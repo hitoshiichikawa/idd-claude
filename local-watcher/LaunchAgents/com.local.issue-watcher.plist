@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  idd-claude local watcher launchd agent (macOS)
+
+  配置先 : ~/Library/LaunchAgents/com.local.issue-watcher.plist
+  登録   : launchctl load  ~/Library/LaunchAgents/com.local.issue-watcher.plist
+  起動   : launchctl start com.local.issue-watcher
+  停止   : launchctl unload ~/Library/LaunchAgents/com.local.issue-watcher.plist
+
+  注意:
+    - 下記の ProgramArguments にフルパスを書くか、shell 経由で $HOME を展開する
+      形にしておくと、launchd でも PATH 問題にハマりにくい
+    - PATH は Homebrew (/opt/homebrew/bin) と /usr/local/bin を含めておくこと
+    - StartInterval は秒単位。2 分 = 120 秒
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.issue-watcher</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-lc</string>
+    <string>$HOME/bin/issue-watcher.sh</string>
+  </array>
+
+  <key>StartInterval</key>
+  <integer>120</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/issue-watcher.stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/issue-watcher.stderr.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LANG</key>
+    <string>ja_JP.UTF-8</string>
+  </dict>
+
+  <!-- ネットワーク到達後に起動（スリープ復帰時など） -->
+  <key>KeepAlive</key>
+  <dict>
+    <key>NetworkState</key>
+    <true/>
+  </dict>
+</dict>
+</plist>

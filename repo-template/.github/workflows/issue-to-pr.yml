@@ -1,0 +1,146 @@
+name: Issue-driven Team Development
+
+# =============================================================================
+# idd-claude GitHub Actions workflow
+#
+# Issue が作成・ラベル付与されたときに、Claude Code を起動して自動開発を実行する。
+# Local watcher を使わず、GitHub Actions 上で回したい場合のテンプレート。
+#
+# 認証方式は以下から 1 つ選択してコメントアウトを切り替える:
+#   - ANTHROPIC_API_KEY     : Console で発行した API Key（本番推奨）
+#   - CLAUDE_CODE_OAUTH_TOKEN : Claude Max / Pro の OAuth Token
+#                               （注: 1M context は使えず 200k まで）
+# =============================================================================
+
+on:
+  issues:
+    types: [opened, labeled]
+
+# 同一 Issue での多重起動を抑止
+concurrency:
+  group: idd-claude-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  id-token: write   # Bedrock / Vertex OIDC 利用時に必要
+
+jobs:
+  claude-team-dev:
+    # auto-dev ラベルが付いた Issue のみ発火。かつ needs-decisions 等の停止ラベルが付いていない場合
+    if: |
+      contains(github.event.issue.labels.*.name, 'auto-dev') &&
+      !contains(github.event.issue.labels.*.name, 'needs-decisions') &&
+      !contains(github.event.issue.labels.*.name, 'claude-picked-up') &&
+      !contains(github.event.issue.labels.*.name, 'ready-for-review') &&
+      !contains(github.event.issue.labels.*.name, 'claude-failed')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "claude-bot"
+          git config user.email "claude-bot@users.noreply.github.com"
+
+      - name: Mark issue as picked up
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: ${{ github.event.issue.number }},
+              labels: ['claude-picked-up']
+            });
+
+      - name: Create working branch from main
+        id: branch
+        run: |
+          SLUG=$(echo "${{ github.event.issue.title }}" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed -E 's/[^a-z0-9]+/-/g' \
+            | cut -c1-40 \
+            | sed -E 's/-+$//')
+          BRANCH="claude/issue-${{ github.event.issue.number }}-${SLUG}"
+          git checkout -b "$BRANCH"
+          git push -u origin "$BRANCH"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Run Claude Code team
+        uses: anthropics/claude-code-action@v1
+        with:
+          # --- 認証: いずれか 1 つを有効化 ---
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+
+          claude_args: >-
+            --model claude-opus-4-7
+            --max-turns 40
+            --permission-mode bypassPermissions
+            --allowedTools "Bash,Edit,Write,Read,Grep,Glob,WebSearch,WebFetch"
+          prompt: |
+            あなたはこのリポジトリの Claude Code オーケストレーターです。
+            以下の GitHub Issue を、PM → Developer → PjM の 3 サブエージェント体制で解決してください。
+
+            ## 対象 Issue
+            - Number: #${{ github.event.issue.number }}
+            - Title : ${{ github.event.issue.title }}
+            - URL   : ${{ github.event.issue.html_url }}
+            - Body  : |
+              ${{ github.event.issue.body }}
+
+            ## 作業ブランチ
+            `${{ steps.branch.outputs.branch }}`（main から派生済み・チェックアウト済み）
+
+            ## 進め方（必ずこの順序で実施）
+            1. **product-manager** サブエージェント
+               - Issue 本文と既存コメントから仕様を抽出
+               - `docs/issues/${{ github.event.issue.number }}-spec.md` に保存
+            2. **developer** サブエージェント
+               - 上記 spec を入力として実装・テスト・コミット
+               - 規約: `CLAUDE.md` を参照
+            3. **project-manager** サブエージェント
+               - ブランチを push
+               - `gh pr create` で PR を作成（title: `feat(#${{ github.event.issue.number }}): <要約>`）
+               - Issue に PR リンクをコメント投稿
+               - Issue ラベル: `claude-picked-up` → `ready-for-review` に付け替え
+
+            ## 制約
+            - `main` に直接 push しないこと
+            - 既存のテストを壊さないこと
+            - 不明点は推測せず、PR 本文の「確認事項」セクションに列挙
+
+      - name: Post failure comment
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.removeLabel({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: ${{ github.event.issue.number }},
+              name: 'claude-picked-up'
+            }).catch(() => {});
+
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: ${{ github.event.issue.number }},
+              labels: ['claude-failed']
+            });
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: ${{ github.event.issue.number }},
+              body: `⚠️ Claude Code による自動開発が失敗しました。\nログ: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\n問題を解決してから \`claude-failed\` ラベルを外してください。`
+            });
