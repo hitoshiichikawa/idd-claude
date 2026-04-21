@@ -89,7 +89,7 @@ jobs:
             --allowedTools "Bash,Edit,Write,Read,Grep,Glob,WebSearch,WebFetch"
           prompt: |
             あなたはこのリポジトリの Claude Code オーケストレーターです。
-            以下の GitHub Issue を、PM → Developer → PjM の 3 サブエージェント体制で解決してください。
+            以下の GitHub Issue を、PM →（必要なら Architect →）Developer → PjM の体制で解決してください。
 
             ## 対象 Issue
             - Number: #${{ github.event.issue.number }}
@@ -105,10 +105,19 @@ jobs:
             1. **product-manager** サブエージェント
                - Issue 本文と既存コメントから仕様を抽出
                - `docs/issues/${{ github.event.issue.number }}-spec.md` に保存
-            2. **developer** サブエージェント
-               - 上記 spec を入力として実装・テスト・コミット
+            2. **Architect の要否を自己判定**（PM の spec を読んで、オーケストレーター自身が次の基準で判断）
+               - 以下のいずれかに該当すれば architect サブエージェントを起動:
+                 * 新規 API エンドポイント／公開インターフェースの追加
+                 * データベーススキーマ・永続データ構造の変更
+                 * 3 モジュール以上にまたがる変更
+                 * 新規の外部サービス・ライブラリ連携
+                 * 既存アーキテクチャ（レイヤ構成・認証方式・通信プロトコル等）の変更
+               - 起動する場合: **architect** サブエージェントで `docs/issues/${{ github.event.issue.number }}-design.md` を保存
+               - 該当しない軽微な修正（バグ修正・文言変更・既存関数内のロジック改善等）はスキップして次へ
+            3. **developer** サブエージェント
+               - spec（Architect を経由した場合は design.md も）を入力として実装・テスト・コミット
                - 規約: `CLAUDE.md` を参照
-            3. **project-manager** サブエージェント
+            4. **project-manager** サブエージェント
                - ブランチを push
                - `gh pr create` で PR を作成（title: `feat(#${{ github.event.issue.number }}): <要約>`）
                - Issue に PR リンクをコメント投稿

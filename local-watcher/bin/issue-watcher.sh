@@ -109,6 +109,10 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
 
   echo "=== Processing #$NUMBER: $TITLE ===" | tee -a "$LOG"
 
+  # Architect 判定（skip-triage の場合は false デフォルト）
+  NEEDS_ARCHITECT="false"
+  ARCHITECT_REASON="Triage をスキップしたため未判定（デフォルト: 不要）"
+
   # ─────────────────────────────────────────────────────────────
   # Triage フェーズ（skip-triage ラベルがなければ実施）
   # ─────────────────────────────────────────────────────────────
@@ -145,6 +149,8 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
 
     STATUS=$(jq -r '.status' "$TRIAGE_FILE")
     DECISION_COUNT=$(jq '.decisions | length' "$TRIAGE_FILE")
+    NEEDS_ARCHITECT=$(jq -r '.needs_architect // false' "$TRIAGE_FILE")
+    ARCHITECT_REASON=$(jq -r '.architect_reason // ""' "$TRIAGE_FILE")
 
     if [ "$STATUS" = "needs-decisions" ] && [ "$DECISION_COUNT" -gt 0 ]; then
       # 決定事項コメントを Markdown に整形
@@ -176,7 +182,7 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
       continue   # 次の Issue へ。開発は次回ラベル除去後に実施
     fi
 
-    echo "✅ #$NUMBER: Triage 通過（決定事項なし）" | tee -a "$LOG"
+    echo "✅ #$NUMBER: Triage 通過（決定事項なし / Architect: $NEEDS_ARCHITECT）" | tee -a "$LOG"
   fi
 
   # ─────────────────────────────────────────────────────────────
@@ -195,10 +201,38 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
   git checkout -B "$BRANCH" main
   git push -u origin "$BRANCH" --force-with-lease
 
+  # Architect を挟むかを判定して、進め方のブロックを構築
+  if [ "$NEEDS_ARCHITECT" = "true" ]; then
+    FLOW_LABEL="PM → Architect → Developer → PjM の 4 サブエージェント体制"
+    MIDDLE_STEPS=$(cat <<EOF
+2. architect サブエージェントで設計書を \`docs/issues/${NUMBER}-design.md\` に保存
+   - Triage 判定理由: ${ARCHITECT_REASON}
+   - spec の FR / NFR / AC を入力に、モジュール構成・データモデル・公開 IF・処理フロー・実装分割を決める
+   - 既存コードの再利用機会を grep で必ず調査する
+3. developer サブエージェントで実装＋テスト＋コミット
+   - design.md の「実装分割」タスクを順に消化する
+   - 規約は CLAUDE.md に従う
+4. project-manager サブエージェントで push と \`gh pr create\` まで実施
+   - PR 本文テンプレートに従い、受入基準・テスト結果・確認事項を記載
+   - Issue のラベルを claude-picked-up → ready-for-review に付け替え
+EOF
+)
+  else
+    FLOW_LABEL="PM → Developer → PjM の 3 サブエージェント体制"
+    MIDDLE_STEPS=$(cat <<EOF
+2. developer サブエージェントで実装＋テスト＋コミット
+   - 規約は CLAUDE.md に従う
+3. project-manager サブエージェントで push と \`gh pr create\` まで実施
+   - PR 本文テンプレートに従い、受入基準・テスト結果・確認事項を記載
+   - Issue のラベルを claude-picked-up → ready-for-review に付け替え
+EOF
+)
+  fi
+
   # 本実装プロンプト
   DEV_PROMPT=$(cat <<EOF
 あなたはこのリポジトリの Claude Code オーケストレーターです。
-以下の Issue を、PM → Developer → PjM の 3 サブエージェント体制で解決してください。
+以下の Issue を、${FLOW_LABEL} で解決してください。
 
 ## 対象 Issue
 - Number: #${NUMBER}
@@ -214,11 +248,7 @@ ${BRANCH}（main から派生・push 済み・現在チェックアウト中）
 1. product-manager サブエージェントで仕様書を \`docs/issues/${NUMBER}-spec.md\` に保存
    - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
    - 人間がコメントで回答済みの決定事項は spec に反映する
-2. developer サブエージェントで実装＋テスト＋コミット
-   - 規約は CLAUDE.md に従う
-3. project-manager サブエージェントで push と \`gh pr create\` まで実施
-   - PR 本文テンプレートに従い、受入基準・テスト結果・確認事項を記載
-   - Issue のラベルを claude-picked-up → ready-for-review に付け替え
+${MIDDLE_STEPS}
 
 ## 制約
 - main に直接 push しないこと
