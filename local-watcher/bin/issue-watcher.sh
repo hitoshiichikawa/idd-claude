@@ -25,9 +25,23 @@ set -euo pipefail
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Config（環境に合わせて書き換える）
+#
+# 複数リポジトリ運用:
+#   REPO / REPO_DIR は環境変数で上書き可能。各 repo の cron / launchd エントリから
+#   env var を渡せば、このスクリプト 1 ファイルを使い回せる。
+#   LOCK_FILE / LOG_DIR / TRIAGE_FILE は REPO から自動派生するため衝突しない。
+#
+#   cron 例:
+#     */2 * * * * REPO=owner/a REPO_DIR=$HOME/work/a $HOME/bin/issue-watcher.sh
+#     */3 * * * * REPO=owner/b REPO_DIR=$HOME/work/b $HOME/bin/issue-watcher.sh
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-REPO="owner/your-repo"
-REPO_DIR="$HOME/work/your-repo"
+
+# env var で上書き可能（未設定なら下のデフォルトを使う）
+REPO="${REPO:-owner/your-repo}"
+REPO_DIR="${REPO_DIR:-$HOME/work/your-repo}"
+
+# REPO から repo-unique な slug を導出（lock / log / 一時ファイルの隔離に使う）
+REPO_SLUG="$(echo "$REPO" | tr '/' '-')"
 
 LABEL_TRIGGER="auto-dev"
 LABEL_PICKED="claude-picked-up"
@@ -37,17 +51,19 @@ LABEL_READY="ready-for-review"
 LABEL_FAILED="claude-failed"
 LABEL_SKIP_TRIAGE="skip-triage"
 
-LOG_DIR="$HOME/.issue-watcher/logs"
-LOCK_FILE="/tmp/issue-watcher.lock"
+# LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
+# 環境変数で明示上書きもできる。
+LOG_DIR="${LOG_DIR:-$HOME/.issue-watcher/logs/$REPO_SLUG}"
+LOCK_FILE="${LOCK_FILE:-/tmp/issue-watcher-${REPO_SLUG}.lock}"
 
 # モデル設定
-TRIAGE_MODEL="claude-sonnet-4-6"      # Triage は軽量モデルで十分
-DEV_MODEL="claude-opus-4-7"            # 本実装は Opus 4.7 + 1M context
-TRIAGE_MAX_TURNS=15
-DEV_MAX_TURNS=60
+TRIAGE_MODEL="${TRIAGE_MODEL:-claude-sonnet-4-6}"   # Triage は軽量モデルで十分
+DEV_MODEL="${DEV_MODEL:-claude-opus-4-7}"           # 本実装は Opus 4.7 + 1M context
+TRIAGE_MAX_TURNS="${TRIAGE_MAX_TURNS:-15}"
+DEV_MAX_TURNS="${DEV_MAX_TURNS:-60}"
 
 # Triage プロンプトテンプレート
-TRIAGE_TEMPLATE="$HOME/bin/triage-prompt.tmpl"
+TRIAGE_TEMPLATE="${TRIAGE_TEMPLATE:-$HOME/bin/triage-prompt.tmpl}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 前提ツールチェック
@@ -150,7 +166,7 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
     MODE="impl"
   else
     # ─── Triage フェーズ ───
-    TRIAGE_FILE="/tmp/triage-${NUMBER}-${TS}.json"
+    TRIAGE_FILE="/tmp/triage-${REPO_SLUG}-${NUMBER}-${TS}.json"
     rm -f "$TRIAGE_FILE"
 
     TITLE_SAFE="${TITLE//|/\\|}"
