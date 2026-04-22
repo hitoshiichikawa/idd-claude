@@ -90,8 +90,14 @@
 - **Developer** は仕様を追加・解釈しない。不明点があれば PM / Architect に差し戻す
 - **Project Manager** はコードを変更しない。PR 作成と進捗管理に専念する
 - Architect は Triage の `needs_architect: true` 判定時のみ PM と Developer の間に挟まれる
-- 各エージェントの成果物は `docs/issues/<番号>-<種別>.md` に保存する
-  - 例: `docs/issues/42-spec.md`（PM）, `docs/issues/42-design.md`（Architect）, `docs/issues/42-impl-notes.md`（Developer 補足）
+- Architect が起動した Issue では **設計 PR ゲート**を経由する（設計 PR を merge してから実装 PR が別途作られる）
+- Developer は `design.md` / `tasks.md` を書き換えない（設計 PR で人間レビュー済みのため）。矛盾は PR 本文「確認事項」で指摘する
+- 各エージェントの成果物は `docs/specs/<番号>-<slug>/` 配下に保存する
+  - `requirements.md`（PM）
+  - `design.md`（Architect、条件付き）
+  - `tasks.md`（Architect、条件付き）
+  - `impl-notes.md`（Developer、補足）
+- `<slug>` は Issue タイトルを lowercase・ハイフン区切り・40 文字以内に正規化した値。既存ディレクトリがあれば流用する
 
 ---
 

@@ -3,8 +3,16 @@
 # idd-claude local issue watcher
 #
 # GitHub Issue をポーリングし、auto-dev ラベルが付いた未処理 Issue を検出して
-# Claude Code でローカル実行する。Triage → needs-decisions → 再 Triage → Dev
-# の状態機械をラベルで管理。
+# Claude Code でローカル実行する。
+#
+# 3 つのモードを状態機械で管理:
+#   - design        : PM → Architect → PjM（設計 PR 作成、awaiting-design-review 付与）
+#   - impl          : PM → Developer → PjM（小〜中規模、Architect 不要）
+#   - impl-resume   : Developer → PjM（設計 PR が merge 済みで docs/specs/<N>-*/ が main に存在）
+#
+# ラベルによる状態遷移:
+#   auto-dev  → Triage → (needs-decisions | awaiting-design-review | claude-picked-up)
+#             → ready-for-review / claude-failed
 #
 # 配置先: ~/bin/issue-watcher.sh
 # 依存  : gh / jq / claude / flock / git
@@ -24,6 +32,7 @@ REPO_DIR="$HOME/work/your-repo"
 LABEL_TRIGGER="auto-dev"
 LABEL_PICKED="claude-picked-up"
 LABEL_NEEDS_DECISIONS="needs-decisions"
+LABEL_AWAITING_DESIGN="awaiting-design-review"
 LABEL_READY="ready-for-review"
 LABEL_FAILED="claude-failed"
 LABEL_SKIP_TRIAGE="skip-triage"
@@ -77,13 +86,14 @@ git pull --ff-only origin main
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 未処理 Issue を取得
 #   auto-dev ラベルがあり、かつ以下のラベルが付いていないもの:
-#     - needs-decisions / claude-picked-up / ready-for-review / claude-failed
+#     needs-decisions / awaiting-design-review / claude-picked-up /
+#     ready-for-review / claude-failed
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ISSUES=$(gh issue list \
   --repo "$REPO" \
   --label "$LABEL_TRIGGER" \
   --state open \
-  --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\"" \
+  --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\"" \
   --json number,title,body,url,labels \
   --limit 5)
 
@@ -109,20 +119,40 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
 
   echo "=== Processing #$NUMBER: $TITLE ===" | tee -a "$LOG"
 
-  # Architect 判定（skip-triage の場合は false デフォルト）
-  NEEDS_ARCHITECT="false"
-  ARCHITECT_REASON="Triage をスキップしたため未判定（デフォルト: 不要）"
+  # ─────────────────────────────────────────────────────────────
+  # 既存 spec ディレクトリの検出（設計 PR merge 済みか）と slug 決定
+  # ─────────────────────────────────────────────────────────────
+  EXISTING_SPEC_DIR=$(ls -d "$REPO_DIR/docs/specs/${NUMBER}-"* 2>/dev/null | head -1 || true)
+  HAS_EXISTING_SPEC=false
+  if [ -n "$EXISTING_SPEC_DIR" ] && [ -f "$EXISTING_SPEC_DIR/requirements.md" ]; then
+    HAS_EXISTING_SPEC=true
+    SLUG=$(basename "$EXISTING_SPEC_DIR" | sed "s/^${NUMBER}-//")
+    echo "📂 既存 spec 検出: $EXISTING_SPEC_DIR (slug=$SLUG)" | tee -a "$LOG"
+  else
+    SLUG=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' \
+          | sed -E 's/[^a-z0-9]+/-/g' | cut -c1-40 | sed -E 's/-+$//')
+  fi
+  SPEC_DIR_REL="docs/specs/${NUMBER}-${SLUG}"
 
   # ─────────────────────────────────────────────────────────────
-  # Triage フェーズ（skip-triage ラベルがなければ実施）
+  # モード判定（design / impl / impl-resume）
   # ─────────────────────────────────────────────────────────────
-  if echo "$LABELS" | grep -qx "$LABEL_SKIP_TRIAGE"; then
-    echo "skip-triage ラベルがあるため Triage をスキップ" | tee -a "$LOG"
+  NEEDS_ARCHITECT="false"
+  ARCHITECT_REASON=""
+  MODE=""
+
+  if $HAS_EXISTING_SPEC; then
+    echo "✅ #$NUMBER: 設計レビュー済み（spec dir あり） → impl-resume モード" | tee -a "$LOG"
+    MODE="impl-resume"
+  elif echo "$LABELS" | grep -qx "$LABEL_SKIP_TRIAGE"; then
+    echo "skip-triage ラベルがあるため Triage をスキップ → impl モード" | tee -a "$LOG"
+    ARCHITECT_REASON="Triage をスキップ（軽微な変更扱い）"
+    MODE="impl"
   else
+    # ─── Triage フェーズ ───
     TRIAGE_FILE="/tmp/triage-${NUMBER}-${TS}.json"
     rm -f "$TRIAGE_FILE"
 
-    # プロンプトのプレースホルダを置換
     TITLE_SAFE="${TITLE//|/\\|}"
     TRIAGE_PROMPT=$(sed \
       -e "s|{{NUMBER}}|${NUMBER}|g" \
@@ -153,7 +183,6 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
     ARCHITECT_REASON=$(jq -r '.architect_reason // ""' "$TRIAGE_FILE")
 
     if [ "$STATUS" = "needs-decisions" ] && [ "$DECISION_COUNT" -gt 0 ]; then
-      # 決定事項コメントを Markdown に整形
       COMMENT=$(jq -r '
         "## 🤔 実装着手前に確認が必要な事項\n\n" +
         "Issue 内容を Claude Code の Product Manager で精査した結果、" +
@@ -179,60 +208,103 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
       gh issue comment "$NUMBER" --repo "$REPO" --body "$COMMENT"
       gh issue edit    "$NUMBER" --repo "$REPO" --add-label "$LABEL_NEEDS_DECISIONS"
       echo "🟡 #$NUMBER: $DECISION_COUNT 件の決定事項を起票しました" | tee -a "$LOG"
-      continue   # 次の Issue へ。開発は次回ラベル除去後に実施
+      continue
     fi
 
-    echo "✅ #$NUMBER: Triage 通過（決定事項なし / Architect: $NEEDS_ARCHITECT）" | tee -a "$LOG"
+    if [ "$NEEDS_ARCHITECT" = "true" ]; then
+      MODE="design"
+      echo "🎨 #$NUMBER: Architect 必要 → design モード（理由: $ARCHITECT_REASON）" | tee -a "$LOG"
+    else
+      MODE="impl"
+      echo "✅ #$NUMBER: Triage 通過（Architect 不要） → impl モード" | tee -a "$LOG"
+    fi
   fi
 
   # ─────────────────────────────────────────────────────────────
-  # Development フェーズ
-  # ─────────────────────────────────────────────────────────────
-
   # ピックアップを即ラベルで表明（クラッシュ時も二重起動を防ぐ）
+  # ─────────────────────────────────────────────────────────────
   gh issue edit "$NUMBER" --repo "$REPO" --add-label "$LABEL_PICKED"
   gh issue comment "$NUMBER" --repo "$REPO" \
-    --body "🤖 ローカル Claude Code ($(hostname)) が処理を開始しました。"
+    --body "🤖 ローカル Claude Code ($(hostname)) が処理を開始しました（モード: ${MODE}）。"
 
-  # ブランチを切る（既に同名があれば上書きで OK）
-  SLUG=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' \
-        | sed -E 's/[^a-z0-9]+/-/g' | cut -c1-40 | sed -E 's/-+$//')
-  BRANCH="claude/issue-${NUMBER}-${SLUG}"
+  # ─────────────────────────────────────────────────────────────
+  # ブランチを切る（モードに応じて名前を変える）
+  # ─────────────────────────────────────────────────────────────
+  case "$MODE" in
+    design)
+      BRANCH="claude/issue-${NUMBER}-design-${SLUG}"
+      ;;
+    impl|impl-resume)
+      BRANCH="claude/issue-${NUMBER}-impl-${SLUG}"
+      ;;
+  esac
   git checkout -B "$BRANCH" main
   git push -u origin "$BRANCH" --force-with-lease
 
-  # Architect を挟むかを判定して、進め方のブロックを構築
-  if [ "$NEEDS_ARCHITECT" = "true" ]; then
-    FLOW_LABEL="PM → Architect → Developer → PjM の 4 サブエージェント体制"
-    MIDDLE_STEPS=$(cat <<EOF
-2. architect サブエージェントで設計書を \`docs/issues/${NUMBER}-design.md\` に保存
+  # ─────────────────────────────────────────────────────────────
+  # DEV_PROMPT 組み立て（モードごとに進め方を切り替え）
+  # ─────────────────────────────────────────────────────────────
+  case "$MODE" in
+    design)
+      FLOW_LABEL="PM → Architect → PjM（設計 PR 作成ゲート）"
+      STEPS=$(cat <<EOF
+1. product-manager サブエージェントで要件定義を \`${SPEC_DIR_REL}/requirements.md\` に保存
+   - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
+   - 人間がコメントで回答済みの決定事項は requirements に反映する
+2. architect サブエージェントで設計書とタスク分割を保存
    - Triage 判定理由: ${ARCHITECT_REASON}
-   - spec の FR / NFR / AC を入力に、モジュール構成・データモデル・公開 IF・処理フロー・実装分割を決める
-   - 既存コードの再利用機会を grep で必ず調査する
-3. developer サブエージェントで実装＋テスト＋コミット
-   - design.md の「実装分割」タスクを順に消化する
-   - 規約は CLAUDE.md に従う
-4. project-manager サブエージェントで push と \`gh pr create\` まで実施
-   - PR 本文テンプレートに従い、受入基準・テスト結果・確認事項を記載
-   - Issue のラベルを claude-picked-up → ready-for-review に付け替え
-EOF
-)
-  else
-    FLOW_LABEL="PM → Developer → PjM の 3 サブエージェント体制"
-    MIDDLE_STEPS=$(cat <<EOF
-2. developer サブエージェントで実装＋テスト＋コミット
-   - 規約は CLAUDE.md に従う
-3. project-manager サブエージェントで push と \`gh pr create\` まで実施
-   - PR 本文テンプレートに従い、受入基準・テスト結果・確認事項を記載
-   - Issue のラベルを claude-picked-up → ready-for-review に付け替え
-EOF
-)
-  fi
+   - \`${SPEC_DIR_REL}/design.md\`（モジュール構成・データモデル・公開 IF・処理フロー・リスク）
+   - \`${SPEC_DIR_REL}/tasks.md\`（Developer 向けタスク分割、各タスクが独立コミット可能な粒度）
+3. project-manager サブエージェントを **design-review モード** で起動
+   - 成果物は ${SPEC_DIR_REL}/ 配下の requirements / design / tasks のみ（実装コードは含めない）
+   - title: \`spec(#${NUMBER}): <1 行サマリ>\`
+   - Issue ラベル: claude-picked-up → awaiting-design-review に付け替え
+   - Issue にコメントで設計 PR リンクと案内を投稿
 
-  # 本実装プロンプト
+この設計 PR が merge されるまで、実装フェーズには進みません。人間が merge した後、
+次回のポーリングで Developer が自動起動し、実装 PR が別途作成されます。
+EOF
+)
+      ;;
+    impl)
+      FLOW_LABEL="PM → Developer → PjM（実装 PR 作成）"
+      STEPS=$(cat <<EOF
+1. product-manager サブエージェントで要件定義を \`${SPEC_DIR_REL}/requirements.md\` に保存
+   - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
+   - 人間がコメントで回答済みの決定事項は requirements に反映する
+2. developer サブエージェントで実装＋テスト＋コミット
+   - 入力: \`${SPEC_DIR_REL}/requirements.md\`
+   - 規約は CLAUDE.md に従う
+   - 実装ノートを \`${SPEC_DIR_REL}/impl-notes.md\` に保存
+3. project-manager サブエージェントを **implementation モード** で起動
+   - title: \`feat(#${NUMBER}): <1 行サマリ>\`
+   - PR 本文に受入基準・テスト結果・確認事項を記載（関連 PR は「なし」と明記）
+   - Issue ラベル: claude-picked-up → ready-for-review に付け替え
+EOF
+)
+      ;;
+    impl-resume)
+      FLOW_LABEL="Developer → PjM（設計 merge 済みの実装フェーズ）"
+      STEPS=$(cat <<EOF
+1. developer サブエージェントで実装＋テスト＋コミット
+   - 入力: \`${SPEC_DIR_REL}/requirements.md\` / \`${SPEC_DIR_REL}/design.md\` / \`${SPEC_DIR_REL}/tasks.md\`
+   - design.md / tasks.md は設計 PR で人間レビュー済み（main に merge 済み）。**書き換えないこと**
+   - tasks.md の T-NN の順にタスクを消化する
+   - 矛盾や疑問があれば PR 本文「確認事項」に記載（書き換えはしない）
+   - 規約は CLAUDE.md に従う
+   - 実装ノートを \`${SPEC_DIR_REL}/impl-notes.md\` に保存
+2. project-manager サブエージェントを **implementation モード** で起動
+   - title: \`feat(#${NUMBER}): <1 行サマリ>\`
+   - PR 本文に対応する設計 PR 番号を記載（直近の main 上の merge commit から \`git log --oneline --merges\` で探す）
+   - Issue ラベル: claude-picked-up → ready-for-review に付け替え
+EOF
+)
+      ;;
+  esac
+
   DEV_PROMPT=$(cat <<EOF
 あなたはこのリポジトリの Claude Code オーケストレーターです。
-以下の Issue を、${FLOW_LABEL} で解決してください。
+以下の Issue を ${FLOW_LABEL} のフローで進めてください。
 
 ## 対象 Issue
 - Number: #${NUMBER}
@@ -244,11 +316,11 @@ ${BODY}
 ## 作業ブランチ
 ${BRANCH}（main から派生・push 済み・現在チェックアウト中）
 
+## 作業ディレクトリ
+${SPEC_DIR_REL}/
+
 ## 進め方
-1. product-manager サブエージェントで仕様書を \`docs/issues/${NUMBER}-spec.md\` に保存
-   - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
-   - 人間がコメントで回答済みの決定事項は spec に反映する
-${MIDDLE_STEPS}
+${STEPS}
 
 ## 制約
 - main に直接 push しないこと
@@ -257,7 +329,7 @@ ${MIDDLE_STEPS}
 EOF
 )
 
-  echo "--- Development 実行 ---" >> "$LOG"
+  echo "--- Development 実行（$MODE）---" >> "$LOG"
   if claude \
       --print "$DEV_PROMPT" \
       --model "$DEV_MODEL" \
@@ -266,13 +338,13 @@ EOF
       --output-format stream-json \
       --verbose \
       >> "$LOG" 2>&1; then
-    echo "✅ #$NUMBER: Development 完了" | tee -a "$LOG"
+    echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
   else
-    echo "❌ #$NUMBER: Development 失敗" | tee -a "$LOG"
+    echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
     gh issue edit "$NUMBER" --repo "$REPO" \
       --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
     gh issue comment "$NUMBER" --repo "$REPO" \
-      --body "⚠️ 自動開発が失敗しました（$(hostname)）。\n\nログ: \`$LOG\`\n\n問題を解決してから \`claude-failed\` ラベルを外してください。"
+      --body "⚠️ 自動開発が失敗しました（$(hostname) / モード: $MODE）。\n\nログ: \`$LOG\`\n\n問題を解決してから \`claude-failed\` ラベルを外してください。"
   fi
 
   # 次のループのため main に戻る
