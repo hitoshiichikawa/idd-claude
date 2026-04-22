@@ -89,6 +89,9 @@ if $INSTALL_REPO; then
   mkdir -p "$REPO_PATH/.claude/agents"
   cp -v "$REPO_TEMPLATE_DIR/.claude/agents/"*.md "$REPO_PATH/.claude/agents/"
 
+  mkdir -p "$REPO_PATH/.claude/rules"
+  cp -v "$REPO_TEMPLATE_DIR/.claude/rules/"*.md "$REPO_PATH/.claude/rules/"
+
   mkdir -p "$REPO_PATH/.github/ISSUE_TEMPLATE"
   cp -v "$REPO_TEMPLATE_DIR/.github/ISSUE_TEMPLATE/feature.yml" \
         "$REPO_PATH/.github/ISSUE_TEMPLATE/feature.yml"

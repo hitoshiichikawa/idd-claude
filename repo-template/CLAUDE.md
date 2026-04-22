@@ -92,12 +92,27 @@
 - Architect は Triage の `needs_architect: true` 判定時のみ PM と Developer の間に挟まれる
 - Architect が起動した Issue では **設計 PR ゲート**を経由する（設計 PR を merge してから実装 PR が別途作られる）
 - Developer は `design.md` / `tasks.md` を書き換えない（設計 PR で人間レビュー済みのため）。矛盾は PR 本文「確認事項」で指摘する
-- 各エージェントの成果物は `docs/specs/<番号>-<slug>/` 配下に保存する
-  - `requirements.md`（PM）
-  - `design.md`（Architect、条件付き）
-  - `tasks.md`（Architect、条件付き）
+- 各エージェントの成果物は `docs/specs/<番号>-<slug>/` 配下に保存する（Kiro / cc-sdd 互換）
+  - `requirements.md`（PM）— EARS 形式の AC、numeric 階層 ID
+  - `design.md`（Architect、条件付き）— File Structure Plan / Components and Interfaces / Traceability
+  - `tasks.md`（Architect、条件付き）— `_Requirements:_` / `_Boundary:_` / `_Depends:_` / `(P)` アノテーション
   - `impl-notes.md`（Developer、補足）
 - `<slug>` は Issue タイトルを lowercase・ハイフン区切り・40 文字以内に正規化した値。既存ディレクトリがあれば流用する
+
+## エージェントが参照する共通ルール（`.claude/rules/`）
+
+各エージェントは作業前に以下のルールを `Read` で読み込みます。ルールの詳細は `repo-template/.claude/rules/*.md` を参照。
+
+| ルールファイル | 参照エージェント | 役割 |
+|---|---|---|
+| `ears-format.md` | PM | AC の EARS 記法（When / If / While / Where / shall） |
+| `requirements-review-gate.md` | PM | requirements.md の自己レビュー（Mechanical + 判断、最大 2 パス） |
+| `design-principles.md` | Architect | design.md の必須セクションと詳細度の方針 |
+| `design-review-gate.md` | Architect | design.md の自己レビュー（traceability / File Structure Plan 充填 / orphan 検出） |
+| `tasks-generation.md` | Architect / Developer | tasks.md のアノテーション規約と numeric ID 階層 |
+
+ルール群は [cc-sdd](https://github.com/gotalab/cc-sdd)（MIT License, Copyright gotalab）から
+adapt したものです。
 
 ---
 
