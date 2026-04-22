@@ -143,10 +143,12 @@ mkdir -p ~/bin ~/.issue-watcher/logs
 cp ~/github/idd-claude/local-watcher/bin/issue-watcher.sh  ~/bin/
 cp ~/github/idd-claude/local-watcher/bin/triage-prompt.tmpl ~/bin/
 chmod +x ~/bin/issue-watcher.sh
-
-# issue-watcher.sh の先頭の REPO / REPO_DIR / MODEL を環境に合わせて編集
-$EDITOR ~/bin/issue-watcher.sh
 ```
+
+スクリプト自体は編集不要。`REPO` / `REPO_DIR` は **環境変数で上書きできる** ため、
+cron / launchd 側でリポジトリを指定する運用にします（単一 repo でも複数 repo でも同じ手順）。
+必要に応じて `$EDITOR ~/bin/issue-watcher.sh` で `TRIAGE_MODEL` / `DEV_MODEL` / `MAX_TURNS`
+のデフォルトを調整してください。
 
 #### macOS: launchd に登録
 
@@ -154,7 +156,7 @@ $EDITOR ~/bin/issue-watcher.sh
 cp ~/github/idd-claude/local-watcher/LaunchAgents/com.local.issue-watcher.plist \
    ~/Library/LaunchAgents/
 
-# plist 内のパス（$HOME/bin/issue-watcher.sh）が正しいことを確認
+# plist 内の EnvironmentVariables の REPO / REPO_DIR を自分のリポジトリに書き換える
 $EDITOR ~/Library/LaunchAgents/com.local.issue-watcher.plist
 
 launchctl load  ~/Library/LaunchAgents/com.local.issue-watcher.plist
@@ -166,9 +168,81 @@ launchctl start com.local.issue-watcher
 
 #### Linux / WSL: cron に登録
 
+単一リポジトリの場合:
+
 ```bash
-(crontab -l 2>/dev/null; echo "*/2 * * * * $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1") | crontab -
+(crontab -l 2>/dev/null; cat <<'CRON'
+*/2 * * * * REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+CRON
+) | crontab -
 ```
+
+複数リポジトリの場合は [複数リポジトリ運用](#複数リポジトリ運用) を参照。
+
+#### 複数リポジトリ運用
+
+`issue-watcher.sh` は **`REPO` / `REPO_DIR` 環境変数で対象を切り替えられる**ため、スクリプトを
+コピーせずに 1 ファイルで複数リポジトリを面倒見られます。衝突しやすい下記要素は `REPO`
+から自動派生するため、env var を分けるだけで分離されます:
+
+| 項目 | 派生先 |
+|---|---|
+| `LOCK_FILE` | `/tmp/issue-watcher-<owner>-<repo>.lock`（repo ごとに独立した `flock`） |
+| `LOG_DIR` | `$HOME/.issue-watcher/logs/<owner>-<repo>/` |
+| Triage 一時 JSON | `/tmp/triage-<owner>-<repo>-<N>-<TS>.json` |
+
+##### cron で複数 repo を回す例
+
+```bash
+(crontab -l 2>/dev/null; cat <<'CRON'
+# 2 分ごと：repo-a
+*/2 * * * * REPO=owner/repo-a REPO_DIR=$HOME/work/repo-a $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+# 3 分ごと：repo-b（時刻をずらすと Claude Max のクォータスパイクを平準化できる）
+*/3 * * * * REPO=owner/repo-b REPO_DIR=$HOME/work/repo-b $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+CRON
+) | crontab -
+```
+
+##### macOS launchd で複数 repo を回す例
+
+plist は **repo ごとに 1 ファイル**用意します（`Label` と `EnvironmentVariables` を
+書き換えるだけ）。
+
+```bash
+# repo-a 用
+cp ~/Library/LaunchAgents/com.local.issue-watcher.plist \
+   ~/Library/LaunchAgents/com.local.issue-watcher-repo-a.plist
+
+# repo-b 用（同様にコピーして編集）
+cp ~/Library/LaunchAgents/com.local.issue-watcher.plist \
+   ~/Library/LaunchAgents/com.local.issue-watcher-repo-b.plist
+```
+
+各 plist の編集ポイント:
+
+- `<key>Label</key>` の `<string>` を `com.local.issue-watcher-<repo-slug>` に変更
+- `<key>EnvironmentVariables</key>` の dict に下記を追加:
+  ```xml
+  <key>REPO</key>
+  <string>owner/repo-a</string>
+  <key>REPO_DIR</key>
+  <string>/Users/you/work/repo-a</string>
+  ```
+- `<key>StandardOutPath</key>` / `<key>StandardErrorPath</key>` も repo ごとに別パスに
+
+すべて編集したら:
+
+```bash
+launchctl load  ~/Library/LaunchAgents/com.local.issue-watcher-repo-a.plist
+launchctl load  ~/Library/LaunchAgents/com.local.issue-watcher-repo-b.plist
+```
+
+##### 運用上の注意
+
+- **Claude Max クォータはアカウント単位で共有**: 複数 repo を同時に回すと 5 時間ウィンドウを
+  早く使い切る可能性。`StartInterval` / cron 時刻を repo ごとにずらすとスパイクを抑えられる
+- **GitHub API のレート制限も共有**（`gh auth` のトークン単位）: 通常は Issue ポーリング程度では問題ないが、repo が 10+ になるなら別トークン検討
+- **個別停止**: launchd は `launchctl unload <plist>` で、cron は該当行をコメントアウトするだけで個別に止められる
 
 ### Step 3-B. GitHub Actions をセットアップ（代替）
 
@@ -404,11 +478,18 @@ cron なら `crontab -e` の先頭に `PATH=...` を書く。
 `/logout` → `/login` で一度ログインし直す。それでも直らない場合は
 Anthropic の既知バグの可能性（[#47019](https://github.com/anthropics/claude-code/issues/47019) 等）。
 
-### 多重起動される
+### 多重起動される（同一 repo）
 
-`issue-watcher.sh` は `flock` で単一インスタンス化しているが、
-`/tmp` が消えている場合や別ユーザーで実行した場合は効かない。
-常に同じユーザー・同じ `LOCK_FILE` パスで実行すること。
+`issue-watcher.sh` は `flock` で単一インスタンス化している。`LOCK_FILE` は `REPO` から
+`/tmp/issue-watcher-<owner>-<repo>.lock` として自動派生するため、**同一 repo での多重起動は
+自動で防がれる**。複数 repo を並行稼働させるときは repo ごとに別 lock になるため並列実行される。
+
+効かなくなるケース:
+- `/tmp` が消えている（再起動直後のレース）
+- 別ユーザーで実行している（lock ファイルの所有者が違う）
+- `REPO` env var を渡さずスクリプト内蔵のデフォルト値で走っている（全 repo が同じ lock を取り合う）
+
+常に同じユーザー・一貫した `REPO` env var で実行すること。
 
 ---
 

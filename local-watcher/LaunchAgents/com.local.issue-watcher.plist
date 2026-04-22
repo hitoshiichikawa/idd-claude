@@ -14,6 +14,14 @@
       形にしておくと、launchd でも PATH 問題にハマりにくい
     - PATH は Homebrew (/opt/homebrew/bin) と /usr/local/bin を含めておくこと
     - StartInterval は秒単位。2 分 = 120 秒
+    - REPO / REPO_DIR は EnvironmentVariables で指定する（スクリプトはこれを受け取る）
+
+  複数リポジトリ運用:
+    このファイルを repo ごとにコピーして、Label / REPO / REPO_DIR / StandardOut/ErrorPath
+    を書き換えれば 1 ホストで何個でも並行稼働できる。lock / log は自動で repo ごとに分離される。
+    例:
+      com.local.issue-watcher-repo-a.plist
+      com.local.issue-watcher-repo-b.plist
 -->
 <plist version="1.0">
 <dict>
@@ -45,6 +53,11 @@
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     <key>LANG</key>
     <string>ja_JP.UTF-8</string>
+    <!-- 対象リポジトリ（このファイルをコピーして repo ごとに書き換える） -->
+    <key>REPO</key>
+    <string>owner/your-repo</string>
+    <key>REPO_DIR</key>
+    <string>/Users/you/work/your-repo</string>
   </dict>
 
   <!-- ネットワーク到達後に起動（スリープ復帰時など） -->
