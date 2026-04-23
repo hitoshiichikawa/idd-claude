@@ -55,6 +55,8 @@ idd-claude/
 │   └── .github/
 │       ├── ISSUE_TEMPLATE/
 │       │   └── feature.yml          # 自動開発用 Issue テンプレート
+│       ├── scripts/
+│       │   └── idd-claude-labels.sh # ラベル一括作成スクリプト（冪等）
 │       └── workflows/
 │           └── issue-to-pr.yml      # GitHub Actions 版ワークフロー
 │
@@ -168,7 +170,35 @@ git push
 
 ### Step 2. GitHub 側の準備
 
-リポジトリの Settings からラベルを作成する（GitHub CLI からでも可）。
+#### ラベル一括作成（推奨）
+
+Step 1 で同梱される `.github/scripts/idd-claude-labels.sh` を実行すると、必要なラベルを
+冪等に作成できます（既存ラベルはスキップ、`--force` で color / description を上書き）。
+
+```bash
+cd /path/to/your-project
+bash .github/scripts/idd-claude-labels.sh
+
+# 既存ラベルの color / description を更新したい場合
+bash .github/scripts/idd-claude-labels.sh --force
+
+# repo 外から実行する場合
+bash .github/scripts/idd-claude-labels.sh --repo owner/repo
+```
+
+作成されるラベル:
+
+| 名前 | 色 | 用途 |
+|---|---|---|
+| `auto-dev` | 青 | 自動開発対象 |
+| `needs-decisions` | 黄 | 人間の判断が必要 |
+| `awaiting-design-review` | 橙 | 設計 PR レビュー待ち（Architect 発動時） |
+| `claude-picked-up` | 紫 | Claude Code 実行中 |
+| `ready-for-review` | 緑 | 実装 PR 作成完了 |
+| `claude-failed` | 赤 | 自動実行が停止 |
+| `skip-triage` | 灰 | Triage をスキップ |
+
+#### 手動で作成する場合
 
 ```bash
 gh label create auto-dev                --repo owner/repo --color 1f77b4 --description "自動開発対象"
@@ -180,7 +210,7 @@ gh label create claude-failed           --repo owner/repo --color e74c3c --descr
 gh label create skip-triage             --repo owner/repo --color 95a5a6 --description "Triage をスキップ"
 ```
 
-Branch protection も設定しておく。
+#### Branch protection（任意）
 
 ```bash
 gh api -X PUT repos/owner/repo/branches/main/protection \
