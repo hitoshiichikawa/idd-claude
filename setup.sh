@@ -65,12 +65,32 @@ for cmd in git bash; do
 done
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# stdin を /dev/tty に再接続（curl パイプ経由のケース）
-#   git が認証プロンプトを出す場合や install.sh の `read -p` が動くために、
-#   git 操作より前に行う。
+# 非対話実行（curl パイプ）で引数なしだと install.sh の対話プロンプトに stdin が
+# 届かず即エラー／無応答になる。args なしの curl | bash は早期エラーで停止し、
+# 代替手段を案内する（`bash <(curl ...)` か、手動インストール）。
+#
+# 以前は `exec </dev/tty` で stdin を tty に付け替える実装だったが、tmux / screen /
+# 特定ターミナル環境で `exec </dev/tty` 自体が無応答になるケースが確認されたため削除。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-if [ ! -t 0 ] && ( : </dev/tty ) 2>/dev/null; then
-  exec </dev/tty
+if [ ! -t 0 ] && [ $# -eq 0 ]; then
+  cat >&2 <<'PIPE_NO_ARGS'
+Error: curl | bash で引数なし実行されました。install.sh が対話プロンプトに入りますが、
+       curl パイプ経由では stdin がすでに消費されているため応答できません。
+
+次のいずれかで再実行してください:
+
+  # 1) 引数を付けて非対話実行（カレントディレクトリに配置 + watcher）
+  curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/setup.sh \
+    | bash -s -- --all
+
+  # 2) プロセス置換でターミナル stdin を保持したまま対話実行
+  bash <(curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/setup.sh)
+
+  # 3) 手動インストール（最も確実）
+  git clone --depth 1 https://github.com/hitoshiichikawa/idd-claude.git ~/.idd-claude
+  bash ~/.idd-claude/install.sh
+PIPE_NO_ARGS
+  exit 2
 fi
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
