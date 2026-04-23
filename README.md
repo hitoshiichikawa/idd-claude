@@ -134,6 +134,11 @@ curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/set
 
 > **セキュリティ**: `curl \| bash` は実行前の監査が難しいため、信頼できる接続先でのみ利用してください。
 > 内容を確認したい場合は `curl -fsSL <URL> -o setup.sh` でダウンロードし、`bash setup.sh` で実行してください。
+>
+> **sudo は不要**: idd-claude は `$HOME` 配下（`~/.idd-claude` / `~/bin` / `~/Library/LaunchAgents` 等）
+> にユーザースコープで配置します。`sudo` で実行するとファイル所有者が root になり、
+> 通常ユーザーで更新・削除できなくなるため、setup.sh / install.sh とも root 実行を検知したら
+> 警告または停止します。cron 登録もユーザー crontab（`crontab -e`）で行うため sudo 不要です。
 
 手動セットアップ（Git clone 経由）の手順は以下のとおりです。
 

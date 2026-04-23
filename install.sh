@@ -14,6 +14,24 @@
 
 set -euo pipefail
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# sudo で実行されていないか警告
+#   idd-claude は $HOME 配下にユーザースコープで配置するため sudo は不要。
+#   sudo で実行するとファイル所有者が root になり、後からユーザーで更新できなくなる。
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+if [ "$(id -u)" = "0" ] && [ -n "${SUDO_USER:-}" ]; then
+  echo "⚠️  sudo で実行されています。idd-claude はユーザースコープ（\$HOME 配下）に"
+  echo "   インストールする前提のため、sudo は不要です。"
+  echo "   このまま続行すると \$HOME 配下のファイルが root 所有になり、通常ユーザーで"
+  echo "   更新・削除できなくなる可能性があります。"
+  echo ""
+  read -r -p "   このまま続行しますか？ [y/N]: " yn
+  if [[ ! "$yn" =~ ^[Yy]$ ]]; then
+    echo "   中断しました。sudo を外して再実行してください。"
+    exit 1
+  fi
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_TEMPLATE_DIR="$SCRIPT_DIR/repo-template"
 LOCAL_WATCHER_DIR="$SCRIPT_DIR/local-watcher"
@@ -126,20 +144,55 @@ if $INSTALL_LOCAL; then
     cp -v "$LOCAL_WATCHER_DIR/LaunchAgents/com.local.issue-watcher.plist" \
           "$HOME/Library/LaunchAgents/"
 
-    echo ""
-    echo "  ✅ 配置完了。次の手順:"
-    echo "     1. ~/bin/issue-watcher.sh の先頭 Config ブロックを編集"
-    echo "        - REPO: owner/your-repo"
-    echo "        - REPO_DIR: ローカルの git clone のパス"
-    echo "     2. launchctl load ~/Library/LaunchAgents/com.local.issue-watcher.plist"
-    echo "     3. launchctl start com.local.issue-watcher"
-    echo "     4. ログ: tail -f /tmp/issue-watcher.stderr.log"
+    cat <<'LAUNCHD_HINT'
+
+  ✅ 配置完了。次の手順:
+
+     1. plist の EnvironmentVariables を対象リポジトリに合わせて編集
+        （$EDITOR ~/Library/LaunchAgents/com.local.issue-watcher.plist）
+          - REPO      : owner/your-repo
+          - REPO_DIR  : ローカルの git clone のパス
+
+     2. launchd に登録（ユーザースコープ、sudo 不要）
+          launchctl load   ~/Library/LaunchAgents/com.local.issue-watcher.plist
+          launchctl start  com.local.issue-watcher
+
+     3. ログ確認
+          tail -f /tmp/issue-watcher.stderr.log
+
+     4. 複数リポジトリを並行稼働させる場合は plist を repo ごとにコピーして
+        Label / REPO / REPO_DIR / StandardOut/ErrorPath を書き換える
+        （README.md 「複数リポジトリ運用」参照）
+
+  ※ いずれも sudo 不要。ユーザー $HOME 配下に閉じた設定のため、
+     sudo で実行するとファイル所有者が root になり逆に動作しなくなる可能性があります。
+LAUNCHD_HINT
   else
-    echo ""
-    echo "  ✅ 配置完了。次の手順:"
-    echo "     1. ~/bin/issue-watcher.sh の先頭 Config ブロックを編集"
-    echo "     2. cron に登録:"
-    echo "        (crontab -l; echo '*/2 * * * * \$HOME/bin/issue-watcher.sh >> \$HOME/.issue-watcher/cron.log 2>&1') | crontab -"
+    cat <<'CRON_HINT'
+
+  ✅ 配置完了。次の手順:
+
+     1. ~/bin/issue-watcher.sh の先頭 Config（TRIAGE_MODEL 等）を必要に応じて編集
+        ※ REPO / REPO_DIR は cron 側で env var として渡すのでファイル編集は不要
+
+     2. cron に登録（**ユーザー crontab**、sudo 不要）
+          crontab -e
+
+        以下の行を追記（単一 repo 例）:
+          */2 * * * * REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+
+        複数 repo を並行稼働させる場合（lock/log は REPO から自動分離されます）:
+          */2 * * * * REPO=owner/repo-a REPO_DIR=$HOME/work/repo-a $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+          */3 * * * * REPO=owner/repo-b REPO_DIR=$HOME/work/repo-b $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+
+     3. 動作確認
+          tail -f $HOME/.issue-watcher/cron.log
+          ls $HOME/.issue-watcher/logs/
+
+  ※ システム全体の /etc/crontab ではなくユーザー crontab（crontab -e）を使ってください。
+     sudo は不要、かつ sudo で install.sh を走らせると $HOME 配下のファイル所有者が
+     root になり、通常ユーザーで更新・削除できなくなります。
+CRON_HINT
   fi
 
   # 前提ツールチェック
