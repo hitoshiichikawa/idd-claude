@@ -65,30 +65,47 @@ for cmd in git bash; do
 done
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# stdin を /dev/tty に再接続（curl パイプ経由のケース）
+#   git が認証プロンプトを出す場合や install.sh の `read -p` が動くために、
+#   git 操作より前に行う。
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+if [ ! -t 0 ] && ( : </dev/tty ) 2>/dev/null; then
+  exec </dev/tty
+fi
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# git 認証プロンプト回避
+#   idd-claude は public repo なので認証は不要。credential helper の誤動作で
+#   プロンプトが出ると `curl | bash` の stdin では応答できず無限待ちになるため、
+#   GIT_TERMINAL_PROMPT=0 でプロンプト自体を無効化して即エラーにする。
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+export GIT_TERMINAL_PROMPT=0
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # クローン（未取得） or 更新（既存）
+#   --progress で進捗を表示（--quiet だと無応答に見えるため）
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 if [ -d "$IDD_CLAUDE_DIR/.git" ]; then
   echo "📦 既存のクローンを更新: $IDD_CLAUDE_DIR (branch=$IDD_CLAUDE_BRANCH)"
-  git -C "$IDD_CLAUDE_DIR" fetch --quiet --depth 1 origin "$IDD_CLAUDE_BRANCH"
-  git -C "$IDD_CLAUDE_DIR" checkout --quiet "$IDD_CLAUDE_BRANCH" 2>/dev/null || true
-  git -C "$IDD_CLAUDE_DIR" reset --hard --quiet "origin/$IDD_CLAUDE_BRANCH"
+  git -C "$IDD_CLAUDE_DIR" fetch --depth 1 origin "$IDD_CLAUDE_BRANCH"
+  git -C "$IDD_CLAUDE_DIR" checkout "$IDD_CLAUDE_BRANCH" 2>/dev/null || true
+  git -C "$IDD_CLAUDE_DIR" reset --hard "origin/$IDD_CLAUDE_BRANCH"
 else
-  echo "📦 idd-claude をクローン: $IDD_CLAUDE_DIR (branch=$IDD_CLAUDE_BRANCH)"
   # 既存の非 git ディレクトリがある場合は安全のため停止
   if [ -e "$IDD_CLAUDE_DIR" ]; then
     echo "Error: '$IDD_CLAUDE_DIR' は git リポジトリではありません。移動または削除してから再実行してください。" >&2
     exit 1
   fi
-  git clone --quiet --depth 1 --branch "$IDD_CLAUDE_BRANCH" \
-    "$IDD_CLAUDE_REPO_URL" "$IDD_CLAUDE_DIR"
-fi
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# curl パイプ経由の場合は stdin を /dev/tty に再接続
-#   （install.sh の対話プロンプト `read -r -p` を動作させるため）
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-if [ ! -t 0 ] && ( : </dev/tty ) 2>/dev/null; then
-  exec </dev/tty
+  echo "📦 idd-claude をクローン: $IDD_CLAUDE_DIR (branch=$IDD_CLAUDE_BRANCH)"
+  if ! git clone --progress --depth 1 --branch "$IDD_CLAUDE_BRANCH" \
+       "$IDD_CLAUDE_REPO_URL" "$IDD_CLAUDE_DIR"; then
+    echo "" >&2
+    echo "Error: git clone に失敗しました。" >&2
+    echo "  - ネットワーク接続を確認してください" >&2
+    echo "  - プロキシ設定がある場合は https_proxy 環境変数をセットしてください" >&2
+    echo "  - IDD_CLAUDE_REPO_URL を fork に変えている場合は URL / 認証を確認してください" >&2
+    exit 1
+  fi
 fi
 
 echo ""
