@@ -331,12 +331,32 @@ launchctl load  ~/Library/LaunchAgents/com.local.issue-watcher-repo-b.plist
 
 ### Step 3-B. GitHub Actions をセットアップ（代替）
 
-リポジトリの Settings → Secrets and variables → Actions で以下のいずれかを登録する。
+ワークフローファイル `.github/workflows/issue-to-pr.yml` は **デフォルトで無効**です。
+repo 配置直後は何もしないので、ローカル watcher のみで運用する場合は **この Step 全体をスキップしてください**
+（ファイルが repo に残っていても問題ありません）。
+
+Actions 経由で自動開発を動かしたい場合のみ、以下を設定します。
+
+#### 1. Repository variable で opt-in
+
+Settings → Secrets and variables → Actions → **Variables** タブ → "New repository variable"
+
+| 名前 | 値 | 意味 |
+|---|---|---|
+| `IDD_CLAUDE_USE_ACTIONS` | `true` | ワークフロー発火を許可 |
+
+この変数が未設定（または `true` 以外）だと、Issue イベントでワークフローの job が `if:`
+条件でスキップされるため何も走りません。ローカル watcher と Actions の二重起動を防ぐ保険にも
+なっています。
+
+#### 2. Secrets に認証情報を追加
+
+Settings → Secrets and variables → Actions → **Secrets** タブ
 
 - `ANTHROPIC_API_KEY`（Console で発行）
 - または `CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token` で発行）
 
-`.github/workflows/issue-to-pr.yml` は両方に対応する形でコメントアウトを切り替えるだけで使える。
+`.github/workflows/issue-to-pr.yml` は両方に対応する形でコメントアウトを切り替えるだけで使えます。
 
 ---
 

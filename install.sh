@@ -144,12 +144,19 @@ if $INSTALL_REPO; then
   ✅ 配置完了。次の手順:
 
      1. CLAUDE.md をプロジェクト固有の内容に編集（技術スタック・規約など）
-     2. .github/workflows/issue-to-pr.yml の認証方式を選択（Local watcher 運用なら不要）
-     3. git add / commit / push
-     4. GitHub ラベルを一括作成:
+     2. git add / commit / push
+     3. GitHub ラベルを一括作成:
           cd $REPO_PATH
           bash .github/scripts/idd-claude-labels.sh
         （repo 外から実行する場合は --repo owner/repo を付与）
+     4. 実行基盤の選択:
+        - **ローカル watcher のみ使う場合**: 何もしない（.github/workflows/issue-to-pr.yml は
+          repository variable 未設定なので自動でスキップされます）
+        - **GitHub Actions で回す場合**:
+          a) Settings → Secrets and variables → Actions → **Variables** タブで
+             \`IDD_CLAUDE_USE_ACTIONS=true\` を追加
+          b) Secrets タブで \`ANTHROPIC_API_KEY\` もしくは \`CLAUDE_CODE_OAUTH_TOKEN\` を追加
+          c) 必要に応じて .github/workflows/issue-to-pr.yml の認証方式行を切り替え
      5. Branch protection（任意）:
           gh api -X PUT repos/<owner>/<repo>/branches/main/protection \\
             -f required_pull_request_reviews.required_approving_review_count=1 \\

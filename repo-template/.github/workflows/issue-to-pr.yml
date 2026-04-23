@@ -6,6 +6,23 @@ name: Issue-driven Team Development
 # Issue が作成・ラベル付与・ラベル除去されたときに Claude Code を起動して
 # 自動開発を実行する。Local watcher を使わず、GitHub Actions 上で回す場合のテンプレート。
 #
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# ★★ 重要: このワークフローはデフォルトで無効 ★★
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 有効化するには、リポジトリ設定で variables（Secrets ではなく Variables）に
+# `IDD_CLAUDE_USE_ACTIONS=true` を追加してください:
+#
+#   Settings → Secrets and variables → Actions → Variables タブ → New variable
+#     Name : IDD_CLAUDE_USE_ACTIONS
+#     Value: true
+#
+# 変数が未設定（または `true` 以外）の場合、Issue イベントが発火しても
+# 本ワークフローの job は条件分岐でスキップされ、何も実行しません。
+#
+# ローカル watcher のみで開発する場合はこの変数を **設定しない** ことで、
+# ファイルがリポジトリにあっても安全にスキップされます。
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#
 # 3 つのモードを同一ワークフロー内で自動判別する:
 #   - design        : 初回・Architect 必要 → PM + Architect + PjM（設計 PR 作成ゲート）
 #   - impl          : 初回・Architect 不要 → PM + Developer + PjM（実装 PR 作成）
@@ -38,8 +55,15 @@ permissions:
 
 jobs:
   claude-team-dev:
-    # auto-dev ラベルがあり、かつ停止ラベルが付いていない場合のみ発火
+    # ─────────────────────────────────────────────────────────────
+    # 発火条件:
+    #   1. Repository variable `IDD_CLAUDE_USE_ACTIONS == 'true'`（明示的な opt-in）
+    #   2. auto-dev ラベルがある
+    #   3. 停止系ラベル（needs-decisions / awaiting-design-review /
+    #      claude-picked-up / ready-for-review / claude-failed）が付いていない
+    # ─────────────────────────────────────────────────────────────
     if: |
+      vars.IDD_CLAUDE_USE_ACTIONS == 'true' &&
       contains(github.event.issue.labels.*.name, 'auto-dev') &&
       !contains(github.event.issue.labels.*.name, 'needs-decisions') &&
       !contains(github.event.issue.labels.*.name, 'awaiting-design-review') &&
