@@ -566,8 +566,10 @@ idd-claude は [cc-sdd](https://github.com/gotalab/cc-sdd) の仕様記法・レ
 ### `claude` コマンドが見つからない
 
 cron / launchd は対話シェルのプロファイルを読み込まないため、`PATH` が通っていないことが多い。
-`launchd` なら plist の `EnvironmentVariables` で `PATH` を明示する（同梱の plist では設定済み）。
-cron なら `crontab -e` の先頭に `PATH=...` を書く。
+`issue-watcher.sh` 側で `~/.local/bin` / `/usr/local/bin` / `/opt/homebrew/bin` を冒頭で `PATH` に
+追加しているため、標準的なインストール先であれば追加設定は不要。
+それ以外の場所に `claude` / `gh` がある場合は、launchd なら plist の `EnvironmentVariables`、
+cron なら `crontab -e` の先頭で `PATH=...` を明示する。
 
 ### OAuth 認証が切れた
 
