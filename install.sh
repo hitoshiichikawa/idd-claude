@@ -134,12 +134,27 @@ if $INSTALL_REPO; then
   cp -v "$REPO_TEMPLATE_DIR/.github/workflows/issue-to-pr.yml" \
         "$REPO_PATH/.github/workflows/issue-to-pr.yml"
 
-  echo ""
-  echo "  ✅ 配置完了。次の手順:"
-  echo "     1. CLAUDE.md をプロジェクト固有の内容に編集"
-  echo "     2. .github/workflows/issue-to-pr.yml の認証方式を選択"
-  echo "     3. git add / commit / push"
-  echo "     4. GitHub で必要なラベルを作成（README 参照）"
+  mkdir -p "$REPO_PATH/.github/scripts"
+  cp -v "$REPO_TEMPLATE_DIR/.github/scripts/idd-claude-labels.sh" \
+        "$REPO_PATH/.github/scripts/idd-claude-labels.sh"
+  chmod +x "$REPO_PATH/.github/scripts/idd-claude-labels.sh"
+
+  cat <<REPO_HINT
+
+  ✅ 配置完了。次の手順:
+
+     1. CLAUDE.md をプロジェクト固有の内容に編集（技術スタック・規約など）
+     2. .github/workflows/issue-to-pr.yml の認証方式を選択（Local watcher 運用なら不要）
+     3. git add / commit / push
+     4. GitHub ラベルを一括作成:
+          cd $REPO_PATH
+          bash .github/scripts/idd-claude-labels.sh
+        （repo 外から実行する場合は --repo owner/repo を付与）
+     5. Branch protection（任意）:
+          gh api -X PUT repos/<owner>/<repo>/branches/main/protection \\
+            -f required_pull_request_reviews.required_approving_review_count=1 \\
+            -F enforce_admins=false
+REPO_HINT
 fi
 
 # ─────────────────────────────────────────────────────────────
