@@ -111,18 +111,27 @@ bash <(curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/m
 **非対話モード**（引数で一気に配置）:
 
 ```bash
-# 対象リポジトリ + ローカル watcher まとめて
+# 対象ディレクトリに cd してからワンライナー実行（--repo 省略時はカレント = ./）
+cd /path/to/your-project
+curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/setup.sh \
+  | bash -s -- --all
+
+# あるいはパス明示
 curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/setup.sh \
   | bash -s -- --all --repo /path/to/your-project
 
-# 対象リポジトリへの配置のみ
+# 対象リポジトリへの配置のみ（カレントディレクトリ）
 curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/setup.sh \
-  | bash -s -- --repo /path/to/your-project
+  | bash -s -- --repo
 
 # ローカル watcher のみ
 curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/setup.sh \
   | bash -s -- --local
 ```
+
+`--repo` に値を渡さなかった場合や `--all` を `--repo` なしで使った場合は、
+**カレントディレクトリ (`./`)** にテンプレートを配置します。対話モードでも
+プロンプトで Enter のみ入力すると同じくカレントがデフォルトです。
 
 環境変数で挙動を調整できます（特定タグの検証や fork からのインストール向け）:
 

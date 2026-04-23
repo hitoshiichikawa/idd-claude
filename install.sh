@@ -6,10 +6,12 @@
 # 対象リポジトリへの配置・ローカル PC へのインストール・両方を選択可能。
 #
 # 使い方:
-#   ./install.sh            # 対話モードで聞きながら進める
+#   ./install.sh                             # 対話モードで聞きながら進める
 #   ./install.sh --repo /path/to/your-project
-#   ./install.sh --local
-#   ./install.sh --all --repo /path/to/your-project
+#   ./install.sh --repo                      # カレントディレクトリ (./) に配置
+#   ./install.sh --local                     # ローカル watcher のみインストール
+#   ./install.sh --all                       # カレントディレクトリ + ローカル watcher
+#   ./install.sh --all --repo /path/to/project
 # =============================================================================
 
 set -euo pipefail
@@ -44,9 +46,15 @@ INSTALL_REPO=false
 while [[ $# -gt 0 ]]; do
   case $1 in
     --repo)
-      REPO_PATH="$2"
+      # --repo の次がフラグ（- で始まる）または存在しない場合はカレントディレクトリを採用
+      if [ $# -ge 2 ] && [[ ! "${2:-}" =~ ^- ]] && [ -n "${2:-}" ]; then
+        REPO_PATH="$2"
+        shift 2
+      else
+        REPO_PATH="."
+        shift
+      fi
       INSTALL_REPO=true
-      shift 2
       ;;
     --local)
       INSTALL_LOCAL=true
@@ -74,7 +82,8 @@ if ! $INSTALL_LOCAL && ! $INSTALL_REPO; then
   echo ""
   read -r -p "対象リポジトリにテンプレートを配置しますか？ [y/N]: " yn
   if [[ "$yn" =~ ^[Yy]$ ]]; then
-    read -r -p "  対象リポジトリのパス (例: ~/github/my-repo): " REPO_PATH
+    read -r -p "  対象リポジトリのパス [Enter でカレント (./): " REPO_PATH
+    REPO_PATH="${REPO_PATH:-./}"
     REPO_PATH="${REPO_PATH/#\~/$HOME}"
     INSTALL_REPO=true
   fi
@@ -88,13 +97,20 @@ fi
 # 対象リポジトリへの配置
 # ─────────────────────────────────────────────────────────────
 if $INSTALL_REPO; then
-  if [ -z "$REPO_PATH" ] || [ ! -d "$REPO_PATH" ]; then
-    echo "Error: リポジトリパスが不正です: $REPO_PATH" >&2
+  # --all などで --repo が明示されなかった場合はカレントディレクトリをデフォルトに
+  REPO_PATH="${REPO_PATH:-.}"
+
+  if [ ! -d "$REPO_PATH" ]; then
+    echo "Error: リポジトリパスが存在しません: $REPO_PATH" >&2
     exit 1
   fi
 
+  # 絶対パスに正規化（ログ表示とメッセージの一貫性のため）
+  REPO_PATH_ABS="$(cd "$REPO_PATH" && pwd)"
+
   echo ""
-  echo "📦 対象リポジトリにファイルを配置: $REPO_PATH"
+  echo "📦 対象リポジトリにファイルを配置: $REPO_PATH_ABS"
+  REPO_PATH="$REPO_PATH_ABS"
 
   # CLAUDE.md は既存があればバックアップ
   if [ -f "$REPO_PATH/CLAUDE.md" ]; then
