@@ -23,6 +23,11 @@
 
 set -euo pipefail
 
+# cron / launchd は対話シェルの profile を読まないため PATH が最小限になり、
+# ~/.local/bin や /usr/local/bin にインストールした claude / gh が見つからない。
+# 一般的なインストール先を先頭に足しておき、どの起動経路でも同じ挙動にする。
+export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Config（環境に合わせて書き換える）
 #
