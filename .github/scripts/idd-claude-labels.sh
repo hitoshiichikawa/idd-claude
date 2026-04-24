@@ -60,6 +60,7 @@ LABELS=(
   "ready-for-review|2ecc71|PR 作成完了"
   "claude-failed|e74c3c|自動実行が失敗"
   "skip-triage|95a5a6|Triage をスキップ"
+  "needs-rebase|fbca04|approved PR で base が古い／conflict が発生済み（Phase A: Merge Queue Processor が付与）"
 )
 
 echo "📌 idd-claude ラベルを作成します"

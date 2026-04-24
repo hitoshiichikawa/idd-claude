@@ -55,6 +55,23 @@ LABEL_AWAITING_DESIGN="awaiting-design-review"
 LABEL_READY="ready-for-review"
 LABEL_FAILED="claude-failed"
 LABEL_SKIP_TRIAGE="skip-triage"
+LABEL_NEEDS_REBASE="needs-rebase"
+
+# ─── Phase A: Merge Queue Processor 設定 ───
+# 既存運用への影響を避けるため、初回導入は opt-in（デフォルト false）。
+# 有効化するには cron / launchd 側で MERGE_QUEUE_ENABLED=true を渡す。
+MERGE_QUEUE_ENABLED="${MERGE_QUEUE_ENABLED:-false}"
+# 1 サイクルで処理する PR 数の上限（残りは次回サイクルに持ち越し）。
+MERGE_QUEUE_MAX_PRS="${MERGE_QUEUE_MAX_PRS:-5}"
+# git 操作の個別タイムアウト（秒）。watcher の最短実行間隔（既定 2 分）の半分以内を目安。
+MERGE_QUEUE_GIT_TIMEOUT="${MERGE_QUEUE_GIT_TIMEOUT:-60}"
+# main ブランチ名（基本は "main"。レガシー repo で master の場合のみ上書き）。
+MERGE_QUEUE_BASE_BRANCH="${MERGE_QUEUE_BASE_BRANCH:-main}"
+# head branch prefix: 自動 rebase を許可する head ref のプレフィックス。
+# idd-claude が作成する PR は `claude/issue-N-*` パターン。人間が書いた PR を
+# 巻き込まないよう、デフォルトで `claude/` 始まりだけを対象にする。
+# 複数許可したい場合はパイプ区切り正規表現で上書き（例: '^(claude|bot)/'）。
+MERGE_QUEUE_HEAD_PATTERN="${MERGE_QUEUE_HEAD_PATTERN:-^claude/}"
 
 # LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
 # 環境変数で明示上書きもできる。
@@ -73,7 +90,7 @@ TRIAGE_TEMPLATE="${TRIAGE_TEMPLATE:-$HOME/bin/triage-prompt.tmpl}"
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 前提ツールチェック
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-for cmd in gh jq claude git flock; do
+for cmd in gh jq claude git flock timeout; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "Error: $cmd が見つかりません。PATH を確認してください。" >&2
     exit 1
@@ -103,6 +120,305 @@ cd "$REPO_DIR"
 git fetch origin --prune
 git checkout main
 git pull --ff-only origin main
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Phase A: Merge Queue Processor
+#   approve 済み open PR の mergeability を能動的に検知し:
+#     - CONFLICTING: needs-rebase ラベル + 状況コメント（人間判断に回す）
+#     - MERGEABLE かつ base が古い: ローカルで自動 rebase + force-with-lease push
+#   既存運用との後方互換のため MERGE_QUEUE_ENABLED=true で opt-in。
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# merge-queue 専用ロガー（識別用 prefix と timestamp 形式を Issue Watcher と揃える）
+mq_log() {
+  echo "[$(date '+%F %T')] merge-queue: $*"
+}
+mq_warn() {
+  echo "[$(date '+%F %T')] merge-queue: WARN: $*" >&2
+}
+mq_error() {
+  echo "[$(date '+%F %T')] merge-queue: ERROR: $*" >&2
+}
+
+# PR ラベル一覧に特定ラベルが含まれるかを判定（jq で labels 配列を走査）
+mq_pr_has_label() {
+  local pr_json="$1"
+  local label="$2"
+  echo "$pr_json" | jq -e --arg l "$label" '.labels // [] | map(.name) | index($l)' >/dev/null 2>&1
+}
+
+# CONFLICTING PR にラベル + 状況コメントを投稿（重複抑止つき）
+# 失敗しても次の PR に進むよう、戻り値ではなく内部で WARN を出す
+mq_handle_conflict() {
+  local pr_number="$1"
+  local pr_json="$2"
+  local pr_url
+  pr_url=$(echo "$pr_json" | jq -r '.url')
+
+  # AC 2.2: 既に needs-rebase が付いている場合はラベル付与/コメントとも skip
+  if mq_pr_has_label "$pr_json" "$LABEL_NEEDS_REBASE"; then
+    mq_log "PR #${pr_number}: CONFLICTING (already labeled, skip)"
+    return 0
+  fi
+
+  # AC 2.4: conflict したファイル粒度を含めるため、PR の変更ファイル一覧を取得。
+  # mergeable=CONFLICTING の段階では merge できないため、簡易的に PR の files
+  # 一覧（最大 50 件）をコメントに含める。Phase B 以降で staging branch 経由の
+  # 真の conflict ファイル特定に置き換える前提。
+  local files_json
+  if ! files_json=$(timeout "$MERGE_QUEUE_GIT_TIMEOUT" \
+      gh pr view "$pr_number" --repo "$REPO" --json files 2>/dev/null); then
+    files_json='{"files":[]}'
+  fi
+  local files_md
+  files_md=$(echo "$files_json" | jq -r '
+    (.files // []) | map("- `" + .path + "`") |
+    if length == 0 then "_(変更ファイル一覧の取得に失敗しました)_"
+    elif length > 50 then (.[0:50] | join("\n")) + "\n- _(他 " + ((length - 50) | tostring) + " 件)_"
+    else join("\n") end
+  ')
+
+  local comment_body
+  comment_body=$(cat <<EOF
+## 🔀 自動マージ前 conflict 検知 (Phase A)
+
+approve 済みの本 PR について、watcher が main との merge 試行で **conflict** を検知しました。
+\`needs-rebase\` ラベルを付与しています。
+
+### 推奨アクション
+
+- 手動で base を最新化してください（例: \`gh pr checkout ${pr_number} && git pull --rebase origin ${MERGE_QUEUE_BASE_BRANCH} && git push --force-with-lease\`）
+- または semantic conflict の自動解消を待ちたい場合は Phase D（#17）の導入を検討してください
+
+### 変更ファイル（参考）
+
+実際の conflict 範囲は \`git merge-tree\` 等で確認してください。本 PR が触っているファイルの一覧:
+
+${files_md}
+
+---
+
+_本コメントは Phase A Merge Queue Processor が自動投稿しました。conflict が解消し \`needs-rebase\` ラベルが手動で外されると、次回サイクルで再度判定されます。_
+EOF
+)
+
+  # AC 2.1: needs-rebase 付与
+  if ! gh pr edit "$pr_number" --repo "$REPO" --add-label "$LABEL_NEEDS_REBASE" >/dev/null 2>&1; then
+    # AC 2.5: ラベル付与失敗 → WARN、後続 PR は継続
+    mq_warn "PR #${pr_number}: needs-rebase ラベル付与に失敗"
+    return 1
+  fi
+  # AC 2.3: ステータスコメント 1 件投稿
+  if ! gh pr comment "$pr_number" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1; then
+    # AC 2.5: コメント投稿失敗 → WARN、後続 PR は継続（ラベルは残す）
+    mq_warn "PR #${pr_number}: 状況コメント投稿に失敗（ラベルは付与済み）"
+    return 1
+  fi
+  mq_log "PR #${pr_number}: CONFLICTING -> labeled+commented (${pr_url})"
+  return 0
+}
+
+# MERGEABLE PR を最新の base に自動 rebase して force-with-lease push する。
+# 失敗したら needs-rebase に格下げする。サブシェルで実行し、trap で必ず main に戻す。
+# 戻り値: 0=rebase+push 成功, 1=conflict 経由 needs-rebase 化, 2=その他失敗（push 失敗等）
+mq_try_rebase_pr() {
+  local pr_number="$1"
+  local head_ref="$2"
+  local base_ref="$3"
+  local pr_json="$4"
+
+  (
+    set +e
+    # サブシェル終了時は必ず元の main checkout に戻す（NFR 2.2）
+    # shellcheck disable=SC2064
+    trap "git rebase --abort >/dev/null 2>&1; git checkout '${MERGE_QUEUE_BASE_BRANCH}' >/dev/null 2>&1" EXIT
+
+    # AC 3.1 / 3.5: 既に祖先関係を満たしているなら rebase 不要
+    if git merge-base --is-ancestor "origin/${base_ref}" "origin/${head_ref}" 2>/dev/null; then
+      exit 10  # skip 用の特別 exit code
+    fi
+
+    # head ブランチを fresh に checkout（既存ローカルブランチがあれば force リセット）
+    if ! timeout "$MERGE_QUEUE_GIT_TIMEOUT" git checkout -B "$head_ref" "origin/${head_ref}" >/dev/null 2>&1; then
+      mq_warn "PR #${pr_number}: head branch '${head_ref}' の checkout に失敗"
+      exit 2
+    fi
+
+    # AC 3.1: rebase 試行
+    if ! timeout "$MERGE_QUEUE_GIT_TIMEOUT" git rebase "origin/${base_ref}" >/dev/null 2>&1; then
+      # AC 3.3: conflict なら abort して needs-rebase 化
+      git rebase --abort >/dev/null 2>&1 || true
+      exit 1
+    fi
+
+    # AC 3.2 / NFR 2.1: 安全な force push
+    if ! timeout "$MERGE_QUEUE_GIT_TIMEOUT" \
+        git push --force-with-lease origin "$head_ref" >/dev/null 2>&1; then
+      # AC 3.4: push 失敗（リモート先行等）→ WARN、当該 PR をスキップ
+      mq_warn "PR #${pr_number}: force-with-lease push に失敗（リモートが進んだ可能性）"
+      exit 2
+    fi
+    exit 0
+  )
+  local rc=$?
+  # サブシェル外でも安全側に倒して main に戻す（AC 3.6 / NFR 2.2）
+  git checkout "$MERGE_QUEUE_BASE_BRANCH" >/dev/null 2>&1 || true
+
+  case $rc in
+    0)
+      mq_log "PR #${pr_number}: MERGEABLE stale -> rebase+push OK"
+      return 0
+      ;;
+    1)
+      # rebase conflict → needs-rebase 化
+      mq_handle_conflict "$pr_number" "$pr_json"
+      return 1
+      ;;
+    10)
+      mq_log "PR #${pr_number}: MERGEABLE up-to-date (skip rebase)"
+      return 10
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+process_merge_queue() {
+  # AC 5.1: opt-out gate
+  if [ "$MERGE_QUEUE_ENABLED" != "true" ]; then
+    return 0
+  fi
+
+  # NFR 2.3: 想定外の dirty working tree を検知したら ERROR を出してサイクル中止
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    mq_error "dirty working tree を検出しました。Merge Queue Processor をスキップします。"
+    return 0
+  fi
+
+  mq_log "サイクル開始 (max=${MERGE_QUEUE_MAX_PRS}, base=${MERGE_QUEUE_BASE_BRANCH}, timeout=${MERGE_QUEUE_GIT_TIMEOUT}s)"
+
+  # AC 1.2 / 1.3 / 1.4 / 1.6 / 1.7: approved かつ needs-rebase / claude-failed が付いていない
+  # 非 draft の PR。さらに head branch が MERGE_QUEUE_HEAD_PATTERN に合致し、
+  # head repo owner が base repo owner と同一（= fork PR を除外）のものに限定。
+  # GitHub search 構文で server side フィルタ（API call 削減・NFR 1.2）
+  local repo_owner="${REPO%%/*}"
+  local prs_json
+  if ! prs_json=$(timeout "$MERGE_QUEUE_GIT_TIMEOUT" gh pr list \
+      --repo "$REPO" \
+      --state open \
+      --search "review:approved -label:\"$LABEL_NEEDS_REBASE\" -label:\"$LABEL_FAILED\" -draft:true" \
+      --json number,headRefName,baseRefName,mergeable,mergeStateStatus,labels,url,isDraft,reviewDecision,headRepositoryOwner \
+      --limit 50 2>/dev/null); then
+    mq_warn "approved PR の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
+    return 0
+  fi
+
+  # クライアント側フィルタ:
+  #   - isDraft / reviewDecision の再確認（server filter の保険）
+  #   - head ref prefix (MERGE_QUEUE_HEAD_PATTERN): 人間の手書き PR を巻き込まない
+  #   - head repo owner == base repo owner: fork PR を除外
+  prs_json=$(echo "$prs_json" | jq \
+    --arg pattern "$MERGE_QUEUE_HEAD_PATTERN" \
+    --arg owner "$repo_owner" \
+    '[.[]
+      | select(.isDraft == false)
+      | select(.reviewDecision == "APPROVED")
+      | select(.headRefName | test($pattern))
+      | select((.headRepositoryOwner.login // "") == $owner)
+    ]')
+
+  local total
+  total=$(echo "$prs_json" | jq 'length')
+  local target_count="$total"
+  local skipped_overflow=0
+  if [ "$total" -gt "$MERGE_QUEUE_MAX_PRS" ]; then
+    target_count="$MERGE_QUEUE_MAX_PRS"
+    skipped_overflow=$((total - MERGE_QUEUE_MAX_PRS))
+    # AC 4.3: 上限超過分は次回に持ち越し
+    mq_log "対象候補 ${total} 件中、上限 ${MERGE_QUEUE_MAX_PRS} 件のみ処理（${skipped_overflow} 件は次回持ち越し）"
+  else
+    # AC 6.1: サイクル開始時に件数をログ
+    mq_log "対象候補 ${total} 件、処理対象 ${target_count} 件"
+  fi
+
+  if [ "$target_count" -eq 0 ]; then
+    mq_log "サマリ: rebase+push=0, conflict=0, skip=0, fail=0, overflow=${skipped_overflow}"
+    return 0
+  fi
+
+  local rebased=0
+  local conflicted=0
+  local skipped=0
+  local failed=0
+
+  # 先頭 N 件のみ処理（後ろは持ち越し）
+  local pr_iter
+  pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]")
+
+  # AC 4.3: target_count > 0 なので pr_iter は最低 1 行を持つ前提だが、念のため空ガード
+  if [ -z "$pr_iter" ]; then
+    mq_log "サマリ: rebase+push=0, conflict=0, skip=0, fail=0, overflow=${skipped_overflow}"
+    return 0
+  fi
+
+  while IFS= read -r pr_json; do
+    local pr_number head_ref base_ref mergeable merge_state url
+    pr_number=$(echo "$pr_json" | jq -r '.number')
+    head_ref=$(echo "$pr_json"  | jq -r '.headRefName')
+    base_ref=$(echo "$pr_json"  | jq -r '.baseRefName')
+    mergeable=$(echo "$pr_json" | jq -r '.mergeable')
+    merge_state=$(echo "$pr_json" | jq -r '.mergeStateStatus')
+    url=$(echo "$pr_json" | jq -r '.url')
+
+    # AC 1.5 / 6.2: 各 PR の mergeable 判定をログ
+    mq_log "PR #${pr_number}: mergeable=${mergeable}, state=${merge_state}, head=${head_ref}, base=${base_ref}"
+
+    case "$mergeable" in
+      CONFLICTING)
+        if mq_handle_conflict "$pr_number" "$pr_json"; then
+          conflicted=$((conflicted + 1))
+        else
+          failed=$((failed + 1))
+        fi
+        ;;
+      MERGEABLE)
+        # base ブランチが対象 main 以外なら自動 rebase の対象外（安全側）
+        if [ "$base_ref" != "$MERGE_QUEUE_BASE_BRANCH" ]; then
+          mq_log "PR #${pr_number}: base=${base_ref} は ${MERGE_QUEUE_BASE_BRANCH} 以外、自動 rebase スキップ"
+          skipped=$((skipped + 1))
+          continue
+        fi
+        local rc=0
+        mq_try_rebase_pr "$pr_number" "$head_ref" "$base_ref" "$pr_json" || rc=$?
+        case $rc in
+          0)  rebased=$((rebased + 1)) ;;
+          1)  conflicted=$((conflicted + 1)) ;;
+          10) skipped=$((skipped + 1)) ;;
+          *)  failed=$((failed + 1)) ;;
+        esac
+        ;;
+      UNKNOWN|"")
+        # GitHub が mergeable を未計算の場合は次回サイクルに委ねる
+        mq_log "PR #${pr_number}: mergeable 未確定 (${mergeable:-null})、次回サイクルに委ねます"
+        skipped=$((skipped + 1))
+        ;;
+      *)
+        mq_log "PR #${pr_number}: 未知の mergeable=${mergeable} (${url})、スキップ"
+        skipped=$((skipped + 1))
+        ;;
+    esac
+  done <<< "$pr_iter"
+
+  # AC 6.3: サマリ行
+  mq_log "サマリ: rebase+push=${rebased}, conflict=${conflicted}, skip=${skipped}, fail=${failed}, overflow=${skipped_overflow}"
+
+  # AC 3.6 / NFR 2.2: 念のため最終確認で main checkout に戻す
+  git checkout "$MERGE_QUEUE_BASE_BRANCH" >/dev/null 2>&1 || true
+}
+
+# AC 1.1: ピックアップ済み Issue の処理ループに入る前に 1 回だけ起動
+process_merge_queue || mq_warn "process_merge_queue が想定外のエラーで終了しました（後続 Issue 処理は継続）"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 未処理 Issue を取得
