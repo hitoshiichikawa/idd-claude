@@ -5,138 +5,148 @@
 
 ---
 
+## このリポジトリについて
+
+**idd-claude はツール / テンプレートリポジトリ** です。他の repo に配置する開発ワークフローテンプレートと、ローカル watcher スクリプト一式を提供します。
+
+**重要: self-hosting (dogfooding)**: idd-claude 自身も idd-claude のワークフロー対象 repo として運用しています（`repo-template/` 一式を root にも配置）。**あなたが編集している watcher スクリプトやテンプレートそのものが、次回 cron 実行であなた自身を動かす**ことを意識してください。後方互換性と冪等性が極めて重要です。
+
+**構成要素**:
+
+- `local-watcher/` — ローカル実行用 bash スクリプト (`issue-watcher.sh`, Triage prompt template)
+- `repo-template/` — 他 repo に配置するテンプレート (CLAUDE.md, agents, rules, ISSUE_TEMPLATE, workflows, labels script)
+- `install.sh` / `setup.sh` — インストーラ（ユーザースコープ、sudo 不要）
+- `README.md` — 設計思想とセットアップ手順の主要ドキュメント
+- `.github/workflows/issue-to-pr.yml` — GitHub Actions 版ワークフロー（`IDD_CLAUDE_USE_ACTIONS=true` で opt-in）
+
+アプリケーションコード（JS/TS/Python バックエンド等）はありません。本体は **bash + markdown + GitHub Actions YAML**。
+
+---
+
 ## 技術スタック
 
-> このセクションは各プロジェクトで書き換えてください。以下は例です。
-
-- Backend: Node.js 20 + TypeScript
-- Frontend: React 19 + Vite
-- テスト: Vitest / Playwright
-- Lint / Format: ESLint + Prettier
-- CI: GitHub Actions
-- パッケージマネージャ: pnpm
+- **スクリプト**: bash 4+ (Linux / macOS / WSL)
+- **依存 CLI**: `gh`, `jq`, `flock`（Linux 標準、macOS は `brew install util-linux`）, `git`
+- **GitHub Actions**: `actions/checkout`, `anthropics/claude-code-action` 等
+- **モデル**: Triage は Sonnet 4.6、本実装は Opus 4.7 (1M context) をデフォルト
+- **ランタイム追加なし**: Node.js / Python 等は依存しない
 
 ---
 
 ## コード規約
 
-> **2 段構成**: 「共通（言語非依存・必ず守る）」と「TypeScript プロジェクトの例（参考・要書き換え）」。
-> Python / Go / Rust など他言語を使う場合は、例ブロックを自プロジェクトの慣習に沿って書き換えてください。
+### bash スクリプト（本リポジトリのコア成果物）
 
-### 共通（言語非依存・必ず守る）
+- 冒頭で `set -euo pipefail` を必ず宣言
+- 変数展開は常にクォート (`"$var"`, 配列は `"${arr[@]}"`)
+- `which` ではなく `command -v` でコマンドの存在確認
+- `~` ではなく `$HOME` を使う（cron は `~` を展開しない事故が起きる）
+- ファイル冒頭のコメントで「用途 / 配置先 / 依存 / セットアップ参照先」を明記する（現行 `issue-watcher.sh` / `install.sh` 参照）
+- 環境変数は `"${VAR:-default}"` で override 可能にし、**既存 env var 名（`REPO`, `REPO_DIR`, `LOG_DIR`, `LOCK_FILE`, `TRIAGE_MODEL`, `DEV_MODEL` 等）は後方互換性のため壊さない**
+- 破壊的操作（`git checkout`, `rm -rf`, `git push --force*`）の前に前提条件を check
+- エラーメッセージは `>&2` に出す。標準出力は機械可読な結果用に予約する
 
-- **単一責務**: 関数は 1 つのことだけをする。複数責務が混ざっていたら分割する
-- **関数サイズの制限**: 行数の目安はプロジェクトで決める（下の TS 例では 40 行）。長い関数は切り出しを検討
-- **マジックナンバーは定数化**: 意味のある名前を付けて共有
-- **エラーを明示的に扱う**: OO 系言語なら独自 Error 型で wrap、手続き型なら error 値、Result 系言語なら `Result` / `Option`。silent fail を作らない
-- **公開 API にドキュメンテーションコメント**: シグネチャだけで意図が読み取れないなら「目的・引数・返り値・副作用」を記述
-- **非同期処理は直線的に書く**: 深いネストやチェーンよりも直線的に読める書き方を優先（言語の慣習に合わせる）
-- **テストは対象コードの近傍に配置する**: 離れた場所に散らさない。具体的なディレクトリ規約は言語慣習に従う
+### markdown（テンプレート類）
 
-### TypeScript プロジェクトの例（参考・要書き換え）
+- h1 はファイル先頭 1 つのみ、以降は階層を一貫させる
+- コードフェンスには言語タグを付ける（` ```bash ` / ` ```yaml ` 等）
+- 内部リンクは相対パス、コード箇所は `file_path:line_number` 形式
+- 絵文字はステータス表示に限定して節度を持つ
 
-> 他の言語を使う場合、このブロックを丸ごと削除／置換してください。
+### yaml (GitHub Actions workflow)
 
-- 関数は単一責務・**40 行以内**を目安とする
-- 公開 API には **JSDoc / TSDoc** を必ず付与する
-- エラーは独自 Error クラスで wrap し、呼び出し側でログ出力する
-- 非同期処理は `async/await` を優先し、Promise チェーンは避ける
-- テストは対象コードの近傍に配置する（`__tests__/` または同一ディレクトリの `*.test.ts`）
+- `actionlint` をクリアすること
+- `permissions:` は最小権限に絞る
+- secrets は `${{ secrets.NAME }}` で参照、echo しない
+
+### 全体共通
+
+- 単一責務の関数・セクションに分割する
+- 設定値（URL、path prefix、default 値）はファイル冒頭の config ブロックにまとめる
+- silent fail を作らない（失敗は exit code / log で明示）
 
 ---
 
-## テスト規約
+## テスト・検証
 
-> **2 段構成**: ほぼすべての規約は言語非依存で共通。TS / Jest / Vitest 固有の
-> 命名記法と fixture パスだけ末尾の「TypeScript プロジェクトの例」に分離しています。
+**本リポジトリには unit test フレームワークはありません**。検証は以下の組み合わせ:
 
-### 共通（言語非依存・必ず守る）
+### 静的解析
 
-#### 粒度の使い分け
+- `shellcheck local-watcher/bin/*.sh install.sh setup.sh .github/scripts/*.sh` — 警告ゼロを目指す
+- `actionlint .github/workflows/*.yml` — workflow YAML の検査
 
-- **単体テスト**: 純粋関数・個別モジュールのロジック。最も数が多くなる層
-- **結合テスト**: DB / 外部サービスを介したユースケース。モックより実物（テスト用 DB / テストサーバ）を優先
-- **E2E**: 主要ユーザーストーリーのゴールデンパスに絞る。網羅を狙わない
+### 手動スモークテスト（変更した成果物ごとに実施）
 
-#### 命名と構造
+- **`install.sh` 変更時**: 使い捨て scratch repo を `/tmp` に作り、`./install.sh --repo /tmp/scratch` を実行して冪等性とファイル配置を確認
+- **`setup.sh` 変更時**: `IDD_CLAUDE_DIR=/tmp/setup-test bash setup.sh` で新規クローン / 既存ディレクトリ双方で動くこと
+- **`issue-watcher.sh` 変更時**:
+  - cron-like 最小 PATH での依存解決: `env -i HOME=$HOME PATH=/usr/bin:/bin bash -c 'command -v claude gh jq flock git'`（`local-watcher/bin/issue-watcher.sh` 冒頭の PATH prepend を経由して解決されること）
+  - dry run: `REPO=owner/test REPO_DIR=/tmp/test-repo $HOME/bin/issue-watcher.sh` を対象なし状態で流し、`処理対象の Issue なし` で正常終了すること
+  - E2E: 本リポジトリに test issue を立てて watcher が Triage → PR 作成までできるか
 
-- テスト名だけで「何を検証しているか」が分かるようにする（`<対象>: <条件>のとき<期待結果>` が読み取れる形式）
-- 各テストは **Arrange / Act / Assert** の 3 パートに明示的に分離する
-- **1 テスト = 1 検証対象**。複数観点を 1 つのテストにまとめない
+### 冪等性
 
-#### モック方針
+- `install.sh` / `setup.sh` / `.github/scripts/idd-claude-labels.sh` は再実行で破壊しない
+- 既存ファイルがある場合は `.bak` バックアップまたは `--force` で opt-in 上書き
 
-- **モックしてよい**: HTTP / DB / 時刻 / ファイル / 外部 SDK など、外部副作用を伴うもの
-- **モックしない**: 自分が書いた純粋ロジック、テスト対象と同一モジュール内の関数
-- 認証・マイグレーションなどモックと本番挙動が乖離しやすい領域は、実物に近い fixture を優先する
+### dogfooding (E2E)
 
-#### カバレッジ・観点
-
-- 目標は **変更箇所の分岐をすべてカバー**。全体カバレッジ率は KPI にしない
-- 各 AC に対して、正常系だけでなく **異常系・境界値・空入力を最低 1 ケース**用意する
-- AC と 1 対 1 に紐付かないテストは spec に戻って AC を追加するか、テスト自体を削除する
-
-#### 運用
-
-- **flaky テスト**は quarantine せず、原因を特定して修正するか削除する。一時的 skip を入れた場合は即時に Issue 化する
-- **テストデータ fixture** は言語・フレームワーク慣習に沿った場所に集約し、テスト間で共有する
-- **Red → Green → Refactor**: 新規テストは一度失敗することを確認してから実装で通す（書いた瞬間に pass するテストは観点不備を疑う）
-
-### TypeScript プロジェクトの例（参考・要書き換え）
-
-> 他の言語を使う場合、このブロックを自プロジェクトのテストフレームワーク慣習で置き換えてください。
-
-- **命名**: `describe('対象') > it('<条件>のとき<期待結果>')` 形式（Jest / Vitest / Mocha 共通の BDD スタイル）
-- **fixture 配置**: `__fixtures__/` または `test/fixtures/` に集約
-- **Snapshot**: 差分が出た時は実装変更の意図と一致しているかを必ず確認してから更新する。盲目的な `-u` は禁止（本規約は禁止事項にも記載）
-
-他言語の目安:
-
-- **Python**: pytest の `test_*.py` / `tests/` ディレクトリ、`pytest.fixture` / `conftest.py`
-- **Go**: `*_test.go` をパッケージ内に配置、`testdata/` ディレクトリ
-- **Rust**: `#[cfg(test)] mod tests` インラインまたは `tests/` ディレクトリ、`tests/common/fixtures/`
+- 大きい機能変更は、本 repo 自身に対して `auto-dev` Issue を立てて watcher が正しく拾えるかで最終確認する
 
 ---
 
 ## ブランチ・コミット規約
 
 - ブランチ名: `claude/issue-<番号>-<slug>` を原則とする
-- コミット: [Conventional Commits](https://www.conventionalcommits.org/) に準拠する
-  - `feat(scope): ...` / `fix(scope): ...` / `test(scope): ...` / `docs(scope): ...` / `refactor(scope): ...` / `chore(scope): ...`
-- 1 PR = 1 Issue を原則とする（スコープが膨らむ場合は PM が Issue を分割提案する）
+- コミット: [Conventional Commits](https://www.conventionalcommits.org/) に準拠
+  - `feat(scope): ...` / `fix(scope): ...` / `docs(scope): ...` / `refactor(scope): ...` / `chore(scope): ...` / `test(scope): ...`
+  - 典型的な scope: `watcher` / `install` / `setup` / `workflow` / `claude`（`repo-template/CLAUDE.md`）/ `readme` / `labels`
+- 1 PR = 1 Issue を原則とする（スコープが膨らむ場合は PM が分割提案）
 
 ---
 
 ## 禁止事項
 
-- `main` ブランチへの直接 push
-- `.env` や実値を含む Secrets のコミット
-- 外部サービス呼び出し時に API Key を埋め込むこと（環境変数化を徹底）
-- 公開リポジトリ上の第三者コードを、ライセンス確認なしにコピペすること
-- テストをコメントアウトして PR を出すこと（scope 外に分離する場合は Issue を切る）
-- テストを通すために実装ではなくテスト側を書き換えて弱めること（mock を過度に強める / assert を緩める / スナップショットを盲目的に更新する等）
+- `main` への直接 push
+- `.env` / Secrets 実値のコミット、スクリプト内 API Key ハードコード
+- **後方互換性を壊す変更を無告知で入れる**（既存 env var 名変更 / cron 登録文字列の変更 / ラベル名変更 / exit code 意味変更）。破る場合は README に migration note を書き、必要なら deprecation 期間を設ける
+- **sudo を必要とする手順の追加**（idd-claude はユーザースコープ前提。`install.sh` / `setup.sh` の root 実行検知を外さない）
+- モデル ID のハードコード（env default で override 可能にする。`TRIAGE_MODEL` / `DEV_MODEL` 参照）
+- **opt-in gate なしで新しい外部サービス呼び出しを有効化**（`.github/workflows/issue-to-pr.yml` が `IDD_CLAUDE_USE_ACTIONS=true` で opt-in になっている設計を踏襲）
+- `repo-template/**` の破壊的変更を、既 installed の consumer repo への影響評価なしに入れる
+- テストをコメントアウトして PR を出す（scope 外に分離する場合は Issue を切る）
 
 ---
 
 ## エージェント連携ルール
 
-- **Product Manager** は実装方針を書かない。要件と受入基準の明確化に専念する
-- **Architect**（条件付き起動）は要件を変更しない。モジュール構成・データモデル・公開 IF・処理フロー・実装分割の設計に専念する
-- **Developer** は仕様を追加・解釈しない。不明点があれば PM / Architect に差し戻す
-- **Project Manager** はコードを変更しない。PR 作成と進捗管理に専念する
-- Architect は Triage の `needs_architect: true` 判定時のみ PM と Developer の間に挟まれる
-- Architect が起動した Issue では **設計 PR ゲート**を経由する（設計 PR を merge してから実装 PR が別途作られる）
-- Developer は `design.md` / `tasks.md` を書き換えない（設計 PR で人間レビュー済みのため）。矛盾は PR 本文「確認事項」で指摘する
-- 各エージェントの成果物は `docs/specs/<番号>-<slug>/` 配下に保存する（Kiro / cc-sdd 互換）
+- **Product Manager** は実装方針を書かない。要件と受入基準の明確化に専念
+- **Architect**（条件付き起動）は要件を変更しない。モジュール構成 / シェルスクリプト分割 / env var 設計 / 後方互換性方針 / ラベル体系 / template 互換性等の設計に専念
+- **Developer** は仕様を追加・解釈しない。不明点は PM / Architect に差し戻す
+- **Project Manager** はコードを変更しない。PR 作成と進捗管理に専念
+- Architect は Triage の `needs_architect: true` 時のみ PM と Developer の間に挟まれる
+- Architect が起動した Issue では **設計 PR ゲート**を経由する
+- Developer は `design.md` / `tasks.md` を書き換えない（人間レビュー済みのため）。矛盾は PR 本文「確認事項」で指摘する
+- 成果物は `docs/specs/<番号>-<slug>/` 配下に保存する
   - `requirements.md`（PM）— EARS 形式の AC、numeric 階層 ID
-  - `design.md`（Architect、条件付き）— File Structure Plan / Components and Interfaces / Traceability
-  - `tasks.md`（Architect、条件付き）— `_Requirements:_` / `_Boundary:_` / `_Depends:_` / `(P)` アノテーション
+  - `design.md`（Architect）— File Structure Plan / Components and Interfaces / Traceability
+  - `tasks.md`（Architect）— `_Requirements:_` / `_Boundary:_` / `_Depends:_` / `(P)` アノテーション
   - `impl-notes.md`（Developer、補足）
-- `<slug>` は Issue タイトルを lowercase・ハイフン区切り・40 文字以内に正規化した値。既存ディレクトリがあれば流用する
+
+### idd-claude 特有の設計上の注意
+
+- **`local-watcher/bin/issue-watcher.sh` の変更**: 既稼働の cron / launchd を壊さない（env var 名、exit code 意味、ログ出力先、ラベル遷移契約を保つ）
+- **`repo-template/**` の変更**: 既に installed の consumer repo にも影響する（`install.sh` 再実行で上書きされる）。破壊的変更は migration note 必須
+- **`idd-claude-labels.sh` のラベルセット**: ラベル追加は OK、既存ラベル削除 / 名前変更は deprecation 期間を経てから
+- **モデル ID デフォルト更新**: 既存ユーザが明示 override している前提で、env default のみ更新
+- **README との二重管理**: 挙動を変えたら必ず README の該当箇所も同じ PR で更新する
+
+---
 
 ## エージェントが参照する共通ルール（`.claude/rules/`）
 
-各エージェントは作業前に以下のルールを `Read` で読み込みます。ルールの詳細は `repo-template/.claude/rules/*.md` を参照。
+各エージェントは作業前に以下のルールを `Read` で読み込む:
 
 | ルールファイル | 参照エージェント | 役割 |
 |---|---|---|
@@ -146,35 +156,38 @@
 | `design-review-gate.md` | Architect | design.md の自己レビュー（traceability / File Structure Plan 充填 / orphan 検出） |
 | `tasks-generation.md` | Architect / Developer | tasks.md のアノテーション規約と numeric ID 階層 |
 
-ルール群は [cc-sdd](https://github.com/gotalab/cc-sdd)（MIT License, Copyright gotalab）から
-adapt したものです。
+ルール群は [cc-sdd](https://github.com/gotalab/cc-sdd)（MIT License, Copyright gotalab）から adapt したものです。
 
 ---
 
 ## PR 品質チェック（PjM が PR 作成時に確認する項目）
 
 - [ ] すべての受入基準に対応する実装がある
-- [ ] 単体テストが追加・通過している
-- [ ] lint / format が通っている
-- [ ] 既存テストが壊れていない
-- [ ] ドキュメントが更新されている（必要な場合）
+- [ ] `shellcheck` / `actionlint` がクリーン（該当ファイルを変更した場合）
+- [ ] 手動スモークテストの結果を PR 本文の「Test plan」に記載
+- [ ] 既存 env var 名 / ラベル / cron 登録文字列の後方互換性を確認
+- [ ] README / CLAUDE.md / 該当 rule ファイルが更新されている（挙動変更時）
+- [ ] 破壊的変更がある場合は README に migration note を追加
 - [ ] PR 本文に「確認事項」セクションがある（レビュワー判断ポイントを明示）
 
 ---
 
 ## 機密情報の扱い
 
-- 本リポジトリでは以下の情報を扱わない
-  - 顧客個人情報（氏名・契約番号・保険証券番号など）
-  - 本番環境の認証情報
-  - 社内機密情報（M&A・人事情報など）
-- もし Issue 本文に機密情報が含まれていた場合、PM エージェントは実装を進めず
-  `needs-decisions` で人間にエスカレーションすること
+本リポジトリは OSS として公開されるツール / テンプレートです。扱わないもの:
+
+- API keys / OAuth tokens の実値
+- 作者個人名義の非公開 path / URL を例示用以外の形でハードコード
+- 本番環境の認証情報
+
+Issue 本文に実値が含まれた場合、PM エージェントは実装を進めず `needs-decisions` で人間にエスカレーションする。
 
 ---
 
 ## 参考資料
 
-- 各サブエージェントの詳細定義: `.claude/agents/*.md`
-- Triage プロンプト: `~/bin/triage-prompt.tmpl`
-- ワークフロー全体像: `README.md`（または idd-claude テンプレート）
+- サブエージェント定義: `.claude/agents/*.md`
+- Triage プロンプト: `local-watcher/bin/triage-prompt.tmpl`（配置先: `~/bin/triage-prompt.tmpl`）
+- Watcher 実装: `local-watcher/bin/issue-watcher.sh`（配置先: `~/bin/issue-watcher.sh`）
+- ワークフロー全体像・セットアップ手順: `README.md`
+- パイプライン全体設計: Issue #13（フェーズ別実装: #14〜#18）
