@@ -502,6 +502,25 @@ cron 例（opt-in する場合）:
 bash .github/scripts/idd-claude-labels.sh
 ```
 
+#### 既知の制限: `needs-rebase` ラベルの自動解除は Phase A のスコープ外
+
+Phase A の Merge Queue Processor は対象 PR 検索クエリに `-label:"needs-rebase"` を含めて除外する
+ため、**一度 `needs-rebase` が付いた PR は自動では再評価されません**。以下のようなケースで
+ラベルが取り残されます:
+
+- 人間が手動で conflict 解消した後、ラベルを外し忘れた → PR は永久に Phase A の対象外
+- base branch が revert されて transient な conflict が自然解消した → ラベルが残り続ける
+
+**現状の対処**: conflict 解消後は **人間が手動でラベルを外す**。外せば次回 watcher サイクルで
+自動的に再評価されます:
+
+```bash
+# ラベル除去（GitHub UI からも可）
+gh pr edit <PR番号> --repo owner/your-repo --remove-label needs-rebase
+```
+
+**将来対応**: [#27](https://github.com/hitoshiichikawa/idd-claude/issues/27) で「`needs-rebase` 付き PR を別ループで定期再評価し、`mergeable=MERGEABLE` に戻った PR のラベルを自動除去」する機能を追跡中（`MERGE_QUEUE_RECHECK_ENABLED` で opt-in 予定）。
+
 ### Migration Note（既存ユーザー向け）
 
 Phase A 導入による後方互換性は以下のとおり保証されます:
