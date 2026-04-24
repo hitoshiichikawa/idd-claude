@@ -67,6 +67,11 @@ MERGE_QUEUE_MAX_PRS="${MERGE_QUEUE_MAX_PRS:-5}"
 MERGE_QUEUE_GIT_TIMEOUT="${MERGE_QUEUE_GIT_TIMEOUT:-60}"
 # main ブランチ名（基本は "main"。レガシー repo で master の場合のみ上書き）。
 MERGE_QUEUE_BASE_BRANCH="${MERGE_QUEUE_BASE_BRANCH:-main}"
+# head branch prefix: 自動 rebase を許可する head ref のプレフィックス。
+# idd-claude が作成する PR は `claude/issue-N-*` パターン。人間が書いた PR を
+# 巻き込まないよう、デフォルトで `claude/` 始まりだけを対象にする。
+# 複数許可したい場合はパイプ区切り正規表現で上書き（例: '^(claude|bot)/'）。
+MERGE_QUEUE_HEAD_PATTERN="${MERGE_QUEUE_HEAD_PATTERN:-^claude/}"
 
 # LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
 # 環境変数で明示上書きもできる。
@@ -293,21 +298,35 @@ process_merge_queue() {
 
   mq_log "サイクル開始 (max=${MERGE_QUEUE_MAX_PRS}, base=${MERGE_QUEUE_BASE_BRANCH}, timeout=${MERGE_QUEUE_GIT_TIMEOUT}s)"
 
-  # AC 1.2 / 1.3 / 1.4: approved かつ needs-rebase / claude-failed が付いていない非 draft の PR
+  # AC 1.2 / 1.3 / 1.4 / 1.6 / 1.7: approved かつ needs-rebase / claude-failed が付いていない
+  # 非 draft の PR。さらに head branch が MERGE_QUEUE_HEAD_PATTERN に合致し、
+  # head repo owner が base repo owner と同一（= fork PR を除外）のものに限定。
   # GitHub search 構文で server side フィルタ（API call 削減・NFR 1.2）
+  local repo_owner="${REPO%%/*}"
   local prs_json
   if ! prs_json=$(timeout "$MERGE_QUEUE_GIT_TIMEOUT" gh pr list \
       --repo "$REPO" \
       --state open \
       --search "review:approved -label:\"$LABEL_NEEDS_REBASE\" -label:\"$LABEL_FAILED\" -draft:true" \
-      --json number,headRefName,baseRefName,mergeable,mergeStateStatus,labels,url,isDraft,reviewDecision \
+      --json number,headRefName,baseRefName,mergeable,mergeStateStatus,labels,url,isDraft,reviewDecision,headRepositoryOwner \
       --limit 50 2>/dev/null); then
     mq_warn "approved PR の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
     return 0
   fi
 
-  # クライアント側でも draft / reviewDecision を再フィルタ（API gate のフォールバック）
-  prs_json=$(echo "$prs_json" | jq '[.[] | select(.isDraft == false) | select(.reviewDecision == "APPROVED")]')
+  # クライアント側フィルタ:
+  #   - isDraft / reviewDecision の再確認（server filter の保険）
+  #   - head ref prefix (MERGE_QUEUE_HEAD_PATTERN): 人間の手書き PR を巻き込まない
+  #   - head repo owner == base repo owner: fork PR を除外
+  prs_json=$(echo "$prs_json" | jq \
+    --arg pattern "$MERGE_QUEUE_HEAD_PATTERN" \
+    --arg owner "$repo_owner" \
+    '[.[]
+      | select(.isDraft == false)
+      | select(.reviewDecision == "APPROVED")
+      | select(.headRefName | test($pattern))
+      | select((.headRepositoryOwner.login // "") == $owner)
+    ]')
 
   local total
   total=$(echo "$prs_json" | jq 'length')
