@@ -56,6 +56,7 @@ LABEL_READY="ready-for-review"
 LABEL_FAILED="claude-failed"
 LABEL_SKIP_TRIAGE="skip-triage"
 LABEL_NEEDS_REBASE="needs-rebase"
+LABEL_NEEDS_ITERATION="needs-iteration"
 
 # ─── Phase A: Merge Queue Processor 設定 ───
 # 既存運用への影響を避けるため、初回導入は opt-in（デフォルト false）。
@@ -72,6 +73,27 @@ MERGE_QUEUE_BASE_BRANCH="${MERGE_QUEUE_BASE_BRANCH:-main}"
 # 巻き込まないよう、デフォルトで `claude/` 始まりだけを対象にする。
 # 複数許可したい場合はパイプ区切り正規表現で上書き（例: '^(claude|bot)/'）。
 MERGE_QUEUE_HEAD_PATTERN="${MERGE_QUEUE_HEAD_PATTERN:-^claude/}"
+
+# ─── PR Iteration Processor 設定 (#26) ───
+# `needs-iteration` ラベル付き PR をレビューコメントに基づいて自動で iterate する。
+# 既存運用への影響を避けるため、初回導入は opt-in（デフォルト false）。
+# 有効化するには cron / launchd 側で PR_ITERATION_ENABLED=true を渡す。
+PR_ITERATION_ENABLED="${PR_ITERATION_ENABLED:-false}"
+# Iteration 専用モデル ID（既存 DEV_MODEL とは独立して上書き可能）。
+PR_ITERATION_DEV_MODEL="${PR_ITERATION_DEV_MODEL:-claude-opus-4-7}"
+# 1 iteration あたりの Claude 実行 turn 数上限（NFR 1.1）。
+PR_ITERATION_MAX_TURNS="${PR_ITERATION_MAX_TURNS:-60}"
+# 1 サイクルで処理する PR 数の上限（残りは次回サイクルに持ち越し、AC 1.6 / NFR 1.2）。
+PR_ITERATION_MAX_PRS="${PR_ITERATION_MAX_PRS:-3}"
+# 1 PR あたりの累計 iteration 上限。到達時は claude-failed に昇格（AC 7.2）。
+PR_ITERATION_MAX_ROUNDS="${PR_ITERATION_MAX_ROUNDS:-3}"
+# 自動 iteration を許可する head ref のプレフィックス正規表現。
+# 人間が手書きした PR や fork PR を巻き込まないよう既定 `^claude/`（AC 1.2）。
+PR_ITERATION_HEAD_PATTERN="${PR_ITERATION_HEAD_PATTERN:-^claude/}"
+# 各 git / gh 操作の個別タイムアウト（秒、NFR 1.3）。
+PR_ITERATION_GIT_TIMEOUT="${PR_ITERATION_GIT_TIMEOUT:-60}"
+# Iteration プロンプトテンプレートの配置先（install.sh --local が配置）。
+ITERATION_TEMPLATE="${ITERATION_TEMPLATE:-$HOME/bin/iteration-prompt.tmpl}"
 
 # LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
 # 環境変数で明示上書きもできる。
@@ -101,6 +123,14 @@ done
   echo "Error: Triage テンプレートが見つかりません: $TRIAGE_TEMPLATE" >&2
   exit 1
 }
+
+# PR Iteration が有効化されている時のみ template の存在を必須化（opt-in gate）。
+# 無効化（既定）時は template 未配置でも watcher 全体を起動できるよう、無条件チェックを避ける。
+if [ "$PR_ITERATION_ENABLED" = "true" ] && [ ! -f "$ITERATION_TEMPLATE" ]; then
+  echo "Error: Iteration テンプレートが見つかりません: $ITERATION_TEMPLATE" >&2
+  echo "  install.sh --local 再実行で配置されます。" >&2
+  exit 1
+fi
 
 mkdir -p "$LOG_DIR"
 
