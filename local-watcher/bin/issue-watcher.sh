@@ -721,13 +721,22 @@ pi_build_iteration_prompt() {
       | jq '[.[] | select((.body // "") | test("@claude"; "i")) | {id, user: (.user.login // ""), body, url: .html_url}]')
   fi
 
-  # template に sed 置換で注入。LINE_COMMENTS_JSON / GENERAL_COMMENTS_JSON / PR_DIFF /
-  # REQUIREMENTS_MD は複数行を含むため、awk ベースのプレースホルダ置換を使う。
+  # template に変数を注入する。
+  # 単一行値（PR 番号 / タイトル / URL 等）は awk -v で渡し、行内の {{KEY}} を文字列置換。
+  # 複数行値（LINE_COMMENTS_JSON / GENERAL_COMMENTS_JSON / PR_DIFF / REQUIREMENTS_MD）は
+  # awk -v では改行を扱えないため、export 経由で ENVIRON[] から取得し、
+  # 「行全体が {{KEY}} のみ」のテンプレ行をブロックごと置換する（template はその前提で書かれている）。
   local tmpl_path="$ITERATION_TEMPLATE"
   if [ ! -f "$tmpl_path" ]; then
     pi_warn "template not found: $tmpl_path"
     return 1
   fi
+
+  # 改行入り値を子プロセスに渡すため export
+  export PI_LINE_JSON="$line_comments_json"
+  export PI_GENERAL_JSON="$general_comments_json"
+  export PI_PR_DIFF="$pr_diff"
+  export PI_REQS_MD="$requirements_md"
 
   awk \
     -v repo="$REPO" \
@@ -740,10 +749,6 @@ pi_build_iteration_prompt() {
     -v max_rounds="$PR_ITERATION_MAX_ROUNDS" \
     -v issue_number="${issue_number:-(none)}" \
     -v spec_dir="${spec_dir:-(none)}" \
-    -v line_json="$line_comments_json" \
-    -v general_json="$general_comments_json" \
-    -v pr_diff="$pr_diff" \
-    -v reqs_md="$requirements_md" \
     '
     function repl(s, key, val,    out, idx) {
       out = ""
@@ -754,6 +759,11 @@ pi_build_iteration_prompt() {
       return out s
     }
     {
+      # 行全体が複数行プレースホルダの場合は ENVIRON 経由で展開
+      if ($0 == "{{LINE_COMMENTS_JSON}}")    { print ENVIRON["PI_LINE_JSON"]; next }
+      if ($0 == "{{GENERAL_COMMENTS_JSON}}") { print ENVIRON["PI_GENERAL_JSON"]; next }
+      if ($0 == "{{PR_DIFF}}")               { print ENVIRON["PI_PR_DIFF"]; next }
+      if ($0 == "{{REQUIREMENTS_MD}}")       { print ENVIRON["PI_REQS_MD"]; next }
       line = $0
       line = repl(line, "{{REPO}}", repo)
       line = repl(line, "{{PR_NUMBER}}", pr_number)
@@ -767,20 +777,11 @@ pi_build_iteration_prompt() {
       line = repl(line, "{{SPEC_DIR}}", spec_dir)
       print line
     }
-    ' "$tmpl_path" \
-    | awk -v line_json="$line_comments_json" \
-          -v general_json="$general_comments_json" \
-          -v pr_diff="$pr_diff" \
-          -v reqs_md="$requirements_md" '
-      {
-        if ($0 == "{{LINE_COMMENTS_JSON}}") { print line_json; next }
-        if ($0 == "{{GENERAL_COMMENTS_JSON}}") { print general_json; next }
-        if ($0 == "{{PR_DIFF}}") { print pr_diff; next }
-        if ($0 == "{{REQUIREMENTS_MD}}") { print reqs_md; next }
-        print
-      }
-    '
-  return 0
+    ' "$tmpl_path"
+  local awk_rc=$?
+
+  unset PI_LINE_JSON PI_GENERAL_JSON PI_PR_DIFF PI_REQS_MD
+  return $awk_rc
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
