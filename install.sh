@@ -174,6 +174,11 @@ if $INSTALL_LOCAL; then
   mkdir -p "$HOME/bin" "$HOME/.issue-watcher/logs"
   cp -v "$LOCAL_WATCHER_DIR/bin/issue-watcher.sh"   "$HOME/bin/"
   cp -v "$LOCAL_WATCHER_DIR/bin/triage-prompt.tmpl" "$HOME/bin/"
+  # PR Iteration Processor (#26) 用テンプレート。既存 watcher で
+  # PR_ITERATION_ENABLED=true にするまで参照されないが、配置のみ常時行う。
+  if [ -f "$LOCAL_WATCHER_DIR/bin/iteration-prompt.tmpl" ]; then
+    cp -v "$LOCAL_WATCHER_DIR/bin/iteration-prompt.tmpl" "$HOME/bin/"
+  fi
   chmod +x "$HOME/bin/issue-watcher.sh"
 
   # macOS: launchd

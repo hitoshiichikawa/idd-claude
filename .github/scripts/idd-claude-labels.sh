@@ -61,6 +61,7 @@ LABELS=(
   "claude-failed|e74c3c|自動実行が失敗"
   "skip-triage|95a5a6|Triage をスキップ"
   "needs-rebase|fbca04|approved PR で base が古い／conflict が発生済み（Phase A: Merge Queue Processor が付与）"
+  "needs-iteration|d4c5f9|PR レビューコメントの反復対応待ち（#26 PR Iteration Processor が処理）"
 )
 
 echo "📌 idd-claude ラベルを作成します"

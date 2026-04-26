@@ -56,6 +56,7 @@ LABEL_READY="ready-for-review"
 LABEL_FAILED="claude-failed"
 LABEL_SKIP_TRIAGE="skip-triage"
 LABEL_NEEDS_REBASE="needs-rebase"
+LABEL_NEEDS_ITERATION="needs-iteration"
 
 # ─── Phase A: Merge Queue Processor 設定 ───
 # 既存運用への影響を避けるため、初回導入は opt-in（デフォルト false）。
@@ -72,6 +73,27 @@ MERGE_QUEUE_BASE_BRANCH="${MERGE_QUEUE_BASE_BRANCH:-main}"
 # 巻き込まないよう、デフォルトで `claude/` 始まりだけを対象にする。
 # 複数許可したい場合はパイプ区切り正規表現で上書き（例: '^(claude|bot)/'）。
 MERGE_QUEUE_HEAD_PATTERN="${MERGE_QUEUE_HEAD_PATTERN:-^claude/}"
+
+# ─── PR Iteration Processor 設定 (#26) ───
+# `needs-iteration` ラベル付き PR をレビューコメントに基づいて自動で iterate する。
+# 既存運用への影響を避けるため、初回導入は opt-in（デフォルト false）。
+# 有効化するには cron / launchd 側で PR_ITERATION_ENABLED=true を渡す。
+PR_ITERATION_ENABLED="${PR_ITERATION_ENABLED:-false}"
+# Iteration 専用モデル ID（既存 DEV_MODEL とは独立して上書き可能）。
+PR_ITERATION_DEV_MODEL="${PR_ITERATION_DEV_MODEL:-claude-opus-4-7}"
+# 1 iteration あたりの Claude 実行 turn 数上限（NFR 1.1）。
+PR_ITERATION_MAX_TURNS="${PR_ITERATION_MAX_TURNS:-60}"
+# 1 サイクルで処理する PR 数の上限（残りは次回サイクルに持ち越し、AC 1.6 / NFR 1.2）。
+PR_ITERATION_MAX_PRS="${PR_ITERATION_MAX_PRS:-3}"
+# 1 PR あたりの累計 iteration 上限。到達時は claude-failed に昇格（AC 7.2）。
+PR_ITERATION_MAX_ROUNDS="${PR_ITERATION_MAX_ROUNDS:-3}"
+# 自動 iteration を許可する head ref のプレフィックス正規表現。
+# 人間が手書きした PR や fork PR を巻き込まないよう既定 `^claude/`（AC 1.2）。
+PR_ITERATION_HEAD_PATTERN="${PR_ITERATION_HEAD_PATTERN:-^claude/}"
+# 各 git / gh 操作の個別タイムアウト（秒、NFR 1.3）。
+PR_ITERATION_GIT_TIMEOUT="${PR_ITERATION_GIT_TIMEOUT:-60}"
+# Iteration プロンプトテンプレートの配置先（install.sh --local が配置）。
+ITERATION_TEMPLATE="${ITERATION_TEMPLATE:-$HOME/bin/iteration-prompt.tmpl}"
 
 # LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
 # 環境変数で明示上書きもできる。
@@ -101,6 +123,14 @@ done
   echo "Error: Triage テンプレートが見つかりません: $TRIAGE_TEMPLATE" >&2
   exit 1
 }
+
+# PR Iteration が有効化されている時のみ template の存在を必須化（opt-in gate）。
+# 無効化（既定）時は template 未配置でも watcher 全体を起動できるよう、無条件チェックを避ける。
+if [ "$PR_ITERATION_ENABLED" = "true" ] && [ ! -f "$ITERATION_TEMPLATE" ]; then
+  echo "Error: Iteration テンプレートが見つかりません: $ITERATION_TEMPLATE" >&2
+  echo "  install.sh --local 再実行で配置されます。" >&2
+  exit 1
+fi
 
 mkdir -p "$LOG_DIR"
 
@@ -419,6 +449,508 @@ process_merge_queue() {
 
 # AC 1.1: ピックアップ済み Issue の処理ループに入る前に 1 回だけ起動
 process_merge_queue || mq_warn "process_merge_queue が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PR Iteration Processor (#26)
+#   `needs-iteration` ラベルが付いた idd-claude 管理下 PR を fresh context の Claude で
+#   反復対応する。Phase A と同じ flock 境界内で直列実行され、対象 PR 集合は
+#   server-side label query で Phase A と直交させている（AC 8.4）。
+#
+#   既存運用との後方互換のため PR_ITERATION_ENABLED=true で opt-in。
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# pr-iteration 専用ロガー（識別用 prefix と timestamp 形式を Issue Watcher と揃える）
+pi_log() {
+  echo "[$(date '+%F %T')] pr-iteration: $*"
+}
+pi_warn() {
+  echo "[$(date '+%F %T')] pr-iteration: WARN: $*" >&2
+}
+pi_error() {
+  echo "[$(date '+%F %T')] pr-iteration: ERROR: $*" >&2
+}
+
+# PR ラベル一覧に特定ラベルが含まれるかを判定（jq で labels 配列を走査）
+pi_pr_has_label() {
+  local pr_json="$1"
+  local label="$2"
+  echo "$pr_json" | jq -e --arg l "$label" '.labels // [] | map(.name) | index($l)' >/dev/null 2>&1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_fetch_candidate_prs: server-side + client-side の二段フィルタで候補 PR を返す
+#   出力: stdout に jq 配列形式の JSON 1 行（候補なしなら "[]"）
+#   AC 1.1, 1.2, 1.3, 1.4, 1.5, 8.4
+# ─────────────────────────────────────────────────────────────────────────────
+pi_fetch_candidate_prs() {
+  local repo_owner="${REPO%%/*}"
+  local prs_json
+  # AC 1.1 / 1.4 / 1.5 / 8.4: needs-iteration 付き、claude-failed / needs-rebase 無し、非 draft
+  if ! prs_json=$(timeout "$PR_ITERATION_GIT_TIMEOUT" gh pr list \
+      --repo "$REPO" \
+      --state open \
+      --search "label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_REBASE\" -draft:true" \
+      --json number,headRefName,baseRefName,isDraft,url,labels,headRepositoryOwner,body \
+      --limit 50 2>/dev/null); then
+    pi_warn "needs-iteration PR の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
+    echo "[]"
+    return 0
+  fi
+
+  # AC 1.2 / 1.3 / 1.4: クライアント側フィルタ（server filter の保険 + head pattern + fork 除外）
+  echo "$prs_json" | jq \
+    --arg pattern "$PR_ITERATION_HEAD_PATTERN" \
+    --arg owner "$repo_owner" \
+    '[.[]
+      | select(.isDraft == false)
+      | select(.headRefName | test($pattern))
+      | select((.headRepositoryOwner.login // "") == $owner)
+    ]'
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_read_round_counter: PR body から hidden marker の round 数を取得
+#   入力: $1=pr_number
+#   出力: stdout に round 数（marker 無しなら 0）
+#   AC 7.1, 7.4
+# ─────────────────────────────────────────────────────────────────────────────
+pi_read_round_counter() {
+  local pr_number="$1"
+  local body
+  if ! body=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
+      gh pr view "$pr_number" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null); then
+    pi_warn "PR #${pr_number}: body 取得に失敗、round=0 として扱います"
+    echo "0"
+    return 0
+  fi
+  # marker 形式: <!-- idd-claude:pr-iteration round=N last-run=... -->
+  # 複数検出時は最後（最新）の数値を採用 = fail-safe
+  local round
+  round=$(echo "$body" \
+    | grep -oE 'idd-claude:pr-iteration round=[0-9]+' \
+    | grep -oE '[0-9]+$' \
+    | tail -1)
+  echo "${round:-0}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_post_processing_marker: PR body に hidden marker を書き込み + 着手表明コメント投稿
+#   入力: $1=pr_number, $2=new_round
+#   AC 6.1, 7.1
+#   戻り値: 0=成功, 1=失敗（呼び出し元で iteration を中断）
+# ─────────────────────────────────────────────────────────────────────────────
+pi_post_processing_marker() {
+  local pr_number="$1"
+  local new_round="$2"
+  local now
+  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+  local body
+  if ! body=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
+      gh pr view "$pr_number" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null); then
+    pi_warn "PR #${pr_number}: body 取得に失敗、marker 更新をスキップ"
+    return 1
+  fi
+
+  local marker="<!-- idd-claude:pr-iteration round=${new_round} last-run=${now} -->"
+  local new_body
+  if echo "$body" | grep -qE 'idd-claude:pr-iteration round=[0-9]+'; then
+    # 既存 marker を最新 marker で置換（複数あった場合も全部 1 つに集約）
+    new_body=$(echo "$body" | sed -E "s|<!-- idd-claude:pr-iteration round=[0-9]+ last-run=[^>]*-->|${marker}|g")
+  else
+    # 末尾に追記（前置の改行で見やすく）
+    new_body="${body}
+
+${marker}"
+  fi
+
+  if ! timeout "$PR_ITERATION_GIT_TIMEOUT" \
+      gh pr edit "$pr_number" --repo "$REPO" --body "$new_body" >/dev/null 2>&1; then
+    pi_warn "PR #${pr_number}: PR body の hidden marker 更新に失敗"
+    return 1
+  fi
+
+  # AC 6.1: 着手表明コメント
+  local processing_msg
+  processing_msg=$(printf '%s\n%s' \
+    ":robot: PR Iteration Processor が処理を開始しました (round ${new_round}/${PR_ITERATION_MAX_ROUNDS})。" \
+    "<!-- idd-claude:pr-iteration-processing round=${new_round} -->")
+  if ! timeout "$PR_ITERATION_GIT_TIMEOUT" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$processing_msg" >/dev/null 2>&1; then
+    # コメント投稿失敗はラベル誤遷移のリスクがないため WARN のみ（marker は付いた）
+    pi_warn "PR #${pr_number}: 着手表明コメントの投稿に失敗（marker は更新済み）"
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_finalize_labels: 成功時のラベル遷移（AC 6.2 / 6.4）
+#   --remove-label と --add-label を同一コマンドで指定し原子的に実行
+# ─────────────────────────────────────────────────────────────────────────────
+pi_finalize_labels() {
+  local pr_number="$1"
+  if ! timeout "$PR_ITERATION_GIT_TIMEOUT" gh pr edit "$pr_number" --repo "$REPO" \
+      --remove-label "$LABEL_NEEDS_ITERATION" \
+      --add-label "$LABEL_READY" >/dev/null 2>&1; then
+    pi_warn "PR #${pr_number}: ラベル遷移 (needs-iteration -> ready-for-review) に失敗"
+    return 1
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_escalate_to_failed: 上限到達時の claude-failed 昇格 + エスカレコメント
+#   入力: $1=pr_number, $2=round, $3=max_rounds
+#   AC 7.2, 7.3
+# ─────────────────────────────────────────────────────────────────────────────
+pi_escalate_to_failed() {
+  local pr_number="$1"
+  local round="$2"
+  local max_rounds="$3"
+
+  if ! timeout "$PR_ITERATION_GIT_TIMEOUT" gh pr edit "$pr_number" --repo "$REPO" \
+      --remove-label "$LABEL_NEEDS_ITERATION" \
+      --add-label "$LABEL_FAILED" >/dev/null 2>&1; then
+    pi_warn "PR #${pr_number}: claude-failed 昇格時のラベル遷移に失敗"
+    return 1
+  fi
+
+  local escalation_body
+  escalation_body=$(cat <<EOF
+## :rotating_light: PR Iteration 上限到達 (#26 PR Iteration Processor)
+
+本 PR の累計自動 iteration 回数が上限 (\`PR_ITERATION_MAX_ROUNDS=${max_rounds}\`) に達しました。
+\`needs-iteration\` ラベルを除去し、\`claude-failed\` ラベルに付け替えています。
+
+### これまでの状況
+
+- 累計 iteration: ${round} round
+- 上限値: ${max_rounds} round
+- 上限到達のため自動 iteration を停止
+
+### 次に人間が取るべきアクション
+
+1. これまでのレビューコメントと自動修正履歴を読み、Claude の判断を確認する
+2. 必要に応じて手動で修正 commit を積む
+3. 自動 iteration を再開したい場合:
+   - PR 本文の \`<!-- idd-claude:pr-iteration round=N ... -->\` 行を **手動で削除**（カウンタリセット）
+   - \`claude-failed\` ラベルを除去
+   - \`needs-iteration\` ラベルを付け直す
+4. これ以上自動 iteration を行わない場合は \`claude-failed\` を残したまま手動レビューに移行
+
+---
+
+_本コメントは PR Iteration Processor (#26) が自動投稿しました。_
+EOF
+)
+  if ! timeout "$PR_ITERATION_GIT_TIMEOUT" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$escalation_body" >/dev/null 2>&1; then
+    pi_warn "PR #${pr_number}: エスカレコメントの投稿に失敗（ラベル遷移は完了済み）"
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_build_iteration_prompt: iteration-prompt.tmpl に変数を注入
+#   入力: $1=pr_number, $2=pr_json, $3=round
+#   出力: stdout に prompt 文字列
+#   AC 3.1, 3.2, 3.3, 3.4, 3.5
+# ─────────────────────────────────────────────────────────────────────────────
+pi_build_iteration_prompt() {
+  local pr_number="$1"
+  local pr_json="$2"
+  local round="$3"
+
+  local pr_title pr_url head_ref base_ref pr_body
+  pr_title=$(echo "$pr_json" | jq -r '.title // ""')
+  pr_url=$(echo "$pr_json"   | jq -r '.url // ""')
+  head_ref=$(echo "$pr_json" | jq -r '.headRefName // ""')
+  base_ref=$(echo "$pr_json" | jq -r '.baseRefName // ""')
+  pr_body=$(echo "$pr_json"  | jq -r '.body // ""')
+
+  # title が JSON で取れていない場合（pr_json は --json title を含まないかも）は gh で補完
+  if [ -z "$pr_title" ]; then
+    pr_title=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
+      gh pr view "$pr_number" --repo "$REPO" --json title --jq '.title // ""' 2>/dev/null || echo "")
+  fi
+
+  # 関連 Issue 番号: head branch (`claude/issue-N-...`) → PR body の順で抽出
+  local issue_number=""
+  issue_number=$(echo "$head_ref" | grep -oE 'issue-[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+  if [ -z "$issue_number" ]; then
+    issue_number=$(echo "$pr_body" | grep -oE '#[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+  fi
+
+  local spec_dir=""
+  local requirements_md="(関連 Issue が見つからないか、対応する requirements.md が存在しません)"
+  if [ -n "$issue_number" ]; then
+    local found
+    found=$(ls -d "${REPO_DIR}/docs/specs/${issue_number}-"* 2>/dev/null | head -1 || true)
+    if [ -n "$found" ] && [ -f "${found}/requirements.md" ]; then
+      spec_dir="docs/specs/$(basename "$found")"
+      requirements_md=$(cat "${found}/requirements.md")
+    fi
+  fi
+
+  # PR diff（base..head）
+  local pr_diff="(diff の取得に失敗)"
+  pr_diff=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
+    gh pr diff "$pr_number" --repo "$REPO" 2>/dev/null || echo "(diff の取得に失敗)")
+
+  # AC 3.1: 最新 review の line コメントを取得（reviews 配列の最後の要素 = 時系列で最新）
+  local line_comments_json="[]"
+  local reviews_json latest_review_id
+  if reviews_json=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
+      gh api "/repos/${REPO}/pulls/${pr_number}/reviews" 2>/dev/null); then
+    latest_review_id=$(echo "$reviews_json" | jq -r 'if length > 0 then (.[length-1].id|tostring) else "" end')
+    if [ -n "$latest_review_id" ]; then
+      local raw_line
+      if raw_line=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
+          gh api "/repos/${REPO}/pulls/${pr_number}/reviews/${latest_review_id}/comments" 2>/dev/null); then
+        line_comments_json=$(echo "$raw_line" | jq '[.[] | {id, path, line, user: (.user.login // ""), body}]')
+      fi
+    fi
+  fi
+
+  # AC 3.2: @claude mention 付き general コメント
+  local general_comments_json="[]"
+  local raw_general
+  if raw_general=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
+      gh api "/repos/${REPO}/issues/${pr_number}/comments" 2>/dev/null); then
+    general_comments_json=$(echo "$raw_general" \
+      | jq '[.[] | select((.body // "") | test("@claude"; "i")) | {id, user: (.user.login // ""), body, url: .html_url}]')
+  fi
+
+  # template に変数を注入する。
+  # 単一行値（PR 番号 / タイトル / URL 等）は awk -v で渡し、行内の {{KEY}} を文字列置換。
+  # 複数行値（LINE_COMMENTS_JSON / GENERAL_COMMENTS_JSON / PR_DIFF / REQUIREMENTS_MD）は
+  # awk -v では改行を扱えないため、export 経由で ENVIRON[] から取得し、
+  # 「行全体が {{KEY}} のみ」のテンプレ行をブロックごと置換する（template はその前提で書かれている）。
+  local tmpl_path="$ITERATION_TEMPLATE"
+  if [ ! -f "$tmpl_path" ]; then
+    pi_warn "template not found: $tmpl_path"
+    return 1
+  fi
+
+  # 改行入り値を子プロセスに渡すため export
+  export PI_LINE_JSON="$line_comments_json"
+  export PI_GENERAL_JSON="$general_comments_json"
+  export PI_PR_DIFF="$pr_diff"
+  export PI_REQS_MD="$requirements_md"
+
+  awk \
+    -v repo="$REPO" \
+    -v pr_number="$pr_number" \
+    -v pr_title="$pr_title" \
+    -v pr_url="$pr_url" \
+    -v head_ref="$head_ref" \
+    -v base_ref="$base_ref" \
+    -v round="$round" \
+    -v max_rounds="$PR_ITERATION_MAX_ROUNDS" \
+    -v issue_number="${issue_number:-(none)}" \
+    -v spec_dir="${spec_dir:-(none)}" \
+    '
+    function repl(s, key, val,    out, idx) {
+      out = ""
+      while ((idx = index(s, key)) > 0) {
+        out = out substr(s, 1, idx-1) val
+        s = substr(s, idx + length(key))
+      }
+      return out s
+    }
+    {
+      # 行全体が複数行プレースホルダの場合は ENVIRON 経由で展開
+      if ($0 == "{{LINE_COMMENTS_JSON}}")    { print ENVIRON["PI_LINE_JSON"]; next }
+      if ($0 == "{{GENERAL_COMMENTS_JSON}}") { print ENVIRON["PI_GENERAL_JSON"]; next }
+      if ($0 == "{{PR_DIFF}}")               { print ENVIRON["PI_PR_DIFF"]; next }
+      if ($0 == "{{REQUIREMENTS_MD}}")       { print ENVIRON["PI_REQS_MD"]; next }
+      line = $0
+      line = repl(line, "{{REPO}}", repo)
+      line = repl(line, "{{PR_NUMBER}}", pr_number)
+      line = repl(line, "{{PR_TITLE}}", pr_title)
+      line = repl(line, "{{PR_URL}}", pr_url)
+      line = repl(line, "{{HEAD_REF}}", head_ref)
+      line = repl(line, "{{BASE_REF}}", base_ref)
+      line = repl(line, "{{ROUND}}", round)
+      line = repl(line, "{{MAX_ROUNDS}}", max_rounds)
+      line = repl(line, "{{ISSUE_NUMBER}}", issue_number)
+      line = repl(line, "{{SPEC_DIR}}", spec_dir)
+      print line
+    }
+    ' "$tmpl_path"
+  local awk_rc=$?
+
+  unset PI_LINE_JSON PI_GENERAL_JSON PI_PR_DIFF PI_REQS_MD
+  return $awk_rc
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_run_iteration: 1 PR 分の iteration を実行（fresh context Claude 起動）
+#   入力: $1=pr_json
+#   戻り値: 0=success(commit+push or reply-only), 1=failure, 2=skipped(round上限到達等)
+#   AC 3.6, 4.x, 5.x, 6.2, 6.3, 7.x, 8.3, 9.2, NFR 1.1, NFR 1.3
+# ─────────────────────────────────────────────────────────────────────────────
+pi_run_iteration() {
+  local pr_json="$1"
+  local pr_number head_ref base_ref pr_url
+  pr_number=$(echo "$pr_json" | jq -r '.number')
+  head_ref=$(echo "$pr_json"  | jq -r '.headRefName')
+  base_ref=$(echo "$pr_json"  | jq -r '.baseRefName')
+  pr_url=$(echo "$pr_json"    | jq -r '.url')
+
+  local round
+  round=$(pi_read_round_counter "$pr_number")
+
+  # AC 7.2: 上限到達なら escalate
+  if [ "$round" -ge "$PR_ITERATION_MAX_ROUNDS" ]; then
+    pi_log "PR #${pr_number}: round=${round} >= max=${PR_ITERATION_MAX_ROUNDS}, claude-failed に昇格"
+    pi_escalate_to_failed "$pr_number" "$round" "$PR_ITERATION_MAX_ROUNDS" || true
+    return 2
+  fi
+
+  local next_round=$((round + 1))
+
+  # AC 6.1: 着手表明（marker 更新 + コメント）
+  if ! pi_post_processing_marker "$pr_number" "$next_round"; then
+    pi_warn "PR #${pr_number}: 着手表明に失敗、iteration 中止"
+    return 1
+  fi
+
+  pi_log "PR #${pr_number}: round=${next_round}/${PR_ITERATION_MAX_ROUNDS} 着手 (${pr_url})"
+
+  # サブシェル + trap で必ず main に戻す（AC 8.3）
+  local rc=0
+  (
+    set +e
+    # shellcheck disable=SC2064
+    trap "git checkout 'main' >/dev/null 2>&1" EXIT
+
+    # head branch を fresh に checkout（origin の最新状態に追従、AC 4.4）
+    if ! timeout "$PR_ITERATION_GIT_TIMEOUT" git fetch origin "$head_ref" >/dev/null 2>&1; then
+      pi_warn "PR #${pr_number}: git fetch origin ${head_ref} に失敗"
+      exit 1
+    fi
+    if ! timeout "$PR_ITERATION_GIT_TIMEOUT" git checkout -B "$head_ref" "origin/${head_ref}" >/dev/null 2>&1; then
+      pi_warn "PR #${pr_number}: head branch '${head_ref}' の checkout に失敗"
+      exit 1
+    fi
+
+    # prompt を生成
+    local prompt
+    if ! prompt=$(pi_build_iteration_prompt "$pr_number" "$pr_json" "$next_round"); then
+      pi_warn "PR #${pr_number}: prompt 組み立てに失敗"
+      exit 1
+    fi
+
+    # AC 3.6: fresh context で起動（--resume / --continue は使わない）
+    # NFR 1.1: --max-turns で turn 数上限
+    local pi_log_file
+    pi_log_file="$LOG_DIR/pr-iteration-${pr_number}-round${next_round}-$(date +%Y%m%d-%H%M%S).log"
+    if ! claude \
+        --print "$prompt" \
+        --model "$PR_ITERATION_DEV_MODEL" \
+        --permission-mode bypassPermissions \
+        --max-turns "$PR_ITERATION_MAX_TURNS" \
+        --output-format stream-json \
+        --verbose \
+        >> "$pi_log_file" 2>&1; then
+      pi_warn "PR #${pr_number}: Claude 実行が失敗 (log: ${pi_log_file})"
+      exit 1
+    fi
+    pi_log "PR #${pr_number}: Claude 実行完了 (log: ${pi_log_file})"
+    exit 0
+  )
+  rc=$?
+  # 保険: 呼び出し元でも main に戻す
+  git checkout main >/dev/null 2>&1 || true
+
+  if [ $rc -eq 0 ]; then
+    # AC 6.2: 成功 → ラベル遷移
+    if pi_finalize_labels "$pr_number"; then
+      pi_log "PR #${pr_number}: round=${next_round} action=success (needs-iteration -> ready-for-review)"
+      return 0
+    else
+      pi_warn "PR #${pr_number}: ラベル遷移失敗、needs-iteration を残置"
+      return 1
+    fi
+  else
+    # AC 6.3: 失敗 → needs-iteration を残し WARN
+    pi_log "PR #${pr_number}: round=${next_round} action=fail (needs-iteration を残置)"
+    return 1
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# process_pr_iteration: PR Iteration Processor のエントリ関数
+#   AC 1.6, 2.1, 2.2, 8.5, 9.1, 9.3, NFR 1.2, NFR 2.3
+# ─────────────────────────────────────────────────────────────────────────────
+process_pr_iteration() {
+  # AC 2.1: opt-in gate
+  if [ "$PR_ITERATION_ENABLED" != "true" ]; then
+    return 0
+  fi
+
+  # NFR 2.3 / AC 8.5: dirty working tree 検知
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    pi_error "dirty working tree を検出しました。PR Iteration Processor をスキップします。"
+    return 0
+  fi
+
+  pi_log "サイクル開始 (max_prs=${PR_ITERATION_MAX_PRS}, max_rounds=${PR_ITERATION_MAX_ROUNDS}, model=${PR_ITERATION_DEV_MODEL}, timeout=${PR_ITERATION_GIT_TIMEOUT}s)"
+
+  local prs_json
+  prs_json=$(pi_fetch_candidate_prs)
+  local total
+  total=$(echo "$prs_json" | jq 'length')
+  local target_count="$total"
+  local skipped_overflow=0
+
+  if [ "$total" -gt "$PR_ITERATION_MAX_PRS" ]; then
+    target_count="$PR_ITERATION_MAX_PRS"
+    skipped_overflow=$((total - PR_ITERATION_MAX_PRS))
+    pi_log "対象候補 ${total} 件中、上限 ${PR_ITERATION_MAX_PRS} 件のみ処理（${skipped_overflow} 件は次回持ち越し）"
+  else
+    pi_log "対象候補 ${total} 件、処理対象 ${target_count} 件"
+  fi
+
+  if [ "$target_count" -eq 0 ]; then
+    pi_log "サマリ: success=0, fail=0, skip=0, escalated=0, overflow=${skipped_overflow}"
+    return 0
+  fi
+
+  local success=0
+  local fail=0
+  local skip=0
+  local escalated=0
+
+  local pr_iter
+  pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]")
+
+  if [ -z "$pr_iter" ]; then
+    pi_log "サマリ: success=0, fail=0, skip=0, escalated=0, overflow=${skipped_overflow}"
+    return 0
+  fi
+
+  while IFS= read -r pr_json; do
+    local rc=0
+    pi_run_iteration "$pr_json" || rc=$?
+    case $rc in
+      0)  success=$((success + 1)) ;;
+      2)  escalated=$((escalated + 1)) ;;
+      *)  fail=$((fail + 1)) ;;
+    esac
+    # 各 PR 処理後に保険で main に戻す
+    git checkout main >/dev/null 2>&1 || true
+  done <<< "$pr_iter"
+
+  pi_log "サマリ: success=${success}, fail=${fail}, skip=${skip}, escalated=${escalated}, overflow=${skipped_overflow}"
+
+  # 念のため最終確認で main に戻す
+  git checkout main >/dev/null 2>&1 || true
+}
+
+# Phase A 直後に PR Iteration Processor を実行（AC 8.1 / 8.2: 同一 flock 内で直列実行）
+process_pr_iteration || pi_warn "process_pr_iteration が想定外のエラーで終了しました（後続 Issue 処理は継続）"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 未処理 Issue を取得

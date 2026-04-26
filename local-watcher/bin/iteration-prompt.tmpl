@@ -1,0 +1,112 @@
+# =============================================================================
+# idd-claude PR Iteration Mode prompt template (#26)
+#
+# 用途: `needs-iteration` ラベル付き PR を fresh context の Claude で反復対応する
+# 配置先: ~/bin/iteration-prompt.tmpl（issue-watcher.sh が ITERATION_TEMPLATE で参照）
+# 依存  : gh / git / jq（Claude が呼び出す）
+# 関連  : local-watcher/bin/issue-watcher.sh の process_pr_iteration / pi_build_iteration_prompt
+#         repo-template/.claude/agents/developer.md「PR Iteration モード（#26）」節
+#
+# プレースホルダ（issue-watcher.sh の sed 置換で展開される）:
+#   {{PR_NUMBER}}, {{PR_TITLE}}, {{PR_URL}}, {{HEAD_REF}}, {{BASE_REF}},
+#   {{ROUND}}, {{MAX_ROUNDS}}, {{ISSUE_NUMBER}}, {{SPEC_DIR}},
+#   {{LINE_COMMENTS_JSON}}, {{GENERAL_COMMENTS_JSON}}, {{PR_DIFF}},
+#   {{REQUIREMENTS_MD}}, {{REPO}}
+# =============================================================================
+あなたは idd-claude の **PR Iteration Mode** で起動された Developer エージェントです。
+以下の PR のレビューコメントに 1 round で対応し、必要なら修正 commit を head branch に
+push して、各レビュースレッドに返信してください。
+
+## 対象 PR
+
+- Repo  : {{REPO}}
+- Number: #{{PR_NUMBER}}
+- Title : {{PR_TITLE}}
+- URL   : {{PR_URL}}
+- Head  : {{HEAD_REF}}  ← このブランチに watcher が checkout 済み
+- Base  : {{BASE_REF}}
+- Iteration: round {{ROUND}} / {{MAX_ROUNDS}}
+
+## 関連 Issue（存在する場合のみ）
+
+- Issue #{{ISSUE_NUMBER}}
+- Spec dir: {{SPEC_DIR}}
+- requirements.md は本プロンプト末尾に添付（添付がない場合は spec が無い PR）
+
+## 最新 review の line コメント（JSON 配列）
+
+各要素のスキーマ: `{ id, path, line, user, body }`
+
+```json
+{{LINE_COMMENTS_JSON}}
+```
+
+## @claude mention 付き general コメント（JSON 配列）
+
+各要素のスキーマ: `{ id, user, body, url }`
+
+```json
+{{GENERAL_COMMENTS_JSON}}
+```
+
+## 現在の diff（base..head）
+
+```diff
+{{PR_DIFF}}
+```
+
+## requirements.md（関連 Issue がある場合のみ）
+
+```markdown
+{{REQUIREMENTS_MD}}
+```
+
+---
+
+## あなたの責務（厳守）
+
+1. **head branch を origin と同期**:
+   - `git fetch origin {{HEAD_REF}}`
+   - `git merge --ff-only origin/{{HEAD_REF}}`
+   - **fast-forward が失敗したら作業を中止して `exit 1`**（後続 PR 処理を止めない）
+2. **各 line コメントを精読**し、妥当な指摘には**修正 commit を積む**
+   - コメント内容と diff を照らし合わせて、指摘の妥当性を判断する
+   - 不要 / 対応しない場合も、スレッドに「なぜ対応しないか」を返信する
+3. **修正 commit は通常 commit + 通常 push のみ**
+   - `git push origin HEAD:{{HEAD_REF}}`
+   - **force push は絶対禁止**（`--force` / `--force-with-lease` のいずれも使用しない）
+   - push 失敗時はリトライせず `exit 1` する（リモート先行 = WARN 扱いで次サイクル待ち）
+4. **line コメントへの返信は同一 review thread に投稿**:
+   ```bash
+   gh api -X POST \
+     "/repos/{{REPO}}/pulls/{{PR_NUMBER}}/comments/<COMMENT_ID>/replies" \
+     -f body="<返信本文>"
+   ```
+   - **1 line comment = 1 reply の 1:1 返信を厳守**（まとめ返信は不可）
+   - 返信本文には「何を修正したか」または「なぜ対応しないか」を明記する
+5. **@claude mention 付き general コメントへの返信は同一 PR の一般コメントとして投稿**:
+   ```bash
+   gh pr comment {{PR_NUMBER}} --repo {{REPO}} --body "@<元コメント著者>\n> <引用>\n\n<返信本文>"
+   ```
+   - 引用 quoting で元コメントとリンクすることで、誰の指摘への返信かが明示される
+6. **修正不要時は commit / push を行わず、返信コメントの投稿のみで完了**
+   - すべてのコメントが「対応しない理由の返信」だけで足りるなら、push なしで `exit 0` にする
+7. **返信 API がエラーを返したら WARN として後続コメントの処理は継続**
+   - 全件成功なら `exit 0`、push に失敗したら `exit 1`
+8. **すべての処理が成功したら `exit 0`** で終了する
+
+## 禁止事項（厳守）
+
+- `git push --force` / `git push --force-with-lease`（force push 全般）
+- `main` ブランチへの直接 push
+- `requirements.md` / `design.md` / `tasks.md` の書き換え（矛盾は返信本文で提起）
+- レビュースレッドの resolve / unresolve（`resolveReviewThread` GraphQL も含めて禁止、人間の運用判断を尊重）
+- 修正スコープを大幅に超える新規ファイル追加（必要なら返信で提案に留める）
+- `--resume` / `--continue` / `--session-id` 等で過去セッションを引き継ぐこと（fresh context が前提）
+
+## 補足
+
+- 本プロセスは fresh context で起動されているため、前回 iteration の会話履歴は残っていません
+- 修正の影響範囲は line コメントが指摘する範囲に限定し、無関係なリファクタは行わないこと
+- requirements.md / design.md / tasks.md と矛盾するレビュー指摘があった場合は、返信本文で
+  「設計と矛盾するため取り込まない / Issue で再提起を推奨」と明記してから先に進む
