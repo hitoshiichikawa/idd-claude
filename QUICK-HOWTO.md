@@ -4,7 +4,7 @@
 GitHub にある既存のリポジトリに idd-claude のワークフローを追加し、最初の自動開発 Issue が
 動くまでの最短手順をまとめたドキュメントです。
 
-> 包括的な仕様・複数 repo 運用・GitHub Actions 版・カスタマイズは [README.md](../README.md) を参照してください。
+> 包括的な仕様・複数 repo 運用・GitHub Actions 版・カスタマイズは [README.md](./README.md) を参照してください。
 > 本ドキュメントは「ローカル watcher 方式 + 単一リポジトリ」に絞っています（最も推奨の構成）。
 
 ---
@@ -114,7 +114,7 @@ crontab -e
 ```
 
 > **macOS の場合**: cron でも動きますが、再起動後の自動復帰のために launchd を推奨します。
-> 設定方法は [README の launchd 節](../README.md#macos-launchd-に登録) を参照。
+> 設定方法は [README の launchd 節](./README.md#macos-launchd-に登録) を参照。
 
 ### 動作確認
 
@@ -197,7 +197,7 @@ gh issue edit <番号> --repo owner/your-repo --remove-label claude-failed
 
 ## 7. 次に読むもの
 
-- **[README.md](../README.md)** — 包括的な仕様、複数 repo 運用、GitHub Actions 版、サブエージェント詳細
+- **[README.md](./README.md)** — 包括的な仕様、複数 repo 運用、GitHub Actions 版、サブエージェント詳細
 - **`CLAUDE.md`**（配置済み） — 自プロジェクト用に編集する全エージェント憲章
 - **README の `## 使い方`「Issue の書き方（PM を誤解させないコツ）」節** — Issue 作成時に PM エージェントを誤解させないための 3 原則
 - **README の `## Merge Queue Processor (Phase A)` 節** — approved PR の自動 rebase（opt-in 機能）
