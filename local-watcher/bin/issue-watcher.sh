@@ -1815,12 +1815,13 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
   git push -u origin "$BRANCH" --force-with-lease
 
   # ─────────────────────────────────────────────────────────────
-  # DEV_PROMPT 組み立て（モードごとに進め方を切り替え）
+  # モード別ディスパッチ
+  #   - design      : 既存どおり PM → Architect → PjM を 1 セッションで起動
+  #   - impl/resume : Reviewer ゲート (#20) を含む stage 分割パイプラインへ委譲
   # ─────────────────────────────────────────────────────────────
-  case "$MODE" in
-    design)
-      FLOW_LABEL="PM → Architect → PjM（設計 PR 作成ゲート）"
-      STEPS=$(cat <<EOF
+  if [ "$MODE" = "design" ]; then
+    FLOW_LABEL="PM → Architect → PjM（設計 PR 作成ゲート）"
+    STEPS=$(cat <<EOF
 1. product-manager サブエージェントで要件定義を \`${SPEC_DIR_REL}/requirements.md\` に保存
    - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
    - 人間がコメントで回答済みの決定事項は requirements に反映する
@@ -1838,44 +1839,8 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
 次回のポーリングで Developer が自動起動し、実装 PR が別途作成されます。
 EOF
 )
-      ;;
-    impl)
-      FLOW_LABEL="PM → Developer → PjM（実装 PR 作成）"
-      STEPS=$(cat <<EOF
-1. product-manager サブエージェントで要件定義を \`${SPEC_DIR_REL}/requirements.md\` に保存
-   - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
-   - 人間がコメントで回答済みの決定事項は requirements に反映する
-2. developer サブエージェントで実装＋テスト＋コミット
-   - 入力: \`${SPEC_DIR_REL}/requirements.md\`
-   - 規約は CLAUDE.md に従う
-   - 実装ノートを \`${SPEC_DIR_REL}/impl-notes.md\` に保存
-3. project-manager サブエージェントを **implementation モード** で起動
-   - title: \`feat(#${NUMBER}): <1 行サマリ>\`
-   - PR 本文に受入基準・テスト結果・確認事項を記載（関連 PR は「なし」と明記）
-   - Issue ラベル: claude-picked-up → ready-for-review に付け替え
-EOF
-)
-      ;;
-    impl-resume)
-      FLOW_LABEL="Developer → PjM（設計 merge 済みの実装フェーズ）"
-      STEPS=$(cat <<EOF
-1. developer サブエージェントで実装＋テスト＋コミット
-   - 入力: \`${SPEC_DIR_REL}/requirements.md\` / \`${SPEC_DIR_REL}/design.md\` / \`${SPEC_DIR_REL}/tasks.md\`
-   - design.md / tasks.md は設計 PR で人間レビュー済み（main に merge 済み）。**書き換えないこと**
-   - tasks.md の T-NN の順にタスクを消化する
-   - 矛盾や疑問があれば PR 本文「確認事項」に記載（書き換えはしない）
-   - 規約は CLAUDE.md に従う
-   - 実装ノートを \`${SPEC_DIR_REL}/impl-notes.md\` に保存
-2. project-manager サブエージェントを **implementation モード** で起動
-   - title: \`feat(#${NUMBER}): <1 行サマリ>\`
-   - PR 本文に対応する設計 PR 番号を記載（直近の main 上の merge commit から \`git log --oneline --merges\` で探す）
-   - Issue ラベル: claude-picked-up → ready-for-review に付け替え
-EOF
-)
-      ;;
-  esac
 
-  DEV_PROMPT=$(cat <<EOF
+    DEV_PROMPT=$(cat <<EOF
 あなたはこのリポジトリの Claude Code オーケストレーターです。
 以下の Issue を ${FLOW_LABEL} のフローで進めてください。
 
@@ -1902,22 +1867,33 @@ ${STEPS}
 EOF
 )
 
-  echo "--- Development 実行（$MODE）---" >> "$LOG"
-  if claude \
-      --print "$DEV_PROMPT" \
-      --model "$DEV_MODEL" \
-      --permission-mode bypassPermissions \
-      --max-turns "$DEV_MAX_TURNS" \
-      --output-format stream-json \
-      --verbose \
-      >> "$LOG" 2>&1; then
-    echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
+    echo "--- Development 実行（$MODE）---" >> "$LOG"
+    if claude \
+        --print "$DEV_PROMPT" \
+        --model "$DEV_MODEL" \
+        --permission-mode bypassPermissions \
+        --max-turns "$DEV_MAX_TURNS" \
+        --output-format stream-json \
+        --verbose \
+        >> "$LOG" 2>&1; then
+      echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
+    else
+      echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
+      gh issue edit "$NUMBER" --repo "$REPO" \
+        --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
+      gh issue comment "$NUMBER" --repo "$REPO" \
+        --body "⚠️ 自動開発が失敗しました（$(hostname) / モード: $MODE）。\n\nログ: \`$LOG\`\n\n問題を解決してから \`claude-failed\` ラベルを外してください。"
+    fi
   else
-    echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
-    gh issue edit "$NUMBER" --repo "$REPO" \
-      --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
-    gh issue comment "$NUMBER" --repo "$REPO" \
-      --body "⚠️ 自動開発が失敗しました（$(hostname) / モード: $MODE）。\n\nログ: \`$LOG\`\n\n問題を解決してから \`claude-failed\` ラベルを外してください。"
+    # impl / impl-resume → Reviewer ゲートを含む stage 分割パイプラインへ
+    # （要件 2.4: Triage / skip-triage / impl-resume の全 impl 系で Reviewer 起動）
+    # 失敗時の claude-picked-up 削除 + claude-failed 付与 + Issue コメントは
+    # run_impl_pipeline 内 (mark_issue_failed) に一元化されており、ここでは追加処理不要。
+    if run_impl_pipeline; then
+      echo "✅ #$NUMBER: $MODE 完了（Reviewer ゲート通過 / PR 作成済み）" | tee -a "$LOG"
+    else
+      echo "❌ #$NUMBER: $MODE 失敗（claude-failed 付与済み）" | tee -a "$LOG"
+    fi
   fi
 
   # 次のループのため main に戻る
