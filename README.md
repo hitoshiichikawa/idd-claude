@@ -156,6 +156,14 @@ curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/set
 > にユーザースコープで配置します。`sudo` で実行するとファイル所有者が root になり、
 > 通常ユーザーで更新・削除できなくなるため、setup.sh / install.sh とも root 実行を検知したら
 > 警告または停止します。cron 登録もユーザー crontab（`crontab -e`）で行うため sudo 不要です。
+>
+> **`$HOME/.idd-claude` は直接編集しないでください**: setup.sh は再実行時に
+> `git reset --hard origin/<branch>` で upstream 状態に上書きするため、このディレクトリ内の
+> ローカル編集は告知なく失われます。idd-claude の挙動を調整したい場合は、設置先 repo
+> （`repo-template/` のコピー先）か `~/bin/` 配下に配置された watcher スクリプトを編集して
+> ください。なお、clone が中断されるなどして `.git` の無い不完全な状態になった場合、setup.sh
+> は安全のため停止します（自動回復しません）。`rm -rf ~/.idd-claude` で削除してから setup.sh
+> を再実行してください。
 
 ### 冪等性ポリシーと再実行時の挙動 (#36)
 
