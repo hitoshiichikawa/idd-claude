@@ -1105,6 +1105,275 @@ process_pr_iteration() {
 process_pr_iteration || pi_warn "process_pr_iteration が想定外のエラーで終了しました（後続 Issue 処理は継続）"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Reviewer Gate (#20 Phase 1) — impl 系モード stage 分割パイプライン
+#
+# 既存の impl / impl-resume モードは DEV_PROMPT 1 回で PM + Developer + PjM を
+# 直列起動していたが、Reviewer サブエージェントを独立 context で挟むため、以下の
+# stage に分割する:
+#
+#   Stage A  : PM + Developer（ただし impl-resume では PM をスキップ）
+#   Stage B  : Reviewer (round=1)
+#   Stage A' : Developer 再実行（reject 時のみ、最大 1 回）
+#   Stage B' : Reviewer (round=2、reject 時のみ)
+#   Stage C  : PjM（PR 作成）
+#
+# 各 stage は `claude --print` の独立プロセスで起動。stage 間の context 共有は
+# しない（要件 2.2「独立 Claude セッション」）。Reviewer 判定は
+# `docs/specs/<N>-<slug>/review-notes.md` の最終 RESULT 行で受け渡す。
+#
+# 設計参照: docs/specs/20-phase-1-reviewer-subagent-gate/design.md
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Reviewer / Pipeline 専用ロガー（既存 mq_log / pi_log と同形式）
+rv_log() {
+  echo "[$(date '+%F %T')] reviewer: $*"
+}
+rv_dev_log() {
+  echo "[$(date '+%F %T')] developer: $*"
+}
+
+# ─── Prompt Builders（Stage A / A' / B / C 用 4 関数）───
+#
+# 既存 DEV_PROMPT の組み立てパターン（heredoc + 変数展開）を踏襲する。
+# 入力は環境変数（NUMBER / TITLE / URL / BODY / BRANCH / SPEC_DIR_REL /
+# MODE / ARCHITECT_REASON）と関数引数。stdout に prompt 文字列を出力する。
+
+# Stage A: PM + Developer（impl では PM 起動、impl-resume では Developer のみ）
+# 既存 DEV_PROMPT の STEPS から「PjM 起動」を除外したもの。
+build_dev_prompt_a() {
+  local mode="$1"
+  local flow_label
+  local steps
+
+  case "$mode" in
+    impl)
+      flow_label="PM → Developer（Reviewer ゲート前）"
+      steps=$(cat <<EOF
+1. product-manager サブエージェントで要件定義を \`${SPEC_DIR_REL}/requirements.md\` に保存
+   - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
+   - 人間がコメントで回答済みの決定事項は requirements に反映する
+2. developer サブエージェントで実装＋テスト＋コミット
+   - 入力: \`${SPEC_DIR_REL}/requirements.md\`
+   - 規約は CLAUDE.md に従う
+   - 実装ノートを \`${SPEC_DIR_REL}/impl-notes.md\` に保存
+
+**重要**: 本ステージでは PR 作成（project-manager サブエージェント）を行わないこと。
+Developer 完了後、独立 context の Reviewer サブエージェントが起動して AC / test / boundary を
+独立レビューします。Reviewer の approve 後にオーケストレーターが PjM を起動して PR を作成します。
+EOF
+)
+      ;;
+    impl-resume)
+      flow_label="Developer（Reviewer ゲート前 / 設計 PR merge 済み）"
+      steps=$(cat <<EOF
+1. developer サブエージェントで実装＋テスト＋コミット
+   - 入力: \`${SPEC_DIR_REL}/requirements.md\` / \`${SPEC_DIR_REL}/design.md\` / \`${SPEC_DIR_REL}/tasks.md\`
+   - design.md / tasks.md は設計 PR で人間レビュー済み（main に merge 済み）。**書き換えないこと**
+   - tasks.md の numeric ID 順にタスクを消化する
+   - 矛盾や疑問があれば PR 本文「確認事項」に記載（書き換えはしない）
+   - 規約は CLAUDE.md に従う
+   - 実装ノートを \`${SPEC_DIR_REL}/impl-notes.md\` に保存
+
+**重要**: 本ステージでは PR 作成（project-manager サブエージェント）を行わないこと。
+Developer 完了後、独立 context の Reviewer サブエージェントが起動して AC / test / boundary を
+独立レビューします。Reviewer の approve 後にオーケストレーターが PjM を起動して PR を作成します。
+EOF
+)
+      ;;
+  esac
+
+  cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+以下の Issue を ${flow_label} のフローで進めてください。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+- Body  : |
+${BODY}
+
+## 作業ブランチ
+${BRANCH}（main から派生・push 済み・現在チェックアウト中）
+
+## 作業ディレクトリ
+${SPEC_DIR_REL}/
+
+## 進め方
+${steps}
+
+## 制約
+- main に直接 push しないこと
+- 既存のテストを壊さないこと
+- 不明点は推測せず、impl-notes.md の「確認事項」セクションに列挙すること
+- **PR は作成しないこと**（次の Reviewer ステージで独立レビューを受けます）
+EOF
+}
+
+# Stage A' (Developer 再実行用): Reviewer reject の Findings を inline で渡し、
+# Developer に是正を依頼する。PM は再起動しない（要件は不変）。
+build_dev_prompt_redo() {
+  local review_notes_path="$1"
+  local review_notes_content
+  if [ -f "$review_notes_path" ]; then
+    review_notes_content=$(cat "$review_notes_path")
+  else
+    review_notes_content="(review-notes.md が見つかりません)"
+  fi
+
+  cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+直前の Reviewer サブエージェントが reject を出したため、Developer の再実装を依頼します。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+
+## 作業ブランチ
+${BRANCH}（追加 commit を積んでください。reset / branch 切り替えは禁止）
+
+## 作業ディレクトリ
+${SPEC_DIR_REL}/
+
+## Reviewer の reject 理由（review-notes.md より）
+
+\`\`\`markdown
+${review_notes_content}
+\`\`\`
+
+## 進め方
+
+1. developer サブエージェントを起動し、上記 Findings の **Required Action** を順に実施する
+   - 要件（requirements.md）は変更しない（PM への差し戻し相当の事象があれば impl-notes.md の
+     「確認事項」に記載するに留める）
+   - 設計（design.md / tasks.md）が存在する場合も書き換えない
+   - 是正に必要なテストの追加・修正と、対応する実装変更のみを commit する
+2. 完了後 \`${SPEC_DIR_REL}/impl-notes.md\` に是正内容を 1 セクション追記
+
+## 制約
+- main に直接 push しないこと
+- product-manager / project-manager サブエージェントは起動しないこと
+  （PM は不要、PjM は次の Reviewer round=2 が approve した後にオーケストレーターが起動）
+- **PR は作成しないこと**（再 Reviewer の判定を受けます）
+- 既存テストを壊さないこと
+EOF
+}
+
+# Stage B (Reviewer): reviewer サブエージェントを独立 context で起動し、
+# review-notes.md を書かせる。git diff main..HEAD と round 情報を inline で渡す。
+build_reviewer_prompt() {
+  local round="$1"
+  local prev_result="$2"   # round=2 のみ意味あり、round=1 は "(none)"
+  local diff_content
+  # diff が空でも壊れないよう || true で fallback
+  diff_content=$(git diff main..HEAD 2>/dev/null || true)
+  if [ -z "$diff_content" ]; then
+    diff_content="(差分が取得できませんでした。Reviewer が Bash で git diff main..HEAD を再取得してください)"
+  fi
+  local head_sha
+  head_sha=$(git rev-parse HEAD 2>/dev/null || echo "(unknown)")
+
+  cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+Developer の実装が一段落したため、reviewer サブエージェントによる **独立レビュー**
+（round=${round} / 最大 2 round）を実施してください。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+- REPO  : ${REPO}
+
+## 作業ブランチ / spec ディレクトリ
+- BRANCH       : ${BRANCH}
+- HEAD commit  : ${head_sha}
+- SPEC_DIR_REL : ${SPEC_DIR_REL}
+- ROUND        : ${round}
+- PREV_RESULT  : ${prev_result}
+
+## 必読ファイル
+
+reviewer サブエージェントは着手前に以下を必ず Read してください:
+
+- \`CLAUDE.md\`（特に「テスト規約」と「禁止事項」）
+- \`${SPEC_DIR_REL}/requirements.md\`（EARS 形式の AC、numeric ID）
+- \`${SPEC_DIR_REL}/tasks.md\`（\`_Requirements:_\` / \`_Boundary:_\` アノテーション）
+- \`${SPEC_DIR_REL}/impl-notes.md\`（Developer のテスト結果含む補足）
+- \`${SPEC_DIR_REL}/design.md\`（存在する場合）
+
+## 最新差分（main..HEAD）
+
+\`\`\`diff
+${diff_content}
+\`\`\`
+
+## 進め方
+
+reviewer サブエージェントを起動し、以下を判定して \`${SPEC_DIR_REL}/review-notes.md\` に
+書き出してください（reviewer.md の出力契約に従う）。
+
+- 判定カテゴリ: AC 未カバー / missing test / boundary 逸脱 の 3 つに限定
+- 最終行は必ず \`RESULT: approve\` または \`RESULT: reject\` で終わること
+
+## 制約
+- requirements.md / design.md / tasks.md / 既存実装コード / テストコードを書き換えないこと
+- \`git add\` / \`git commit\` / \`git push\` / \`gh\` を実行しないこと（review-notes.md は次の
+  Developer または PjM が commit します）
+- スタイル / 命名 / lint / フォーマットの観点での reject はしないこと
+EOF
+}
+
+# Stage C (PjM): 既存 DEV_PROMPT の PjM 起動部分のみを抜き出し。
+# Reviewer の approve を受けた後、project-manager サブエージェントが PR を作成する。
+# PR 本文の構造は本機能導入前と等価（要件 6.5）。
+build_dev_prompt_c() {
+  local mode="$1"
+  local design_pr_note=""
+  if [ "$mode" = "impl-resume" ]; then
+    design_pr_note=$'   - PR 本文に対応する設計 PR 番号を記載（直近の main 上の merge commit から `git log --oneline --merges` で探す）'
+  else
+    design_pr_note='   - 設計 PR は走っていないため「関連 PR: なし」と明記すること'
+  fi
+
+  cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+Developer の実装と Reviewer の独立レビュー（approve）が完了しました。
+project-manager サブエージェントを起動し、最終 PR を作成してください。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+
+## 作業ブランチ
+${BRANCH}（実装 commit が積まれた状態。push 済み）
+
+## 作業ディレクトリ
+${SPEC_DIR_REL}/
+
+## 進め方
+
+1. \`${SPEC_DIR_REL}/review-notes.md\` を **本ブランチに git add / git commit** してから push する
+   - commit メッセージ: \`docs(review): add reviewer notes for #${NUMBER}\`
+   - 既に commit 済みなら skip
+2. project-manager サブエージェントを **implementation モード** で起動
+   - title: \`feat(#${NUMBER}): <1 行サマリ>\`
+   - PR 本文は project-manager.md の「実装 PR 本文テンプレート」に従う
+${design_pr_note}
+   - PR 本文の「確認事項」セクションに、必要なら review-notes.md の参照リンクを 1 行記載
+   - Issue ラベル: claude-picked-up → ready-for-review に付け替え
+   - Issue にコメントで実装 PR リンクを投稿
+
+## 制約
+- main に直接 push しないこと
+- Reviewer の approve 判定を覆さないこと（PR 本文に判定結果を逐語転載しない。review-notes.md の
+  参照に留める）
+- 仕様変更や追加実装はしないこと（PjM はコードを変更しない）
+EOF
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 未処理 Issue を取得
 #   auto-dev ラベルがあり、かつ以下のラベルが付いていないもの:
 #     needs-decisions / awaiting-design-review / claude-picked-up /
