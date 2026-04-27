@@ -74,6 +74,14 @@ MERGE_QUEUE_BASE_BRANCH="${MERGE_QUEUE_BASE_BRANCH:-main}"
 # 複数許可したい場合はパイプ区切り正規表現で上書き（例: '^(claude|bot)/'）。
 MERGE_QUEUE_HEAD_PATTERN="${MERGE_QUEUE_HEAD_PATTERN:-^claude/}"
 
+# ─── Merge Queue Re-check Processor 設定 (#27) ───
+# `needs-rebase` 付き approved PR を別レーンで再評価し、`mergeable=MERGEABLE` に
+# 戻った PR のラベルを自動除去する。Phase A 本体（MERGE_QUEUE_ENABLED）とは
+# 独立に opt-in 制御するため、デフォルトは false。
+MERGE_QUEUE_RECHECK_ENABLED="${MERGE_QUEUE_RECHECK_ENABLED:-false}"
+# 1 サイクルで再評価する PR 数の上限（残りは次回サイクルに持ち越し）。
+MERGE_QUEUE_RECHECK_MAX_PRS="${MERGE_QUEUE_RECHECK_MAX_PRS:-20}"
+
 # ─── PR Iteration Processor 設定 (#26) ───
 # `needs-iteration` ラベル付き PR をレビューコメントに基づいて自動で iterate する。
 # 既存運用への影響を避けるため、初回導入は opt-in（デフォルト false）。
@@ -446,6 +454,144 @@ process_merge_queue() {
   # AC 3.6 / NFR 2.2: 念のため最終確認で main checkout に戻す
   git checkout "$MERGE_QUEUE_BASE_BRANCH" >/dev/null 2>&1 || true
 }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Phase A: Merge Queue Re-check Processor (#27)
+#   `needs-rebase` 付き approved PR を別レーンで再評価し、`mergeable=MERGEABLE` に
+#   戻った PR のラベルを自動除去する。Phase A 本体（process_merge_queue）とは
+#   独立に opt-in 制御するため、MERGE_QUEUE_RECHECK_ENABLED=true で起動。
+#   ラベル除去のみを副作用とし、再 rebase / コメント投稿は Phase A 本体に委譲。
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# merge-queue-recheck 専用ロガー（Phase A 本体の `merge-queue:` と区別する prefix）。
+# AC 5.5 / 5.6 / NFR 3.2: `merge-queue-recheck:` prefix と既存 timestamp 書式に統一。
+mqr_log() {
+  echo "[$(date '+%F %T')] merge-queue-recheck: $*"
+}
+mqr_warn() {
+  echo "[$(date '+%F %T')] merge-queue-recheck: WARN: $*" >&2
+}
+mqr_error() {
+  echo "[$(date '+%F %T')] merge-queue-recheck: ERROR: $*" >&2
+}
+
+process_merge_queue_recheck() {
+  # AC 1.2 / 1.3 / 3.1 / 3.3: opt-in gate（MERGE_QUEUE_ENABLED とは独立）
+  if [ "$MERGE_QUEUE_RECHECK_ENABLED" != "true" ]; then
+    return 0
+  fi
+
+  mqr_log "サイクル開始 (max=${MERGE_QUEUE_RECHECK_MAX_PRS}, timeout=${MERGE_QUEUE_GIT_TIMEOUT}s)"
+
+  # AC 1.4 / 1.5 / 1.6: approved かつ needs-rebase ラベル付き、claude-failed 無し、非 draft。
+  # AC 4.3 / 4.4: server-side フィルタで API call を最小化、Phase A と同一 timeout を適用。
+  local repo_owner="${REPO%%/*}"
+  local prs_json
+  if ! prs_json=$(timeout "$MERGE_QUEUE_GIT_TIMEOUT" gh pr list \
+      --repo "$REPO" \
+      --state open \
+      --search "review:approved label:\"$LABEL_NEEDS_REBASE\" -label:\"$LABEL_FAILED\" -draft:true" \
+      --json number,headRefName,baseRefName,mergeable,labels,url,isDraft,reviewDecision,headRepositoryOwner \
+      --limit 100 2>/dev/null); then
+    # AC 4.5: タイムアウト / エラー時は WARN を出して以降スキップ（後続処理は継続）
+    mqr_warn "対象 PR 一覧の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
+    return 0
+  fi
+
+  # AC 1.5 / 1.6 / 1.7 / 1.8: クライアント側フィルタ（server filter の保険）
+  #   - isDraft / reviewDecision の再確認
+  #   - head ref prefix (MERGE_QUEUE_HEAD_PATTERN): 人間の手書き PR を巻き込まない
+  #   - head repo owner == base repo owner: fork PR を除外
+  prs_json=$(echo "$prs_json" | jq \
+    --arg pattern "$MERGE_QUEUE_HEAD_PATTERN" \
+    --arg owner "$repo_owner" \
+    '[.[]
+      | select(.isDraft == false)
+      | select(.reviewDecision == "APPROVED")
+      | select(.headRefName | test($pattern))
+      | select((.headRepositoryOwner.login // "") == $owner)
+    ]')
+
+  local total
+  total=$(echo "$prs_json" | jq 'length')
+  local target_count="$total"
+  local skipped_overflow=0
+  if [ "$total" -gt "$MERGE_QUEUE_RECHECK_MAX_PRS" ]; then
+    target_count="$MERGE_QUEUE_RECHECK_MAX_PRS"
+    skipped_overflow=$((total - MERGE_QUEUE_RECHECK_MAX_PRS))
+    # AC 4.2 / 5.1: 上限超過分は次回に持ち越し
+    mqr_log "対象候補 ${total} 件中、上限 ${MERGE_QUEUE_RECHECK_MAX_PRS} 件のみ処理（${skipped_overflow} 件は次回持ち越し）"
+  else
+    # AC 5.1: サイクル開始時に件数をログ
+    mqr_log "対象候補 ${total} 件、処理対象 ${target_count} 件"
+  fi
+
+  if [ "$target_count" -eq 0 ]; then
+    # AC 5.4: サマリ行（ゼロ件でも明示）
+    mqr_log "サマリ: label-removed=0, conflicting=0, unknown-skip=0, fail=0, overflow=${skipped_overflow}"
+    return 0
+  fi
+
+  local removed=0
+  local conflicting=0
+  local unknown_skip=0
+  local failed=0
+
+  local pr_iter
+  pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]")
+
+  if [ -z "$pr_iter" ]; then
+    mqr_log "サマリ: label-removed=0, conflicting=0, unknown-skip=0, fail=0, overflow=${skipped_overflow}"
+    return 0
+  fi
+
+  while IFS= read -r pr_json; do
+    local pr_number head_ref base_ref mergeable url
+    pr_number=$(echo "$pr_json" | jq -r '.number')
+    head_ref=$(echo "$pr_json"  | jq -r '.headRefName')
+    base_ref=$(echo "$pr_json"  | jq -r '.baseRefName')
+    mergeable=$(echo "$pr_json" | jq -r '.mergeable')
+    url=$(echo "$pr_json" | jq -r '.url')
+
+    # AC 5.2: 各 PR の mergeable 判定をログ（PR 番号 / mergeable / アクション）
+    case "$mergeable" in
+      MERGEABLE)
+        # AC 2.1 / NFR 2.1: ラベル除去（唯一の副作用）。Phase A と同一 timeout を適用。
+        if timeout "$MERGE_QUEUE_GIT_TIMEOUT" \
+            gh pr edit "$pr_number" --repo "$REPO" --remove-label "$LABEL_NEEDS_REBASE" >/dev/null 2>&1; then
+          # AC 2.2 / 5.3: 成功 INFO ログ（要件文言を含める）
+          mqr_log "PR #${pr_number}: mergeable=MERGEABLE -> label removed (conflict resolved, re-evaluating next cycle) (${url})"
+          removed=$((removed + 1))
+        else
+          # AC 2.6: ラベル除去 API がエラーを返した場合は WARN、後続 PR は継続
+          mqr_warn "PR #${pr_number}: needs-rebase ラベル除去に失敗（${url}）"
+          failed=$((failed + 1))
+        fi
+        ;;
+      CONFLICTING)
+        # AC 2.3 / NFR 2.2: 状態変更なし（再ラベル / コメント追記なし）
+        mqr_log "PR #${pr_number}: mergeable=CONFLICTING -> kept (head=${head_ref}, base=${base_ref})"
+        conflicting=$((conflicting + 1))
+        ;;
+      UNKNOWN|null|"")
+        # AC 2.4 / NFR 2.2: UNKNOWN / null は次回サイクルに委ねる
+        mqr_log "PR #${pr_number}: mergeable=${mergeable:-null} -> skip (next cycle)"
+        unknown_skip=$((unknown_skip + 1))
+        ;;
+      *)
+        # NFR 2.2: 未知の値もラベル除去を行わずスキップ
+        mqr_log "PR #${pr_number}: mergeable=${mergeable} (未知) -> skip"
+        unknown_skip=$((unknown_skip + 1))
+        ;;
+    esac
+  done <<< "$pr_iter"
+
+  # AC 5.4: サマリ行
+  mqr_log "サマリ: label-removed=${removed}, conflicting=${conflicting}, unknown-skip=${unknown_skip}, fail=${failed}, overflow=${skipped_overflow}"
+}
+
+# AC 1.1: Phase A 本体ループの直前に Re-check Processor を 1 回起動
+process_merge_queue_recheck || mqr_warn "process_merge_queue_recheck が想定外のエラーで終了しました（後続処理は継続）"
 
 # AC 1.1: ピックアップ済み Issue の処理ループに入る前に 1 回だけ起動
 process_merge_queue || mq_warn "process_merge_queue が想定外のエラーで終了しました（後続 Issue 処理は継続）"
