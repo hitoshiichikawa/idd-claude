@@ -12,7 +12,7 @@
 #   # 既存ラベルの color / description を上書き更新
 #   bash .github/scripts/idd-claude-labels.sh --force
 #
-# 依存: gh CLI（`gh auth login` 済み）
+# 依存: gh CLI（`gh auth login` 済み）, jq
 # =============================================================================
 
 set -euo pipefail
@@ -43,6 +43,11 @@ done
 
 command -v gh >/dev/null 2>&1 || {
   echo "Error: 'gh' CLI が必要です。https://cli.github.com" >&2
+  exit 1
+}
+
+command -v jq >/dev/null 2>&1 || {
+  echo "Error: 'jq' が必要です。" >&2
   exit 1
 }
 
@@ -77,30 +82,53 @@ EXISTS=0
 UPDATED=0
 FAILED=0
 
+# 既存ラベルを 1 回の API コールで全件取得しキャッシュする。
+# `gh label list` のデフォルト件数上限（30）はページネーション境界の取りこぼし
+# を起こすため、`--limit 1000` で十分なマージンを取る（NFR 2.3）。
+# 取得自体に失敗した場合（API 不達 / 認証失敗 / 権限不足等）は、ラベル状態を
+# 確定できないので即座にエラー終了する（Req 2.4）。
+EXISTING_LABELS_JSON=""
+if ! EXISTING_LABELS_JSON=$(gh label list "${REPO_ARG[@]}" --limit 1000 --json name 2>&1); then
+  echo "Error: 既存ラベル一覧の取得に失敗しました: $EXISTING_LABELS_JSON" >&2
+  exit 1
+fi
+
+# 取得結果を name → 1 の連想配列に展開する。
+declare -A EXISTING_LABELS=()
+while IFS= read -r existing_name; do
+  [ -n "$existing_name" ] && EXISTING_LABELS["$existing_name"]=1
+done < <(printf '%s' "$EXISTING_LABELS_JSON" | jq -r '.[].name')
+
 for spec in "${LABELS[@]}"; do
   IFS="|" read -r NAME COLOR DESC <<< "$spec"
   printf "  %-25s ... " "$NAME"
-  if [ -n "$FORCE" ]; then
-    if gh label create "$NAME" --color "$COLOR" --description "$DESC" --force "${REPO_ARG[@]}" >/dev/null 2>&1; then
-      echo "created/updated"
-      UPDATED=$((UPDATED+1))
-    else
-      echo "FAILED"
-      FAILED=$((FAILED+1))
-    fi
-  else
-    if gh label create "$NAME" --color "$COLOR" --description "$DESC" "${REPO_ARG[@]}" 2>/dev/null; then
-      echo "created"
-      CREATED=$((CREATED+1))
-    else
-      # 既存ラベルかどうか確認
-      if gh label list "${REPO_ARG[@]}" --limit 100 --json name --jq '.[].name' 2>/dev/null | grep -qx "$NAME"; then
-        echo "already exists (skipped; use --force to update)"
-        EXISTS=$((EXISTS+1))
+  if [ -n "${EXISTING_LABELS[$NAME]:-}" ]; then
+    # 既存ラベル
+    if [ -n "$FORCE" ]; then
+      if gh label create "$NAME" --color "$COLOR" --description "$DESC" --force "${REPO_ARG[@]}" >/dev/null 2>&1; then
+        echo "created/updated"
+        UPDATED=$((UPDATED+1))
       else
         echo "FAILED"
         FAILED=$((FAILED+1))
       fi
+    else
+      echo "already exists (skipped; use --force to update)"
+      EXISTS=$((EXISTS+1))
+    fi
+  else
+    # 未存在ラベル: 新規作成を試みる
+    if gh label create "$NAME" --color "$COLOR" --description "$DESC" "${REPO_ARG[@]}" >/dev/null 2>&1; then
+      if [ -n "$FORCE" ]; then
+        echo "created/updated"
+        UPDATED=$((UPDATED+1))
+      else
+        echo "created"
+        CREATED=$((CREATED+1))
+      fi
+    else
+      echo "FAILED"
+      FAILED=$((FAILED+1))
     fi
   fi
 done
