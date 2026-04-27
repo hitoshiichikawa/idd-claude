@@ -157,6 +157,96 @@ curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/set
 > 通常ユーザーで更新・削除できなくなるため、setup.sh / install.sh とも root 実行を検知したら
 > 警告または停止します。cron 登録もユーザー crontab（`crontab -e`）で行うため sudo 不要です。
 
+### 冪等性ポリシーと再実行時の挙動 (#36)
+
+`install.sh` は何度再実行しても安全に冪等動作するよう設計されています。再実行時の各ファイル
+カテゴリの扱いは以下のとおりです。
+
+#### `CLAUDE.md.bak` の once-only 保護
+
+- **初回 install** で対象 repo に既存 `CLAUDE.md` があれば `CLAUDE.md.bak` に退避し、
+  `repo-template/CLAUDE.md` を新規配置します
+- **2 回目以降** は `CLAUDE.md.bak` を**上書きしません**（既存 `.bak` を検知して `SKIP` ログを
+  出します）。これによりオリジナルの自分の `CLAUDE.md` を後から参照・復元できます
+
+> **過去バージョンからの Migration**: #36 以前の `install.sh` は再実行のたびに `.bak` を
+> テンプレ由来内容で書き換えていました。当該バージョンで複数回 install を回した既存利用者は、
+> 初回のオリジナル `CLAUDE.md` が `.bak` から失われている可能性があります（`git log` から
+> 復元してください）。本改修以降は発生しません。
+
+#### `.claude/agents/` / `.claude/rules/` のハイブリッド safe-overwrite
+
+`install.sh` 再実行時、各 `*.md` テンプレートは以下の 5 パスで処理されます:
+
+| dest の状態 | 既定挙動（`--force` なし） | `--force` 指定時 |
+|---|---|---|
+| ファイル不在 | `NEW`（無条件配置、template 進化に追従） | `NEW`（同上） |
+| 内容が template と完全一致 | `SKIP`（`.bak` を作らない） | `SKIP`（同上） |
+| 差分あり、`<file>.bak` 不在 | `BACKUP` `<file>.bak` を once-only 退避してから `OVERWRITE` | 同左（`--force` でも once-only） |
+| 差分あり、`<file>.bak` 既存 | `SKIP`（`use --force to overwrite` 警告） | `OVERWRITE`（`.bak` は再退避せず温存） |
+
+**設計意図**: 初回退避された `.bak` を「カスタム編集の最も貴重な世代」として扱うため、`--force`
+指定時でも既存 `.bak` は保護されます。`.bak` を更新したい場合は、自分で `<file>.bak` を削除して
+から再実行してください。
+
+> **CLAUDE.md は別経路**: `CLAUDE.md` は `backup_claude_md_once` で初回バックアップ（once-only）
+> を作ったあと、本体は **常に template 由来内容で配置**されます（既存と同一なら `SKIP`）。
+> `.claude/agents/` / `.claude/rules/` のハイブリッド safe-overwrite とは違い、`CLAUDE.md` 本体
+> 自体に対する `--force` のような上書き抑止はありません（カスタム編集は `.bak` のみで保護）。
+> これは従来の `install.sh` 挙動（無条件で template を配置）との後方互換性を維持するためです。
+
+#### `--dry-run` モード
+
+`--dry-run` を付けると、ファイルシステムを変更せずに**予定操作のみを列挙**します。出力例:
+
+```text
+$ ./install.sh --repo /path/to/your-project --dry-run
+[DRY-RUN] BACKUP    /path/to/your-project/CLAUDE.md → CLAUDE.md.bak
+[DRY-RUN] OVERWRITE /path/to/your-project/CLAUDE.md
+[DRY-RUN] NEW       /path/to/your-project/.claude/agents/reviewer.md
+[DRY-RUN] SKIP      /path/to/your-project/.claude/agents/developer.md (identical to template)
+[DRY-RUN] BACKUP    /path/to/your-project/.claude/rules/ears-format.md → ears-format.md.bak (custom edits detected)
+[DRY-RUN] OVERWRITE /path/to/your-project/.claude/rules/ears-format.md
+```
+
+| Prefix | 意味 |
+|---|---|
+| `NEW` | 配置先にファイルが存在しない。新規作成 |
+| `OVERWRITE` | 既存ファイルを template 内容で上書き（差分ありまたは `--force`） |
+| `SKIP` | 既存ファイルが template と同一、もしくは `.bak` 既存で上書き抑止 |
+| `BACKUP` | `<file>.bak` を作成（`OVERWRITE` 直前にのみ発生） |
+
+**保証**: `--dry-run` で `NEW` / `OVERWRITE` と分類されたファイルは、`--dry-run` を外して同じ
+引数で再実行すれば**必ず実際に配置されます**（ファイル状態が変化しない限り）。これにより、
+影響範囲を事前確認してから実適用を判断できます。
+
+`--dry-run` は `setup.sh` 経由（`curl | bash`）でも透過されます:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/setup.sh \
+  | bash -s -- --all --dry-run
+```
+
+#### `--force` の使いどころ
+
+既存利用者が再 install するときの推奨フローは以下のとおりです:
+
+1. まず `./install.sh --repo /path --dry-run` で影響範囲を確認
+2. 必要なら `<file>.bak` をコミットして自分のカスタム編集を保護
+3. `./install.sh --repo /path` を実行（既定挙動でカスタム編集は `.bak` once-only 退避される）
+4. **どうしても最新 template を強制適用したい**ファイルだけ `--force` で再実行（`.bak` 既存は
+   尊重される）
+
+通常の運用では `--force` は不要です。
+
+#### 既存利用者向け Migration Note
+
+本改修で必要な追加手順は**ありません**。既存の `install.sh --repo` / `--local` / `--all` 起動は
+そのまま動作し、再実行時に自動的に新しい冪等性ガードが適用されます。env var 名・cron / launchd
+登録文字列・ラベル名・配置先パスは一切変わりません。
+
+---
+
 手動セットアップ（Git clone 経由）の手順は以下のとおりです。
 
 ### Step 1. 対象リポジトリへの配置

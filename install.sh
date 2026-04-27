@@ -12,6 +12,13 @@
 #   ./install.sh --local                     # ローカル watcher のみインストール
 #   ./install.sh --all                       # カレントディレクトリ + ローカル watcher
 #   ./install.sh --all --repo /path/to/project
+#
+# オプション（既存フラグと組み合わせ可）:
+#   --dry-run        実コピーせず、予定操作を [DRY-RUN] プレフィクスで列挙
+#                    （ファイルシステムを変更しない。出力分類は実実行時と一致）
+#   --force          .claude/agents/ / .claude/rules/ / CLAUDE.md について、
+#                    内容差分があれば再 .bak 退避して強制上書き
+#                    （既存 *.bak は once-only 規律で保護されたまま）
 # =============================================================================
 
 set -euo pipefail
@@ -37,6 +44,10 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_TEMPLATE_DIR="$SCRIPT_DIR/repo-template"
 LOCAL_WATCHER_DIR="$SCRIPT_DIR/local-watcher"
+
+# 冪等性 / dry-run 制御フラグ（後段の引数パースで上書き可能）
+DRY_RUN=false
+FORCE=false
 
 REPO_PATH=""
 INSTALL_LOCAL=false
@@ -65,8 +76,16 @@ while [[ $# -gt 0 ]]; do
       INSTALL_REPO=true
       shift
       ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --force)
+      FORCE=true
+      shift
+      ;;
     -h|--help)
-      sed -n '3,14p' "$0"
+      sed -n '3,21p' "$0"
       exit 0
       ;;
     *)
@@ -75,6 +94,305 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# ─────────────────────────────────────────────────────────────
+# ヘルパー関数群
+#   引数パースの後に定義し、後段の setup_repo / setup_local_watcher 相当ブロックから
+#   呼び出される。すべて DRY_RUN / FORCE をグローバル変数として参照する。
+# ─────────────────────────────────────────────────────────────
+
+# log_action <NEW|OVERWRITE|SKIP|BACKUP> <path> [<note>]
+#   配置・上書き・スキップ・バックアップを統一フォーマットで stdout に記録する。
+#   DRY_RUN=true の場合は "[DRY-RUN]" prefix、それ以外は "[INSTALL]" prefix を使う。
+log_action() {
+  local action="$1"
+  local path="$2"
+  local note="${3:-}"
+  local prefix
+  if [ "$DRY_RUN" = "true" ]; then
+    prefix="[DRY-RUN]"
+  else
+    prefix="[INSTALL]"
+  fi
+  if [ -n "$note" ]; then
+    printf '%s %-9s %s %s\n' "$prefix" "$action" "$path" "$note"
+  else
+    printf '%s %-9s %s\n' "$prefix" "$action" "$path"
+  fi
+}
+
+# files_equal <path_a> <path_b>
+#   2 ファイルの内容同一性判定。
+#   return: 0=同一 / 1=差分あり / 2=どちらか不在 or 比較不能
+files_equal() {
+  local a="$1"
+  local b="$2"
+  if [ ! -f "$a" ] || [ ! -f "$b" ]; then
+    return 2
+  fi
+  if cmp -s "$a" "$b"; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# classify_action <src> <dest>
+#   stdout に "NEW" / "SKIP" / "OVERWRITE" を返す。
+#   - dest 不在 → NEW
+#   - dest 存在 + 内容同一 → SKIP
+#   - dest 存在 + 内容差分 → OVERWRITE
+classify_action() {
+  local src="$1"
+  local dest="$2"
+  if [ ! -e "$dest" ]; then
+    echo "NEW"
+    return 0
+  fi
+  if files_equal "$src" "$dest"; then
+    echo "SKIP"
+  else
+    echo "OVERWRITE"
+  fi
+}
+
+# ensure_dir <path>
+#   mkdir -p の dry-run 対応版。dry-run 時はディレクトリも作らない。
+ensure_dir() {
+  local path="$1"
+  if [ "$DRY_RUN" = "true" ]; then
+    return 0
+  fi
+  mkdir -p "$path"
+}
+
+# copy_template_file <src> <dest> [--executable]
+#   単一ファイルの NEW / SKIP / OVERWRITE 配置（meta ファイル用、`.bak` は作らない）。
+#   既存があっても内容差分があれば無条件で OVERWRITE する。
+#   --executable 指定時は配置後に `chmod +x` を実行する。
+copy_template_file() {
+  local src="$1"
+  local dest="$2"
+  local executable=false
+  if [ "${3:-}" = "--executable" ]; then
+    executable=true
+  fi
+
+  if [ ! -f "$src" ]; then
+    echo "Error: source file not found: $src" >&2
+    return 1
+  fi
+
+  local action
+  action="$(classify_action "$src" "$dest")"
+
+  local note=""
+  if [ "$executable" = "true" ]; then
+    note="(chmod +x)"
+  fi
+
+  case "$action" in
+    NEW)
+      log_action "NEW" "$dest" "$note"
+      if [ "$DRY_RUN" = "false" ]; then
+        ensure_dir "$(dirname "$dest")"
+        cp "$src" "$dest"
+        if [ "$executable" = "true" ]; then
+          chmod +x "$dest"
+        fi
+      fi
+      ;;
+    SKIP)
+      log_action "SKIP" "$dest" "(identical to template)"
+      ;;
+    OVERWRITE)
+      log_action "OVERWRITE" "$dest" "$note"
+      if [ "$DRY_RUN" = "false" ]; then
+        cp "$src" "$dest"
+        if [ "$executable" = "true" ]; then
+          chmod +x "$dest"
+        fi
+      fi
+      ;;
+  esac
+}
+
+# copy_glob_to_homebin <src_dir> <pattern> <dest_dir> [--executable]
+#   `<src_dir>/<pattern>` にマッチする全ファイルを <dest_dir> に配置する。
+#   nullglob を一時的に有効化し、マッチ 0 件は SKIP ログを出して exit 0 で継続する。
+copy_glob_to_homebin() {
+  local src_dir="$1"
+  local pattern="$2"
+  local dest_dir="$3"
+  local executable_flag=""
+  if [ "${4:-}" = "--executable" ]; then
+    executable_flag="--executable"
+  fi
+
+  ensure_dir "$dest_dir"
+
+  # nullglob を一時的に有効化（マッチ 0 件で空配列扱いにする）
+  local prev_nullglob
+  if shopt -q nullglob; then
+    prev_nullglob=on
+  else
+    prev_nullglob=off
+  fi
+  shopt -s nullglob
+
+  # `$pattern` は意図的に glob 展開させたいためクォートしない
+  # shellcheck disable=SC2206
+  local files=( "$src_dir"/$pattern )
+  local count=${#files[@]}
+
+  if [ "$count" -eq 0 ]; then
+    log_action "SKIP" "$src_dir/$pattern" "(no files matched)"
+  else
+    local src
+    for src in "${files[@]}"; do
+      local dest
+      dest="$dest_dir/$(basename "$src")"
+      if [ -n "$executable_flag" ]; then
+        copy_template_file "$src" "$dest" --executable
+      else
+        copy_template_file "$src" "$dest"
+      fi
+    done
+  fi
+
+  # nullglob を呼び出し前の状態に戻す
+  if [ "$prev_nullglob" = "off" ]; then
+    shopt -u nullglob
+  fi
+}
+
+# backup_claude_md_once <repo_path>
+#   CLAUDE.md.bak を初回 1 回のみ作成し、再実行で内容を変えない once-only 規律を実装。
+#   - CLAUDE.md 不在 → noop
+#   - CLAUDE.md.bak 不在 → BACKUP（初回バックアップ）
+#   - CLAUDE.md.bak 既存 → SKIP（既存 .bak を温存）
+backup_claude_md_once() {
+  local repo_path="$1"
+  local src="$repo_path/CLAUDE.md"
+  local bak="$repo_path/CLAUDE.md.bak"
+
+  if [ ! -f "$src" ]; then
+    return 0
+  fi
+
+  if [ ! -f "$bak" ]; then
+    log_action "BACKUP" "$src" "→ CLAUDE.md.bak"
+    if [ "$DRY_RUN" = "false" ]; then
+      cp "$src" "$bak"
+    fi
+  else
+    log_action "SKIP" "$bak" "(existing .bak preserved)"
+  fi
+}
+
+# copy_with_hybrid_overwrite <src> <dest>
+#   1 ファイル単位のハイブリッド safe-overwrite 処理（agents / rules / CLAUDE.md 共用）。
+#   - dest 不在 → NEW（無条件配置、template 進化に追従）
+#   - dest 存在 + 内容同一 → SKIP `(identical to template)`
+#   - dest 存在 + 内容差分:
+#     - <dest>.bak 不在 → BACKUP `<dest> → <name>.bak` + OVERWRITE
+#     - <dest>.bak 既存 + FORCE=false → SKIP `(existing .bak found, use --force to overwrite)`
+#     - <dest>.bak 既存 + FORCE=true  → SKIP の .bak（once-only 規律保護）+ OVERWRITE
+copy_with_hybrid_overwrite() {
+  local src="$1"
+  local dest="$2"
+
+  if [ ! -f "$src" ]; then
+    echo "Error: source file not found: $src" >&2
+    return 1
+  fi
+
+  local action
+  action="$(classify_action "$src" "$dest")"
+
+  case "$action" in
+    NEW)
+      log_action "NEW" "$dest"
+      if [ "$DRY_RUN" = "false" ]; then
+        ensure_dir "$(dirname "$dest")"
+        cp "$src" "$dest"
+      fi
+      ;;
+    SKIP)
+      log_action "SKIP" "$dest" "(identical to template)"
+      ;;
+    OVERWRITE)
+      local bak="$dest.bak"
+      local bak_name
+      bak_name="$(basename "$dest").bak"
+      if [ ! -f "$bak" ]; then
+        # .bak 不在 → 初回退避してから上書き（once-only）
+        local backup_note
+        if [ "$FORCE" = "true" ]; then
+          backup_note="→ $bak_name (--force)"
+        else
+          backup_note="→ $bak_name (custom edits detected)"
+        fi
+        log_action "BACKUP" "$dest" "$backup_note"
+        if [ "$DRY_RUN" = "false" ]; then
+          cp "$dest" "$bak"
+        fi
+        log_action "OVERWRITE" "$dest"
+        if [ "$DRY_RUN" = "false" ]; then
+          cp "$src" "$dest"
+        fi
+      else
+        # .bak 既存 → once-only 規律で再退避しない
+        if [ "$FORCE" = "true" ]; then
+          log_action "SKIP" "$bak" "(existing .bak preserved even with --force)"
+          log_action "OVERWRITE" "$dest"
+          if [ "$DRY_RUN" = "false" ]; then
+            cp "$src" "$dest"
+          fi
+        else
+          log_action "SKIP" "$dest" "(existing .bak found, use --force to overwrite)"
+        fi
+      fi
+      ;;
+  esac
+}
+
+# copy_agents_rules <src_dir> <dest_dir>
+#   `.claude/agents/*.md` および `.claude/rules/*.md` のハイブリッド safe-overwrite 配置。
+#   各 .md ファイルに対して copy_with_hybrid_overwrite を適用する。
+#   nullglob を一時的に有効化し、マッチ 0 件は SKIP ログを出して exit 0 で継続。
+copy_agents_rules() {
+  local src_dir="$1"
+  local dest_dir="$2"
+
+  ensure_dir "$dest_dir"
+
+  local prev_nullglob
+  if shopt -q nullglob; then
+    prev_nullglob=on
+  else
+    prev_nullglob=off
+  fi
+  shopt -s nullglob
+
+  local files=( "$src_dir"/*.md )
+  local count=${#files[@]}
+
+  if [ "$count" -eq 0 ]; then
+    log_action "SKIP" "$src_dir/*.md" "(no files matched)"
+  else
+    local src
+    for src in "${files[@]}"; do
+      local dest
+      dest="$dest_dir/$(basename "$src")"
+      copy_with_hybrid_overwrite "$src" "$dest"
+    done
+  fi
+
+  if [ "$prev_nullglob" = "off" ]; then
+    shopt -u nullglob
+  fi
+}
 
 # 対話モード（引数なし）
 if ! $INSTALL_LOCAL && ! $INSTALL_REPO; then
@@ -112,32 +430,32 @@ if $INSTALL_REPO; then
   echo "📦 対象リポジトリにファイルを配置: $REPO_PATH_ABS"
   REPO_PATH="$REPO_PATH_ABS"
 
-  # CLAUDE.md は既存があればバックアップ
-  if [ -f "$REPO_PATH/CLAUDE.md" ]; then
-    echo "  既存の CLAUDE.md を CLAUDE.md.bak にバックアップ"
-    cp "$REPO_PATH/CLAUDE.md" "$REPO_PATH/CLAUDE.md.bak"
-  fi
+  # CLAUDE.md.bak の once-only 保護（初回 install 時のオリジナルを温存）
+  # → 既存 CLAUDE.md があれば `.bak` に退避（既存 `.bak` は尊重、再退避しない）
+  backup_claude_md_once "$REPO_PATH"
 
-  cp -v "$REPO_TEMPLATE_DIR/CLAUDE.md" "$REPO_PATH/CLAUDE.md"
+  # CLAUDE.md 本体は backup_claude_md_once が `.bak` 退避を引き受けたあと、
+  # copy_template_file で template を常に配置する（既存と同一なら SKIP）。
+  # → design.md「setup_repo ブロック」設計判断: ハイブリッド側は `.bak` 退避を
+  #   スキップしてそのまま OVERWRITE / SKIP のみを行う、と整合
+  # → 要件 2.5 / 5.4: 既存挙動（無条件で template 由来 CLAUDE.md を配置）を維持
+  copy_template_file "$REPO_TEMPLATE_DIR/CLAUDE.md" "$REPO_PATH/CLAUDE.md"
 
-  mkdir -p "$REPO_PATH/.claude/agents"
-  cp -v "$REPO_TEMPLATE_DIR/.claude/agents/"*.md "$REPO_PATH/.claude/agents/"
+  copy_agents_rules "$REPO_TEMPLATE_DIR/.claude/agents" "$REPO_PATH/.claude/agents"
+  copy_agents_rules "$REPO_TEMPLATE_DIR/.claude/rules"  "$REPO_PATH/.claude/rules"
 
-  mkdir -p "$REPO_PATH/.claude/rules"
-  cp -v "$REPO_TEMPLATE_DIR/.claude/rules/"*.md "$REPO_PATH/.claude/rules/"
+  copy_template_file \
+    "$REPO_TEMPLATE_DIR/.github/ISSUE_TEMPLATE/feature.yml" \
+    "$REPO_PATH/.github/ISSUE_TEMPLATE/feature.yml"
 
-  mkdir -p "$REPO_PATH/.github/ISSUE_TEMPLATE"
-  cp -v "$REPO_TEMPLATE_DIR/.github/ISSUE_TEMPLATE/feature.yml" \
-        "$REPO_PATH/.github/ISSUE_TEMPLATE/feature.yml"
+  copy_template_file \
+    "$REPO_TEMPLATE_DIR/.github/workflows/issue-to-pr.yml" \
+    "$REPO_PATH/.github/workflows/issue-to-pr.yml"
 
-  mkdir -p "$REPO_PATH/.github/workflows"
-  cp -v "$REPO_TEMPLATE_DIR/.github/workflows/issue-to-pr.yml" \
-        "$REPO_PATH/.github/workflows/issue-to-pr.yml"
-
-  mkdir -p "$REPO_PATH/.github/scripts"
-  cp -v "$REPO_TEMPLATE_DIR/.github/scripts/idd-claude-labels.sh" \
-        "$REPO_PATH/.github/scripts/idd-claude-labels.sh"
-  chmod +x "$REPO_PATH/.github/scripts/idd-claude-labels.sh"
+  copy_template_file \
+    "$REPO_TEMPLATE_DIR/.github/scripts/idd-claude-labels.sh" \
+    "$REPO_PATH/.github/scripts/idd-claude-labels.sh" \
+    --executable
 
   cat <<REPO_HINT
 
@@ -171,21 +489,20 @@ if $INSTALL_LOCAL; then
   echo ""
   echo "📦 ローカル PC に watcher をインストール"
 
-  mkdir -p "$HOME/bin" "$HOME/.issue-watcher/logs"
-  cp -v "$LOCAL_WATCHER_DIR/bin/issue-watcher.sh"   "$HOME/bin/"
-  cp -v "$LOCAL_WATCHER_DIR/bin/triage-prompt.tmpl" "$HOME/bin/"
-  # PR Iteration Processor (#26) 用テンプレート。既存 watcher で
-  # PR_ITERATION_ENABLED=true にするまで参照されないが、配置のみ常時行う。
-  if [ -f "$LOCAL_WATCHER_DIR/bin/iteration-prompt.tmpl" ]; then
-    cp -v "$LOCAL_WATCHER_DIR/bin/iteration-prompt.tmpl" "$HOME/bin/"
-  fi
-  chmod +x "$HOME/bin/issue-watcher.sh"
+  ensure_dir "$HOME/bin"
+  ensure_dir "$HOME/.issue-watcher/logs"
+
+  # local-watcher/bin/ 配下の *.sh / *.tmpl をワイルドカードで一括配置。
+  # 新規 *.tmpl / *.sh が追加された場合に install.sh を書き換えなくて済む。
+  copy_glob_to_homebin "$LOCAL_WATCHER_DIR/bin" "*.sh"   "$HOME/bin" --executable
+  copy_glob_to_homebin "$LOCAL_WATCHER_DIR/bin" "*.tmpl" "$HOME/bin"
 
   # macOS: launchd
   if [ "$(uname)" = "Darwin" ]; then
-    mkdir -p "$HOME/Library/LaunchAgents"
-    cp -v "$LOCAL_WATCHER_DIR/LaunchAgents/com.local.issue-watcher.plist" \
-          "$HOME/Library/LaunchAgents/"
+    ensure_dir "$HOME/Library/LaunchAgents"
+    copy_template_file \
+      "$LOCAL_WATCHER_DIR/LaunchAgents/com.local.issue-watcher.plist" \
+      "$HOME/Library/LaunchAgents/com.local.issue-watcher.plist"
 
     cat <<'LAUNCHD_HINT'
 
