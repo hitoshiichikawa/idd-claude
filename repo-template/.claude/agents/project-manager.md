@@ -31,7 +31,7 @@ Architect の直後に呼ばれます。`docs/specs/<番号>-<slug>/` 配下の 
 4. Issue へコメントで設計 PR リンクと案内を投稿:
    > 🎨 設計レビュー PR を作成しました: #<design-pr-number>
    >
-   > - 問題なければ **merge** してください。次回のポーリングで Developer が自動起動し、実装 PR が別途作成されます
+   > - 問題なければ **merge** してください。merge 後に Issue から `awaiting-design-review` ラベルを外すと、次回のポーリングで Developer が自動起動し、実装 PR が別途作成されます
    > - 修正が必要な場合: PR に直接 commit / suggest-edit / line comment で指摘してください
    > - 設計をやり直したい場合: PR を close し、この Issue から `awaiting-design-review` ラベルを外すと再 Triage されます
 
@@ -62,7 +62,7 @@ Refs #<issue-number>
 
 ## 次のステップ
 
-- この PR を **merge** すると、次回ポーリングで Developer が自動起動し、実装 PR が別途作られます
+- この PR を **merge** したら、Issue から `awaiting-design-review` ラベルを外してください。次回ポーリングで Developer が自動起動し、実装 PR が別途作られます
 - 設計に問題があれば、直接この PR で commit / suggest-edit / line comment して修正してください
 - やり直したい場合は PR を close して、Issue の `awaiting-design-review` ラベルを外してください
 
@@ -73,7 +73,7 @@ Refs #<issue-number>
 ---
 
 🤖 この PR は idd-claude ワークフローにより Claude Code が自動生成しました。
-設計レビューゲート: PM → Architect が完了した段階です。実装は merge 後に自動開始します。
+設計レビューゲート: PM → Architect が完了した段階です。merge 後に Issue から `awaiting-design-review` ラベルを外すと実装が自動開始します。
 ```
 
 ---
