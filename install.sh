@@ -430,32 +430,29 @@ if $INSTALL_REPO; then
   echo "📦 対象リポジトリにファイルを配置: $REPO_PATH_ABS"
   REPO_PATH="$REPO_PATH_ABS"
 
-  # CLAUDE.md は既存があればバックアップ
-  if [ -f "$REPO_PATH/CLAUDE.md" ]; then
-    echo "  既存の CLAUDE.md を CLAUDE.md.bak にバックアップ"
-    cp "$REPO_PATH/CLAUDE.md" "$REPO_PATH/CLAUDE.md.bak"
-  fi
+  # CLAUDE.md.bak の once-only 保護（初回 install 時のオリジナルを温存）
+  backup_claude_md_once "$REPO_PATH"
 
-  cp -v "$REPO_TEMPLATE_DIR/CLAUDE.md" "$REPO_PATH/CLAUDE.md"
+  # CLAUDE.md 本体は agents/rules と同じハイブリッド safe-overwrite ポリシーで配置。
+  # backup_claude_md_once が既に CLAUDE.md.bak を保護しているため、ここでの BACKUP は
+  # 「既存 .bak を尊重する」分岐に落ちる（once-only 規律で重複退避を防ぐ）。
+  copy_with_hybrid_overwrite "$REPO_TEMPLATE_DIR/CLAUDE.md" "$REPO_PATH/CLAUDE.md"
 
-  mkdir -p "$REPO_PATH/.claude/agents"
-  cp -v "$REPO_TEMPLATE_DIR/.claude/agents/"*.md "$REPO_PATH/.claude/agents/"
+  copy_agents_rules "$REPO_TEMPLATE_DIR/.claude/agents" "$REPO_PATH/.claude/agents"
+  copy_agents_rules "$REPO_TEMPLATE_DIR/.claude/rules"  "$REPO_PATH/.claude/rules"
 
-  mkdir -p "$REPO_PATH/.claude/rules"
-  cp -v "$REPO_TEMPLATE_DIR/.claude/rules/"*.md "$REPO_PATH/.claude/rules/"
+  copy_template_file \
+    "$REPO_TEMPLATE_DIR/.github/ISSUE_TEMPLATE/feature.yml" \
+    "$REPO_PATH/.github/ISSUE_TEMPLATE/feature.yml"
 
-  mkdir -p "$REPO_PATH/.github/ISSUE_TEMPLATE"
-  cp -v "$REPO_TEMPLATE_DIR/.github/ISSUE_TEMPLATE/feature.yml" \
-        "$REPO_PATH/.github/ISSUE_TEMPLATE/feature.yml"
+  copy_template_file \
+    "$REPO_TEMPLATE_DIR/.github/workflows/issue-to-pr.yml" \
+    "$REPO_PATH/.github/workflows/issue-to-pr.yml"
 
-  mkdir -p "$REPO_PATH/.github/workflows"
-  cp -v "$REPO_TEMPLATE_DIR/.github/workflows/issue-to-pr.yml" \
-        "$REPO_PATH/.github/workflows/issue-to-pr.yml"
-
-  mkdir -p "$REPO_PATH/.github/scripts"
-  cp -v "$REPO_TEMPLATE_DIR/.github/scripts/idd-claude-labels.sh" \
-        "$REPO_PATH/.github/scripts/idd-claude-labels.sh"
-  chmod +x "$REPO_PATH/.github/scripts/idd-claude-labels.sh"
+  copy_template_file \
+    "$REPO_TEMPLATE_DIR/.github/scripts/idd-claude-labels.sh" \
+    "$REPO_PATH/.github/scripts/idd-claude-labels.sh" \
+    --executable
 
   cat <<REPO_HINT
 
