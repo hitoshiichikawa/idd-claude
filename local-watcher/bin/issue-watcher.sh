@@ -1373,6 +1373,129 @@ ${design_pr_note}
 EOF
 }
 
+# ─── parse_review_result <path> ───
+#
+# review-notes.md から「最後に出現する RESULT 行」と Findings の Category / Target を抽出する。
+# stdout に TSV 1 行で出力: <result>\t<categories>\t<target_ids>
+#
+# - result      ∈ {approve, reject}
+# - categories  = カンマ区切り（reject 時のみ。approve 時は空文字）
+# - target_ids  = カンマ区切り requirement ID または `boundary:<component>` 形式
+#
+# 戻り値:
+#   0 = 抽出成功
+#   2 = ファイル無 / RESULT 行欠落 / 値不正
+parse_review_result() {
+  local path="$1"
+  if [ ! -f "$path" ]; then
+    return 2
+  fi
+
+  # 最後に出現する RESULT 行のみを採用（fail-safe）。
+  # 行頭がそのまま `RESULT: approve` または `RESULT: reject` のもののみ受け付ける。
+  local result_line
+  result_line=$(grep -E '^RESULT: (approve|reject)$' "$path" | tail -1 || true)
+  if [ -z "$result_line" ]; then
+    return 2
+  fi
+
+  local result="${result_line#RESULT: }"
+  case "$result" in
+    approve|reject) ;;
+    *) return 2 ;;
+  esac
+
+  local categories=""
+  local target_ids=""
+  if [ "$result" = "reject" ]; then
+    # Findings ブロックの "**Category**: ..." 行と "**Target**: ..." 行を抽出。
+    # Findings は markdown bullet なので、行頭の "- " も含めて許容する。
+    categories=$(grep -E '^[[:space:]]*-[[:space:]]+\*\*Category\*\*:' "$path" \
+                   | sed -E 's/^[[:space:]]*-[[:space:]]+\*\*Category\*\*:[[:space:]]*//' \
+                   | sed -E 's/[[:space:]]+$//' \
+                   | paste -sd, - || true)
+    target_ids=$(grep -E '^[[:space:]]*-[[:space:]]+\*\*Target\*\*:' "$path" \
+                   | sed -E 's/^[[:space:]]*-[[:space:]]+\*\*Target\*\*:[[:space:]]*//' \
+                   | sed -E 's/（.*$//' \
+                   | sed -E 's/[[:space:]]+$//' \
+                   | paste -sd, - || true)
+  fi
+
+  printf '%s\t%s\t%s\n' "$result" "$categories" "$target_ids"
+  return 0
+}
+
+# ─── run_reviewer_stage <round> ───
+#
+# Reviewer サブエージェントを 1 回起動し、review-notes.md の最終 RESULT 行を抽出して
+# 戻り値で結果を呼び出し元に返す。
+#
+# 入力:
+#   $1 = round (1 | 2)
+#   環境変数: NUMBER, BRANCH, SPEC_DIR_REL, LOG, REPO_DIR
+# 副作用:
+#   - $LOG に Reviewer 起動ログ（model / max-turns / 結果）を append
+#   - $REPO_DIR/$SPEC_DIR_REL/review-notes.md が Reviewer によって作成 / 上書き
+# 戻り値:
+#   0 = approve
+#   1 = reject
+#   2 = 異常終了（claude crash / parse 失敗 / RESULT 行欠落）
+run_reviewer_stage() {
+  local round="$1"
+  local prev_result="(none)"
+
+  # round=2 の場合、直前 review-notes.md の RESULT 行を Reviewer に伝える
+  local notes_path="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
+  if [ "$round" = "2" ] && [ -f "$notes_path" ]; then
+    prev_result=$(grep -E '^RESULT: (approve|reject)$' "$notes_path" | tail -1 || echo "(none)")
+  fi
+
+  rv_log "round=$round start (model=$REVIEWER_MODEL, max-turns=$REVIEWER_MAX_TURNS)" >> "$LOG"
+
+  local prompt
+  prompt=$(build_reviewer_prompt "$round" "$prev_result")
+
+  echo "--- Reviewer 実行 (round=$round) ---" >> "$LOG"
+  if ! claude \
+      --print "$prompt" \
+      --model "$REVIEWER_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$REVIEWER_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      >> "$LOG" 2>&1; then
+    rv_log "round=$round result=error reason=claude-exit-nonzero" >> "$LOG"
+    return 2
+  fi
+
+  # review-notes.md を parse
+  local parsed
+  if ! parsed=$(parse_review_result "$notes_path"); then
+    rv_log "round=$round result=error reason=parse-failed" >> "$LOG"
+    return 2
+  fi
+
+  local result categories targets
+  result=$(echo "$parsed" | cut -f1)
+  categories=$(echo "$parsed" | cut -f2)
+  targets=$(echo "$parsed" | cut -f3)
+
+  case "$result" in
+    approve)
+      rv_log "round=$round result=approve verified=$targets" >> "$LOG"
+      return 0
+      ;;
+    reject)
+      rv_log "round=$round result=reject categories=$categories targets=$targets" >> "$LOG"
+      return 1
+      ;;
+    *)
+      rv_log "round=$round result=error reason=unknown-result" >> "$LOG"
+      return 2
+      ;;
+  esac
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 未処理 Issue を取得
 #   auto-dev ラベルがあり、かつ以下のラベルが付いていないもの:
