@@ -114,6 +114,12 @@ DEV_MODEL="${DEV_MODEL:-claude-opus-4-7}"           # 本実装は Opus 4.7 + 1M
 TRIAGE_MAX_TURNS="${TRIAGE_MAX_TURNS:-15}"
 DEV_MAX_TURNS="${DEV_MAX_TURNS:-60}"
 
+# ─── Reviewer subagent 設定 (#20 Phase 1) ───
+# impl 系モード（impl / impl-resume）の Developer 完了後に独立 context で起動する
+# Reviewer サブエージェント用の env。既存の TRIAGE_* / DEV_* と独立に扱う。
+REVIEWER_MODEL="${REVIEWER_MODEL:-claude-opus-4-7}"
+REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-30}"
+
 # Triage プロンプトテンプレート
 TRIAGE_TEMPLATE="${TRIAGE_TEMPLATE:-$HOME/bin/triage-prompt.tmpl}"
 
