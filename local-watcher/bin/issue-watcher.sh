@@ -1496,6 +1496,166 @@ run_reviewer_stage() {
   esac
 }
 
+# ─── failure 共通遷移ヘルパー ───
+#
+# Stage 失敗時の claude-failed 遷移を一元化。引数で原因種別と Issue コメント追加情報を受け取る。
+# - $1 = stage 識別子（"stageA" / "stageA-redo" / "stageB" / "stageC" / "reviewer-error" / "reviewer-reject2"）
+# - $2 = Issue コメントに追加する補足（reject 理由など。空文字可）
+mark_issue_failed() {
+  local stage="$1"
+  local extra_body="$2"
+
+  gh issue edit "$NUMBER" --repo "$REPO" \
+    --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
+
+  local hostname_val
+  hostname_val=$(hostname)
+  local body="⚠️ 自動開発が失敗しました（${hostname_val} / モード: $MODE / 失敗 stage: ${stage}）。
+
+ログ: \`$LOG\`"
+  if [ -n "$extra_body" ]; then
+    body="${body}
+
+${extra_body}"
+  fi
+  body="${body}
+
+問題を解決してから \`claude-failed\` ラベルを外してください。"
+
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
+}
+
+# ─── run_impl_pipeline ───
+#
+# impl / impl-resume モードの Stage 状態機械を実装する。
+#
+#   START → Stage A → Stage B(round=1)
+#                    ├─ approve → Stage C → TERMINAL_OK
+#                    ├─ reject  → Stage A' → Stage B(round=2)
+#                    │                       ├─ approve → Stage C → TERMINAL_OK
+#                    │                       ├─ reject  → TERMINAL_FAILED (with Issue comment)
+#                    │                       └─ error   → TERMINAL_FAILED (with $LOG path)
+#                    └─ error   → TERMINAL_FAILED (with $LOG path)
+#
+#   Stage A / A' / C の非 0 exit は既存 Developer 失敗時遷移と同等メッセージ。
+#
+# 入力 (環境変数経由): NUMBER, TITLE, BODY, URL, BRANCH, MODE, SPEC_DIR_REL, LOG, REPO,
+#                      DEV_MODEL, DEV_MAX_TURNS, REVIEWER_MODEL, REVIEWER_MAX_TURNS
+# 戻り値:
+#   0 = pipeline 成功（Stage C も成功 / PR 作成済み）
+#   1 = Stage A / A' / B / B' / C いずれかで失敗 → claude-failed 既に付与済み
+run_impl_pipeline() {
+  local prompt_a prompt_redo prompt_c
+  local rev_rc
+
+  # ── Stage A: PM + Developer（impl-resume では PM スキップ）──
+  echo "--- Stage A 実行（$MODE / PM + Developer）---" >> "$LOG"
+  prompt_a=$(build_dev_prompt_a "$MODE")
+  if ! claude \
+      --print "$prompt_a" \
+      --model "$DEV_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$DEV_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      >> "$LOG" 2>&1; then
+    echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
+    mark_issue_failed "stageA" ""
+    return 1
+  fi
+  echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
+
+  # ── Stage B (round=1): Reviewer ──
+  rev_rc=0
+  run_reviewer_stage 1 || rev_rc=$?
+  case $rev_rc in
+    0)
+      echo "✅ #$NUMBER: Reviewer round=1 approve" | tee -a "$LOG"
+      ;;
+    1)
+      echo "🔁 #$NUMBER: Reviewer round=1 reject → Developer 再実行" | tee -a "$LOG"
+      rv_dev_log "redo by reviewer reject (round=1)" >> "$LOG"
+
+      # ── Stage A' (Developer 再実行) ──
+      echo "--- Stage A' 実行（Developer 再実行 / Reviewer reject 差し戻し）---" >> "$LOG"
+      prompt_redo=$(build_dev_prompt_redo "$REPO_DIR/$SPEC_DIR_REL/review-notes.md")
+      if ! claude \
+          --print "$prompt_redo" \
+          --model "$DEV_MODEL" \
+          --permission-mode bypassPermissions \
+          --max-turns "$DEV_MAX_TURNS" \
+          --output-format stream-json \
+          --verbose \
+          >> "$LOG" 2>&1; then
+        echo "❌ #$NUMBER: Stage A' (Developer 再実行) 失敗" | tee -a "$LOG"
+        mark_issue_failed "stageA-redo" ""
+        return 1
+      fi
+      echo "✅ #$NUMBER: Stage A' 完了" | tee -a "$LOG"
+
+      # ── Stage B (round=2): Reviewer 最終回 ──
+      rev_rc=0
+      run_reviewer_stage 2 || rev_rc=$?
+      case $rev_rc in
+        0)
+          echo "✅ #$NUMBER: Reviewer round=2 approve" | tee -a "$LOG"
+          ;;
+        1)
+          # 2 回目 reject → claude-failed + Issue コメントに reject 理由 / 対象 ID を含める
+          echo "❌ #$NUMBER: Reviewer round=2 reject → claude-failed" | tee -a "$LOG"
+          local parsed2 cat2 tgt2
+          parsed2=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
+          cat2=$(echo "$parsed2" | cut -f2)
+          tgt2=$(echo "$parsed2" | cut -f3)
+          local reject_body
+          reject_body="Reviewer が 2 回連続で reject を出したため、自動 iteration を打ち切り、人間判断に委ねます。
+
+- 対象 requirement ID: ${tgt2:-(unknown)}
+- reject カテゴリ: ${cat2:-(unknown)}
+- Reviewer 判定詳細: \`${SPEC_DIR_REL}/review-notes.md\` を参照
+
+### 次の手順
+1. review-notes.md と watcher ログを読み、Reviewer 判定が妥当か確認
+2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
+3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
+          mark_issue_failed "reviewer-reject2" "$reject_body"
+          return 1
+          ;;
+        *)
+          # round=2 reviewer error
+          echo "❌ #$NUMBER: Reviewer round=2 異常終了 → claude-failed" | tee -a "$LOG"
+          mark_issue_failed "reviewer-error" "Reviewer round=2 が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      # round=1 reviewer error → claude-failed + Issue コメント (要件 4.8)
+      echo "❌ #$NUMBER: Reviewer round=1 異常終了 → claude-failed" | tee -a "$LOG"
+      mark_issue_failed "reviewer-error" "Reviewer round=1 が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+      return 1
+      ;;
+  esac
+
+  # ── Stage C: PjM (PR 作成) ──
+  echo "--- Stage C 実行（PjM / PR 作成）---" >> "$LOG"
+  prompt_c=$(build_dev_prompt_c "$MODE")
+  if ! claude \
+      --print "$prompt_c" \
+      --model "$DEV_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$DEV_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      >> "$LOG" 2>&1; then
+    echo "❌ #$NUMBER: Stage C (PjM) 失敗" | tee -a "$LOG"
+    mark_issue_failed "stageC" ""
+    return 1
+  fi
+  echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み" | tee -a "$LOG"
+  return 0
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 未処理 Issue を取得
 #   auto-dev ラベルがあり、かつ以下のラベルが付いていないもの:
