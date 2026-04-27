@@ -123,15 +123,18 @@
 - **Product Manager** は実装方針を書かない。要件と受入基準の明確化に専念する
 - **Architect**（条件付き起動）は要件を変更しない。モジュール構成・データモデル・公開 IF・処理フロー・実装分割の設計に専念する
 - **Developer** は仕様を追加・解釈しない。不明点があれば PM / Architect に差し戻す
+- **Reviewer**（impl 系モードで自動起動）は Developer 完了後の独立レビューのみを担当し、要件・設計・実装・テストの追加や書き換えを行わない。判定は AC 未カバー / missing test / boundary 逸脱 の 3 カテゴリに限定する（スタイル / lint 観点では reject しない）
 - **Project Manager** はコードを変更しない。PR 作成と進捗管理に専念する
 - Architect は Triage の `needs_architect: true` 判定時のみ PM と Developer の間に挟まれる
 - Architect が起動した Issue では **設計 PR ゲート**を経由する（設計 PR を merge してから実装 PR が別途作られる）
+- Reviewer は impl / impl-resume の Developer 完了直後に **独立 context** で起動され、reject 時は Developer に最大 1 回だけ自動差し戻し、再 reject では `claude-failed` で人間に委ねる（差し戻しループは Reviewer 最大 2 回 / Developer 最大 2 回で打ち切り）
 - Developer は `design.md` / `tasks.md` を書き換えない（設計 PR で人間レビュー済みのため）。矛盾は PR 本文「確認事項」で指摘する
 - 各エージェントの成果物は `docs/specs/<番号>-<slug>/` 配下に保存する（Kiro / cc-sdd 互換）
   - `requirements.md`（PM）— EARS 形式の AC、numeric 階層 ID
   - `design.md`（Architect、条件付き）— File Structure Plan / Components and Interfaces / Traceability
   - `tasks.md`（Architect、条件付き）— `_Requirements:_` / `_Boundary:_` / `_Depends:_` / `(P)` アノテーション
   - `impl-notes.md`（Developer、補足）
+  - `review-notes.md`（Reviewer、impl 系モードのみ）— 判定結果と Findings / 最終行 `RESULT: approve|reject`
 - `<slug>` は Issue タイトルを lowercase・ハイフン区切り・40 文字以内に正規化した値。既存ディレクトリがあれば流用する
 
 ## エージェントが参照する共通ルール（`.claude/rules/`）

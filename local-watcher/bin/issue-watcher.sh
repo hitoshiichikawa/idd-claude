@@ -114,6 +114,12 @@ DEV_MODEL="${DEV_MODEL:-claude-opus-4-7}"           # 本実装は Opus 4.7 + 1M
 TRIAGE_MAX_TURNS="${TRIAGE_MAX_TURNS:-15}"
 DEV_MAX_TURNS="${DEV_MAX_TURNS:-60}"
 
+# ─── Reviewer subagent 設定 (#20 Phase 1) ───
+# impl 系モード（impl / impl-resume）の Developer 完了後に独立 context で起動する
+# Reviewer サブエージェント用の env。既存の TRIAGE_* / DEV_* と独立に扱う。
+REVIEWER_MODEL="${REVIEWER_MODEL:-claude-opus-4-7}"
+REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-30}"
+
 # Triage プロンプトテンプレート
 TRIAGE_TEMPLATE="${TRIAGE_TEMPLATE:-$HOME/bin/triage-prompt.tmpl}"
 
@@ -1099,6 +1105,558 @@ process_pr_iteration() {
 process_pr_iteration || pi_warn "process_pr_iteration が想定外のエラーで終了しました（後続 Issue 処理は継続）"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Reviewer Gate (#20 Phase 1) — impl 系モード stage 分割パイプライン
+#
+# 既存の impl / impl-resume モードは DEV_PROMPT 1 回で PM + Developer + PjM を
+# 直列起動していたが、Reviewer サブエージェントを独立 context で挟むため、以下の
+# stage に分割する:
+#
+#   Stage A  : PM + Developer（ただし impl-resume では PM をスキップ）
+#   Stage B  : Reviewer (round=1)
+#   Stage A' : Developer 再実行（reject 時のみ、最大 1 回）
+#   Stage B' : Reviewer (round=2、reject 時のみ)
+#   Stage C  : PjM（PR 作成）
+#
+# 各 stage は `claude --print` の独立プロセスで起動。stage 間の context 共有は
+# しない（要件 2.2「独立 Claude セッション」）。Reviewer 判定は
+# `docs/specs/<N>-<slug>/review-notes.md` の最終 RESULT 行で受け渡す。
+#
+# 設計参照: docs/specs/20-phase-1-reviewer-subagent-gate/design.md
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Reviewer / Pipeline 専用ロガー（既存 mq_log / pi_log と同形式）
+rv_log() {
+  echo "[$(date '+%F %T')] reviewer: $*"
+}
+rv_dev_log() {
+  echo "[$(date '+%F %T')] developer: $*"
+}
+
+# ─── Prompt Builders（Stage A / A' / B / C 用 4 関数）───
+#
+# 既存 DEV_PROMPT の組み立てパターン（heredoc + 変数展開）を踏襲する。
+# 入力は環境変数（NUMBER / TITLE / URL / BODY / BRANCH / SPEC_DIR_REL /
+# MODE / ARCHITECT_REASON）と関数引数。stdout に prompt 文字列を出力する。
+
+# Stage A: PM + Developer（impl では PM 起動、impl-resume では Developer のみ）
+# 既存 DEV_PROMPT の STEPS から「PjM 起動」を除外したもの。
+build_dev_prompt_a() {
+  local mode="$1"
+  local flow_label
+  local steps
+
+  case "$mode" in
+    impl)
+      flow_label="PM → Developer（Reviewer ゲート前）"
+      steps=$(cat <<EOF
+1. product-manager サブエージェントで要件定義を \`${SPEC_DIR_REL}/requirements.md\` に保存
+   - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
+   - 人間がコメントで回答済みの決定事項は requirements に反映する
+2. developer サブエージェントで実装＋テスト＋コミット
+   - 入力: \`${SPEC_DIR_REL}/requirements.md\`
+   - 規約は CLAUDE.md に従う
+   - 実装ノートを \`${SPEC_DIR_REL}/impl-notes.md\` に保存
+
+**重要**: 本ステージでは PR 作成（project-manager サブエージェント）を行わないこと。
+Developer 完了後、独立 context の Reviewer サブエージェントが起動して AC / test / boundary を
+独立レビューします。Reviewer の approve 後にオーケストレーターが PjM を起動して PR を作成します。
+EOF
+)
+      ;;
+    impl-resume)
+      flow_label="Developer（Reviewer ゲート前 / 設計 PR merge 済み）"
+      steps=$(cat <<EOF
+1. developer サブエージェントで実装＋テスト＋コミット
+   - 入力: \`${SPEC_DIR_REL}/requirements.md\` / \`${SPEC_DIR_REL}/design.md\` / \`${SPEC_DIR_REL}/tasks.md\`
+   - design.md / tasks.md は設計 PR で人間レビュー済み（main に merge 済み）。**書き換えないこと**
+   - tasks.md の numeric ID 順にタスクを消化する
+   - 矛盾や疑問があれば PR 本文「確認事項」に記載（書き換えはしない）
+   - 規約は CLAUDE.md に従う
+   - 実装ノートを \`${SPEC_DIR_REL}/impl-notes.md\` に保存
+
+**重要**: 本ステージでは PR 作成（project-manager サブエージェント）を行わないこと。
+Developer 完了後、独立 context の Reviewer サブエージェントが起動して AC / test / boundary を
+独立レビューします。Reviewer の approve 後にオーケストレーターが PjM を起動して PR を作成します。
+EOF
+)
+      ;;
+  esac
+
+  cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+以下の Issue を ${flow_label} のフローで進めてください。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+- Body  : |
+${BODY}
+
+## 作業ブランチ
+${BRANCH}（main から派生・push 済み・現在チェックアウト中）
+
+## 作業ディレクトリ
+${SPEC_DIR_REL}/
+
+## 進め方
+${steps}
+
+## 制約
+- main に直接 push しないこと
+- 既存のテストを壊さないこと
+- 不明点は推測せず、impl-notes.md の「確認事項」セクションに列挙すること
+- **PR は作成しないこと**（次の Reviewer ステージで独立レビューを受けます）
+EOF
+}
+
+# Stage A' (Developer 再実行用): Reviewer reject の Findings を inline で渡し、
+# Developer に是正を依頼する。PM は再起動しない（要件は不変）。
+build_dev_prompt_redo() {
+  local review_notes_path="$1"
+  local review_notes_content
+  if [ -f "$review_notes_path" ]; then
+    review_notes_content=$(cat "$review_notes_path")
+  else
+    review_notes_content="(review-notes.md が見つかりません)"
+  fi
+
+  cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+直前の Reviewer サブエージェントが reject を出したため、Developer の再実装を依頼します。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+
+## 作業ブランチ
+${BRANCH}（追加 commit を積んでください。reset / branch 切り替えは禁止）
+
+## 作業ディレクトリ
+${SPEC_DIR_REL}/
+
+## Reviewer の reject 理由（review-notes.md より）
+
+\`\`\`markdown
+${review_notes_content}
+\`\`\`
+
+## 進め方
+
+1. developer サブエージェントを起動し、上記 Findings の **Required Action** を順に実施する
+   - 要件（requirements.md）は変更しない（PM への差し戻し相当の事象があれば impl-notes.md の
+     「確認事項」に記載するに留める）
+   - 設計（design.md / tasks.md）が存在する場合も書き換えない
+   - 是正に必要なテストの追加・修正と、対応する実装変更のみを commit する
+2. 完了後 \`${SPEC_DIR_REL}/impl-notes.md\` に是正内容を 1 セクション追記
+
+## 制約
+- main に直接 push しないこと
+- product-manager / project-manager サブエージェントは起動しないこと
+  （PM は不要、PjM は次の Reviewer round=2 が approve した後にオーケストレーターが起動）
+- **PR は作成しないこと**（再 Reviewer の判定を受けます）
+- 既存テストを壊さないこと
+EOF
+}
+
+# Stage B (Reviewer): reviewer サブエージェントを独立 context で起動し、
+# review-notes.md を書かせる。git diff main..HEAD と round 情報を inline で渡す。
+build_reviewer_prompt() {
+  local round="$1"
+  local prev_result="$2"   # round=2 のみ意味あり、round=1 は "(none)"
+  local diff_content
+  # diff が空でも壊れないよう || true で fallback
+  diff_content=$(git diff main..HEAD 2>/dev/null || true)
+  if [ -z "$diff_content" ]; then
+    diff_content="(差分が取得できませんでした。Reviewer が Bash で git diff main..HEAD を再取得してください)"
+  fi
+  local head_sha
+  head_sha=$(git rev-parse HEAD 2>/dev/null || echo "(unknown)")
+
+  cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+Developer の実装が一段落したため、reviewer サブエージェントによる **独立レビュー**
+（round=${round} / 最大 2 round）を実施してください。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+- REPO  : ${REPO}
+
+## 作業ブランチ / spec ディレクトリ
+- BRANCH       : ${BRANCH}
+- HEAD commit  : ${head_sha}
+- SPEC_DIR_REL : ${SPEC_DIR_REL}
+- ROUND        : ${round}
+- PREV_RESULT  : ${prev_result}
+
+## 必読ファイル
+
+reviewer サブエージェントは着手前に以下を必ず Read してください:
+
+- \`CLAUDE.md\`（特に「テスト規約」と「禁止事項」）
+- \`${SPEC_DIR_REL}/requirements.md\`（EARS 形式の AC、numeric ID）
+- \`${SPEC_DIR_REL}/tasks.md\`（\`_Requirements:_\` / \`_Boundary:_\` アノテーション）
+- \`${SPEC_DIR_REL}/impl-notes.md\`（Developer のテスト結果含む補足）
+- \`${SPEC_DIR_REL}/design.md\`（存在する場合）
+
+## 最新差分（main..HEAD）
+
+\`\`\`diff
+${diff_content}
+\`\`\`
+
+## 進め方
+
+reviewer サブエージェントを起動し、以下を判定して \`${SPEC_DIR_REL}/review-notes.md\` に
+書き出してください（reviewer.md の出力契約に従う）。
+
+- 判定カテゴリ: AC 未カバー / missing test / boundary 逸脱 の 3 つに限定
+- 最終行は必ず \`RESULT: approve\` または \`RESULT: reject\` で終わること
+
+## 制約
+- requirements.md / design.md / tasks.md / 既存実装コード / テストコードを書き換えないこと
+- \`git add\` / \`git commit\` / \`git push\` / \`gh\` を実行しないこと（review-notes.md は次の
+  Developer または PjM が commit します）
+- スタイル / 命名 / lint / フォーマットの観点での reject はしないこと
+EOF
+}
+
+# Stage C (PjM): 既存 DEV_PROMPT の PjM 起動部分のみを抜き出し。
+# Reviewer の approve を受けた後、project-manager サブエージェントが PR を作成する。
+# PR 本文の構造は本機能導入前と等価（要件 6.5）。
+build_dev_prompt_c() {
+  local mode="$1"
+  local design_pr_note=""
+  if [ "$mode" = "impl-resume" ]; then
+    design_pr_note=$'   - PR 本文に対応する設計 PR 番号を記載（直近の main 上の merge commit から `git log --oneline --merges` で探す）'
+  else
+    design_pr_note='   - 設計 PR は走っていないため「関連 PR: なし」と明記すること'
+  fi
+
+  cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+Developer の実装と Reviewer の独立レビュー（approve）が完了しました。
+project-manager サブエージェントを起動し、最終 PR を作成してください。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+
+## 作業ブランチ
+${BRANCH}（実装 commit が積まれた状態。push 済み）
+
+## 作業ディレクトリ
+${SPEC_DIR_REL}/
+
+## 進め方
+
+1. \`${SPEC_DIR_REL}/review-notes.md\` を **本ブランチに git add / git commit** してから push する
+   - commit メッセージ: \`docs(review): add reviewer notes for #${NUMBER}\`
+   - 既に commit 済みなら skip
+2. project-manager サブエージェントを **implementation モード** で起動
+   - title: \`feat(#${NUMBER}): <1 行サマリ>\`
+   - PR 本文は project-manager.md の「実装 PR 本文テンプレート」に従う
+${design_pr_note}
+   - PR 本文の「確認事項」セクションに、必要なら review-notes.md の参照リンクを 1 行記載
+   - Issue ラベル: claude-picked-up → ready-for-review に付け替え
+   - Issue にコメントで実装 PR リンクを投稿
+
+## 制約
+- main に直接 push しないこと
+- Reviewer の approve 判定を覆さないこと（PR 本文に判定結果を逐語転載しない。review-notes.md の
+  参照に留める）
+- 仕様変更や追加実装はしないこと（PjM はコードを変更しない）
+EOF
+}
+
+# ─── parse_review_result <path> ───
+#
+# review-notes.md から「最後に出現する RESULT 行」と Findings の Category / Target を抽出する。
+# stdout に TSV 1 行で出力: <result>\t<categories>\t<target_ids>
+#
+# - result      ∈ {approve, reject}
+# - categories  = カンマ区切り（reject 時のみ。approve 時は空文字）
+# - target_ids  = カンマ区切り requirement ID または `boundary:<component>` 形式
+#
+# 戻り値:
+#   0 = 抽出成功
+#   2 = ファイル無 / RESULT 行欠落 / 値不正
+parse_review_result() {
+  local path="$1"
+  if [ ! -f "$path" ]; then
+    return 2
+  fi
+
+  # 最後に出現する RESULT 行のみを採用（fail-safe）。
+  # 行頭がそのまま `RESULT: approve` または `RESULT: reject` のもののみ受け付ける。
+  local result_line
+  result_line=$(grep -E '^RESULT: (approve|reject)$' "$path" | tail -1 || true)
+  if [ -z "$result_line" ]; then
+    return 2
+  fi
+
+  local result="${result_line#RESULT: }"
+  case "$result" in
+    approve|reject) ;;
+    *) return 2 ;;
+  esac
+
+  local categories=""
+  local target_ids=""
+  if [ "$result" = "reject" ]; then
+    # Findings ブロックの "**Category**: ..." 行と "**Target**: ..." 行を抽出。
+    # Findings は markdown bullet なので、行頭の "- " も含めて許容する。
+    categories=$(grep -E '^[[:space:]]*-[[:space:]]+\*\*Category\*\*:' "$path" \
+                   | sed -E 's/^[[:space:]]*-[[:space:]]+\*\*Category\*\*:[[:space:]]*//' \
+                   | sed -E 's/[[:space:]]+$//' \
+                   | paste -sd, - || true)
+    target_ids=$(grep -E '^[[:space:]]*-[[:space:]]+\*\*Target\*\*:' "$path" \
+                   | sed -E 's/^[[:space:]]*-[[:space:]]+\*\*Target\*\*:[[:space:]]*//' \
+                   | sed -E 's/（.*$//' \
+                   | sed -E 's/[[:space:]]+$//' \
+                   | paste -sd, - || true)
+  fi
+
+  printf '%s\t%s\t%s\n' "$result" "$categories" "$target_ids"
+  return 0
+}
+
+# ─── run_reviewer_stage <round> ───
+#
+# Reviewer サブエージェントを 1 回起動し、review-notes.md の最終 RESULT 行を抽出して
+# 戻り値で結果を呼び出し元に返す。
+#
+# 入力:
+#   $1 = round (1 | 2)
+#   環境変数: NUMBER, BRANCH, SPEC_DIR_REL, LOG, REPO_DIR
+# 副作用:
+#   - $LOG に Reviewer 起動ログ（model / max-turns / 結果）を append
+#   - $REPO_DIR/$SPEC_DIR_REL/review-notes.md が Reviewer によって作成 / 上書き
+# 戻り値:
+#   0 = approve
+#   1 = reject
+#   2 = 異常終了（claude crash / parse 失敗 / RESULT 行欠落）
+run_reviewer_stage() {
+  local round="$1"
+  local prev_result="(none)"
+
+  # round=2 の場合、直前 review-notes.md の RESULT 行を Reviewer に伝える
+  local notes_path="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
+  if [ "$round" = "2" ] && [ -f "$notes_path" ]; then
+    prev_result=$(grep -E '^RESULT: (approve|reject)$' "$notes_path" | tail -1 || echo "(none)")
+  fi
+
+  rv_log "round=$round start (model=$REVIEWER_MODEL, max-turns=$REVIEWER_MAX_TURNS)" >> "$LOG"
+
+  local prompt
+  prompt=$(build_reviewer_prompt "$round" "$prev_result")
+
+  echo "--- Reviewer 実行 (round=$round) ---" >> "$LOG"
+  if ! claude \
+      --print "$prompt" \
+      --model "$REVIEWER_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$REVIEWER_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      >> "$LOG" 2>&1; then
+    rv_log "round=$round result=error reason=claude-exit-nonzero" >> "$LOG"
+    return 2
+  fi
+
+  # review-notes.md を parse
+  local parsed
+  if ! parsed=$(parse_review_result "$notes_path"); then
+    rv_log "round=$round result=error reason=parse-failed" >> "$LOG"
+    return 2
+  fi
+
+  local result categories targets
+  result=$(echo "$parsed" | cut -f1)
+  categories=$(echo "$parsed" | cut -f2)
+  targets=$(echo "$parsed" | cut -f3)
+
+  case "$result" in
+    approve)
+      rv_log "round=$round result=approve verified=$targets" >> "$LOG"
+      return 0
+      ;;
+    reject)
+      rv_log "round=$round result=reject categories=$categories targets=$targets" >> "$LOG"
+      return 1
+      ;;
+    *)
+      rv_log "round=$round result=error reason=unknown-result" >> "$LOG"
+      return 2
+      ;;
+  esac
+}
+
+# ─── failure 共通遷移ヘルパー ───
+#
+# Stage 失敗時の claude-failed 遷移を一元化。引数で原因種別と Issue コメント追加情報を受け取る。
+# - $1 = stage 識別子（"stageA" / "stageA-redo" / "stageB" / "stageC" / "reviewer-error" / "reviewer-reject2"）
+# - $2 = Issue コメントに追加する補足（reject 理由など。空文字可）
+mark_issue_failed() {
+  local stage="$1"
+  local extra_body="$2"
+
+  gh issue edit "$NUMBER" --repo "$REPO" \
+    --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
+
+  local hostname_val
+  hostname_val=$(hostname)
+  local body="⚠️ 自動開発が失敗しました（${hostname_val} / モード: $MODE / 失敗 stage: ${stage}）。
+
+ログ: \`$LOG\`"
+  if [ -n "$extra_body" ]; then
+    body="${body}
+
+${extra_body}"
+  fi
+  body="${body}
+
+問題を解決してから \`claude-failed\` ラベルを外してください。"
+
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
+}
+
+# ─── run_impl_pipeline ───
+#
+# impl / impl-resume モードの Stage 状態機械を実装する。
+#
+#   START → Stage A → Stage B(round=1)
+#                    ├─ approve → Stage C → TERMINAL_OK
+#                    ├─ reject  → Stage A' → Stage B(round=2)
+#                    │                       ├─ approve → Stage C → TERMINAL_OK
+#                    │                       ├─ reject  → TERMINAL_FAILED (with Issue comment)
+#                    │                       └─ error   → TERMINAL_FAILED (with $LOG path)
+#                    └─ error   → TERMINAL_FAILED (with $LOG path)
+#
+#   Stage A / A' / C の非 0 exit は既存 Developer 失敗時遷移と同等メッセージ。
+#
+# 入力 (環境変数経由): NUMBER, TITLE, BODY, URL, BRANCH, MODE, SPEC_DIR_REL, LOG, REPO,
+#                      DEV_MODEL, DEV_MAX_TURNS, REVIEWER_MODEL, REVIEWER_MAX_TURNS
+# 戻り値:
+#   0 = pipeline 成功（Stage C も成功 / PR 作成済み）
+#   1 = Stage A / A' / B / B' / C いずれかで失敗 → claude-failed 既に付与済み
+run_impl_pipeline() {
+  local prompt_a prompt_redo prompt_c
+  local rev_rc
+
+  # ── Stage A: PM + Developer（impl-resume では PM スキップ）──
+  echo "--- Stage A 実行（$MODE / PM + Developer）---" >> "$LOG"
+  prompt_a=$(build_dev_prompt_a "$MODE")
+  if ! claude \
+      --print "$prompt_a" \
+      --model "$DEV_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$DEV_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      >> "$LOG" 2>&1; then
+    echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
+    mark_issue_failed "stageA" ""
+    return 1
+  fi
+  echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
+
+  # ── Stage B (round=1): Reviewer ──
+  rev_rc=0
+  run_reviewer_stage 1 || rev_rc=$?
+  case $rev_rc in
+    0)
+      echo "✅ #$NUMBER: Reviewer round=1 approve" | tee -a "$LOG"
+      ;;
+    1)
+      echo "🔁 #$NUMBER: Reviewer round=1 reject → Developer 再実行" | tee -a "$LOG"
+      rv_dev_log "redo by reviewer reject (round=1)" >> "$LOG"
+
+      # ── Stage A' (Developer 再実行) ──
+      echo "--- Stage A' 実行（Developer 再実行 / Reviewer reject 差し戻し）---" >> "$LOG"
+      prompt_redo=$(build_dev_prompt_redo "$REPO_DIR/$SPEC_DIR_REL/review-notes.md")
+      if ! claude \
+          --print "$prompt_redo" \
+          --model "$DEV_MODEL" \
+          --permission-mode bypassPermissions \
+          --max-turns "$DEV_MAX_TURNS" \
+          --output-format stream-json \
+          --verbose \
+          >> "$LOG" 2>&1; then
+        echo "❌ #$NUMBER: Stage A' (Developer 再実行) 失敗" | tee -a "$LOG"
+        mark_issue_failed "stageA-redo" ""
+        return 1
+      fi
+      echo "✅ #$NUMBER: Stage A' 完了" | tee -a "$LOG"
+
+      # ── Stage B (round=2): Reviewer 最終回 ──
+      rev_rc=0
+      run_reviewer_stage 2 || rev_rc=$?
+      case $rev_rc in
+        0)
+          echo "✅ #$NUMBER: Reviewer round=2 approve" | tee -a "$LOG"
+          ;;
+        1)
+          # 2 回目 reject → claude-failed + Issue コメントに reject 理由 / 対象 ID を含める
+          echo "❌ #$NUMBER: Reviewer round=2 reject → claude-failed" | tee -a "$LOG"
+          local parsed2 cat2 tgt2
+          parsed2=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
+          cat2=$(echo "$parsed2" | cut -f2)
+          tgt2=$(echo "$parsed2" | cut -f3)
+          local reject_body
+          reject_body="Reviewer が 2 回連続で reject を出したため、自動 iteration を打ち切り、人間判断に委ねます。
+
+- 対象 requirement ID: ${tgt2:-(unknown)}
+- reject カテゴリ: ${cat2:-(unknown)}
+- Reviewer 判定詳細: \`${SPEC_DIR_REL}/review-notes.md\` を参照
+
+### 次の手順
+1. review-notes.md と watcher ログを読み、Reviewer 判定が妥当か確認
+2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
+3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
+          mark_issue_failed "reviewer-reject2" "$reject_body"
+          return 1
+          ;;
+        *)
+          # round=2 reviewer error
+          echo "❌ #$NUMBER: Reviewer round=2 異常終了 → claude-failed" | tee -a "$LOG"
+          mark_issue_failed "reviewer-error" "Reviewer round=2 が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      # round=1 reviewer error → claude-failed + Issue コメント (要件 4.8)
+      echo "❌ #$NUMBER: Reviewer round=1 異常終了 → claude-failed" | tee -a "$LOG"
+      mark_issue_failed "reviewer-error" "Reviewer round=1 が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+      return 1
+      ;;
+  esac
+
+  # ── Stage C: PjM (PR 作成) ──
+  echo "--- Stage C 実行（PjM / PR 作成）---" >> "$LOG"
+  prompt_c=$(build_dev_prompt_c "$MODE")
+  if ! claude \
+      --print "$prompt_c" \
+      --model "$DEV_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$DEV_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      >> "$LOG" 2>&1; then
+    echo "❌ #$NUMBER: Stage C (PjM) 失敗" | tee -a "$LOG"
+    mark_issue_failed "stageC" ""
+    return 1
+  fi
+  echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み" | tee -a "$LOG"
+  return 0
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 未処理 Issue を取得
 #   auto-dev ラベルがあり、かつ以下のラベルが付いていないもの:
 #     needs-decisions / awaiting-design-review / claude-picked-up /
@@ -1257,12 +1815,13 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
   git push -u origin "$BRANCH" --force-with-lease
 
   # ─────────────────────────────────────────────────────────────
-  # DEV_PROMPT 組み立て（モードごとに進め方を切り替え）
+  # モード別ディスパッチ
+  #   - design      : 既存どおり PM → Architect → PjM を 1 セッションで起動
+  #   - impl/resume : Reviewer ゲート (#20) を含む stage 分割パイプラインへ委譲
   # ─────────────────────────────────────────────────────────────
-  case "$MODE" in
-    design)
-      FLOW_LABEL="PM → Architect → PjM（設計 PR 作成ゲート）"
-      STEPS=$(cat <<EOF
+  if [ "$MODE" = "design" ]; then
+    FLOW_LABEL="PM → Architect → PjM（設計 PR 作成ゲート）"
+    STEPS=$(cat <<EOF
 1. product-manager サブエージェントで要件定義を \`${SPEC_DIR_REL}/requirements.md\` に保存
    - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
    - 人間がコメントで回答済みの決定事項は requirements に反映する
@@ -1280,44 +1839,8 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
 次回のポーリングで Developer が自動起動し、実装 PR が別途作成されます。
 EOF
 )
-      ;;
-    impl)
-      FLOW_LABEL="PM → Developer → PjM（実装 PR 作成）"
-      STEPS=$(cat <<EOF
-1. product-manager サブエージェントで要件定義を \`${SPEC_DIR_REL}/requirements.md\` に保存
-   - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
-   - 人間がコメントで回答済みの決定事項は requirements に反映する
-2. developer サブエージェントで実装＋テスト＋コミット
-   - 入力: \`${SPEC_DIR_REL}/requirements.md\`
-   - 規約は CLAUDE.md に従う
-   - 実装ノートを \`${SPEC_DIR_REL}/impl-notes.md\` に保存
-3. project-manager サブエージェントを **implementation モード** で起動
-   - title: \`feat(#${NUMBER}): <1 行サマリ>\`
-   - PR 本文に受入基準・テスト結果・確認事項を記載（関連 PR は「なし」と明記）
-   - Issue ラベル: claude-picked-up → ready-for-review に付け替え
-EOF
-)
-      ;;
-    impl-resume)
-      FLOW_LABEL="Developer → PjM（設計 merge 済みの実装フェーズ）"
-      STEPS=$(cat <<EOF
-1. developer サブエージェントで実装＋テスト＋コミット
-   - 入力: \`${SPEC_DIR_REL}/requirements.md\` / \`${SPEC_DIR_REL}/design.md\` / \`${SPEC_DIR_REL}/tasks.md\`
-   - design.md / tasks.md は設計 PR で人間レビュー済み（main に merge 済み）。**書き換えないこと**
-   - tasks.md の T-NN の順にタスクを消化する
-   - 矛盾や疑問があれば PR 本文「確認事項」に記載（書き換えはしない）
-   - 規約は CLAUDE.md に従う
-   - 実装ノートを \`${SPEC_DIR_REL}/impl-notes.md\` に保存
-2. project-manager サブエージェントを **implementation モード** で起動
-   - title: \`feat(#${NUMBER}): <1 行サマリ>\`
-   - PR 本文に対応する設計 PR 番号を記載（直近の main 上の merge commit から \`git log --oneline --merges\` で探す）
-   - Issue ラベル: claude-picked-up → ready-for-review に付け替え
-EOF
-)
-      ;;
-  esac
 
-  DEV_PROMPT=$(cat <<EOF
+    DEV_PROMPT=$(cat <<EOF
 あなたはこのリポジトリの Claude Code オーケストレーターです。
 以下の Issue を ${FLOW_LABEL} のフローで進めてください。
 
@@ -1344,22 +1867,33 @@ ${STEPS}
 EOF
 )
 
-  echo "--- Development 実行（$MODE）---" >> "$LOG"
-  if claude \
-      --print "$DEV_PROMPT" \
-      --model "$DEV_MODEL" \
-      --permission-mode bypassPermissions \
-      --max-turns "$DEV_MAX_TURNS" \
-      --output-format stream-json \
-      --verbose \
-      >> "$LOG" 2>&1; then
-    echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
+    echo "--- Development 実行（$MODE）---" >> "$LOG"
+    if claude \
+        --print "$DEV_PROMPT" \
+        --model "$DEV_MODEL" \
+        --permission-mode bypassPermissions \
+        --max-turns "$DEV_MAX_TURNS" \
+        --output-format stream-json \
+        --verbose \
+        >> "$LOG" 2>&1; then
+      echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
+    else
+      echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
+      gh issue edit "$NUMBER" --repo "$REPO" \
+        --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
+      gh issue comment "$NUMBER" --repo "$REPO" \
+        --body "⚠️ 自動開発が失敗しました（$(hostname) / モード: $MODE）。\n\nログ: \`$LOG\`\n\n問題を解決してから \`claude-failed\` ラベルを外してください。"
+    fi
   else
-    echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
-    gh issue edit "$NUMBER" --repo "$REPO" \
-      --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
-    gh issue comment "$NUMBER" --repo "$REPO" \
-      --body "⚠️ 自動開発が失敗しました（$(hostname) / モード: $MODE）。\n\nログ: \`$LOG\`\n\n問題を解決してから \`claude-failed\` ラベルを外してください。"
+    # impl / impl-resume → Reviewer ゲートを含む stage 分割パイプラインへ
+    # （要件 2.4: Triage / skip-triage / impl-resume の全 impl 系で Reviewer 起動）
+    # 失敗時の claude-picked-up 削除 + claude-failed 付与 + Issue コメントは
+    # run_impl_pipeline 内 (mark_issue_failed) に一元化されており、ここでは追加処理不要。
+    if run_impl_pipeline; then
+      echo "✅ #$NUMBER: $MODE 完了（Reviewer ゲート通過 / PR 作成済み）" | tee -a "$LOG"
+    else
+      echo "❌ #$NUMBER: $MODE 失敗（claude-failed 付与済み）" | tee -a "$LOG"
+    fi
   fi
 
   # 次のループのため main に戻る
