@@ -486,21 +486,20 @@ if $INSTALL_LOCAL; then
   echo ""
   echo "📦 ローカル PC に watcher をインストール"
 
-  mkdir -p "$HOME/bin" "$HOME/.issue-watcher/logs"
-  cp -v "$LOCAL_WATCHER_DIR/bin/issue-watcher.sh"   "$HOME/bin/"
-  cp -v "$LOCAL_WATCHER_DIR/bin/triage-prompt.tmpl" "$HOME/bin/"
-  # PR Iteration Processor (#26) 用テンプレート。既存 watcher で
-  # PR_ITERATION_ENABLED=true にするまで参照されないが、配置のみ常時行う。
-  if [ -f "$LOCAL_WATCHER_DIR/bin/iteration-prompt.tmpl" ]; then
-    cp -v "$LOCAL_WATCHER_DIR/bin/iteration-prompt.tmpl" "$HOME/bin/"
-  fi
-  chmod +x "$HOME/bin/issue-watcher.sh"
+  ensure_dir "$HOME/bin"
+  ensure_dir "$HOME/.issue-watcher/logs"
+
+  # local-watcher/bin/ 配下の *.sh / *.tmpl をワイルドカードで一括配置。
+  # 新規 *.tmpl / *.sh が追加された場合に install.sh を書き換えなくて済む。
+  copy_glob_to_homebin "$LOCAL_WATCHER_DIR/bin" "*.sh"   "$HOME/bin" --executable
+  copy_glob_to_homebin "$LOCAL_WATCHER_DIR/bin" "*.tmpl" "$HOME/bin"
 
   # macOS: launchd
   if [ "$(uname)" = "Darwin" ]; then
-    mkdir -p "$HOME/Library/LaunchAgents"
-    cp -v "$LOCAL_WATCHER_DIR/LaunchAgents/com.local.issue-watcher.plist" \
-          "$HOME/Library/LaunchAgents/"
+    ensure_dir "$HOME/Library/LaunchAgents"
+    copy_template_file \
+      "$LOCAL_WATCHER_DIR/LaunchAgents/com.local.issue-watcher.plist" \
+      "$HOME/Library/LaunchAgents/com.local.issue-watcher.plist"
 
     cat <<'LAUNCHD_HINT'
 
