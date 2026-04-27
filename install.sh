@@ -12,6 +12,13 @@
 #   ./install.sh --local                     # ローカル watcher のみインストール
 #   ./install.sh --all                       # カレントディレクトリ + ローカル watcher
 #   ./install.sh --all --repo /path/to/project
+#
+# オプション（既存フラグと組み合わせ可）:
+#   --dry-run        実コピーせず、予定操作を [DRY-RUN] プレフィクスで列挙
+#                    （ファイルシステムを変更しない。出力分類は実実行時と一致）
+#   --force          .claude/agents/ / .claude/rules/ / CLAUDE.md について、
+#                    内容差分があれば再 .bak 退避して強制上書き
+#                    （既存 *.bak は once-only 規律で保護されたまま）
 # =============================================================================
 
 set -euo pipefail
@@ -69,8 +76,16 @@ while [[ $# -gt 0 ]]; do
       INSTALL_REPO=true
       shift
       ;;
+    --dry-run)
+      DRY_RUN=true
+      shift
+      ;;
+    --force)
+      FORCE=true
+      shift
+      ;;
     -h|--help)
-      sed -n '3,14p' "$0"
+      sed -n '3,21p' "$0"
       exit 0
       ;;
     *)
