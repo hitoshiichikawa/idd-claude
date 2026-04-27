@@ -38,6 +38,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_TEMPLATE_DIR="$SCRIPT_DIR/repo-template"
 LOCAL_WATCHER_DIR="$SCRIPT_DIR/local-watcher"
 
+# 冪等性 / dry-run 制御フラグ（後段の引数パースで上書き可能）
+DRY_RUN=false
+FORCE=false
+
 REPO_PATH=""
 INSTALL_LOCAL=false
 INSTALL_REPO=false
@@ -75,6 +79,305 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+# ─────────────────────────────────────────────────────────────
+# ヘルパー関数群
+#   引数パースの後に定義し、後段の setup_repo / setup_local_watcher 相当ブロックから
+#   呼び出される。すべて DRY_RUN / FORCE をグローバル変数として参照する。
+# ─────────────────────────────────────────────────────────────
+
+# log_action <NEW|OVERWRITE|SKIP|BACKUP> <path> [<note>]
+#   配置・上書き・スキップ・バックアップを統一フォーマットで stdout に記録する。
+#   DRY_RUN=true の場合は "[DRY-RUN]" prefix、それ以外は "[INSTALL]" prefix を使う。
+log_action() {
+  local action="$1"
+  local path="$2"
+  local note="${3:-}"
+  local prefix
+  if [ "$DRY_RUN" = "true" ]; then
+    prefix="[DRY-RUN]"
+  else
+    prefix="[INSTALL]"
+  fi
+  if [ -n "$note" ]; then
+    printf '%s %-9s %s %s\n' "$prefix" "$action" "$path" "$note"
+  else
+    printf '%s %-9s %s\n' "$prefix" "$action" "$path"
+  fi
+}
+
+# files_equal <path_a> <path_b>
+#   2 ファイルの内容同一性判定。
+#   return: 0=同一 / 1=差分あり / 2=どちらか不在 or 比較不能
+files_equal() {
+  local a="$1"
+  local b="$2"
+  if [ ! -f "$a" ] || [ ! -f "$b" ]; then
+    return 2
+  fi
+  if cmp -s "$a" "$b"; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+# classify_action <src> <dest>
+#   stdout に "NEW" / "SKIP" / "OVERWRITE" を返す。
+#   - dest 不在 → NEW
+#   - dest 存在 + 内容同一 → SKIP
+#   - dest 存在 + 内容差分 → OVERWRITE
+classify_action() {
+  local src="$1"
+  local dest="$2"
+  if [ ! -e "$dest" ]; then
+    echo "NEW"
+    return 0
+  fi
+  if files_equal "$src" "$dest"; then
+    echo "SKIP"
+  else
+    echo "OVERWRITE"
+  fi
+}
+
+# ensure_dir <path>
+#   mkdir -p の dry-run 対応版。dry-run 時はディレクトリも作らない。
+ensure_dir() {
+  local path="$1"
+  if [ "$DRY_RUN" = "true" ]; then
+    return 0
+  fi
+  mkdir -p "$path"
+}
+
+# copy_template_file <src> <dest> [--executable]
+#   単一ファイルの NEW / SKIP / OVERWRITE 配置（meta ファイル用、`.bak` は作らない）。
+#   既存があっても内容差分があれば無条件で OVERWRITE する。
+#   --executable 指定時は配置後に `chmod +x` を実行する。
+copy_template_file() {
+  local src="$1"
+  local dest="$2"
+  local executable=false
+  if [ "${3:-}" = "--executable" ]; then
+    executable=true
+  fi
+
+  if [ ! -f "$src" ]; then
+    echo "Error: source file not found: $src" >&2
+    return 1
+  fi
+
+  local action
+  action="$(classify_action "$src" "$dest")"
+
+  local note=""
+  if [ "$executable" = "true" ]; then
+    note="(chmod +x)"
+  fi
+
+  case "$action" in
+    NEW)
+      log_action "NEW" "$dest" "$note"
+      if [ "$DRY_RUN" = "false" ]; then
+        ensure_dir "$(dirname "$dest")"
+        cp "$src" "$dest"
+        if [ "$executable" = "true" ]; then
+          chmod +x "$dest"
+        fi
+      fi
+      ;;
+    SKIP)
+      log_action "SKIP" "$dest" "(identical to template)"
+      ;;
+    OVERWRITE)
+      log_action "OVERWRITE" "$dest" "$note"
+      if [ "$DRY_RUN" = "false" ]; then
+        cp "$src" "$dest"
+        if [ "$executable" = "true" ]; then
+          chmod +x "$dest"
+        fi
+      fi
+      ;;
+  esac
+}
+
+# copy_glob_to_homebin <src_dir> <pattern> <dest_dir> [--executable]
+#   `<src_dir>/<pattern>` にマッチする全ファイルを <dest_dir> に配置する。
+#   nullglob を一時的に有効化し、マッチ 0 件は SKIP ログを出して exit 0 で継続する。
+copy_glob_to_homebin() {
+  local src_dir="$1"
+  local pattern="$2"
+  local dest_dir="$3"
+  local executable_flag=""
+  if [ "${4:-}" = "--executable" ]; then
+    executable_flag="--executable"
+  fi
+
+  ensure_dir "$dest_dir"
+
+  # nullglob を一時的に有効化（マッチ 0 件で空配列扱いにする）
+  local prev_nullglob
+  if shopt -q nullglob; then
+    prev_nullglob=on
+  else
+    prev_nullglob=off
+  fi
+  shopt -s nullglob
+
+  # `$pattern` は意図的に glob 展開させたいためクォートしない
+  # shellcheck disable=SC2206
+  local files=( "$src_dir"/$pattern )
+  local count=${#files[@]}
+
+  if [ "$count" -eq 0 ]; then
+    log_action "SKIP" "$src_dir/$pattern" "(no files matched)"
+  else
+    local src
+    for src in "${files[@]}"; do
+      local dest
+      dest="$dest_dir/$(basename "$src")"
+      if [ -n "$executable_flag" ]; then
+        copy_template_file "$src" "$dest" --executable
+      else
+        copy_template_file "$src" "$dest"
+      fi
+    done
+  fi
+
+  # nullglob を呼び出し前の状態に戻す
+  if [ "$prev_nullglob" = "off" ]; then
+    shopt -u nullglob
+  fi
+}
+
+# backup_claude_md_once <repo_path>
+#   CLAUDE.md.bak を初回 1 回のみ作成し、再実行で内容を変えない once-only 規律を実装。
+#   - CLAUDE.md 不在 → noop
+#   - CLAUDE.md.bak 不在 → BACKUP（初回バックアップ）
+#   - CLAUDE.md.bak 既存 → SKIP（既存 .bak を温存）
+backup_claude_md_once() {
+  local repo_path="$1"
+  local src="$repo_path/CLAUDE.md"
+  local bak="$repo_path/CLAUDE.md.bak"
+
+  if [ ! -f "$src" ]; then
+    return 0
+  fi
+
+  if [ ! -f "$bak" ]; then
+    log_action "BACKUP" "$src" "→ CLAUDE.md.bak"
+    if [ "$DRY_RUN" = "false" ]; then
+      cp "$src" "$bak"
+    fi
+  else
+    log_action "SKIP" "$bak" "(existing .bak preserved)"
+  fi
+}
+
+# copy_with_hybrid_overwrite <src> <dest>
+#   1 ファイル単位のハイブリッド safe-overwrite 処理（agents / rules / CLAUDE.md 共用）。
+#   - dest 不在 → NEW（無条件配置、template 進化に追従）
+#   - dest 存在 + 内容同一 → SKIP `(identical to template)`
+#   - dest 存在 + 内容差分:
+#     - <dest>.bak 不在 → BACKUP `<dest> → <name>.bak` + OVERWRITE
+#     - <dest>.bak 既存 + FORCE=false → SKIP `(existing .bak found, use --force to overwrite)`
+#     - <dest>.bak 既存 + FORCE=true  → SKIP の .bak（once-only 規律保護）+ OVERWRITE
+copy_with_hybrid_overwrite() {
+  local src="$1"
+  local dest="$2"
+
+  if [ ! -f "$src" ]; then
+    echo "Error: source file not found: $src" >&2
+    return 1
+  fi
+
+  local action
+  action="$(classify_action "$src" "$dest")"
+
+  case "$action" in
+    NEW)
+      log_action "NEW" "$dest"
+      if [ "$DRY_RUN" = "false" ]; then
+        ensure_dir "$(dirname "$dest")"
+        cp "$src" "$dest"
+      fi
+      ;;
+    SKIP)
+      log_action "SKIP" "$dest" "(identical to template)"
+      ;;
+    OVERWRITE)
+      local bak="$dest.bak"
+      local bak_name
+      bak_name="$(basename "$dest").bak"
+      if [ ! -f "$bak" ]; then
+        # .bak 不在 → 初回退避してから上書き（once-only）
+        local backup_note
+        if [ "$FORCE" = "true" ]; then
+          backup_note="→ $bak_name (--force)"
+        else
+          backup_note="→ $bak_name (custom edits detected)"
+        fi
+        log_action "BACKUP" "$dest" "$backup_note"
+        if [ "$DRY_RUN" = "false" ]; then
+          cp "$dest" "$bak"
+        fi
+        log_action "OVERWRITE" "$dest"
+        if [ "$DRY_RUN" = "false" ]; then
+          cp "$src" "$dest"
+        fi
+      else
+        # .bak 既存 → once-only 規律で再退避しない
+        if [ "$FORCE" = "true" ]; then
+          log_action "SKIP" "$bak" "(existing .bak preserved even with --force)"
+          log_action "OVERWRITE" "$dest"
+          if [ "$DRY_RUN" = "false" ]; then
+            cp "$src" "$dest"
+          fi
+        else
+          log_action "SKIP" "$dest" "(existing .bak found, use --force to overwrite)"
+        fi
+      fi
+      ;;
+  esac
+}
+
+# copy_agents_rules <src_dir> <dest_dir>
+#   `.claude/agents/*.md` および `.claude/rules/*.md` のハイブリッド safe-overwrite 配置。
+#   各 .md ファイルに対して copy_with_hybrid_overwrite を適用する。
+#   nullglob を一時的に有効化し、マッチ 0 件は SKIP ログを出して exit 0 で継続。
+copy_agents_rules() {
+  local src_dir="$1"
+  local dest_dir="$2"
+
+  ensure_dir "$dest_dir"
+
+  local prev_nullglob
+  if shopt -q nullglob; then
+    prev_nullglob=on
+  else
+    prev_nullglob=off
+  fi
+  shopt -s nullglob
+
+  local files=( "$src_dir"/*.md )
+  local count=${#files[@]}
+
+  if [ "$count" -eq 0 ]; then
+    log_action "SKIP" "$src_dir/*.md" "(no files matched)"
+  else
+    local src
+    for src in "${files[@]}"; do
+      local dest
+      dest="$dest_dir/$(basename "$src")"
+      copy_with_hybrid_overwrite "$src" "$dest"
+    done
+  fi
+
+  if [ "$prev_nullglob" = "off" ]; then
+    shopt -u nullglob
+  fi
+}
 
 # 対話モード（引数なし）
 if ! $INSTALL_LOCAL && ! $INSTALL_REPO; then
