@@ -431,12 +431,15 @@ if $INSTALL_REPO; then
   REPO_PATH="$REPO_PATH_ABS"
 
   # CLAUDE.md.bak の once-only 保護（初回 install 時のオリジナルを温存）
+  # → 既存 CLAUDE.md があれば `.bak` に退避（既存 `.bak` は尊重、再退避しない）
   backup_claude_md_once "$REPO_PATH"
 
-  # CLAUDE.md 本体は agents/rules と同じハイブリッド safe-overwrite ポリシーで配置。
-  # backup_claude_md_once が既に CLAUDE.md.bak を保護しているため、ここでの BACKUP は
-  # 「既存 .bak を尊重する」分岐に落ちる（once-only 規律で重複退避を防ぐ）。
-  copy_with_hybrid_overwrite "$REPO_TEMPLATE_DIR/CLAUDE.md" "$REPO_PATH/CLAUDE.md"
+  # CLAUDE.md 本体は backup_claude_md_once が `.bak` 退避を引き受けたあと、
+  # copy_template_file で template を常に配置する（既存と同一なら SKIP）。
+  # → design.md「setup_repo ブロック」設計判断: ハイブリッド側は `.bak` 退避を
+  #   スキップしてそのまま OVERWRITE / SKIP のみを行う、と整合
+  # → 要件 2.5 / 5.4: 既存挙動（無条件で template 由来 CLAUDE.md を配置）を維持
+  copy_template_file "$REPO_TEMPLATE_DIR/CLAUDE.md" "$REPO_PATH/CLAUDE.md"
 
   copy_agents_rules "$REPO_TEMPLATE_DIR/.claude/agents" "$REPO_PATH/.claude/agents"
   copy_agents_rules "$REPO_TEMPLATE_DIR/.claude/rules"  "$REPO_PATH/.claude/rules"

@@ -189,8 +189,11 @@ curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/set
 指定時でも既存 `.bak` は保護されます。`.bak` を更新したい場合は、自分で `<file>.bak` を削除して
 から再実行してください。
 
-`CLAUDE.md` も同じハイブリッド safe-overwrite の対象です（`backup_claude_md_once` で initial
-バックアップを作ったあと、`copy_with_hybrid_overwrite` で本体を判定）。
+> **CLAUDE.md は別経路**: `CLAUDE.md` は `backup_claude_md_once` で初回バックアップ（once-only）
+> を作ったあと、本体は **常に template 由来内容で配置**されます（既存と同一なら `SKIP`）。
+> `.claude/agents/` / `.claude/rules/` のハイブリッド safe-overwrite とは違い、`CLAUDE.md` 本体
+> 自体に対する `--force` のような上書き抑止はありません（カスタム編集は `.bak` のみで保護）。
+> これは従来の `install.sh` 挙動（無条件で template を配置）との後方互換性を維持するためです。
 
 #### `--dry-run` モード
 
