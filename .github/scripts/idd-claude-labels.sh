@@ -57,16 +57,20 @@ if [ -n "$REPO" ]; then
 fi
 
 # Label definitions: name|color|description
+# Issue #54 Req 2.1 / 2.2 / 2.3: 誤付与防止のため description に「【PR 用】」「【Issue 用】」
+# prefix を入れて適用先を明示する。GitHub のラベル description 上限（100 文字）を超えないよう
+# 末尾の説明文は維持できる範囲で短縮しない（最長: needs-rebase = 80 文字）。
+# ラベルの name / color 自体は本要件で変更しない（既存運用との互換性維持・Req 2.5）。
 LABELS=(
-  "auto-dev|1f77b4|自動開発対象"
-  "needs-decisions|f1c40f|人間の判断が必要"
-  "awaiting-design-review|e67e22|設計 PR レビュー待ち（Architect 発動時）"
-  "claude-picked-up|9b59b6|Claude Code 実行中"
-  "ready-for-review|2ecc71|PR 作成完了"
-  "claude-failed|e74c3c|自動実行が失敗"
-  "skip-triage|95a5a6|Triage をスキップ"
-  "needs-rebase|fbca04|approved PR で base が古い／conflict が発生済み（Phase A: Merge Queue Processor が付与）"
-  "needs-iteration|d4c5f9|PR レビューコメントの反復対応待ち（#26 PR Iteration Processor が処理）"
+  "auto-dev|1f77b4|【Issue 用】 自動開発対象"
+  "needs-decisions|f1c40f|【Issue 用】 人間の判断が必要"
+  "awaiting-design-review|e67e22|【Issue 用】 設計 PR レビュー待ち（Architect 発動時）"
+  "claude-picked-up|9b59b6|【Issue 用】 Claude Code 実行中"
+  "ready-for-review|2ecc71|【Issue 用】 PR 作成完了"
+  "claude-failed|e74c3c|【Issue 用】 自動実行が失敗"
+  "skip-triage|95a5a6|【Issue 用】 Triage をスキップ"
+  "needs-rebase|fbca04|【PR 用】 approved PR で base が古い／conflict が発生済み（Phase A: Merge Queue Processor が付与）"
+  "needs-iteration|d4c5f9|【PR 用】 PR レビューコメントの反復対応待ち（#26 PR Iteration Processor が処理）"
 )
 
 echo "📌 idd-claude ラベルを作成します"
