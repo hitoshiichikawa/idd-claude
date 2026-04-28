@@ -2191,6 +2191,115 @@ _parallel_validate_slots() {
   return 0
 }
 
+# ─── Phase C: Worktree Manager ───
+#
+# Per-slot 永続 worktree を $WORKTREE_BASE_DIR/<repo-slug>/slot-N/ に配置し、
+# slot 同士の作業ツリー干渉を物理隔離する（Req 3.5）。
+#
+# 設計判断:
+#   - slot worktree は `git worktree add --detach` で detached HEAD として作成する
+#     （Slot Runner が `git checkout -B <branch> main` で新規 branch に切り替える際、
+#     他 slot の worktree が同じ local branch を保持していてもブロックされないため）
+#   - `git worktree list --porcelain` で冪等性を担保
+#   - 破損検出時は <slot-N>.broken-<ts> に退避してから再作成
+#   - PARALLEL_SLOTS=1 のときは slot-2 以降の worktree を作らない（呼び出し元で gate）
+
+# slot 番号から worktree ディレクトリの絶対パスを返す。
+# 引数: $1 = slot 番号
+# Req 3.1, 3.7
+_worktree_path() {
+  local n="$1"
+  echo "$WORKTREE_BASE_DIR/$REPO_SLUG/slot-$n"
+}
+
+# 指定 path が現在の repo の git worktree として登録済みかを判定。
+# 0 = 登録済み / 非ゼロ = 未登録
+_worktree_is_registered() {
+  local wt_path="$1"
+  # `git worktree list --porcelain` は `worktree <abs_path>` 形式で各 worktree を返す
+  git -C "$REPO_DIR" worktree list --porcelain 2>/dev/null \
+    | grep -Fx "worktree $wt_path" >/dev/null 2>&1
+}
+
+# Per-slot worktree を冪等に確保する。
+# 引数: $1 = slot 番号
+# 戻り値: 0 = ok（worktree が存在し利用可能） / 1 = 失敗（呼び出し元で claude-failed 化）
+# 副作用: $WORKTREE_BASE_DIR/<slug>/slot-N/ を作成または再利用
+#
+# Req 3.1, 3.2, 3.3, 3.6, 3.7
+_worktree_ensure() {
+  local n="$1"
+  local wt_path
+  wt_path="$(_worktree_path "$n")"
+  local parent_dir
+  parent_dir="$(dirname "$wt_path")"
+
+  if ! mkdir -p "$parent_dir" 2>/dev/null; then
+    dispatcher_warn "slot-${n}: worktree 親ディレクトリ作成に失敗: $parent_dir"
+    return 1
+  fi
+
+  # ケース A: 既に worktree として登録済み → 再利用（Req 3.3）
+  if _worktree_is_registered "$wt_path"; then
+    if [ -d "$wt_path/.git" ] || [ -f "$wt_path/.git" ]; then
+      return 0
+    fi
+    # 登録は残っているが実体が壊れている → prune してから再作成
+    dispatcher_warn "slot-${n}: worktree 登録あり実体欠損、prune して再作成: $wt_path"
+    git -C "$REPO_DIR" worktree prune >/dev/null 2>&1 || true
+  fi
+
+  # ケース B: dir は存在するが worktree として登録されていない（未初期化 or 破損）
+  if [ -e "$wt_path" ]; then
+    local ts
+    ts=$(date +%Y%m%d-%H%M%S)
+    local broken="${wt_path}.broken-${ts}"
+    dispatcher_warn "slot-${n}: 既存ディレクトリを退避して worktree を再作成: $wt_path -> $broken"
+    if ! mv "$wt_path" "$broken" 2>/dev/null; then
+      dispatcher_warn "slot-${n}: 既存ディレクトリの退避に失敗: $wt_path"
+      return 1
+    fi
+    git -C "$REPO_DIR" worktree prune >/dev/null 2>&1 || true
+  fi
+
+  # ケース C: 新規作成（origin/main から detached HEAD として）
+  # detached にする理由: 各 slot が `git checkout -B <branch> main` で新規 branch に
+  # 切り替える際、別 slot worktree が同じ local branch を持っていても弾かれないため。
+  if ! git -C "$REPO_DIR" worktree add --detach "$wt_path" "origin/main" >/dev/null 2>&1; then
+    dispatcher_warn "slot-${n}: git worktree add に失敗: $wt_path"
+    return 1
+  fi
+  dispatcher_log "slot-${n}: worktree 作成: $wt_path (detached @ origin/main)"
+  return 0
+}
+
+# Per-slot worktree を origin/main の最新状態に強制リセットする（Issue 投入時に毎回呼ぶ）。
+# 引数: $1 = worktree 絶対パス
+# 戻り値: 0 = ok / 1 = 失敗
+# 副作用: 当該 worktree が origin/main の最新コミットに head=detached、
+#   tracked / untracked / ignored すべて消去される
+#
+# Req 3.4
+_worktree_reset() {
+  local wt="$1"
+  if [ ! -d "$wt" ]; then
+    return 1
+  fi
+  # 1. 最新の origin を取得
+  if ! git -C "$wt" fetch origin --prune >/dev/null 2>&1; then
+    return 1
+  fi
+  # 2. detached HEAD を origin/main に強制移動
+  if ! git -C "$wt" reset --hard origin/main >/dev/null 2>&1; then
+    return 1
+  fi
+  # 3. untracked + ignored を消去（前回 Issue の build artifact / node_modules を残さない）
+  if ! git -C "$wt" clean -fdx >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 未処理 Issue を取得
 #   auto-dev ラベルがあり、かつ以下のラベルが付いていないもの:
