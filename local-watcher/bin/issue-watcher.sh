@@ -2300,6 +2300,66 @@ _worktree_reset() {
   return 0
 }
 
+# ─── Phase C: Slot Lock Manager ───
+#
+# Per-slot 非ブロッキング flock を提供する。slot 間のロックは別ファイルとし、
+# ある slot の処理が他 slot の処理開始をブロックしない（Req 4.4）。
+#
+# fd 番号: 既存 LOCK_FILE が fd 200 を使うため、衝突回避で 210 + slot_number を使う。
+# 従って bash の per-fd 上限以下になるよう、PARALLEL_SLOTS は事実上 ~ 数十程度を想定
+# （CLAUDE.md には bash 4+ と記載済、bash の fd 上限は通常数百〜数千）。
+#
+# slot Worker はサブシェル `( ... ) &` で動くため、サブシェル終了で fd は自動解放され、
+# 明示的な _slot_release 呼び出しは不要だが命名対称性のため定義する。
+
+# slot 番号から lock file path を返す。
+# 引数: $1 = slot 番号
+# Req 4.1
+_slot_lock_path() {
+  local n="$1"
+  echo "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-${n}.lock"
+}
+
+# 指定 slot の per-slot 非ブロッキング flock を取得する（成功時 fd 210+N が open のまま残る）。
+# 引数: $1 = slot 番号
+# 戻り値: 0 = acquired / 1 = 既に他プロセスがロック中、または fd open 失敗
+# 副作用: 成功時 fd (210+N) が open 状態（呼び出し側スコープで保持される）
+#
+# Req 4.2, 4.3, 4.4
+_slot_acquire() {
+  local n="$1"
+  local lock_file
+  lock_file="$(_slot_lock_path "$n")"
+  # parent dir を冪等作成（SLOT_LOCK_DIR は通常 $HOME/.issue-watcher で既存）
+  mkdir -p "$(dirname "$lock_file")" 2>/dev/null || return 1
+  local fd=$((210 + n))
+  # eval を使うのは bash 4.0 互換のため。入力 n は _parallel_validate_slots 通過済の
+  # 正整数のみで、外部入力は流入しない（NFR 2.3 のシェル展開リスクなし）。
+  # shellcheck disable=SC1083
+  if ! eval "exec ${fd}>\"\$lock_file\"" 2>/dev/null; then
+    return 1
+  fi
+  if ! flock -n "$fd" 2>/dev/null; then
+    # 既に他プロセスがロック中。fd を閉じて return 1
+    eval "exec ${fd}>&-" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+# 指定 slot の per-slot lock を解放する。
+# 引数: $1 = slot 番号
+# 戻り値: 常に 0
+# サブシェル終了で fd は自動解放されるため通常は呼ぶ必要なし。Dispatcher 側で
+# claim 失敗時のロールバックに使う（Req 2.3: ラベル付与失敗で slot lock 解放）。
+_slot_release() {
+  local n="$1"
+  local fd=$((210 + n))
+  # shellcheck disable=SC1083
+  eval "exec ${fd}>&-" 2>/dev/null || true
+  return 0
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 未処理 Issue を取得
 #   auto-dev ラベルがあり、かつ以下のラベルが付いていないもの:
