@@ -1339,8 +1339,70 @@ Phase C 導入による後方互換性は以下のとおり保証されます:
   Phase C 導入前と外形的に同一挙動（slot-2 以降の lock / worktree は作成されない）
 - **依存コマンドの追加なし**: 既存の `gh` / `jq` / `git` / `flock` / `timeout` のみで動作。
   ただし `wait -n` を使うため **bash 4.3+** が必要（CLAUDE.md の bash 4+ 前提を踏襲、
-  macOS 標準 bash 3.2 では別途 `brew install bash` が必要）
+  macOS 標準 bash 3.2 では別途 `brew install bash` が必要、詳細は下記
+  [macOS で bash 4.3+ を導入する手順](#macos-で-bash-43-を導入する手順) を参照）
 - **新規ラベルの追加なし**: `idd-claude-labels.sh` の再実行は不要
+
+#### macOS で bash 4.3+ を導入する手順
+
+macOS 標準の `/bin/bash` は GPLv3 ライセンス上の理由で **bash 3.2 のまま据え置かれている**
+ため、`PARALLEL_SLOTS=2` 以上で動作させたい macOS ユーザーは **Homebrew で bash 4.3+
+を別途導入** する必要があります。`PARALLEL_SLOTS=1`（既定）のままなら本手順は不要です。
+
+```bash
+# 1. Homebrew で最新 bash を導入（4.4+ がインストールされる）
+brew install bash
+
+# 2. インストール先と version を確認
+which -a bash                # /opt/homebrew/bin/bash と /bin/bash の 2 つが出れば OK
+/opt/homebrew/bin/bash --version  # GNU bash, version 5.x.x ...
+
+# 3. cron / launchd で issue-watcher.sh を実行する際に Homebrew bash が見えるよう
+#    PATH に /opt/homebrew/bin を含める（Apple Silicon の場合）
+#    Intel Mac の場合は /usr/local/bin が Homebrew prefix
+```
+
+watcher への適用は **以下のいずれか 1 つ** を選びます:
+
+- **推奨**: cron / launchd の `PATH` 環境変数に `/opt/homebrew/bin`（Intel Mac は
+  `/usr/local/bin`）を含めれば、`issue-watcher.sh` の shebang `#!/usr/bin/env bash`
+  が新しい bash を解決します。launchd plist の `EnvironmentVariables` または crontab
+  先頭の `PATH=...` で設定してください
+- **明示指定**: launchd plist や cron 行で `/opt/homebrew/bin/bash $HOME/bin/issue-watcher.sh`
+  のように bash バイナリを明示的に呼び出す
+
+導入後は `bash --version` の出力が `4.3` 以上であることを確認してから `PARALLEL_SLOTS=2`
+を有効化してください。`/usr/bin/env bash` が依然 bash 3.2 を解決していると、`wait -n` を
+使う Dispatcher が `wait: -n: invalid option` で失敗します。
+
+> Linux ディストリビューションの大半（Ubuntu / Debian / RHEL 系）は標準で bash 4.3+ が
+> 入っているため、追加手順は不要です。
+
+#### PARALLEL_SLOTS を減らした場合の残存リソース
+
+`PARALLEL_SLOTS` を一度大きい値（例: `4`）で起動した後に小さい値（例: `2`）に戻した場合、
+**過去に作成した slot-3 / slot-4 用の worktree とロックファイルがディスク上に残ります**
+（これは仕様です。watcher は自動削除しません）。
+
+- `$HOME/.issue-watcher/worktrees/<repo-slug>/slot-3/` / `slot-4/` などの worktree ディレクトリ
+- `$HOME/.issue-watcher/<repo-slug>-slot-3.lock` / `slot-4.lock` などの lock ファイル
+
+これらが残っていても新しい `PARALLEL_SLOTS=2` の動作には影響しません（Dispatcher は
+`1..PARALLEL_SLOTS` の範囲のみを参照するため、slot-3 以降のリソースは利用されない）。
+ディスク容量を回収したい場合は **手動で削除** してください:
+
+```bash
+# 例: PARALLEL_SLOTS を 4 から 2 に戻した後、slot-3 / slot-4 を回収する
+git -C "$REPO_DIR" worktree remove "$HOME/.issue-watcher/worktrees/<repo-slug>/slot-3" --force
+git -C "$REPO_DIR" worktree remove "$HOME/.issue-watcher/worktrees/<repo-slug>/slot-4" --force
+git -C "$REPO_DIR" worktree prune
+rm -f "$HOME/.issue-watcher/<repo-slug>-slot-3.lock"
+rm -f "$HOME/.issue-watcher/<repo-slug>-slot-4.lock"
+```
+
+> **設計上の判断**: 自動削除しないのは、削除タイミング（次サイクル開始直前 / 終了直後）に
+> よっては「他プロセスが当該 slot-N の lock を握っている可能性」を完全には排除できず、
+> 安全側に倒すと処理を進められないケースが出るためです。回収責任はユーザー側に委ねます。
 
 #### 初回サイクルの追加遅延
 
