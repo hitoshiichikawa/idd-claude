@@ -128,7 +128,12 @@
 - Architect は Triage の `needs_architect: true` 判定時のみ PM と Developer の間に挟まれる
 - Architect が起動した Issue では **設計 PR ゲート**を経由する（設計 PR を merge してから実装 PR が別途作られる）
 - Reviewer は impl / impl-resume の Developer 完了直後に **独立 context** で起動され、reject 時は Developer に最大 1 回だけ自動差し戻し、再 reject では `claude-failed` で人間に委ねる（差し戻しループは Reviewer 最大 2 回 / Developer 最大 2 回で打ち切り）
-- Developer は `design.md` / `tasks.md` を書き換えない（設計 PR で人間レビュー済みのため）。矛盾は PR 本文「確認事項」で指摘する
+- Developer は **実装 PR** で `design.md` / `tasks.md` / `requirements.md` を書き換えない（設計 PR で人間レビュー済みのため）。矛盾は PR 本文「確認事項」で指摘する
+- **PR Iteration（`needs-iteration` ラベル）の責務境界**:
+  - **設計 PR (`claude/issue-<N>-design-<slug>`)** で `needs-iteration` が付いた場合、watcher が次サイクルで Architect 役割の iteration を起動する。`docs/specs/<N>-<slug>/` 配下（`requirements.md` / `design.md` / `tasks.md`）の **書き換えは許容** され、成功時 `awaiting-design-review` に遷移する
+  - **実装 PR (`claude/issue-<N>-impl-<slug>`)** で `needs-iteration` が付いた場合、watcher が次サイクルで Developer 役割の iteration を起動する。`docs/specs/<N>-<slug>/` 配下の **spec 書き換えは禁止** で、矛盾は PR 本文「確認事項」で指摘するに留める。成功時 `ready-for-review` に遷移する
+  - **1 PR = design or impl のどちらか**（混在禁止）。1 PR で spec 編集と実装変更を同居させない（branch 名が両 pattern に合致するケースは watcher が `ambiguous` として skip する）
+  - 設計 PR iteration は idd-claude 側で `PR_ITERATION_DESIGN_ENABLED=true` の opt-in が必要
 - 各エージェントの成果物は `docs/specs/<番号>-<slug>/` 配下に保存する（Kiro / cc-sdd 互換）
   - `requirements.md`（PM）— EARS 形式の AC、numeric 階層 ID
   - `design.md`（Architect、条件付き）— File Structure Plan / Components and Interfaces / Traceability

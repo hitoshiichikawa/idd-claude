@@ -33,9 +33,24 @@ Architect の直後に呼ばれます。`docs/specs/<番号>-<slug>/` 配下の 
    >
    > - 問題なければ **merge** してください。merge 後に Issue から `awaiting-design-review` ラベルを外すと、次回のポーリングで Developer が自動起動し、実装 PR が別途作成されます
    > - 修正が必要な場合: PR に直接 commit / suggest-edit / line comment で指摘してください
+   > - **`needs-iteration` ラベルでの自動反復**（idd-claude 側で `PR_ITERATION_DESIGN_ENABLED=true` 有効時）: line コメント / `@claude` mention general コメントを残してから `needs-iteration` ラベルを付与すると、watcher が次サイクルで Architect 役割の iteration を起動し、`docs/specs/<N>-<slug>/` 配下の spec 群を更新する。成功時は `awaiting-design-review` に自動遷移
    > - 設計をやり直したい場合: PR を close し、この Issue から `awaiting-design-review` ラベルを外すと再 Triage されます
    >
    > _注: watcher で `DESIGN_REVIEW_RELEASE_ENABLED=true` を有効化している場合、設計 PR merge 後数分以内に Issue から `awaiting-design-review` が自動除去され、ステータスコメントが投稿されます。手動でのラベル除去は不要です。_
+
+## 1 PR = design or impl のどちらか（混在禁止）
+
+設計 PR と実装 PR は **必ず別 PR** として扱います。1 PR の中で `docs/specs/<N>-<slug>/`
+配下の spec 編集と実装コードの変更を同居させないでください。
+
+- 設計 PR の branch 名は `claude/issue-<N>-design-<slug>`（idd-claude PjM が自動付与）
+- 実装 PR の branch 名は `claude/issue-<N>-impl-<slug>`（idd-claude PjM が自動付与）
+- watcher の PR Iteration Processor は branch 名で **kind**（design / impl / 対象外）を判定する
+  - 両 pattern に合致する branch は `ambiguous` として skip される
+  - 設計 PR iteration では spec 群を書き換えてよい / 実装 PR iteration では spec 書き換え禁止
+  - ラベル遷移先が分岐する（design → `awaiting-design-review` / impl → `ready-for-review`）
+
+混在 PR は **ラベル遷移の意味が曖昧になる** ため、watcher 側で対象外として扱います。
 
 ## 設計 PR 本文テンプレート
 
