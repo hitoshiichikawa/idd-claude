@@ -572,6 +572,54 @@ Reviewer ステージ実行中もラベルは `claude-picked-up` のまま保持
 
 ---
 
+## オプション機能（opt-in / 常時有効）一覧
+
+idd-claude は基本フロー（Triage → 実装 → PR 作成）以外の機能を **opt-in 制**で導入しています。
+有効化していない機能のコードパスは完全に skip され、挙動は導入前と一致します。
+
+### opt-in（既定 OFF、明示的に有効化が必要）
+
+| 機能 | 制御変数 | 既定 | 詳細 | 関連 |
+|---|---|---|---|---|
+| **Phase A: Merge Queue Processor**（出口 conflict 検知 + stale base 自動 rebase） | `MERGE_QUEUE_ENABLED` | `false` | [Merge Queue Processor (Phase A)](#merge-queue-processor-phase-a) | #14 |
+| **`needs-rebase` 自動再評価ループ**（conflict 解消後のラベル自動除去） | `MERGE_QUEUE_RECHECK_ENABLED` | `false` | [`needs-rebase` ラベルの自動解除](#needs-rebase-ラベルの自動解除-re-check-processor-opt-in) | #27 |
+| **PR Iteration Processor**（PR レビューコメント駆動の自動反復） | `PR_ITERATION_ENABLED` | `false` | [PR Iteration Processor (#26)](#pr-iteration-processor-26) | #26 |
+| **Design Review Release Processor**（設計 PR merge 時の `awaiting-design-review` 自動除去） | `DESIGN_REVIEW_RELEASE_ENABLED` | `false` | [Design Review Release Processor (#40)](#design-review-release-processor-40) | #40 |
+| **GitHub Actions ワークフロー**（local watcher の代替実行基盤） | `IDD_CLAUDE_USE_ACTIONS`（Repository Variable） | 未設定 = 無効 | [Step 3-B. GitHub Actions をセットアップ](#step-3-b-github-actions-をセットアップ代替) | #10 |
+
+各 opt-in は**互いに独立**に制御できます。例えば `MERGE_QUEUE_RECHECK_ENABLED` だけを有効化して
+Phase A 本体は無効、といった構成も可能です。
+
+cron で全 watcher 系 opt-in を有効化する例:
+
+```cron
+*/2 * * * * REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo \
+  MERGE_QUEUE_ENABLED=true \
+  MERGE_QUEUE_RECHECK_ENABLED=true \
+  PR_ITERATION_ENABLED=true \
+  DESIGN_REVIEW_RELEASE_ENABLED=true \
+  $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+```
+
+### 常時有効（opt-out 不可）
+
+| 機能 | 起動条件 | 詳細 | 関連 |
+|---|---|---|---|
+| **Reviewer Gate**（Developer 完了後の独立レビュー subagent） | impl / impl-resume / skip-triage 経由 impl の **すべて**で常時起動 | [Reviewer Gate (#20 Phase 1)](#reviewer-gate-20-phase-1) | #20 |
+
+問題発生時は `REVIEWER_MAX_TURNS=0` 等での無効化ではなく、原因究明と Issue 起票で対処してください。
+
+### install.sh の runtime フラグ（参考）
+
+機能 opt-in ではなく installer の挙動制御フラグ。詳細は[冪等性ポリシー](#冪等性ポリシーと再実行時の挙動-36)を参照。
+
+| フラグ | 既定 | 用途 |
+|---|---|---|
+| `--dry-run` | 無効 | ファイルシステムを変更せず予定操作のみ表示 |
+| `--force` | 無効 | `.bak` ガードを飛び越えて差分ありファイルを上書き（既存 `.bak` は温存） |
+
+---
+
 ## Merge Queue Processor (Phase A)
 
 local watcher は各サイクルの冒頭（Issue 処理ループに入る前）で **approved 済み open PR の
