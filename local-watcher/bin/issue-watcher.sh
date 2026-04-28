@@ -2789,247 +2789,167 @@ EOF
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 未処理 Issue を取得
-#   auto-dev ラベルがあり、かつ以下のラベルが付いていないもの:
-#     needs-decisions / awaiting-design-review / claude-picked-up /
-#     ready-for-review / claude-failed
+# Phase C: Dispatcher
+#
+# 1 サイクル中に 1 度起動される。Issue 候補をローカルキューに pop し、空き slot を
+# 探索して claim（claude-picked-up ラベル付与）してから Slot Runner をバックグラウンド
+# 起動する。サイクル終端で `wait` により全 Worker 完了を待ち合わせる。
+#
+# Req 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 6.3, 6.4, 6.5, 7.5, NFR 1.1, NFR 1.2
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ISSUES=$(gh issue list \
-  --repo "$REPO" \
-  --label "$LABEL_TRIGGER" \
-  --state open \
-  --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\"" \
-  --json number,title,body,url,labels \
-  --limit 5)
 
-COUNT=$(echo "$ISSUES" | jq 'length')
-[ "$COUNT" -eq 0 ] && {
-  echo "[$(date '+%F %T')] 処理対象の Issue なし"
-  exit 0
+# Dispatcher が抱える slot_n -> PID マッピング（bash associative array, 4.0+）。
+# サブシェル fork 後、_slot_release で fd を閉じてもこの map で「どの slot が誰の
+# 子プロセスか」を後で再特定できる。
+declare -A _DISPATCHER_SLOT_PIDS
+
+# 完了した子プロセスを slot_pid map から prune する。
+# `kill -0 <pid>` が失敗（プロセス不在）なら slot は空いたとみなす。
+_dispatcher_reap_finished_slots() {
+  local n pid
+  for n in "${!_DISPATCHER_SLOT_PIDS[@]}"; do
+    pid="${_DISPATCHER_SLOT_PIDS[$n]}"
+    if [ -z "$pid" ]; then
+      unset '_DISPATCHER_SLOT_PIDS['"$n"']'
+      continue
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      # 子プロセス終了済 → slot 解放
+      wait "$pid" 2>/dev/null || true
+      unset '_DISPATCHER_SLOT_PIDS['"$n"']'
+      dispatcher_log "slot-${n}: completed (pid=$pid)"
+    fi
+  done
 }
 
-echo "[$(date '+%F %T')] $COUNT 件の Issue を処理します"
+# 空き slot を探す（reap → 1..PARALLEL_SLOTS で _slot_acquire）。
+# 戻り値: 0 = 取得成功（slot 番号を stdout に echo） / 1 = 全 slot busy
+_dispatcher_find_free_slot() {
+  _dispatcher_reap_finished_slots
+  local n
+  for ((n=1; n<=PARALLEL_SLOTS; n++)); do
+    # 既に PID マップに載っている slot は busy
+    if [ -n "${_DISPATCHER_SLOT_PIDS[$n]:-}" ]; then
+      continue
+    fi
+    if _slot_acquire "$n"; then
+      echo "$n"
+      return 0
+    fi
+  done
+  return 1
+}
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 各 Issue を処理
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
-  NUMBER=$(echo "$issue" | jq -r '.number')
-  TITLE=$(echo "$issue"  | jq -r '.title')
-  BODY=$(echo "$issue"   | jq -r '.body // ""')
-  URL=$(echo "$issue"    | jq -r '.url')
-  LABELS=$(echo "$issue" | jq -r '.labels[].name')
-  TS=$(date +%Y%m%d-%H%M%S)
-  LOG="$LOG_DIR/issue-${NUMBER}-${TS}.log"
-
-  echo "=== Processing #$NUMBER: $TITLE ===" | tee -a "$LOG"
-
-  # ─────────────────────────────────────────────────────────────
-  # 既存 spec ディレクトリの検出（設計 PR merge 済みか）と slug 決定
-  # ─────────────────────────────────────────────────────────────
-  EXISTING_SPEC_DIR=$(ls -d "$REPO_DIR/docs/specs/${NUMBER}-"* 2>/dev/null | head -1 || true)
-  HAS_EXISTING_SPEC=false
-  if [ -n "$EXISTING_SPEC_DIR" ] && [ -f "$EXISTING_SPEC_DIR/requirements.md" ]; then
-    HAS_EXISTING_SPEC=true
-    SLUG=$(basename "$EXISTING_SPEC_DIR" | sed "s/^${NUMBER}-//")
-    echo "📂 既存 spec 検出: $EXISTING_SPEC_DIR (slug=$SLUG)" | tee -a "$LOG"
-  else
-    SLUG=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' \
-          | sed -E 's/[^a-z0-9]+/-/g' | cut -c1-40 | sed -E 's/-+$//')
+# 1 サイクル分の Dispatcher を実行する。
+# 戻り値: 0 = 正常完了（個々の Worker の成否は Issue ラベル経由で表現）/ 非ゼロ = 致命的失敗
+_dispatcher_run() {
+  # Req 1.3: PARALLEL_SLOTS 検証 → 不正なら ERROR ログ + exit 1
+  if ! _parallel_validate_slots; then
+    return 1
   fi
-  SPEC_DIR_REL="docs/specs/${NUMBER}-${SLUG}"
 
-  # ─────────────────────────────────────────────────────────────
-  # モード判定（design / impl / impl-resume）
-  # ─────────────────────────────────────────────────────────────
-  NEEDS_ARCHITECT="false"
-  ARCHITECT_REASON=""
-  MODE=""
+  # Req 7.5: 既存の Issue 取得クエリ（フィルタ・limit 5）を据え置き
+  local issues
+  issues=$(gh issue list \
+    --repo "$REPO" \
+    --label "$LABEL_TRIGGER" \
+    --state open \
+    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\"" \
+    --json number,title,body,url,labels \
+    --limit 5)
 
-  if $HAS_EXISTING_SPEC; then
-    echo "✅ #$NUMBER: 設計レビュー済み（spec dir あり） → impl-resume モード" | tee -a "$LOG"
-    MODE="impl-resume"
-  elif echo "$LABELS" | grep -qx "$LABEL_SKIP_TRIAGE"; then
-    echo "skip-triage ラベルがあるため Triage をスキップ → impl モード" | tee -a "$LOG"
-    ARCHITECT_REASON="Triage をスキップ（軽微な変更扱い）"
-    MODE="impl"
-  else
-    # ─── Triage フェーズ ───
-    TRIAGE_FILE="/tmp/triage-${REPO_SLUG}-${NUMBER}-${TS}.json"
-    rm -f "$TRIAGE_FILE"
+  local count
+  count=$(echo "$issues" | jq 'length')
+  if [ "$count" -eq 0 ]; then
+    # Req 1.4 / 7.6: PARALLEL_SLOTS=1 + 対象なし時の挙動を本機能導入前と同等に保つ。
+    # （prefix dispatcher: は付くが、メッセージ本体は既存と同じ）
+    echo "[$(date '+%F %T')] 処理対象の Issue なし"
+    return 0
+  fi
 
-    TITLE_SAFE="${TITLE//|/\\|}"
-    TRIAGE_PROMPT=$(sed \
-      -e "s|{{NUMBER}}|${NUMBER}|g" \
-      -e "s|{{TITLE}}|${TITLE_SAFE}|g" \
-      -e "s|{{URL}}|${URL}|g" \
-      -e "s|{{FILE}}|${TRIAGE_FILE}|g" \
-      "$TRIAGE_TEMPLATE")
+  # Req 6.3: サイクル開始ログ（処理対象件数 + 利用可能 slot 数）
+  dispatcher_log "対象 Issue ${count} 件 / 利用可能 slot ${PARALLEL_SLOTS} 件"
 
-    echo "--- Triage 実行 ---" >> "$LOG"
-    if ! claude \
-        --print "$TRIAGE_PROMPT" \
-        --model "$TRIAGE_MODEL" \
-        --permission-mode bypassPermissions \
-        --max-turns "$TRIAGE_MAX_TURNS" \
-        >> "$LOG" 2>&1; then
-      echo "❌ Triage の実行に失敗" | tee -a "$LOG"
+  # Req 1.4 互換のため、PARALLEL_SLOTS=1 のときも従来と同じ（prefix なし）件数 echo を出す。
+  # 既存ユーザー / cron の grep 監視を破壊しない（"N 件の Issue を処理します" 行）。
+  if [ "$PARALLEL_SLOTS" -eq 1 ]; then
+    echo "[$(date '+%F %T')] $count 件の Issue を処理します"
+  fi
+
+  # Issue キューを 1 件ずつ pop して slot に投入
+  local issue
+  while IFS= read -r issue; do
+    [ -z "$issue" ] && continue
+    local issue_number
+    issue_number=$(echo "$issue" | jq -r '.number')
+
+    # ── 空き slot 探索（busy なら 1 件完了するまで待機）──
+    local slot=""
+    while true; do
+      if slot=$(_dispatcher_find_free_slot); then
+        break
+      fi
+      # 全 slot busy → 1 件完了を待つ（bash 4.3+ の `wait -n`）
+      if [ "${#_DISPATCHER_SLOT_PIDS[@]}" -eq 0 ]; then
+        # 子プロセス未起動かつ全 slot 取得失敗 → 取れる slot がない異常事態
+        # （他 watcher プロセスが slot lock を握っているなど）
+        dispatcher_warn "全 slot がロック中（_slot_acquire いずれも失敗）。Issue #${issue_number} は次サイクルへ持ち越し"
+        slot=""
+        break
+      fi
+      wait -n 2>/dev/null || true
+      _dispatcher_reap_finished_slots
+    done
+
+    if [ -z "$slot" ]; then
       continue
     fi
 
-    if [ ! -f "$TRIAGE_FILE" ]; then
-      echo "❌ Triage 結果 JSON が生成されませんでした" | tee -a "$LOG"
+    # ── claim（claude-picked-up ラベル付与）──
+    if ! gh issue edit "$issue_number" --repo "$REPO" --add-label "$LABEL_PICKED" >/dev/null 2>&1; then
+      # Req 2.3: ラベル付与失敗 → WARN + slot lock 解放 + 次 Issue へ
+      dispatcher_warn "Issue #${issue_number}: claude-picked-up ラベル付与に失敗、slot-${slot} を解放して次 Issue へ"
+      _slot_release "$slot"
       continue
     fi
 
-    STATUS=$(jq -r '.status' "$TRIAGE_FILE")
-    DECISION_COUNT=$(jq '.decisions | length' "$TRIAGE_FILE")
-    NEEDS_ARCHITECT=$(jq -r '.needs_architect // false' "$TRIAGE_FILE")
-    ARCHITECT_REASON=$(jq -r '.architect_reason // ""' "$TRIAGE_FILE")
+    # Req 6.4: 投入時刻ログ
+    dispatcher_log "dispatched #${issue_number} -> slot-${slot}"
 
-    if [ "$STATUS" = "needs-decisions" ] && [ "$DECISION_COUNT" -gt 0 ]; then
-      COMMENT=$(jq -r '
-        "## 🤔 実装着手前に確認が必要な事項\n\n" +
-        "Issue 内容を Claude Code の Product Manager で精査した結果、" +
-        "以下の判断は人間に委ねる必要があると判定しました。\n\n" +
-        "> " + .rationale + "\n\n" +
-        "---\n\n" +
-        (.decisions | to_entries | map(
-          "### " + ((.key + 1) | tostring) + ". " + .value.topic + "\n\n" +
-          "**質問**: " + .value.question + "\n\n" +
-          "**選択肢**:\n" +
-          (.value.options | map("- " + .) | join("\n")) + "\n\n" +
-          "**影響**: " + .value.impact + "\n\n" +
-          "**推奨**: " + .value.recommendation + "\n"
-        ) | join("\n---\n\n")) +
-        "\n\n---\n\n" +
-        "## 回答方法\n\n" +
-        "1. 各項目についてこの Issue にコメントで回答してください。\n" +
-        "2. すべての項目に結論が出たら、この Issue から **`needs-decisions` ラベルを外してください**。\n" +
-        "3. ラベルが外れた時点で Claude Code が自動で再 Triage し、追加論点が無ければ開発に着手します。\n" +
-        "4. Triage をスキップして強制着手したい場合は `skip-triage` ラベルを付与してください。"
-      ' "$TRIAGE_FILE")
+    # ── Slot Runner をバックグラウンド起動 ──
+    # サブシェル `( ... ) &` で fork。サブシェルは親の fd を継承するため
+    # _slot_acquire で取得した lock fd は subshell が引き続き保持する。
+    ( _slot_run_issue "$slot" "$issue" ) &
+    local pid=$!
+    _DISPATCHER_SLOT_PIDS[$slot]=$pid
 
-      gh issue comment "$NUMBER" --repo "$REPO" --body "$COMMENT"
-      gh issue edit    "$NUMBER" --repo "$REPO" --add-label "$LABEL_NEEDS_DECISIONS"
-      echo "🟡 #$NUMBER: $DECISION_COUNT 件の決定事項を起票しました" | tee -a "$LOG"
-      continue
-    fi
+    # 親 Dispatcher 側の fd を解放する。これにより、Dispatcher が同 slot を再
+    # acquire しようとしたとき、subshell が lock を保持している間は flock -n が
+    # 失敗するようになる（claim atomicity の構造的保証）。
+    _slot_release "$slot"
+  done <<< "$(echo "$issues" | jq -c '.[]')"
 
-    if [ "$NEEDS_ARCHITECT" = "true" ]; then
-      MODE="design"
-      echo "🎨 #$NUMBER: Architect 必要 → design モード（理由: $ARCHITECT_REASON）" | tee -a "$LOG"
-    else
-      MODE="impl"
-      echo "✅ #$NUMBER: Triage 通過（Architect 不要） → impl モード" | tee -a "$LOG"
-    fi
+  # Req 2.6: サイクル終端で全 Worker を待ち合わせる
+  # Slot Runner 内で claude-failed 化等は完結済のため exit code は無視
+  if [ "${#_DISPATCHER_SLOT_PIDS[@]}" -gt 0 ]; then
+    dispatcher_log "全 Worker 完了を待機中 (${#_DISPATCHER_SLOT_PIDS[@]} 件 in flight)"
+    wait
+    _dispatcher_reap_finished_slots
   fi
 
-  # ─────────────────────────────────────────────────────────────
-  # ピックアップを即ラベルで表明（クラッシュ時も二重起動を防ぐ）
-  # ─────────────────────────────────────────────────────────────
-  gh issue edit "$NUMBER" --repo "$REPO" --add-label "$LABEL_PICKED"
-  gh issue comment "$NUMBER" --repo "$REPO" \
-    --body "🤖 ローカル Claude Code ($(hostname)) が処理を開始しました（モード: ${MODE}）。"
+  dispatcher_log "サイクル完了"
+  return 0
+}
 
-  # ─────────────────────────────────────────────────────────────
-  # ブランチを切る（モードに応じて名前を変える）
-  # ─────────────────────────────────────────────────────────────
-  case "$MODE" in
-    design)
-      BRANCH="claude/issue-${NUMBER}-design-${SLUG}"
-      ;;
-    impl|impl-resume)
-      BRANCH="claude/issue-${NUMBER}-impl-${SLUG}"
-      ;;
-  esac
-  git checkout -B "$BRANCH" main
-  git push -u origin "$BRANCH" --force-with-lease
-
-  # ─────────────────────────────────────────────────────────────
-  # モード別ディスパッチ
-  #   - design      : 既存どおり PM → Architect → PjM を 1 セッションで起動
-  #   - impl/resume : Reviewer ゲート (#20) を含む stage 分割パイプラインへ委譲
-  # ─────────────────────────────────────────────────────────────
-  if [ "$MODE" = "design" ]; then
-    FLOW_LABEL="PM → Architect → PjM（設計 PR 作成ゲート）"
-    STEPS=$(cat <<EOF
-1. product-manager サブエージェントで要件定義を \`${SPEC_DIR_REL}/requirements.md\` に保存
-   - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
-   - 人間がコメントで回答済みの決定事項は requirements に反映する
-2. architect サブエージェントで設計書とタスク分割を保存
-   - Triage 判定理由: ${ARCHITECT_REASON}
-   - \`${SPEC_DIR_REL}/design.md\`（モジュール構成・データモデル・公開 IF・処理フロー・リスク）
-   - \`${SPEC_DIR_REL}/tasks.md\`（Developer 向けタスク分割、各タスクが独立コミット可能な粒度）
-3. project-manager サブエージェントを **design-review モード** で起動
-   - 成果物は ${SPEC_DIR_REL}/ 配下の requirements / design / tasks のみ（実装コードは含めない）
-   - title: \`spec(#${NUMBER}): <1 行サマリ>\`
-   - Issue ラベル: claude-picked-up → awaiting-design-review に付け替え
-   - Issue にコメントで設計 PR リンクと案内を投稿
-
-この設計 PR が merge されるまで、実装フェーズには進みません。人間が merge した後、
-次回のポーリングで Developer が自動起動し、実装 PR が別途作成されます。
-EOF
-)
-
-    DEV_PROMPT=$(cat <<EOF
-あなたはこのリポジトリの Claude Code オーケストレーターです。
-以下の Issue を ${FLOW_LABEL} のフローで進めてください。
-
-## 対象 Issue
-- Number: #${NUMBER}
-- Title : ${TITLE}
-- URL   : ${URL}
-- Body  : |
-${BODY}
-
-## 作業ブランチ
-${BRANCH}（main から派生・push 済み・現在チェックアウト中）
-
-## 作業ディレクトリ
-${SPEC_DIR_REL}/
-
-## 進め方
-${STEPS}
-
-## 制約
-- main に直接 push しないこと
-- 既存のテストを壊さないこと
-- 不明点は推測せず、PR 本文の「確認事項」セクションに列挙すること
-EOF
-)
-
-    echo "--- Development 実行（$MODE）---" >> "$LOG"
-    if claude \
-        --print "$DEV_PROMPT" \
-        --model "$DEV_MODEL" \
-        --permission-mode bypassPermissions \
-        --max-turns "$DEV_MAX_TURNS" \
-        --output-format stream-json \
-        --verbose \
-        >> "$LOG" 2>&1; then
-      echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
-    else
-      echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
-      gh issue edit "$NUMBER" --repo "$REPO" \
-        --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
-      gh issue comment "$NUMBER" --repo "$REPO" \
-        --body "⚠️ 自動開発が失敗しました（$(hostname) / モード: $MODE）。\n\nログ: \`$LOG\`\n\n問題を解決してから \`claude-failed\` ラベルを外してください。"
-    fi
-  else
-    # impl / impl-resume → Reviewer ゲートを含む stage 分割パイプラインへ
-    # （要件 2.4: Triage / skip-triage / impl-resume の全 impl 系で Reviewer 起動）
-    # 失敗時の claude-picked-up 削除 + claude-failed 付与 + Issue コメントは
-    # run_impl_pipeline 内 (mark_issue_failed) に一元化されており、ここでは追加処理不要。
-    if run_impl_pipeline; then
-      echo "✅ #$NUMBER: $MODE 完了（Reviewer ゲート通過 / PR 作成済み）" | tee -a "$LOG"
-    else
-      echo "❌ #$NUMBER: $MODE 失敗（claude-failed 付与済み）" | tee -a "$LOG"
-    fi
-  fi
-
-  # 次のループのため main に戻る
-  git checkout main
-done
+# Dispatcher を起動（既存 Issue 処理ループの置換）。
+_dispatcher_run
+DISPATCHER_RC=$?
+if [ "$DISPATCHER_RC" -ne 0 ]; then
+  # Req 1.3: PARALLEL_SLOTS 不正値などで _dispatcher_run が non-zero を返した場合は
+  # サイクル中断（既存の ERROR 終了規約 = exit 1 と整合）
+  exit "$DISPATCHER_RC"
+fi
 
 echo "[$(date '+%F %T')] 完了"
+exit 0
+
