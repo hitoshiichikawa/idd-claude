@@ -688,13 +688,22 @@ pi_fetch_candidate_prs() {
   fi
 
   # AC 1.2 / 1.3 / 1.4: クライアント側フィルタ（server filter の保険 + head pattern + fork 除外）
+  # #35 AC 4.4 / 5.1: design pattern は PR_ITERATION_DESIGN_ENABLED=true のときのみ OR 条件に
+  # 含める。false（既定）なら impl pattern のみで絞り込み、設計 PR は candidate 段階で除外される
+  # （= 本機能導入前と完全同一の挙動）。
   echo "$prs_json" | jq \
-    --arg pattern "$PR_ITERATION_HEAD_PATTERN" \
+    --arg impl_pattern "$PR_ITERATION_HEAD_PATTERN" \
+    --arg design_pattern "$PR_ITERATION_DESIGN_HEAD_PATTERN" \
+    --arg design_enabled "$PR_ITERATION_DESIGN_ENABLED" \
     --arg owner "$repo_owner" \
     '[.[]
       | select(.isDraft == false)
-      | select(.headRefName | test($pattern))
       | select((.headRepositoryOwner.login // "") == $owner)
+      | select(
+          (.headRefName | test($impl_pattern))
+          or
+          ($design_enabled == "true" and (.headRefName | test($design_pattern)))
+        )
     ]'
 }
 
@@ -1216,25 +1225,55 @@ process_pr_iteration() {
     return 0
   fi
 
-  pi_log "サイクル開始 (max_prs=${PR_ITERATION_MAX_PRS}, max_rounds=${PR_ITERATION_MAX_ROUNDS}, model=${PR_ITERATION_DEV_MODEL}, timeout=${PR_ITERATION_GIT_TIMEOUT}s)"
+  pi_log "サイクル開始 (max_prs=${PR_ITERATION_MAX_PRS}, max_rounds=${PR_ITERATION_MAX_ROUNDS}, model=${PR_ITERATION_DEV_MODEL}, design_enabled=${PR_ITERATION_DESIGN_ENABLED}, timeout=${PR_ITERATION_GIT_TIMEOUT}s)"
 
   local prs_json
   prs_json=$(pi_fetch_candidate_prs)
   local total
   total=$(echo "$prs_json" | jq 'length')
+
+  # #35 NFR 3.2: 候補 PR の design / impl 内訳をログに記録（kind=ambiguous も含む）。
+  # candidate 段階では impl pattern OR (DESIGN_ENABLED=true AND design pattern) で絞られる
+  # ため、ここでは bash 側で同じ正規表現照合を行って breakdown を出す。
+  local design_count=0
+  local impl_count=0
+  local ambiguous_count=0
+  if [ "$total" -gt 0 ]; then
+    local breakdown
+    breakdown=$(echo "$prs_json" | jq -r \
+      --arg impl_pattern "$PR_ITERATION_HEAD_PATTERN" \
+      --arg design_pattern "$PR_ITERATION_DESIGN_HEAD_PATTERN" \
+      --arg design_enabled "$PR_ITERATION_DESIGN_ENABLED" \
+      '[.[] | .headRefName] as $heads
+       | reduce $heads[] as $h ({"design":0, "impl":0, "ambiguous":0};
+           if ($h | test($impl_pattern)) and ($h | test($design_pattern))
+             then .ambiguous += 1
+           elif ($h | test($design_pattern)) and ($design_enabled == "true")
+             then .design += 1
+           elif ($h | test($impl_pattern))
+             then .impl += 1
+           else . end)
+       | "\(.design) \(.impl) \(.ambiguous)"')
+    # shellcheck disable=SC2086
+    set -- $breakdown
+    design_count="${1:-0}"
+    impl_count="${2:-0}"
+    ambiguous_count="${3:-0}"
+  fi
+
   local target_count="$total"
   local skipped_overflow=0
 
   if [ "$total" -gt "$PR_ITERATION_MAX_PRS" ]; then
     target_count="$PR_ITERATION_MAX_PRS"
     skipped_overflow=$((total - PR_ITERATION_MAX_PRS))
-    pi_log "対象候補 ${total} 件中、上限 ${PR_ITERATION_MAX_PRS} 件のみ処理（${skipped_overflow} 件は次回持ち越し）"
+    pi_log "対象候補 ${total} 件中、上限 ${PR_ITERATION_MAX_PRS} 件のみ処理（${skipped_overflow} 件は次回持ち越し、内訳: design=${design_count}, impl=${impl_count}, ambiguous=${ambiguous_count}）"
   else
-    pi_log "対象候補 ${total} 件、処理対象 ${target_count} 件"
+    pi_log "対象候補 ${total} 件、処理対象 ${target_count} 件（内訳: design=${design_count}, impl=${impl_count}, ambiguous=${ambiguous_count}）"
   fi
 
   if [ "$target_count" -eq 0 ]; then
-    pi_log "サマリ: success=0, fail=0, skip=0, escalated=0, overflow=${skipped_overflow}"
+    pi_log "サマリ: success=0, fail=0, skip=0, escalated=0, overflow=${skipped_overflow} (design=0, impl=0)"
     return 0
   fi
 
@@ -1247,7 +1286,7 @@ process_pr_iteration() {
   pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]")
 
   if [ -z "$pr_iter" ]; then
-    pi_log "サマリ: success=0, fail=0, skip=0, escalated=0, overflow=${skipped_overflow}"
+    pi_log "サマリ: success=0, fail=0, skip=0, escalated=0, overflow=${skipped_overflow} (design=0, impl=0)"
     return 0
   fi
 
@@ -1257,13 +1296,15 @@ process_pr_iteration() {
     case $rc in
       0)  success=$((success + 1)) ;;
       2)  escalated=$((escalated + 1)) ;;
+      3)  skip=$((skip + 1)) ;;       # #35: kind=none / ambiguous は skip としてカウント
       *)  fail=$((fail + 1)) ;;
     esac
     # 各 PR 処理後に保険で main に戻す
     git checkout main >/dev/null 2>&1 || true
   done <<< "$pr_iter"
 
-  pi_log "サマリ: success=${success}, fail=${fail}, skip=${skip}, escalated=${escalated}, overflow=${skipped_overflow}"
+  # #35 NFR 3.1 / 3.2: サマリにも design / impl 内訳を出して grep 集計可能にする
+  pi_log "サマリ: success=${success}, fail=${fail}, skip=${skip}, escalated=${escalated}, overflow=${skipped_overflow} (design=${design_count}, impl=${impl_count})"
 
   # 念のため最終確認で main に戻す
   git checkout main >/dev/null 2>&1 || true
