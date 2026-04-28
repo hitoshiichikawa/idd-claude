@@ -95,13 +95,27 @@ PR_ITERATION_MAX_TURNS="${PR_ITERATION_MAX_TURNS:-60}"
 PR_ITERATION_MAX_PRS="${PR_ITERATION_MAX_PRS:-3}"
 # 1 PR あたりの累計 iteration 上限。到達時は claude-failed に昇格（AC 7.2）。
 PR_ITERATION_MAX_ROUNDS="${PR_ITERATION_MAX_ROUNDS:-3}"
-# 自動 iteration を許可する head ref のプレフィックス正規表現。
-# 人間が手書きした PR や fork PR を巻き込まないよう既定 `^claude/`（AC 1.2）。
-PR_ITERATION_HEAD_PATTERN="${PR_ITERATION_HEAD_PATTERN:-^claude/}"
+# 自動 iteration を許可する head ref のプレフィックス正規表現（impl PR 用）。
+# 既定値は #35 で `^claude/` から `^claude/issue-[0-9]+-impl-` に厳格化された。
+# 旧 `^claude/` 挙動に戻したい場合は cron / launchd 側で本変数を override すること
+# （Migration Note は README 参照、AC 4.3 / 5.5 / NFR 4.2）。
+PR_ITERATION_HEAD_PATTERN="${PR_ITERATION_HEAD_PATTERN:-^claude/issue-[0-9]+-impl-}"
 # 各 git / gh 操作の個別タイムアウト（秒、NFR 1.3）。
 PR_ITERATION_GIT_TIMEOUT="${PR_ITERATION_GIT_TIMEOUT:-60}"
-# Iteration プロンプトテンプレートの配置先（install.sh --local が配置）。
+# Iteration プロンプトテンプレートの配置先（install.sh --local が配置、impl PR 用）。
 ITERATION_TEMPLATE="${ITERATION_TEMPLATE:-$HOME/bin/iteration-prompt.tmpl}"
+
+# ─── PR Iteration Processor 設定: 設計 PR 拡張 (#35) ───
+# 設計 PR (`claude/issue-<N>-design-<slug>`) にも `needs-iteration` で反復対応する
+# opt-in フラグ。既定 false で本機能は無効、impl PR の挙動は #26 導入時と完全同一。
+# 有効化するには cron / launchd 側で PR_ITERATION_DESIGN_ENABLED=true を渡す
+# （AC 4.1 / 4.4 / 5.1）。
+PR_ITERATION_DESIGN_ENABLED="${PR_ITERATION_DESIGN_ENABLED:-false}"
+# 設計 PR の head branch pattern（jq の test() 互換 POSIX ERE）。
+# idd-claude PjM テンプレートが作る設計 PR は `claude/issue-<N>-design-<slug>` 形式（AC 4.2）。
+PR_ITERATION_DESIGN_HEAD_PATTERN="${PR_ITERATION_DESIGN_HEAD_PATTERN:-^claude/issue-[0-9]+-design-}"
+# 設計 PR 用 Iteration テンプレートの配置先（install.sh --local が配置）。
+ITERATION_TEMPLATE_DESIGN="${ITERATION_TEMPLATE_DESIGN:-$HOME/bin/iteration-prompt-design.tmpl}"
 
 # ─── Design Review Release Processor 設定 (#40) ───
 # 設計 PR が merge された Issue から `awaiting-design-review` ラベルを自動除去し、
@@ -157,6 +171,15 @@ done
 # 無効化（既定）時は template 未配置でも watcher 全体を起動できるよう、無条件チェックを避ける。
 if [ "$PR_ITERATION_ENABLED" = "true" ] && [ ! -f "$ITERATION_TEMPLATE" ]; then
   echo "Error: Iteration テンプレートが見つかりません: $ITERATION_TEMPLATE" >&2
+  echo "  install.sh --local 再実行で配置されます。" >&2
+  exit 1
+fi
+
+# 設計 PR Iteration が有効化されている時のみ design 用 template を必須化（#35 AC 2.2）。
+if [ "$PR_ITERATION_ENABLED" = "true" ] \
+   && [ "$PR_ITERATION_DESIGN_ENABLED" = "true" ] \
+   && [ ! -f "$ITERATION_TEMPLATE_DESIGN" ]; then
+  echo "Error: 設計 PR 用 Iteration テンプレートが見つかりません: $ITERATION_TEMPLATE_DESIGN" >&2
   echo "  install.sh --local 再実行で配置されます。" >&2
   exit 1
 fi
