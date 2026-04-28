@@ -149,6 +149,18 @@ DEV_MAX_TURNS="${DEV_MAX_TURNS:-60}"
 REVIEWER_MODEL="${REVIEWER_MODEL:-claude-opus-4-7}"
 REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-30}"
 
+# ─── Phase C: Issue 並列化 (worktree slot + dispatcher, #16) ───
+# 入口（auto-dev Issue 処理）の並列度を制御する env var 群。
+# 既存運用との後方互換のため、すべてデフォルトで本機能導入前と同一挙動になるよう配置:
+#   - PARALLEL_SLOTS 未設定 → 直列（slot=1）動作。slot-2 以降の lock / worktree は作成しない
+#   - SLOT_INIT_HOOK 未設定 → フック非起動（本機能導入前と同一）
+#   - WORKTREE_BASE_DIR / SLOT_LOCK_DIR は通常上書き不要。テスト用に override 可能。
+# 詳細: docs/specs/16-phase-c-worktree-slot-dispatcher/design.md
+PARALLEL_SLOTS="${PARALLEL_SLOTS:-1}"
+SLOT_INIT_HOOK="${SLOT_INIT_HOOK:-}"
+WORKTREE_BASE_DIR="${WORKTREE_BASE_DIR:-$HOME/.issue-watcher/worktrees}"
+SLOT_LOCK_DIR="${SLOT_LOCK_DIR:-$HOME/.issue-watcher}"
+
 # Triage プロンプトテンプレート
 TRIAGE_TEMPLATE="${TRIAGE_TEMPLATE:-$HOME/bin/triage-prompt.tmpl}"
 
@@ -2131,31 +2143,375 @@ run_impl_pipeline() {
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 未処理 Issue を取得
-#   auto-dev ラベルがあり、かつ以下のラベルが付いていないもの:
-#     needs-decisions / awaiting-design-review / claude-picked-up /
-#     ready-for-review / claude-failed
+# Phase C: Issue 入口並列化 (worktree slot + dispatcher, #16)
+#
+# auto-dev Issue 処理ループを Dispatcher / Slot Worker パターンに置き換え、
+# 複数 Issue を時間的に重ねて処理できるようにする。
+#
+# 構成:
+#   - _parallel_validate_slots : PARALLEL_SLOTS 検証
+#   - Worktree Manager  : per-slot 永続 worktree の初期化・最新化
+#   - Slot Lock Manager : per-slot 非ブロッキング flock の取得・解放
+#   - Hook Layer        : SLOT_INIT_HOOK の絶対パス起動（eval 不使用）
+#   - Slot Runner       : 1 Issue を 1 worktree で処理する Worker
+#   - Dispatcher        : Issue 候補取得 → claim → slot 投入 → 全 Worker wait
+#
+# PARALLEL_SLOTS=1（デフォルト）のとき、slot-2 以降の lock / worktree を作成せず、
+# 本機能導入前と外形的に同一挙動になるよう実装する。
+#
+# 詳細: docs/specs/16-phase-c-worktree-slot-dispatcher/design.md
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-ISSUES=$(gh issue list \
-  --repo "$REPO" \
-  --label "$LABEL_TRIGGER" \
-  --state open \
-  --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\"" \
-  --json number,title,body,url,labels \
-  --limit 5)
 
-COUNT=$(echo "$ISSUES" | jq 'length')
-[ "$COUNT" -eq 0 ] && {
-  echo "[$(date '+%F %T')] 処理対象の Issue なし"
-  exit 0
+# ─── Phase C: Logger ───
+# Dispatcher / Slot Worker / Worktree / Hook 共通の timestamp 形式（既存 mq_log 等と同じ）
+dispatcher_log() {
+  echo "[$(date '+%F %T')] dispatcher: $*"
+}
+dispatcher_warn() {
+  echo "[$(date '+%F %T')] dispatcher: WARN: $*" >&2
+}
+dispatcher_error() {
+  echo "[$(date '+%F %T')] dispatcher: ERROR: $*" >&2
 }
 
-echo "[$(date '+%F %T')] $COUNT 件の Issue を処理します"
+# ─── _parallel_validate_slots ───
+#
+# PARALLEL_SLOTS が正の整数として解釈できるかを検証する。
+# - 0 / 負数 / 非数値 / 空文字 / 先頭ゼロ等の形式違反を拒否する
+# - 不正なら ERROR ログを stderr に出力して return 1
+# 戻り値: 0 = ok / 1 = invalid
+#
+# Req 1.3: 不正値時はサイクル中断（呼び出し元で exit 1）
+# Req 6.5: timestamp 書式 [YYYY-MM-DD HH:MM:SS] を維持
+_parallel_validate_slots() {
+  if [[ ! "$PARALLEL_SLOTS" =~ ^[1-9][0-9]*$ ]]; then
+    dispatcher_error "PARALLEL_SLOTS は正の整数を指定してください: '$PARALLEL_SLOTS'"
+    return 1
+  fi
+  return 0
+}
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 各 Issue を処理
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
+# ─── Phase C: Worktree Manager ───
+#
+# Per-slot 永続 worktree を $WORKTREE_BASE_DIR/<repo-slug>/slot-N/ に配置し、
+# slot 同士の作業ツリー干渉を物理隔離する（Req 3.5）。
+#
+# 設計判断:
+#   - slot worktree は `git worktree add --detach` で detached HEAD として作成する
+#     （Slot Runner が `git checkout -B <branch> main` で新規 branch に切り替える際、
+#     他 slot の worktree が同じ local branch を保持していてもブロックされないため）
+#   - `git worktree list --porcelain` で冪等性を担保
+#   - 破損検出時は <slot-N>.broken-<ts> に退避してから再作成
+#   - PARALLEL_SLOTS=1 のときは slot-2 以降の worktree を作らない（呼び出し元で gate）
+
+# slot 番号から worktree ディレクトリの絶対パスを返す。
+# 引数: $1 = slot 番号
+# Req 3.1, 3.7
+_worktree_path() {
+  local n="$1"
+  echo "$WORKTREE_BASE_DIR/$REPO_SLUG/slot-$n"
+}
+
+# 指定 path が現在の repo の git worktree として登録済みかを判定。
+# 0 = 登録済み / 非ゼロ = 未登録
+_worktree_is_registered() {
+  local wt_path="$1"
+  # `git worktree list --porcelain` は `worktree <abs_path>` 形式で各 worktree を返す
+  git -C "$REPO_DIR" worktree list --porcelain 2>/dev/null \
+    | grep -Fx "worktree $wt_path" >/dev/null 2>&1
+}
+
+# Per-slot worktree を冪等に確保する。
+# 引数: $1 = slot 番号
+# 戻り値: 0 = ok（worktree が存在し利用可能） / 1 = 失敗（呼び出し元で claude-failed 化）
+# 副作用: $WORKTREE_BASE_DIR/<slug>/slot-N/ を作成または再利用
+#
+# Req 3.1, 3.2, 3.3, 3.6, 3.7
+_worktree_ensure() {
+  local n="$1"
+  local wt_path
+  wt_path="$(_worktree_path "$n")"
+  local parent_dir
+  parent_dir="$(dirname "$wt_path")"
+
+  if ! mkdir -p "$parent_dir" 2>/dev/null; then
+    dispatcher_warn "slot-${n}: worktree 親ディレクトリ作成に失敗: $parent_dir"
+    return 1
+  fi
+
+  # ケース A: 既に worktree として登録済み → 再利用（Req 3.3）
+  if _worktree_is_registered "$wt_path"; then
+    if [ -d "$wt_path/.git" ] || [ -f "$wt_path/.git" ]; then
+      return 0
+    fi
+    # 登録は残っているが実体が壊れている → prune してから再作成
+    dispatcher_warn "slot-${n}: worktree 登録あり実体欠損、prune して再作成: $wt_path"
+    git -C "$REPO_DIR" worktree prune >/dev/null 2>&1 || true
+  fi
+
+  # ケース B: dir は存在するが worktree として登録されていない（未初期化 or 破損）
+  if [ -e "$wt_path" ]; then
+    local ts
+    ts=$(date +%Y%m%d-%H%M%S)
+    local broken="${wt_path}.broken-${ts}"
+    dispatcher_warn "slot-${n}: 既存ディレクトリを退避して worktree を再作成: $wt_path -> $broken"
+    if ! mv "$wt_path" "$broken" 2>/dev/null; then
+      dispatcher_warn "slot-${n}: 既存ディレクトリの退避に失敗: $wt_path"
+      return 1
+    fi
+    git -C "$REPO_DIR" worktree prune >/dev/null 2>&1 || true
+  fi
+
+  # ケース C: 新規作成（origin/main から detached HEAD として）
+  # detached にする理由: 各 slot が `git checkout -B <branch> main` で新規 branch に
+  # 切り替える際、別 slot worktree が同じ local branch を持っていても弾かれないため。
+  if ! git -C "$REPO_DIR" worktree add --detach "$wt_path" "origin/main" >/dev/null 2>&1; then
+    dispatcher_warn "slot-${n}: git worktree add に失敗: $wt_path"
+    return 1
+  fi
+  dispatcher_log "slot-${n}: worktree 作成: $wt_path (detached @ origin/main)"
+  return 0
+}
+
+# Per-slot worktree を origin/main の最新状態に強制リセットする（Issue 投入時に毎回呼ぶ）。
+# 引数: $1 = worktree 絶対パス
+# 戻り値: 0 = ok / 1 = 失敗
+# 副作用: 当該 worktree が origin/main の最新コミットに head=detached、
+#   tracked / untracked / ignored すべて消去される
+#
+# Req 3.4
+_worktree_reset() {
+  local wt="$1"
+  if [ ! -d "$wt" ]; then
+    return 1
+  fi
+  # 1. 最新の origin を取得
+  if ! git -C "$wt" fetch origin --prune >/dev/null 2>&1; then
+    return 1
+  fi
+  # 2. detached HEAD を origin/main に強制移動
+  if ! git -C "$wt" reset --hard origin/main >/dev/null 2>&1; then
+    return 1
+  fi
+  # 3. untracked + ignored を消去（前回 Issue の build artifact / node_modules を残さない）
+  if ! git -C "$wt" clean -fdx >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+# ─── Phase C: Slot Lock Manager ───
+#
+# Per-slot 非ブロッキング flock を提供する。slot 間のロックは別ファイルとし、
+# ある slot の処理が他 slot の処理開始をブロックしない（Req 4.4）。
+#
+# fd 番号: 既存 LOCK_FILE が fd 200 を使うため、衝突回避で 210 + slot_number を使う。
+# 従って bash の per-fd 上限以下になるよう、PARALLEL_SLOTS は事実上 ~ 数十程度を想定
+# （CLAUDE.md には bash 4+ と記載済、bash の fd 上限は通常数百〜数千）。
+#
+# slot Worker はサブシェル `( ... ) &` で動くため、サブシェル終了で fd は自動解放され、
+# 明示的な _slot_release 呼び出しは不要だが命名対称性のため定義する。
+
+# slot 番号から lock file path を返す。
+# 引数: $1 = slot 番号
+# Req 4.1
+_slot_lock_path() {
+  local n="$1"
+  echo "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-${n}.lock"
+}
+
+# 指定 slot の per-slot 非ブロッキング flock を取得する（成功時 fd 210+N が open のまま残る）。
+# 引数: $1 = slot 番号
+# 戻り値: 0 = acquired / 1 = 既に他プロセスがロック中、または fd open 失敗
+# 副作用: 成功時 fd (210+N) が open 状態（呼び出し側スコープで保持される）
+#
+# Req 4.2, 4.3, 4.4
+_slot_acquire() {
+  local n="$1"
+  local lock_file
+  lock_file="$(_slot_lock_path "$n")"
+  # parent dir を冪等作成（SLOT_LOCK_DIR は通常 $HOME/.issue-watcher で既存）
+  mkdir -p "$(dirname "$lock_file")" 2>/dev/null || return 1
+  local fd=$((210 + n))
+  # eval を使うのは bash 4.0 互換のため。入力 n は _parallel_validate_slots 通過済の
+  # 正整数のみで、外部入力は流入しない（NFR 2.3 のシェル展開リスクなし）。
+  # shellcheck disable=SC1083
+  if ! eval "exec ${fd}>\"\$lock_file\"" 2>/dev/null; then
+    return 1
+  fi
+  if ! flock -n "$fd" 2>/dev/null; then
+    # 既に他プロセスがロック中。fd を閉じて return 1
+    eval "exec ${fd}>&-" 2>/dev/null || true
+    return 1
+  fi
+  return 0
+}
+
+# 指定 slot の per-slot lock を解放する。
+# 引数: $1 = slot 番号
+# 戻り値: 常に 0
+# サブシェル終了で fd は自動解放されるため通常は呼ぶ必要なし。Dispatcher 側で
+# claim 失敗時のロールバックに使う（Req 2.3: ラベル付与失敗で slot lock 解放）。
+_slot_release() {
+  local n="$1"
+  local fd=$((210 + n))
+  # shellcheck disable=SC1083
+  eval "exec ${fd}>&-" 2>/dev/null || true
+  return 0
+}
+
+# ─── Phase C: Hook Layer ───
+#
+# SLOT_INIT_HOOK 起動を担う薄い wrapper。
+#
+# 安全性（NFR 2.3 / Req 5.5）:
+#   - SLOT_INIT_HOOK の値はシェル展開させない（eval / `bash -c` 不使用）
+#   - 絶対パスをそのまま起動するのみ。引数文字列の空白分割を許容しない
+#   - "/path/to/script.sh --flag" のような引数渡しはサポート外（README に明記、
+#     ユーザーは wrapper script を書く）
+
+# SLOT_INIT_HOOK を起動する。未設定なら no-op。
+# 引数: $1 = slot 番号, $2 = worktree 絶対パス
+# 戻り値: 0 = 起動成功 / 1 = 起動失敗（path 不在 / 非実行可能 / 非ゼロ exit）
+# 副作用: hook 子プロセスの stdout / stderr は呼び出し元の標準出力 / エラー出力に流れる
+#
+# Req 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, NFR 2.3
+_hook_invoke() {
+  local n="$1"
+  local wt="$2"
+  if [ -z "${SLOT_INIT_HOOK:-}" ]; then
+    return 0
+  fi
+  if [ ! -x "$SLOT_INIT_HOOK" ]; then
+    echo "[$(date '+%F %T')] slot-${n}: ERROR: SLOT_INIT_HOOK が存在しないか実行可能ではありません: $SLOT_INIT_HOOK" >&2
+    return 1
+  fi
+
+  # stderr を一時ファイルに捕捉して非ゼロ exit 時にログ転記する（Req 5.7）
+  local stderr_tmp
+  stderr_tmp="$(mktemp -t slot-init-hook-XXXXXX.err 2>/dev/null || echo "")"
+  local rc=0
+
+  # IDD_SLOT_NUMBER / IDD_SLOT_WORKTREE / PARALLEL_SLOTS / REPO / REPO_DIR を export
+  # して子プロセスに引き継ぐ。直接 exec のみ（Req 5.5: shell 展開なし）。
+  if [ -n "$stderr_tmp" ]; then
+    IDD_SLOT_NUMBER="$n" \
+      IDD_SLOT_WORKTREE="$wt" \
+      PARALLEL_SLOTS="$PARALLEL_SLOTS" \
+      REPO="$REPO" \
+      REPO_DIR="$REPO_DIR" \
+      "$SLOT_INIT_HOOK" 2> >(tee -a "$stderr_tmp" >&2) || rc=$?
+  else
+    IDD_SLOT_NUMBER="$n" \
+      IDD_SLOT_WORKTREE="$wt" \
+      PARALLEL_SLOTS="$PARALLEL_SLOTS" \
+      REPO="$REPO" \
+      REPO_DIR="$REPO_DIR" \
+      "$SLOT_INIT_HOOK" || rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    local tail_text=""
+    if [ -n "$stderr_tmp" ] && [ -f "$stderr_tmp" ]; then
+      tail_text="$(tail -c 2000 "$stderr_tmp" 2>/dev/null || true)"
+    fi
+    echo "[$(date '+%F %T')] slot-${n}: ERROR: SLOT_INIT_HOOK が exit code ${rc} で失敗しました: $SLOT_INIT_HOOK" >&2
+    if [ -n "$tail_text" ]; then
+      echo "[$(date '+%F %T')] slot-${n}: hook stderr (tail):" >&2
+      echo "$tail_text" >&2
+    fi
+  fi
+
+  if [ -n "$stderr_tmp" ]; then
+    rm -f "$stderr_tmp" 2>/dev/null || true
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    return 1
+  fi
+  return 0
+}
+
+# ─── Phase C: Slot Runner ───
+#
+# 1 Issue を 1 つの slot worktree で処理する Worker。Dispatcher から
+# `( _slot_run_issue $n $issue_json ) &` の形でバックグラウンド fork される。
+#
+# 設計上の重要点:
+#   - サブシェルで動くため、内部の `cd` / 環境変数変更は親に伝播しない（Req 3.5 を構造的に保証）
+#   - 入口で _slot_acquire 済を前提（Dispatcher が取得済の lock fd を継承）
+#   - claim（claude-picked-up ラベル付与）は Dispatcher 側で完了済（Req 2.2）
+#   - 処理シーケンス:
+#       1. slot 専用ログファイル open
+#       2. _worktree_ensure → 失敗時 claude-failed 化 + return
+#       3. cd "$WT"
+#       4. _worktree_reset → 失敗時 claude-failed 化 + return
+#       5. _hook_invoke → 失敗時 claude-failed 化 + return
+#       6. 既存 Issue 処理ロジック（Triage → mode 判定 → claude 起動）を実行
+#   - すべての claude-failed 化は既存 mark_issue_failed パスを再利用（新ラベル不可）
+#
+# Req 2.7, 3.4, 3.5, 3.6, 5.3, 5.6, 5.7, 6.1, 6.2, 6.5, 7.3, 7.4, NFR 2.1, 2.2, 3.1, 3.2
+
+# slot worker 用ロガー（slot 番号 + Issue 番号を必ず prefix に含める、Req 6.1, NFR 3.1）。
+# サブシェル内で IDD_SLOT_NUMBER / NUMBER を読み取って prefix を組み立てる。
+slot_log() {
+  echo "[$(date '+%F %T')] slot-${IDD_SLOT_NUMBER:-?}: #${NUMBER:-?}: $*"
+}
+slot_warn() {
+  echo "[$(date '+%F %T')] slot-${IDD_SLOT_NUMBER:-?}: #${NUMBER:-?}: WARN: $*" >&2
+}
+slot_error() {
+  echo "[$(date '+%F %T')] slot-${IDD_SLOT_NUMBER:-?}: #${NUMBER:-?}: ERROR: $*" >&2
+}
+
+# claude-picked-up を claude-failed に置き換える共通フロー（Worktree / Hook / その他
+# サブシェル内エラー用）。run_impl_pipeline 内の mark_issue_failed と同じ操作を slot
+# worker 文脈で再現する（mark_issue_failed は MODE / LOG 等を要求するため代用しない）。
+# 引数: $1 = stage 識別子, $2 = Issue コメントに追加する補足
+_slot_mark_failed() {
+  local stage="$1"
+  local extra="$2"
+  gh issue edit "$NUMBER" --repo "$REPO" \
+    --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" >/dev/null 2>&1 || true
+  local hostname_val
+  hostname_val=$(hostname)
+  local body="⚠️ 自動開発が失敗しました（${hostname_val} / slot=${IDD_SLOT_NUMBER:-?} / 失敗 stage: ${stage}）。"
+  if [ -n "$extra" ]; then
+    body="${body}
+
+${extra}"
+  fi
+  if [ -n "${LOG:-}" ]; then
+    body="${body}
+
+ログ: \`$LOG\`"
+  fi
+  body="${body}
+
+問題を解決してから \`claude-failed\` ラベルを外してください。"
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+}
+
+# 1 Issue を 1 slot worktree で処理する Worker 本体。
+# サブシェル `( _slot_run_issue n issue_json ) &` から呼び出される前提。
+#
+# 引数:
+#   $1 = slot 番号
+#   $2 = Issue JSON (gh issue list の 1 要素)
+# 戻り値:
+#   0 = 成功 / 非ゼロ = 失敗（既に claude-failed ラベルへ遷移済み）
+#
+# 副作用:
+#   - サブシェル内で NUMBER / TITLE / BODY / URL / LABELS / TS / LOG / SLUG /
+#     SPEC_DIR_REL / MODE / BRANCH などのグローバル変数を設定（親には伝播しない）
+#   - $WT に cd（サブシェル内）
+#   - claude / gh / git の副作用は Issue ラベル遷移として外部観測可能
+_slot_run_issue() {
+  # slot 識別子をサブシェル内で見えるよう export（slot_log / _hook_invoke が参照）
+  export IDD_SLOT_NUMBER="$1"
+  local issue="$2"
+
+  # ── Issue メタデータ抽出 ──
   NUMBER=$(echo "$issue" | jq -r '.number')
   TITLE=$(echo "$issue"  | jq -r '.title')
   BODY=$(echo "$issue"   | jq -r '.body // ""')
@@ -2164,13 +2520,59 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
   TS=$(date +%Y%m%d-%H%M%S)
   LOG="$LOG_DIR/issue-${NUMBER}-${TS}.log"
 
-  echo "=== Processing #$NUMBER: $TITLE ===" | tee -a "$LOG"
+  # slot 運用ログ（worktree 初期化・hook 結果など）。Issue ログとは別系統で残す（Req 6.2）。
+  local SLOT_LOG="$LOG_DIR/slot-${IDD_SLOT_NUMBER}-${NUMBER}-${TS}.log"
+  # 以降の slot_log 行は stdout (cron mailer) と SLOT_LOG の両方に書き出す
+  exec > >(tee -a "$SLOT_LOG") 2>&1
 
-  # ─────────────────────────────────────────────────────────────
-  # 既存 spec ディレクトリの検出（設計 PR merge 済みか）と slug 決定
-  # ─────────────────────────────────────────────────────────────
-  EXISTING_SPEC_DIR=$(ls -d "$REPO_DIR/docs/specs/${NUMBER}-"* 2>/dev/null | head -1 || true)
-  HAS_EXISTING_SPEC=false
+  slot_log "Worker 起動 (LOG=$LOG SLOT_LOG=$SLOT_LOG)"
+
+  # ── Worktree 初期化（per-slot 永続 worktree）──
+  local WT
+  WT="$(_worktree_path "$IDD_SLOT_NUMBER")"
+  export IDD_SLOT_WORKTREE="$WT"
+
+  if ! _worktree_ensure "$IDD_SLOT_NUMBER"; then
+    slot_warn "worktree 初期化に失敗 (path=$WT)"
+    _slot_mark_failed "worktree-ensure" "Slot ${IDD_SLOT_NUMBER} の worktree 初期化に失敗しました（path=\`$WT\`）。"
+    return 1
+  fi
+  slot_log "worktree 確保 OK (path=$WT)"
+
+  # サブシェル内で worktree に cd（親には伝播しない、Req 3.5）
+  if ! cd "$WT"; then
+    slot_warn "worktree への cd に失敗 (path=$WT)"
+    _slot_mark_failed "worktree-cd" "worktree path への cd に失敗しました: \`$WT\`"
+    return 1
+  fi
+
+  # ── Worktree を origin/main 最新へ強制リセット ──
+  if ! _worktree_reset "$WT"; then
+    slot_warn "worktree reset に失敗 (path=$WT)"
+    _slot_mark_failed "worktree-reset" "Slot ${IDD_SLOT_NUMBER} の worktree を origin/main にリセットできませんでした。"
+    return 1
+  fi
+  slot_log "worktree reset OK (origin/main 最新化 + clean -fdx)"
+
+  # ── SLOT_INIT_HOOK 起動（reset 後・claude 起動前に 1 度だけ）──
+  if ! _hook_invoke "$IDD_SLOT_NUMBER" "$WT"; then
+    slot_warn "SLOT_INIT_HOOK の起動に失敗"
+    _slot_mark_failed "slot-init-hook" "SLOT_INIT_HOOK が失敗しました（詳細はログ参照）。SLOT_INIT_HOOK=\`${SLOT_INIT_HOOK:-(unset)}\`"
+    return 1
+  fi
+  if [ -n "${SLOT_INIT_HOOK:-}" ]; then
+    slot_log "SLOT_INIT_HOOK 完了"
+  fi
+
+  # ── 既存 Issue 処理ロジックを実行 ──
+  # ここから下は本機能導入前の Issue ループ本体と等価。サブシェル内で動くため
+  # NUMBER / MODE / LOG 等のグローバル変数変更は親に伝播しない（Req 3.5 を構造的に保証）。
+  echo "=== Processing #$NUMBER: $TITLE (slot-${IDD_SLOT_NUMBER}) ===" | tee -a "$LOG"
+
+  # ── 既存 spec ディレクトリの検出（設計 PR merge 済みか）と slug 決定 ──
+  local EXISTING_SPEC_DIR
+  EXISTING_SPEC_DIR=$(ls -d "$WT/docs/specs/${NUMBER}-"* 2>/dev/null | head -1 || true)
+  local HAS_EXISTING_SPEC=false
   if [ -n "$EXISTING_SPEC_DIR" ] && [ -f "$EXISTING_SPEC_DIR/requirements.md" ]; then
     HAS_EXISTING_SPEC=true
     SLUG=$(basename "$EXISTING_SPEC_DIR" | sed "s/^${NUMBER}-//")
@@ -2181,9 +2583,7 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
   fi
   SPEC_DIR_REL="docs/specs/${NUMBER}-${SLUG}"
 
-  # ─────────────────────────────────────────────────────────────
-  # モード判定（design / impl / impl-resume）
-  # ─────────────────────────────────────────────────────────────
+  # ── モード判定（design / impl / impl-resume）──
   NEEDS_ARCHITECT="false"
   ARCHITECT_REASON=""
   MODE=""
@@ -2196,11 +2596,12 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
     ARCHITECT_REASON="Triage をスキップ（軽微な変更扱い）"
     MODE="impl"
   else
-    # ─── Triage フェーズ ───
-    TRIAGE_FILE="/tmp/triage-${REPO_SLUG}-${NUMBER}-${TS}.json"
+    # ── Triage フェーズ ──
+    local TRIAGE_FILE="/tmp/triage-${REPO_SLUG}-${NUMBER}-${TS}.json"
     rm -f "$TRIAGE_FILE"
 
-    TITLE_SAFE="${TITLE//|/\\|}"
+    local TITLE_SAFE="${TITLE//|/\\|}"
+    local TRIAGE_PROMPT
     TRIAGE_PROMPT=$(sed \
       -e "s|{{NUMBER}}|${NUMBER}|g" \
       -e "s|{{TITLE}}|${TITLE_SAFE}|g" \
@@ -2216,20 +2617,27 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
         --max-turns "$TRIAGE_MAX_TURNS" \
         >> "$LOG" 2>&1; then
       echo "❌ Triage の実行に失敗" | tee -a "$LOG"
-      continue
+      # claude-picked-up は Dispatcher 側で付与済。Triage 失敗時は claude-failed に
+      # 遷移して人間判断に委ねる（既存挙動: Triage 失敗時は continue だったが、
+      # Phase C ではすでに claim 済のため、ラベルを残置せず claude-failed 化する）。
+      _slot_mark_failed "triage" "Triage（Claude 実行）に失敗しました。"
+      return 1
     fi
 
     if [ ! -f "$TRIAGE_FILE" ]; then
       echo "❌ Triage 結果 JSON が生成されませんでした" | tee -a "$LOG"
-      continue
+      _slot_mark_failed "triage-json" "Triage 結果 JSON が生成されませんでした。"
+      return 1
     fi
 
+    local STATUS DECISION_COUNT
     STATUS=$(jq -r '.status' "$TRIAGE_FILE")
     DECISION_COUNT=$(jq '.decisions | length' "$TRIAGE_FILE")
     NEEDS_ARCHITECT=$(jq -r '.needs_architect // false' "$TRIAGE_FILE")
     ARCHITECT_REASON=$(jq -r '.architect_reason // ""' "$TRIAGE_FILE")
 
     if [ "$STATUS" = "needs-decisions" ] && [ "$DECISION_COUNT" -gt 0 ]; then
+      local COMMENT
       COMMENT=$(jq -r '
         "## 🤔 実装着手前に確認が必要な事項\n\n" +
         "Issue 内容を Claude Code の Product Manager で精査した結果、" +
@@ -2252,10 +2660,17 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
         "4. Triage をスキップして強制着手したい場合は `skip-triage` ラベルを付与してください。"
       ' "$TRIAGE_FILE")
 
-      gh issue comment "$NUMBER" --repo "$REPO" --body "$COMMENT"
-      gh issue edit    "$NUMBER" --repo "$REPO" --add-label "$LABEL_NEEDS_DECISIONS"
+      gh issue comment "$NUMBER" --repo "$REPO" --body "$COMMENT" >/dev/null 2>&1 || true
+      # Phase C: claim を取り消す（claude-picked-up 除去）+ needs-decisions 付与。
+      # 次サイクルで人間が needs-decisions を外したら再ピックアップされる必要があるため、
+      # claude-picked-up を残してはいけない。本機能導入前は claude-picked-up は未付与
+      # だったが、Phase C では Dispatcher が事前に付与しているためここで取り消す。
+      gh issue edit "$NUMBER" --repo "$REPO" \
+        --remove-label "$LABEL_PICKED" \
+        --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1 || true
       echo "🟡 #$NUMBER: $DECISION_COUNT 件の決定事項を起票しました" | tee -a "$LOG"
-      continue
+      slot_log "Triage 結果: needs-decisions（claude-picked-up 取り消し済）"
+      return 0
     fi
 
     if [ "$NEEDS_ARCHITECT" = "true" ]; then
@@ -2267,16 +2682,11 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
     fi
   fi
 
-  # ─────────────────────────────────────────────────────────────
-  # ピックアップを即ラベルで表明（クラッシュ時も二重起動を防ぐ）
-  # ─────────────────────────────────────────────────────────────
-  gh issue edit "$NUMBER" --repo "$REPO" --add-label "$LABEL_PICKED"
+  # ── ピックアップ表明コメント（claim 表明ラベルは Dispatcher が事前に付与済）──
   gh issue comment "$NUMBER" --repo "$REPO" \
-    --body "🤖 ローカル Claude Code ($(hostname)) が処理を開始しました（モード: ${MODE}）。"
+    --body "🤖 ローカル Claude Code ($(hostname)) が処理を開始しました（slot=${IDD_SLOT_NUMBER} / モード: ${MODE}）。" >/dev/null 2>&1 || true
 
-  # ─────────────────────────────────────────────────────────────
-  # ブランチを切る（モードに応じて名前を変える）
-  # ─────────────────────────────────────────────────────────────
+  # ── ブランチを切る（モードに応じて名前を変える）──
   case "$MODE" in
     design)
       BRANCH="claude/issue-${NUMBER}-design-${SLUG}"
@@ -2285,15 +2695,21 @@ echo "$ISSUES" | jq -c '.[]' | while read -r issue; do
       BRANCH="claude/issue-${NUMBER}-impl-${SLUG}"
       ;;
   esac
-  git checkout -B "$BRANCH" main
-  git push -u origin "$BRANCH" --force-with-lease
+  # worktree は detached HEAD で起動するため -B で新規 branch 作成（local main を持たない）
+  if ! git checkout -B "$BRANCH" "origin/main"; then
+    slot_warn "branch 作成に失敗: $BRANCH"
+    _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
+    return 1
+  fi
+  if ! git push -u origin "$BRANCH" --force-with-lease; then
+    slot_warn "branch push に失敗: $BRANCH"
+    _slot_mark_failed "branch-push" "ブランチ \`$BRANCH\` の push に失敗しました。"
+    return 1
+  fi
 
-  # ─────────────────────────────────────────────────────────────
-  # モード別ディスパッチ
-  #   - design      : 既存どおり PM → Architect → PjM を 1 セッションで起動
-  #   - impl/resume : Reviewer ゲート (#20) を含む stage 分割パイプラインへ委譲
-  # ─────────────────────────────────────────────────────────────
+  # ── モード別ディスパッチ ──
   if [ "$MODE" = "design" ]; then
+    local FLOW_LABEL STEPS DEV_PROMPT
     FLOW_LABEL="PM → Architect → PjM（設計 PR 作成ゲート）"
     STEPS=$(cat <<EOF
 1. product-manager サブエージェントで要件定義を \`${SPEC_DIR_REL}/requirements.md\` に保存
@@ -2351,27 +2767,189 @@ EOF
         --verbose \
         >> "$LOG" 2>&1; then
       echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
+      slot_log "$MODE 完了"
+      return 0
     else
       echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
-      gh issue edit "$NUMBER" --repo "$REPO" \
-        --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
-      gh issue comment "$NUMBER" --repo "$REPO" \
-        --body "⚠️ 自動開発が失敗しました（$(hostname) / モード: $MODE）。\n\nログ: \`$LOG\`\n\n問題を解決してから \`claude-failed\` ラベルを外してください。"
+      _slot_mark_failed "$MODE" "design モードでの Claude 実行が失敗しました。"
+      return 1
     fi
   else
     # impl / impl-resume → Reviewer ゲートを含む stage 分割パイプラインへ
-    # （要件 2.4: Triage / skip-triage / impl-resume の全 impl 系で Reviewer 起動）
-    # 失敗時の claude-picked-up 削除 + claude-failed 付与 + Issue コメントは
-    # run_impl_pipeline 内 (mark_issue_failed) に一元化されており、ここでは追加処理不要。
     if run_impl_pipeline; then
       echo "✅ #$NUMBER: $MODE 完了（Reviewer ゲート通過 / PR 作成済み）" | tee -a "$LOG"
+      slot_log "$MODE 完了（PR 作成済み）"
+      return 0
     else
       echo "❌ #$NUMBER: $MODE 失敗（claude-failed 付与済み）" | tee -a "$LOG"
+      slot_log "$MODE 失敗（claude-failed 付与済み）"
+      return 1
     fi
   fi
+}
 
-  # 次のループのため main に戻る
-  git checkout main
-done
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Phase C: Dispatcher
+#
+# 1 サイクル中に 1 度起動される。Issue 候補をローカルキューに pop し、空き slot を
+# 探索して claim（claude-picked-up ラベル付与）してから Slot Runner をバックグラウンド
+# 起動する。サイクル終端で `wait` により全 Worker 完了を待ち合わせる。
+#
+# Req 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 6.3, 6.4, 6.5, 7.5, NFR 1.1, NFR 1.2
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# Dispatcher が抱える slot_n -> PID マッピング（bash associative array, 4.0+）。
+# サブシェル fork 後、_slot_release で fd を閉じてもこの map で「どの slot が誰の
+# 子プロセスか」を後で再特定できる。
+declare -A _DISPATCHER_SLOT_PIDS
+
+# 完了した子プロセスを slot_pid map から prune する。
+# `kill -0 <pid>` が失敗（プロセス不在）なら slot は空いたとみなす。
+_dispatcher_reap_finished_slots() {
+  local n pid
+  for n in "${!_DISPATCHER_SLOT_PIDS[@]}"; do
+    pid="${_DISPATCHER_SLOT_PIDS[$n]}"
+    if [ -z "$pid" ]; then
+      unset '_DISPATCHER_SLOT_PIDS['"$n"']'
+      continue
+    fi
+    if ! kill -0 "$pid" 2>/dev/null; then
+      # 子プロセス終了済 → slot 解放
+      wait "$pid" 2>/dev/null || true
+      unset '_DISPATCHER_SLOT_PIDS['"$n"']'
+      dispatcher_log "slot-${n}: completed (pid=$pid)"
+    fi
+  done
+}
+
+# 空き slot を探す（reap → 1..PARALLEL_SLOTS で _slot_acquire）。
+# 戻り値: 0 = 取得成功（slot 番号を stdout に echo） / 1 = 全 slot busy
+_dispatcher_find_free_slot() {
+  _dispatcher_reap_finished_slots
+  local n
+  for ((n=1; n<=PARALLEL_SLOTS; n++)); do
+    # 既に PID マップに載っている slot は busy
+    if [ -n "${_DISPATCHER_SLOT_PIDS[$n]:-}" ]; then
+      continue
+    fi
+    if _slot_acquire "$n"; then
+      echo "$n"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# 1 サイクル分の Dispatcher を実行する。
+# 戻り値: 0 = 正常完了（個々の Worker の成否は Issue ラベル経由で表現）/ 非ゼロ = 致命的失敗
+_dispatcher_run() {
+  # Req 1.3: PARALLEL_SLOTS 検証 → 不正なら ERROR ログ + exit 1
+  if ! _parallel_validate_slots; then
+    return 1
+  fi
+
+  # Req 7.5: 既存の Issue 取得クエリ（フィルタ・limit 5）を据え置き
+  local issues
+  issues=$(gh issue list \
+    --repo "$REPO" \
+    --label "$LABEL_TRIGGER" \
+    --state open \
+    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\"" \
+    --json number,title,body,url,labels \
+    --limit 5)
+
+  local count
+  count=$(echo "$issues" | jq 'length')
+  if [ "$count" -eq 0 ]; then
+    # Req 1.4 / 7.6: PARALLEL_SLOTS=1 + 対象なし時の挙動を本機能導入前と同等に保つ。
+    # （prefix dispatcher: は付くが、メッセージ本体は既存と同じ）
+    echo "[$(date '+%F %T')] 処理対象の Issue なし"
+    return 0
+  fi
+
+  # Req 6.3: サイクル開始ログ（処理対象件数 + 利用可能 slot 数）
+  dispatcher_log "対象 Issue ${count} 件 / 利用可能 slot ${PARALLEL_SLOTS} 件"
+
+  # Req 1.4 互換のため、PARALLEL_SLOTS=1 のときも従来と同じ（prefix なし）件数 echo を出す。
+  # 既存ユーザー / cron の grep 監視を破壊しない（"N 件の Issue を処理します" 行）。
+  if [ "$PARALLEL_SLOTS" -eq 1 ]; then
+    echo "[$(date '+%F %T')] $count 件の Issue を処理します"
+  fi
+
+  # Issue キューを 1 件ずつ pop して slot に投入
+  local issue
+  while IFS= read -r issue; do
+    [ -z "$issue" ] && continue
+    local issue_number
+    issue_number=$(echo "$issue" | jq -r '.number')
+
+    # ── 空き slot 探索（busy なら 1 件完了するまで待機）──
+    local slot=""
+    while true; do
+      if slot=$(_dispatcher_find_free_slot); then
+        break
+      fi
+      # 全 slot busy → 1 件完了を待つ（bash 4.3+ の `wait -n`）
+      if [ "${#_DISPATCHER_SLOT_PIDS[@]}" -eq 0 ]; then
+        # 子プロセス未起動かつ全 slot 取得失敗 → 取れる slot がない異常事態
+        # （他 watcher プロセスが slot lock を握っているなど）
+        dispatcher_warn "全 slot がロック中（_slot_acquire いずれも失敗）。Issue #${issue_number} は次サイクルへ持ち越し"
+        slot=""
+        break
+      fi
+      wait -n 2>/dev/null || true
+      _dispatcher_reap_finished_slots
+    done
+
+    if [ -z "$slot" ]; then
+      continue
+    fi
+
+    # ── claim（claude-picked-up ラベル付与）──
+    if ! gh issue edit "$issue_number" --repo "$REPO" --add-label "$LABEL_PICKED" >/dev/null 2>&1; then
+      # Req 2.3: ラベル付与失敗 → WARN + slot lock 解放 + 次 Issue へ
+      dispatcher_warn "Issue #${issue_number}: claude-picked-up ラベル付与に失敗、slot-${slot} を解放して次 Issue へ"
+      _slot_release "$slot"
+      continue
+    fi
+
+    # Req 6.4: 投入時刻ログ
+    dispatcher_log "dispatched #${issue_number} -> slot-${slot}"
+
+    # ── Slot Runner をバックグラウンド起動 ──
+    # サブシェル `( ... ) &` で fork。サブシェルは親の fd を継承するため
+    # _slot_acquire で取得した lock fd は subshell が引き続き保持する。
+    ( _slot_run_issue "$slot" "$issue" ) &
+    local pid=$!
+    _DISPATCHER_SLOT_PIDS[$slot]=$pid
+
+    # 親 Dispatcher 側の fd を解放する。これにより、Dispatcher が同 slot を再
+    # acquire しようとしたとき、subshell が lock を保持している間は flock -n が
+    # 失敗するようになる（claim atomicity の構造的保証）。
+    _slot_release "$slot"
+  done <<< "$(echo "$issues" | jq -c '.[]')"
+
+  # Req 2.6: サイクル終端で全 Worker を待ち合わせる
+  # Slot Runner 内で claude-failed 化等は完結済のため exit code は無視
+  if [ "${#_DISPATCHER_SLOT_PIDS[@]}" -gt 0 ]; then
+    dispatcher_log "全 Worker 完了を待機中 (${#_DISPATCHER_SLOT_PIDS[@]} 件 in flight)"
+    wait
+    _dispatcher_reap_finished_slots
+  fi
+
+  dispatcher_log "サイクル完了"
+  return 0
+}
+
+# Dispatcher を起動（既存 Issue 処理ループの置換）。
+_dispatcher_run
+DISPATCHER_RC=$?
+if [ "$DISPATCHER_RC" -ne 0 ]; then
+  # Req 1.3: PARALLEL_SLOTS 不正値などで _dispatcher_run が non-zero を返した場合は
+  # サイクル中断（既存の ERROR 終了規約 = exit 1 と整合）
+  exit "$DISPATCHER_RC"
+fi
 
 echo "[$(date '+%F %T')] 完了"
+exit 0
+
