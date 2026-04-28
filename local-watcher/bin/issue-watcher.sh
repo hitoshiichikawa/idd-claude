@@ -2143,6 +2143,55 @@ run_impl_pipeline() {
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Phase C: Issue 入口並列化 (worktree slot + dispatcher, #16)
+#
+# auto-dev Issue 処理ループを Dispatcher / Slot Worker パターンに置き換え、
+# 複数 Issue を時間的に重ねて処理できるようにする。
+#
+# 構成:
+#   - _parallel_validate_slots : PARALLEL_SLOTS 検証
+#   - Worktree Manager  : per-slot 永続 worktree の初期化・最新化
+#   - Slot Lock Manager : per-slot 非ブロッキング flock の取得・解放
+#   - Hook Layer        : SLOT_INIT_HOOK の絶対パス起動（eval 不使用）
+#   - Slot Runner       : 1 Issue を 1 worktree で処理する Worker
+#   - Dispatcher        : Issue 候補取得 → claim → slot 投入 → 全 Worker wait
+#
+# PARALLEL_SLOTS=1（デフォルト）のとき、slot-2 以降の lock / worktree を作成せず、
+# 本機能導入前と外形的に同一挙動になるよう実装する。
+#
+# 詳細: docs/specs/16-phase-c-worktree-slot-dispatcher/design.md
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ─── Phase C: Logger ───
+# Dispatcher / Slot Worker / Worktree / Hook 共通の timestamp 形式（既存 mq_log 等と同じ）
+dispatcher_log() {
+  echo "[$(date '+%F %T')] dispatcher: $*"
+}
+dispatcher_warn() {
+  echo "[$(date '+%F %T')] dispatcher: WARN: $*" >&2
+}
+dispatcher_error() {
+  echo "[$(date '+%F %T')] dispatcher: ERROR: $*" >&2
+}
+
+# ─── _parallel_validate_slots ───
+#
+# PARALLEL_SLOTS が正の整数として解釈できるかを検証する。
+# - 0 / 負数 / 非数値 / 空文字 / 先頭ゼロ等の形式違反を拒否する
+# - 不正なら ERROR ログを stderr に出力して return 1
+# 戻り値: 0 = ok / 1 = invalid
+#
+# Req 1.3: 不正値時はサイクル中断（呼び出し元で exit 1）
+# Req 6.5: timestamp 書式 [YYYY-MM-DD HH:MM:SS] を維持
+_parallel_validate_slots() {
+  if [[ ! "$PARALLEL_SLOTS" =~ ^[1-9][0-9]*$ ]]; then
+    dispatcher_error "PARALLEL_SLOTS は正の整数を指定してください: '$PARALLEL_SLOTS'"
+    return 1
+  fi
+  return 0
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 未処理 Issue を取得
 #   auto-dev ラベルがあり、かつ以下のラベルが付いていないもの:
 #     needs-decisions / awaiting-design-review / claude-picked-up /
