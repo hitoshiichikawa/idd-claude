@@ -1467,11 +1467,13 @@ process_design_review_release() {
 
   # AC 2.1 / 2.7 / 4.1 / 4.5: server-side filter で `awaiting-design-review` を必須に、
   # `claude-failed` / `needs-decisions` を除外。人間が先に手動除去した Issue は候補に上がらない。
+  # Issue #54 Req 1.1 / 5.1: PR 専用ラベル `needs-iteration` が Issue 側に誤付与された
+  # ケースは Documentation Set 全体で「PR 適用」と一貫させるため、ここでも候補から除外する。
   local issues_json
   if ! issues_json=$(timeout "$DRR_GH_TIMEOUT" gh issue list \
       --repo "$REPO" \
       --state open \
-      --search "label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_DECISIONS\"" \
+      --search "label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_NEEDS_ITERATION\"" \
       --json number,title,url,labels \
       --limit 100 2>/dev/null); then
     drr_warn "候補 Issue 取得 API 失敗（タイムアウト or 4xx/5xx）。本サイクルの Design Review Release Processor は skip。"
@@ -2849,12 +2851,14 @@ _dispatcher_run() {
   fi
 
   # Req 7.5: 既存の Issue 取得クエリ（フィルタ・limit 5）を据え置き
+  # Issue #54 Req 1.1 / 1.3 / 5.2: PR 専用ラベル `needs-iteration` が誤って Issue 側に
+  # 付与されているケースを除外する（人為ミスでの impl-resume 起動 → 既存 PR 破壊事故防止）。
   local issues
   issues=$(gh issue list \
     --repo "$REPO" \
     --label "$LABEL_TRIGGER" \
     --state open \
-    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\"" \
+    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\"" \
     --json number,title,body,url,labels \
     --limit 5)
 
