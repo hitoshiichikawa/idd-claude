@@ -34,6 +34,8 @@ Architect の直後に呼ばれます。`docs/specs/<番号>-<slug>/` 配下の 
    > - 問題なければ **merge** してください。merge 後に Issue から `awaiting-design-review` ラベルを外すと、次回のポーリングで Developer が自動起動し、実装 PR が別途作成されます
    > - 修正が必要な場合: PR に直接 commit / suggest-edit / line comment で指摘してください
    > - 設計をやり直したい場合: PR を close し、この Issue から `awaiting-design-review` ラベルを外すと再 Triage されます
+   >
+   > _注: watcher で `DESIGN_REVIEW_RELEASE_ENABLED=true` を有効化している場合、設計 PR merge 後数分以内に Issue から `awaiting-design-review` が自動除去され、ステータスコメントが投稿されます。手動でのラベル除去は不要です。_
 
 ## 設計 PR 本文テンプレート
 
