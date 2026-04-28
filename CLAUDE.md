@@ -158,6 +158,7 @@
 | `design-principles.md` | Architect | design.md の必須セクションと詳細度の方針 |
 | `design-review-gate.md` | Architect | design.md の自己レビュー（traceability / File Structure Plan 充填 / orphan 検出） |
 | `tasks-generation.md` | Architect / Developer | tasks.md のアノテーション規約と numeric ID 階層 |
+| `feature-flag.md` | Developer / Reviewer | Feature Flag Protocol opt-in 宣言時の規約詳細（命名・両系統テスト・クリーンアップ責務） |
 
 ルール群は [cc-sdd](https://github.com/gotalab/cc-sdd)（MIT License, Copyright gotalab）から adapt したものです。
 
