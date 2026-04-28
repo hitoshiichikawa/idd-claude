@@ -928,15 +928,17 @@ EOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# pi_build_iteration_prompt: iteration-prompt.tmpl に変数を注入
-#   入力: $1=pr_number, $2=pr_json, $3=round
+# pi_build_iteration_prompt: 指定 template に変数を注入
+#   入力: $1=pr_number, $2=pr_json, $3=round, $4=template_path（省略時は impl 用既定）
 #   出力: stdout に prompt 文字列
-#   AC 3.1, 3.2, 3.3, 3.4, 3.5
+#   AC 3.1, 3.2, 3.3, 3.4, 3.5（#26）/ #35 で kind 引数の代わりに template path を受け取る
 # ─────────────────────────────────────────────────────────────────────────────
 pi_build_iteration_prompt() {
   local pr_number="$1"
   local pr_json="$2"
   local round="$3"
+  # #35: template path を呼び出し元から渡す。省略時は impl 用 template を使う（後方互換）。
+  local tmpl_path="${4:-$ITERATION_TEMPLATE}"
 
   local pr_title pr_url head_ref base_ref pr_body
   pr_title=$(echo "$pr_json" | jq -r '.title // ""')
@@ -1003,7 +1005,6 @@ pi_build_iteration_prompt() {
   # 複数行値（LINE_COMMENTS_JSON / GENERAL_COMMENTS_JSON / PR_DIFF / REQUIREMENTS_MD）は
   # awk -v では改行を扱えないため、export 経由で ENVIRON[] から取得し、
   # 「行全体が {{KEY}} のみ」のテンプレ行をブロックごと置換する（template はその前提で書かれている）。
-  local tmpl_path="$ITERATION_TEMPLATE"
   if [ ! -f "$tmpl_path" ]; then
     pi_warn "template not found: $tmpl_path"
     return 1
@@ -1064,8 +1065,10 @@ pi_build_iteration_prompt() {
 # ─────────────────────────────────────────────────────────────────────────────
 # pi_run_iteration: 1 PR 分の iteration を実行（fresh context Claude 起動）
 #   入力: $1=pr_json
-#   戻り値: 0=success(commit+push or reply-only), 1=failure, 2=skipped(round上限到達等)
-#   AC 3.6, 4.x, 5.x, 6.2, 6.3, 7.x, 8.3, 9.2, NFR 1.1, NFR 1.3
+#   戻り値: 0=success(commit+push or reply-only), 1=failure, 2=escalated(round上限到達),
+#           3=skip (kind=none/ambiguous, #35)
+#   AC 3.6, 4.x, 5.x, 6.2, 6.3, 7.x, 8.3, 9.2, NFR 1.1, NFR 1.3 (#26)
+#   #35: kind 判定で design / impl を分岐し、template と finalize 関数を切り替える
 # ─────────────────────────────────────────────────────────────────────────────
 pi_run_iteration() {
   local pr_json="$1"
@@ -1075,25 +1078,52 @@ pi_run_iteration() {
   base_ref=$(echo "$pr_json"  | jq -r '.baseRefName')
   pr_url=$(echo "$pr_json"    | jq -r '.url')
 
+  # #35 AC 1.1〜1.4 / 4.4: kind 判定（design / impl / none / ambiguous）
+  local kind
+  kind=$(pi_classify_pr_kind "$head_ref")
+
+  case "$kind" in
+    none)
+      pi_log "PR #${pr_number}: kind=none head=${head_ref} (does not match design/impl pattern), skip"
+      return 3
+      ;;
+    ambiguous)
+      pi_warn "PR #${pr_number}: kind=ambiguous head=${head_ref} (matches both design and impl pattern), skip"
+      return 3
+      ;;
+    design|impl) : ;;
+    *)
+      pi_warn "PR #${pr_number}: kind=${kind} (unknown), skip"
+      return 3
+      ;;
+  esac
+
+  # #35 AC 2.x: kind に応じた template path を取得
+  local tmpl_path
+  if ! tmpl_path=$(pi_select_template "$kind"); then
+    pi_warn "PR #${pr_number}: kind=${kind} 用 template が取得できず iteration 中止"
+    return 1
+  fi
+
   local round
   round=$(pi_read_round_counter "$pr_number")
 
-  # AC 7.2: 上限到達なら escalate
+  # AC 7.2 (#26): 上限到達なら escalate（kind 共通、#35 AC 3.4 / 6.5）
   if [ "$round" -ge "$PR_ITERATION_MAX_ROUNDS" ]; then
-    pi_log "PR #${pr_number}: round=${round} >= max=${PR_ITERATION_MAX_ROUNDS}, claude-failed に昇格"
+    pi_log "PR #${pr_number}: kind=${kind} round=${round} >= max=${PR_ITERATION_MAX_ROUNDS}, claude-failed に昇格"
     pi_escalate_to_failed "$pr_number" "$round" "$PR_ITERATION_MAX_ROUNDS" || true
     return 2
   fi
 
   local next_round=$((round + 1))
 
-  # AC 6.1: 着手表明（marker 更新 + コメント）
+  # AC 6.1: 着手表明（marker 更新 + コメント、kind 非依存、#35 AC 6.1 / 6.5）
   if ! pi_post_processing_marker "$pr_number" "$next_round"; then
-    pi_warn "PR #${pr_number}: 着手表明に失敗、iteration 中止"
+    pi_warn "PR #${pr_number}: kind=${kind} 着手表明に失敗、iteration 中止"
     return 1
   fi
 
-  pi_log "PR #${pr_number}: round=${next_round}/${PR_ITERATION_MAX_ROUNDS} 着手 (${pr_url})"
+  pi_log "PR #${pr_number}: kind=${kind} round=${next_round}/${PR_ITERATION_MAX_ROUNDS} 着手 (${pr_url})"
 
   # サブシェル + trap で必ず main に戻す（AC 8.3）
   local rc=0
@@ -1112,9 +1142,9 @@ pi_run_iteration() {
       exit 1
     fi
 
-    # prompt を生成
+    # prompt を生成（#35: kind に応じた template path を渡す）
     local prompt
-    if ! prompt=$(pi_build_iteration_prompt "$pr_number" "$pr_json" "$next_round"); then
+    if ! prompt=$(pi_build_iteration_prompt "$pr_number" "$pr_json" "$next_round" "$tmpl_path"); then
       pi_warn "PR #${pr_number}: prompt 組み立てに失敗"
       exit 1
     fi
@@ -1122,7 +1152,7 @@ pi_run_iteration() {
     # AC 3.6: fresh context で起動（--resume / --continue は使わない）
     # NFR 1.1: --max-turns で turn 数上限
     local pi_log_file
-    pi_log_file="$LOG_DIR/pr-iteration-${pr_number}-round${next_round}-$(date +%Y%m%d-%H%M%S).log"
+    pi_log_file="$LOG_DIR/pr-iteration-${kind}-${pr_number}-round${next_round}-$(date +%Y%m%d-%H%M%S).log"
     if ! claude \
         --print "$prompt" \
         --model "$PR_ITERATION_DEV_MODEL" \
@@ -1131,10 +1161,10 @@ pi_run_iteration() {
         --output-format stream-json \
         --verbose \
         >> "$pi_log_file" 2>&1; then
-      pi_warn "PR #${pr_number}: Claude 実行が失敗 (log: ${pi_log_file})"
+      pi_warn "PR #${pr_number}: kind=${kind} Claude 実行が失敗 (log: ${pi_log_file})"
       exit 1
     fi
-    pi_log "PR #${pr_number}: Claude 実行完了 (log: ${pi_log_file})"
+    pi_log "PR #${pr_number}: kind=${kind} Claude 実行完了 (log: ${pi_log_file})"
     exit 0
   )
   rc=$?
@@ -1142,17 +1172,30 @@ pi_run_iteration() {
   git checkout main >/dev/null 2>&1 || true
 
   if [ $rc -eq 0 ]; then
-    # AC 6.2: 成功 → ラベル遷移
-    if pi_finalize_labels "$pr_number"; then
-      pi_log "PR #${pr_number}: round=${next_round} action=success (needs-iteration -> ready-for-review)"
+    # AC 6.2 (#26) / #35 AC 3.1 / 3.2: kind に応じたラベル遷移
+    local finalize_ok=false
+    case "$kind" in
+      design)
+        if pi_finalize_labels_design "$pr_number"; then
+          pi_log "PR #${pr_number}: kind=${kind} round=${next_round} action=success (needs-iteration -> awaiting-design-review)"
+          finalize_ok=true
+        fi
+        ;;
+      impl)
+        if pi_finalize_labels "$pr_number"; then
+          pi_log "PR #${pr_number}: kind=${kind} round=${next_round} action=success (needs-iteration -> ready-for-review)"
+          finalize_ok=true
+        fi
+        ;;
+    esac
+    if [ "$finalize_ok" = "true" ]; then
       return 0
-    else
-      pi_warn "PR #${pr_number}: ラベル遷移失敗、needs-iteration を残置"
-      return 1
     fi
+    pi_warn "PR #${pr_number}: kind=${kind} ラベル遷移失敗、needs-iteration を残置"
+    return 1
   else
-    # AC 6.3: 失敗 → needs-iteration を残し WARN
-    pi_log "PR #${pr_number}: round=${next_round} action=fail (needs-iteration を残置)"
+    # AC 6.3 (#26) / #35 AC 3.3: 失敗 → needs-iteration を残し WARN
+    pi_log "PR #${pr_number}: kind=${kind} round=${next_round} action=fail (needs-iteration を残置)"
     return 1
   fi
 }
