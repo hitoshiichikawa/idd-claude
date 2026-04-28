@@ -149,6 +149,18 @@ DEV_MAX_TURNS="${DEV_MAX_TURNS:-60}"
 REVIEWER_MODEL="${REVIEWER_MODEL:-claude-opus-4-7}"
 REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-30}"
 
+# ─── Phase C: Issue 並列化 (worktree slot + dispatcher, #16) ───
+# 入口（auto-dev Issue 処理）の並列度を制御する env var 群。
+# 既存運用との後方互換のため、すべてデフォルトで本機能導入前と同一挙動になるよう配置:
+#   - PARALLEL_SLOTS 未設定 → 直列（slot=1）動作。slot-2 以降の lock / worktree は作成しない
+#   - SLOT_INIT_HOOK 未設定 → フック非起動（本機能導入前と同一）
+#   - WORKTREE_BASE_DIR / SLOT_LOCK_DIR は通常上書き不要。テスト用に override 可能。
+# 詳細: docs/specs/16-phase-c-worktree-slot-dispatcher/design.md
+PARALLEL_SLOTS="${PARALLEL_SLOTS:-1}"
+SLOT_INIT_HOOK="${SLOT_INIT_HOOK:-}"
+WORKTREE_BASE_DIR="${WORKTREE_BASE_DIR:-$HOME/.issue-watcher/worktrees}"
+SLOT_LOCK_DIR="${SLOT_LOCK_DIR:-$HOME/.issue-watcher}"
+
 # Triage プロンプトテンプレート
 TRIAGE_TEMPLATE="${TRIAGE_TEMPLATE:-$HOME/bin/triage-prompt.tmpl}"
 
