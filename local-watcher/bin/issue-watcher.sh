@@ -2422,12 +2422,370 @@ _hook_invoke() {
     fi
   fi
 
-  [ -n "$stderr_tmp" ] && rm -f "$stderr_tmp" 2>/dev/null || true
+  if [ -n "$stderr_tmp" ]; then
+    rm -f "$stderr_tmp" 2>/dev/null || true
+  fi
 
   if [ "$rc" -ne 0 ]; then
     return 1
   fi
   return 0
+}
+
+# ─── Phase C: Slot Runner ───
+#
+# 1 Issue を 1 つの slot worktree で処理する Worker。Dispatcher から
+# `( _slot_run_issue $n $issue_json ) &` の形でバックグラウンド fork される。
+#
+# 設計上の重要点:
+#   - サブシェルで動くため、内部の `cd` / 環境変数変更は親に伝播しない（Req 3.5 を構造的に保証）
+#   - 入口で _slot_acquire 済を前提（Dispatcher が取得済の lock fd を継承）
+#   - claim（claude-picked-up ラベル付与）は Dispatcher 側で完了済（Req 2.2）
+#   - 処理シーケンス:
+#       1. slot 専用ログファイル open
+#       2. _worktree_ensure → 失敗時 claude-failed 化 + return
+#       3. cd "$WT"
+#       4. _worktree_reset → 失敗時 claude-failed 化 + return
+#       5. _hook_invoke → 失敗時 claude-failed 化 + return
+#       6. 既存 Issue 処理ロジック（Triage → mode 判定 → claude 起動）を実行
+#   - すべての claude-failed 化は既存 mark_issue_failed パスを再利用（新ラベル不可）
+#
+# Req 2.7, 3.4, 3.5, 3.6, 5.3, 5.6, 5.7, 6.1, 6.2, 6.5, 7.3, 7.4, NFR 2.1, 2.2, 3.1, 3.2
+
+# slot worker 用ロガー（slot 番号 + Issue 番号を必ず prefix に含める、Req 6.1, NFR 3.1）。
+# サブシェル内で IDD_SLOT_NUMBER / NUMBER を読み取って prefix を組み立てる。
+slot_log() {
+  echo "[$(date '+%F %T')] slot-${IDD_SLOT_NUMBER:-?}: #${NUMBER:-?}: $*"
+}
+slot_warn() {
+  echo "[$(date '+%F %T')] slot-${IDD_SLOT_NUMBER:-?}: #${NUMBER:-?}: WARN: $*" >&2
+}
+slot_error() {
+  echo "[$(date '+%F %T')] slot-${IDD_SLOT_NUMBER:-?}: #${NUMBER:-?}: ERROR: $*" >&2
+}
+
+# claude-picked-up を claude-failed に置き換える共通フロー（Worktree / Hook / その他
+# サブシェル内エラー用）。run_impl_pipeline 内の mark_issue_failed と同じ操作を slot
+# worker 文脈で再現する（mark_issue_failed は MODE / LOG 等を要求するため代用しない）。
+# 引数: $1 = stage 識別子, $2 = Issue コメントに追加する補足
+_slot_mark_failed() {
+  local stage="$1"
+  local extra="$2"
+  gh issue edit "$NUMBER" --repo "$REPO" \
+    --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" >/dev/null 2>&1 || true
+  local hostname_val
+  hostname_val=$(hostname)
+  local body="⚠️ 自動開発が失敗しました（${hostname_val} / slot=${IDD_SLOT_NUMBER:-?} / 失敗 stage: ${stage}）。"
+  if [ -n "$extra" ]; then
+    body="${body}
+
+${extra}"
+  fi
+  if [ -n "${LOG:-}" ]; then
+    body="${body}
+
+ログ: \`$LOG\`"
+  fi
+  body="${body}
+
+問題を解決してから \`claude-failed\` ラベルを外してください。"
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+}
+
+# 1 Issue を 1 slot worktree で処理する Worker 本体。
+# サブシェル `( _slot_run_issue n issue_json ) &` から呼び出される前提。
+#
+# 引数:
+#   $1 = slot 番号
+#   $2 = Issue JSON (gh issue list の 1 要素)
+# 戻り値:
+#   0 = 成功 / 非ゼロ = 失敗（既に claude-failed ラベルへ遷移済み）
+#
+# 副作用:
+#   - サブシェル内で NUMBER / TITLE / BODY / URL / LABELS / TS / LOG / SLUG /
+#     SPEC_DIR_REL / MODE / BRANCH などのグローバル変数を設定（親には伝播しない）
+#   - $WT に cd（サブシェル内）
+#   - claude / gh / git の副作用は Issue ラベル遷移として外部観測可能
+_slot_run_issue() {
+  # slot 識別子をサブシェル内で見えるよう export（slot_log / _hook_invoke が参照）
+  export IDD_SLOT_NUMBER="$1"
+  local issue="$2"
+
+  # ── Issue メタデータ抽出 ──
+  NUMBER=$(echo "$issue" | jq -r '.number')
+  TITLE=$(echo "$issue"  | jq -r '.title')
+  BODY=$(echo "$issue"   | jq -r '.body // ""')
+  URL=$(echo "$issue"    | jq -r '.url')
+  LABELS=$(echo "$issue" | jq -r '.labels[].name')
+  TS=$(date +%Y%m%d-%H%M%S)
+  LOG="$LOG_DIR/issue-${NUMBER}-${TS}.log"
+
+  # slot 運用ログ（worktree 初期化・hook 結果など）。Issue ログとは別系統で残す（Req 6.2）。
+  local SLOT_LOG="$LOG_DIR/slot-${IDD_SLOT_NUMBER}-${NUMBER}-${TS}.log"
+  # 以降の slot_log 行は stdout (cron mailer) と SLOT_LOG の両方に書き出す
+  exec > >(tee -a "$SLOT_LOG") 2>&1
+
+  slot_log "Worker 起動 (LOG=$LOG SLOT_LOG=$SLOT_LOG)"
+
+  # ── Worktree 初期化（per-slot 永続 worktree）──
+  local WT
+  WT="$(_worktree_path "$IDD_SLOT_NUMBER")"
+  export IDD_SLOT_WORKTREE="$WT"
+
+  if ! _worktree_ensure "$IDD_SLOT_NUMBER"; then
+    slot_warn "worktree 初期化に失敗 (path=$WT)"
+    _slot_mark_failed "worktree-ensure" "Slot ${IDD_SLOT_NUMBER} の worktree 初期化に失敗しました（path=\`$WT\`）。"
+    return 1
+  fi
+  slot_log "worktree 確保 OK (path=$WT)"
+
+  # サブシェル内で worktree に cd（親には伝播しない、Req 3.5）
+  if ! cd "$WT"; then
+    slot_warn "worktree への cd に失敗 (path=$WT)"
+    _slot_mark_failed "worktree-cd" "worktree path への cd に失敗しました: \`$WT\`"
+    return 1
+  fi
+
+  # ── Worktree を origin/main 最新へ強制リセット ──
+  if ! _worktree_reset "$WT"; then
+    slot_warn "worktree reset に失敗 (path=$WT)"
+    _slot_mark_failed "worktree-reset" "Slot ${IDD_SLOT_NUMBER} の worktree を origin/main にリセットできませんでした。"
+    return 1
+  fi
+  slot_log "worktree reset OK (origin/main 最新化 + clean -fdx)"
+
+  # ── SLOT_INIT_HOOK 起動（reset 後・claude 起動前に 1 度だけ）──
+  if ! _hook_invoke "$IDD_SLOT_NUMBER" "$WT"; then
+    slot_warn "SLOT_INIT_HOOK の起動に失敗"
+    _slot_mark_failed "slot-init-hook" "SLOT_INIT_HOOK が失敗しました（詳細はログ参照）。SLOT_INIT_HOOK=\`${SLOT_INIT_HOOK:-(unset)}\`"
+    return 1
+  fi
+  if [ -n "${SLOT_INIT_HOOK:-}" ]; then
+    slot_log "SLOT_INIT_HOOK 完了"
+  fi
+
+  # ── 既存 Issue 処理ロジックを実行 ──
+  # ここから下は本機能導入前の Issue ループ本体と等価。サブシェル内で動くため
+  # NUMBER / MODE / LOG 等のグローバル変数変更は親に伝播しない（Req 3.5 を構造的に保証）。
+  echo "=== Processing #$NUMBER: $TITLE (slot-${IDD_SLOT_NUMBER}) ===" | tee -a "$LOG"
+
+  # ── 既存 spec ディレクトリの検出（設計 PR merge 済みか）と slug 決定 ──
+  local EXISTING_SPEC_DIR
+  EXISTING_SPEC_DIR=$(ls -d "$WT/docs/specs/${NUMBER}-"* 2>/dev/null | head -1 || true)
+  local HAS_EXISTING_SPEC=false
+  if [ -n "$EXISTING_SPEC_DIR" ] && [ -f "$EXISTING_SPEC_DIR/requirements.md" ]; then
+    HAS_EXISTING_SPEC=true
+    SLUG=$(basename "$EXISTING_SPEC_DIR" | sed "s/^${NUMBER}-//")
+    echo "📂 既存 spec 検出: $EXISTING_SPEC_DIR (slug=$SLUG)" | tee -a "$LOG"
+  else
+    SLUG=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' \
+          | sed -E 's/[^a-z0-9]+/-/g' | cut -c1-40 | sed -E 's/-+$//')
+  fi
+  SPEC_DIR_REL="docs/specs/${NUMBER}-${SLUG}"
+
+  # ── モード判定（design / impl / impl-resume）──
+  NEEDS_ARCHITECT="false"
+  ARCHITECT_REASON=""
+  MODE=""
+
+  if $HAS_EXISTING_SPEC; then
+    echo "✅ #$NUMBER: 設計レビュー済み（spec dir あり） → impl-resume モード" | tee -a "$LOG"
+    MODE="impl-resume"
+  elif echo "$LABELS" | grep -qx "$LABEL_SKIP_TRIAGE"; then
+    echo "skip-triage ラベルがあるため Triage をスキップ → impl モード" | tee -a "$LOG"
+    ARCHITECT_REASON="Triage をスキップ（軽微な変更扱い）"
+    MODE="impl"
+  else
+    # ── Triage フェーズ ──
+    local TRIAGE_FILE="/tmp/triage-${REPO_SLUG}-${NUMBER}-${TS}.json"
+    rm -f "$TRIAGE_FILE"
+
+    local TITLE_SAFE="${TITLE//|/\\|}"
+    local TRIAGE_PROMPT
+    TRIAGE_PROMPT=$(sed \
+      -e "s|{{NUMBER}}|${NUMBER}|g" \
+      -e "s|{{TITLE}}|${TITLE_SAFE}|g" \
+      -e "s|{{URL}}|${URL}|g" \
+      -e "s|{{FILE}}|${TRIAGE_FILE}|g" \
+      "$TRIAGE_TEMPLATE")
+
+    echo "--- Triage 実行 ---" >> "$LOG"
+    if ! claude \
+        --print "$TRIAGE_PROMPT" \
+        --model "$TRIAGE_MODEL" \
+        --permission-mode bypassPermissions \
+        --max-turns "$TRIAGE_MAX_TURNS" \
+        >> "$LOG" 2>&1; then
+      echo "❌ Triage の実行に失敗" | tee -a "$LOG"
+      # claude-picked-up は Dispatcher 側で付与済。Triage 失敗時は claude-failed に
+      # 遷移して人間判断に委ねる（既存挙動: Triage 失敗時は continue だったが、
+      # Phase C ではすでに claim 済のため、ラベルを残置せず claude-failed 化する）。
+      _slot_mark_failed "triage" "Triage（Claude 実行）に失敗しました。"
+      return 1
+    fi
+
+    if [ ! -f "$TRIAGE_FILE" ]; then
+      echo "❌ Triage 結果 JSON が生成されませんでした" | tee -a "$LOG"
+      _slot_mark_failed "triage-json" "Triage 結果 JSON が生成されませんでした。"
+      return 1
+    fi
+
+    local STATUS DECISION_COUNT
+    STATUS=$(jq -r '.status' "$TRIAGE_FILE")
+    DECISION_COUNT=$(jq '.decisions | length' "$TRIAGE_FILE")
+    NEEDS_ARCHITECT=$(jq -r '.needs_architect // false' "$TRIAGE_FILE")
+    ARCHITECT_REASON=$(jq -r '.architect_reason // ""' "$TRIAGE_FILE")
+
+    if [ "$STATUS" = "needs-decisions" ] && [ "$DECISION_COUNT" -gt 0 ]; then
+      local COMMENT
+      COMMENT=$(jq -r '
+        "## 🤔 実装着手前に確認が必要な事項\n\n" +
+        "Issue 内容を Claude Code の Product Manager で精査した結果、" +
+        "以下の判断は人間に委ねる必要があると判定しました。\n\n" +
+        "> " + .rationale + "\n\n" +
+        "---\n\n" +
+        (.decisions | to_entries | map(
+          "### " + ((.key + 1) | tostring) + ". " + .value.topic + "\n\n" +
+          "**質問**: " + .value.question + "\n\n" +
+          "**選択肢**:\n" +
+          (.value.options | map("- " + .) | join("\n")) + "\n\n" +
+          "**影響**: " + .value.impact + "\n\n" +
+          "**推奨**: " + .value.recommendation + "\n"
+        ) | join("\n---\n\n")) +
+        "\n\n---\n\n" +
+        "## 回答方法\n\n" +
+        "1. 各項目についてこの Issue にコメントで回答してください。\n" +
+        "2. すべての項目に結論が出たら、この Issue から **`needs-decisions` ラベルを外してください**。\n" +
+        "3. ラベルが外れた時点で Claude Code が自動で再 Triage し、追加論点が無ければ開発に着手します。\n" +
+        "4. Triage をスキップして強制着手したい場合は `skip-triage` ラベルを付与してください。"
+      ' "$TRIAGE_FILE")
+
+      gh issue comment "$NUMBER" --repo "$REPO" --body "$COMMENT" >/dev/null 2>&1 || true
+      # Phase C: claim を取り消す（claude-picked-up 除去）+ needs-decisions 付与。
+      # 次サイクルで人間が needs-decisions を外したら再ピックアップされる必要があるため、
+      # claude-picked-up を残してはいけない。本機能導入前は claude-picked-up は未付与
+      # だったが、Phase C では Dispatcher が事前に付与しているためここで取り消す。
+      gh issue edit "$NUMBER" --repo "$REPO" \
+        --remove-label "$LABEL_PICKED" \
+        --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1 || true
+      echo "🟡 #$NUMBER: $DECISION_COUNT 件の決定事項を起票しました" | tee -a "$LOG"
+      slot_log "Triage 結果: needs-decisions（claude-picked-up 取り消し済）"
+      return 0
+    fi
+
+    if [ "$NEEDS_ARCHITECT" = "true" ]; then
+      MODE="design"
+      echo "🎨 #$NUMBER: Architect 必要 → design モード（理由: $ARCHITECT_REASON）" | tee -a "$LOG"
+    else
+      MODE="impl"
+      echo "✅ #$NUMBER: Triage 通過（Architect 不要） → impl モード" | tee -a "$LOG"
+    fi
+  fi
+
+  # ── ピックアップ表明コメント（claim 表明ラベルは Dispatcher が事前に付与済）──
+  gh issue comment "$NUMBER" --repo "$REPO" \
+    --body "🤖 ローカル Claude Code ($(hostname)) が処理を開始しました（slot=${IDD_SLOT_NUMBER} / モード: ${MODE}）。" >/dev/null 2>&1 || true
+
+  # ── ブランチを切る（モードに応じて名前を変える）──
+  case "$MODE" in
+    design)
+      BRANCH="claude/issue-${NUMBER}-design-${SLUG}"
+      ;;
+    impl|impl-resume)
+      BRANCH="claude/issue-${NUMBER}-impl-${SLUG}"
+      ;;
+  esac
+  # worktree は detached HEAD で起動するため -B で新規 branch 作成（local main を持たない）
+  if ! git checkout -B "$BRANCH" "origin/main"; then
+    slot_warn "branch 作成に失敗: $BRANCH"
+    _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
+    return 1
+  fi
+  if ! git push -u origin "$BRANCH" --force-with-lease; then
+    slot_warn "branch push に失敗: $BRANCH"
+    _slot_mark_failed "branch-push" "ブランチ \`$BRANCH\` の push に失敗しました。"
+    return 1
+  fi
+
+  # ── モード別ディスパッチ ──
+  if [ "$MODE" = "design" ]; then
+    local FLOW_LABEL STEPS DEV_PROMPT
+    FLOW_LABEL="PM → Architect → PjM（設計 PR 作成ゲート）"
+    STEPS=$(cat <<EOF
+1. product-manager サブエージェントで要件定義を \`${SPEC_DIR_REL}/requirements.md\` に保存
+   - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
+   - 人間がコメントで回答済みの決定事項は requirements に反映する
+2. architect サブエージェントで設計書とタスク分割を保存
+   - Triage 判定理由: ${ARCHITECT_REASON}
+   - \`${SPEC_DIR_REL}/design.md\`（モジュール構成・データモデル・公開 IF・処理フロー・リスク）
+   - \`${SPEC_DIR_REL}/tasks.md\`（Developer 向けタスク分割、各タスクが独立コミット可能な粒度）
+3. project-manager サブエージェントを **design-review モード** で起動
+   - 成果物は ${SPEC_DIR_REL}/ 配下の requirements / design / tasks のみ（実装コードは含めない）
+   - title: \`spec(#${NUMBER}): <1 行サマリ>\`
+   - Issue ラベル: claude-picked-up → awaiting-design-review に付け替え
+   - Issue にコメントで設計 PR リンクと案内を投稿
+
+この設計 PR が merge されるまで、実装フェーズには進みません。人間が merge した後、
+次回のポーリングで Developer が自動起動し、実装 PR が別途作成されます。
+EOF
+)
+
+    DEV_PROMPT=$(cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+以下の Issue を ${FLOW_LABEL} のフローで進めてください。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+- Body  : |
+${BODY}
+
+## 作業ブランチ
+${BRANCH}（main から派生・push 済み・現在チェックアウト中）
+
+## 作業ディレクトリ
+${SPEC_DIR_REL}/
+
+## 進め方
+${STEPS}
+
+## 制約
+- main に直接 push しないこと
+- 既存のテストを壊さないこと
+- 不明点は推測せず、PR 本文の「確認事項」セクションに列挙すること
+EOF
+)
+
+    echo "--- Development 実行（$MODE）---" >> "$LOG"
+    if claude \
+        --print "$DEV_PROMPT" \
+        --model "$DEV_MODEL" \
+        --permission-mode bypassPermissions \
+        --max-turns "$DEV_MAX_TURNS" \
+        --output-format stream-json \
+        --verbose \
+        >> "$LOG" 2>&1; then
+      echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
+      slot_log "$MODE 完了"
+      return 0
+    else
+      echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
+      _slot_mark_failed "$MODE" "design モードでの Claude 実行が失敗しました。"
+      return 1
+    fi
+  else
+    # impl / impl-resume → Reviewer ゲートを含む stage 分割パイプラインへ
+    if run_impl_pipeline; then
+      echo "✅ #$NUMBER: $MODE 完了（Reviewer ゲート通過 / PR 作成済み）" | tee -a "$LOG"
+      slot_log "$MODE 完了（PR 作成済み）"
+      return 0
+    else
+      echo "❌ #$NUMBER: $MODE 失敗（claude-failed 付与済み）" | tee -a "$LOG"
+      slot_log "$MODE 失敗（claude-failed 付与済み）"
+      return 1
+    fi
+  fi
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
