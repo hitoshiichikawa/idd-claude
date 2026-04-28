@@ -1,0 +1,83 @@
+# Implementation Plan
+
+- [ ] 1. Config Block 拡張と入力検証の実装
+- [ ] 1.1 `PARALLEL_SLOTS` / `SLOT_INIT_HOOK` / `WORKTREE_BASE_DIR` / `SLOT_LOCK_DIR` の env var を Config ブロック末尾に追加
+  - 既存 env var 名（`REPO` / `REPO_DIR` / `LOG_DIR` / `LOCK_FILE` / `TRIAGE_MODEL` / `DEV_MODEL` 等）の名称・意味・デフォルト値は一切変更しない
+  - すべて `${VAR:-default}` 形式で override 可能にする
+  - _Requirements: 1.1, 1.2, 5.1, 7.1_
+- [ ] 1.2 `_parallel_validate_slots` 関数を実装し、Dispatcher 起動直前で呼び出す
+  - 正の整数以外の値は ERROR ログ出力後に `exit 1` でサイクル中断（既存 ERROR 時の終了規約と整合）
+  - timestamp 書式 `[YYYY-MM-DD HH:MM:SS]` を維持
+  - _Requirements: 1.3, 6.5_
+
+- [ ] 2. Worktree Manager / Slot Lock Manager / Hook Layer の関数群を追加
+- [ ] 2.1 Worktree Manager の関数群を実装 (P)
+  - `_worktree_path` / `_worktree_ensure` / `_worktree_reset` の 3 関数
+  - `_worktree_ensure` は `git worktree list --porcelain` で冪等性を担保し、不在時のみ `git worktree add` する
+  - `_worktree_reset` は `git -C "$WT" fetch origin --prune && git -C "$WT" reset --hard origin/main && git -C "$WT" clean -fdx` を実行
+  - 破損検出時は `slot-N` を `slot-N.broken-<ts>` に退避して再作成
+  - 失敗時はすべて `return 1`（上位で claude-failed 化）
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.6, 3.7, 7.6_
+  - _Boundary: Worktree Manager_
+- [ ] 2.2 Slot Lock Manager の関数群を実装 (P)
+  - `_slot_lock_path` / `_slot_acquire` / `_slot_release` の 3 関数
+  - lock file path: `$SLOT_LOCK_DIR/${REPO_SLUG}-slot-${n}.lock`
+  - fd 番号は per-slot に `210 + slot_number` を使用（既存 `LOCK_FILE` の fd 200 と衝突回避）
+  - `flock -n` で非ブロッキング、失敗時 INFO ログ + `return 1`
+  - `PARALLEL_SLOTS=1` のとき slot-2 以降の lock を作らない（slot index ループで gate）
+  - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 7.6, NFR 4.1_
+  - _Boundary: Slot Lock Manager_
+- [ ] 2.3 `_hook_invoke` 関数を実装 (P)
+  - 未設定 / 空文字なら `return 0`（hook 不起動）
+  - `[ -x "$SLOT_INIT_HOOK" ]` で実行可能性を検査、失敗時 ERROR ログ + `return 1`
+  - 環境変数 `IDD_SLOT_NUMBER` / `IDD_SLOT_WORKTREE` を引き継ぎ、cwd は `$wt`
+  - **eval / `bash -c` 不使用**: 引数文字列の空白分割を許容せず、絶対パスをそのまま起動
+  - 非ゼロ exit 時は exit code と stderr 末尾をログに転記して `return 1`
+  - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, NFR 2.3_
+  - _Boundary: Hook Layer_
+
+- [ ] 3. Slot Runner / Dispatcher の実装
+- [ ] 3.1 Slot Runner `_slot_run_issue` を実装し、既存 Issue 処理ループ本体を関数化する
+  - サブシェル `( ... ) &` で起動するため内部 `cd` / 環境変数変更は親に伝播しない（Req 3.5 を構造的に保証）
+  - 処理シーケンス: slot ログファイル open → `_worktree_ensure` → `cd $WT` → `_worktree_reset` → `_hook_invoke` → 既存 Triage / branch 作成 / claude 起動 / mode 別ディスパッチ
+  - 各失敗ポイントは既存 `mark_issue_failed` を再利用して claude-failed 化（新ラベル不可）
+  - すべてのログ行に `[YYYY-MM-DD HH:MM:SS] slot-<N>: #<Issue>:` prefix を付与
+  - slot 専用ログファイル `$LOG_DIR/slot-<N>-<TS>.log` と既存 `$LOG_DIR/issue-<N>-<TS>.log` の 2 系統を併用
+  - _Requirements: 2.7, 3.4, 3.5, 3.6, 5.3, 5.6, 5.7, 6.1, 6.2, 6.5, 7.3, 7.4, NFR 2.1, NFR 2.2, NFR 3.1, NFR 3.2_
+  - _Depends: 2.1, 2.2, 2.3_
+- [ ] 3.2 Dispatcher `_dispatcher_run` を実装し、既存 Issue ループブロックを置換する
+  - 既存 `gh issue list` の取得を Dispatcher 内に移設（フィルタ・limit は据え置き）
+  - サイクル開始時に「対象 Issue 件数」「利用可能 slot 数」をログに記録
+  - 各 Issue ごとに `for n in 1..PARALLEL_SLOTS` で空き slot を探索（最初に取れた slot を採用）
+  - 全 slot busy なら `wait -n PID...` で 1 件完了を待機（bash 4.3+ 前提、CLAUDE.md と整合）
+  - slot 取得後 `gh issue edit --add-label claude-picked-up` を実行、失敗時 WARN + slot lock 解放 + 次 Issue へ
+  - 成功時 `_slot_run_issue ... &` でバックグラウンド起動 + PID 配列に保存
+  - 投入時刻 / 完了時刻ログを `dispatcher:` prefix で記録
+  - キュー枯渇後は `wait` で全 Worker 完了待ち（exit code は無視、Slot Runner 内で claude-failed 化済）
+  - 既存 `LOCK_FILE` による cron 多重起動防止 flock は Dispatcher プロセス全体に対して維持
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 6.3, 6.4, 6.5, 7.5, NFR 1.1, NFR 1.2_
+  - _Depends: 1.2, 3.1_
+
+- [ ] 4. README 更新と Migration Note の追加
+- [ ] 4.1 README.md に「並列実行（Phase C）」節を追加
+  - `PARALLEL_SLOTS` の意味・デフォルト値（`1`）・推奨値（初期推奨 2、3 以上は Claude Max 枠と相談）
+  - `SLOT_INIT_HOOK` の責任分界（フック内コマンドはユーザー責任、idd-claude は内容を検査しない）
+  - worktree ベースディレクトリの配置先 `$HOME/.issue-watcher/worktrees/` とディスク量目安（フル clone × N 倍）
+  - Migration Note: `PARALLEL_SLOTS` 未設定で既存 cron は無設定で動き続ける旨、初回サイクルは worktree 作成で通常より遅い旨
+  - 既存「セットアップ」「複数リポジトリ運用」等の節構造を破壊しない位置に挿入
+  - _Requirements: 1.5, 5.8, NFR 4.2_
+
+- [ ] 5. 静的解析と手動スモークテスト
+- [ ] 5.1 `shellcheck` / `actionlint` / `bash -n` を warning ゼロでクリア
+  - `shellcheck local-watcher/bin/issue-watcher.sh install.sh setup.sh .github/scripts/*.sh`
+  - `actionlint .github/workflows/*.yml`
+  - `bash -n local-watcher/bin/issue-watcher.sh`
+  - _Requirements: 7.1, 7.2, 7.5_
+- [ ] 5.2 手動スモークテストで AC 互換性と並列動作を検証
+  - **`PARALLEL_SLOTS=1` 回帰**: 既存 cron 設定で対象なし状態 dry run、ログ書式・slot-2 lock 不在・slot-2 worktree 不在の確認
+  - **`PARALLEL_SLOTS=2` 並列**: 2 件の `auto-dev` Issue を立て、slot-1 / slot-2 ログタイムスタンプの重なり確認
+  - **claim 競合**: Dispatcher 起動中に手動で `claude-picked-up` ラベルを先回り付与し、再投入されないことを確認
+  - **`SLOT_INIT_HOOK` 動作**: 正常 / 非ゼロ exit / 不在 / 非実行可能 の 4 ケースで claude-failed 遷移とログ出力を確認
+  - **worktree 破損リカバリ**: `slot-1/.git` を破壊して次サイクルで自動再作成されることを確認
+  - 結果を PR 本文「Test plan」に記載
+  - _Requirements: 1.4, 5.6, 5.7, 8.1, 8.2, 8.3, 8.4, 8.5_
