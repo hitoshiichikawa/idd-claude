@@ -1,0 +1,89 @@
+# Implementation Plan
+
+- [ ] 1. Feature Flag Protocol 規約詳細ファイルを新設
+- [ ] 1.1 `repo-template/.claude/rules/feature-flag.md` を新規作成 (P)
+  - 概要 / 採否宣言の書式 / Flag 命名と初期値 / Implementer が満たすべき要件 / 両系統テスト指針 / クリーンアップ責務 / Non-Goals / 採用宣言サンプル の各セクションを設計書 `FeatureFlagRule` の File Outline Contract に従って記述
+  - クリーンアップ起票責務は「人間が umbrella Issue 完了時に手動起票」と明記
+  - 残存 flag 棚卸し閾値は「同時 5 個超で棚卸し Issue を起票」と数値化
+  - LaunchDarkly / Unleash / GrowthBook 等の外部 SaaS は Non-Goals で明示除外
+  - 言語固有のコード例を含めない（NFR 3.1）。200 行以内目安（NFR 2.1）
+  - opt-in / opt-out 採用宣言サンプルを 1 つずつ含める（NFR 2.2）
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 5.1, 5.2, 5.3, 6.1, 6.2, 6.3, NFR 2.1, NFR 2.2, NFR 3.1_
+  - _Boundary: FeatureFlagRule_
+- [ ] 1.2 `.claude/rules/feature-flag.md`（root / self-hosting 用）を作成 (P)
+  - 1.1 と同内容のファイルを root の `.claude/rules/` に配置
+  - 既存 `.claude/rules/*.md`（design-principles.md 等）と同じスタイルで記述
+  - _Requirements: 2.1_
+  - _Boundary: FeatureFlagRule_
+  - _Depends: 1.1_
+
+- [ ] 2. `repo-template/CLAUDE.md` に Feature Flag Protocol 節を追加
+- [ ] 2.1 末尾（参考資料節の前）に `## Feature Flag Protocol` 節を追加
+  - 設計書 `TemplateClaudeMd` の Section Contract に従う（h2 固定、`**採否**: opt-out` を初期値とする）
+  - 冒頭に「デフォルトは opt-out です」を bold で明記（要件 1.4）
+  - opt-in / opt-out それぞれの宣言例をコメント付きで併記（要件 1.2）
+  - メリット / デメリット / 推奨ケース / 非推奨ケースを記述（NFR 2.1: 1 ページ可読性のため 60 行以内目安）
+  - 規約詳細への内部リンクとして `.claude/rules/feature-flag.md` を相対パスで参照
+  - 既存節（技術スタック / コード規約 / テスト規約 / ブランチ・コミット規約 / 禁止事項 / エージェント連携ルール / PR 品質チェック / 機密情報の扱い / 参考資料）の見出しテキストと階層を一切変更しない（NFR 1.2）
+  - 追加後 `grep -E '^## ' repo-template/CLAUDE.md` で既存見出しが全て残っていることを確認
+  - _Requirements: 1.1, 1.2, 1.4, NFR 1.2, NFR 2.1, NFR 2.2_
+  - _Boundary: TemplateClaudeMd_
+  - _Depends: 1.1_
+
+- [ ] 3. Developer エージェント定義に opt-in 分岐を追加
+- [ ] 3.1 `.claude/agents/developer.md` を更新 (P)
+  - 「必ず先に読むルール」セクション（または「実装ルール」冒頭）に「対象 repo の CLAUDE.md `## Feature Flag Protocol` 節を Read し、`**採否**:` 行を確認 → opt-in なら `.claude/rules/feature-flag.md` も Read」フローを追記
+  - opt-in 以外（opt-out / 空 / 不正値 / 節なし）は通常フロー（追加 Read なし）と明記（要件 1.3 / 3.4）
+  - 「実装フロー」セクションに opt-in 分岐：旧パス温存 / `if (flag) { 新挙動 } else { 旧挙動 }` パターン / 両系統テスト維持 / `git diff main..HEAD` セルフチェック / `impl-notes.md` への flag 名と初期値の記録 を追記（要件 3.1, 3.2, 3.3）
+  - 既存「実装ルール」「実装フロー」「テスト作成ルール」「補足ノート」「やらないこと」「受入基準の達成確認」セクションを破壊しない（追記のみ）
+  - _Requirements: 1.3, 3.1, 3.2, 3.3, 3.4, NFR 1.1_
+  - _Boundary: DeveloperAgentDef_
+  - _Depends: 1.1, 2.1_
+- [ ] 3.2 `repo-template/.claude/agents/developer.md` を 3.1 と同期更新 (P)
+  - 3.1 と同じ追記内容を `repo-template` 側にも適用（symmetry 維持）
+  - install.sh で配布される consumer repo にも反映されるようにする
+  - _Requirements: 3.1, 3.2, 3.3, 3.4_
+  - _Boundary: DeveloperAgentDef_
+  - _Depends: 3.1_
+
+- [ ] 4. Reviewer エージェント定義に opt-in 観点を追加
+- [ ] 4.1 `.claude/agents/reviewer.md` を更新 (P)
+  - 「必ず先に読むルール」に CLAUDE.md `## Feature Flag Protocol` 節の確認手順を追記。opt-in 時のみ `.claude/rules/feature-flag.md` を Read（要件 4.1, 4.2）
+  - 「判定基準（3 カテゴリのみ）」の `boundary 逸脱` カテゴリの細目として「opt-in 宣言時は flag-off パスの差分等価を確認」を追記（要件 4.3, 4.4）
+  - 確認手順: `git diff main..HEAD -- <file>` で flag-off ブランチ側の差分が意味的に空であることを目視 → 等価でなければ reject
+  - 既存「reject しない条件」「入力契約」「出力契約」「やらないこと」「行動指針」「round 別の判断ガイド」セクションを破壊しない（追記のみ）
+  - 判定カテゴリは引き続き 3 つ（AC 未カバー / missing test / boundary 逸脱）— 新カテゴリは作らない
+  - _Requirements: 4.1, 4.2, 4.3, 4.4, NFR 1.1_
+  - _Boundary: ReviewerAgentDef_
+  - _Depends: 1.1, 2.1_
+- [ ] 4.2 `repo-template/.claude/agents/reviewer.md` を 4.1 と同期更新 (P)
+  - 4.1 と同じ追記内容を `repo-template` 側にも適用（symmetry 維持）
+  - _Requirements: 4.1, 4.2, 4.3, 4.4_
+  - _Boundary: ReviewerAgentDef_
+  - _Depends: 4.1_
+
+- [ ] 5. README と root CLAUDE.md を更新
+- [ ] 5.1 `README.md` の Phase 4 マーカーを更新し、オプション機能一覧と Migration note を追記
+  - line 1100 付近「Feature Flag Protocol（Phase 4）は別 Issue として分離します」を「実装済み（Phase 4 / Issue #23）」に書き換え
+  - 「オプション機能（opt-in / 常時有効）一覧」の opt-in 節に Feature Flag Protocol を 1 行追加（有効化方法は「`CLAUDE.md` の `## Feature Flag Protocol` 節で `**採否**: opt-in` を宣言」と明記）
+  - Migration note（既 installed の consumer repo は再 install しても CLAUDE.md が `.bak` で保護されるため、Phase 4 移行は手動）を追加
+  - _Requirements: 1.1, 1.2, 1.4, NFR 1.1_
+  - _Boundary: TemplateClaudeMd_
+  - _Depends: 2.1_
+- [ ] 5.2 root `CLAUDE.md` の共通ルール表に `feature-flag.md` を追記 (P)
+  - 「エージェントが参照する共通ルール（`.claude/rules/`）」表に 1 行追加
+  - 役割欄: 「Feature Flag Protocol opt-in 宣言時の規約詳細」
+  - 参照エージェント欄: Developer / Reviewer
+  - **idd-claude 本体の `## Feature Flag Protocol` 節は追加しない**（dogfooding 採否は別 Issue / Out of Scope）
+  - _Requirements: 2.1_
+  - _Boundary: FeatureFlagRule_
+  - _Depends: 1.2_
+
+- [ ]* 6. 手動スモークテストの実施結果を `impl-notes.md` に記録
+  - install.sh 冪等性確認: `/tmp/scratch-pre` で旧 CLAUDE.md が `.bak` に退避され、`feature-flag.md` が新規配置されること（NFR 1.1）
+  - opt-out フォールバック: 宣言節なし repo で Developer / Reviewer prompt に flag 関連指示が出ないこと（要件 3.4 / 4.2 / NFR 1.1）
+  - opt-in 経路: opt-in 宣言を入れた repo で Developer が `feature-flag.md` を Read すること（要件 3.1）
+  - Reviewer reject 経路: opt-in repo で flag-off パスを変更した PR を Reviewer が `boundary 逸脱` で reject すること（要件 4.4）
+  - 既存節見出しの保全: `grep -E '^## ' repo-template/CLAUDE.md` 結果を before/after で diff し既存節が破壊されていないこと（NFR 1.2）
+  - 各ファイルの行数確認: `wc -l` で `repo-template/CLAUDE.md` の Feature Flag 節 60 行以内、`feature-flag.md` 200 行以内（NFR 2.1）
+  - _Requirements: 3.1, 3.4, 4.2, 4.4, NFR 1.1, NFR 1.2, NFR 2.1_
