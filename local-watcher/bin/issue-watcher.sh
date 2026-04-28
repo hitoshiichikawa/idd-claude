@@ -789,6 +789,93 @@ pi_finalize_labels() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_finalize_labels_design: 設計 PR 用のラベル遷移（#35 AC 3.1）
+#   needs-iteration 除去 + awaiting-design-review 付与を 1 コマンドで原子的に発行
+# ─────────────────────────────────────────────────────────────────────────────
+pi_finalize_labels_design() {
+  local pr_number="$1"
+  if ! timeout "$PR_ITERATION_GIT_TIMEOUT" gh pr edit "$pr_number" --repo "$REPO" \
+      --remove-label "$LABEL_NEEDS_ITERATION" \
+      --add-label "$LABEL_AWAITING_DESIGN" >/dev/null 2>&1; then
+    pi_warn "PR #${pr_number}: ラベル遷移 (needs-iteration -> awaiting-design-review) に失敗"
+    return 1
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_classify_pr_kind: branch 名 + env vars から PR の iteration 種別を判定
+#   入力: $1 = head_ref
+#   出力: stdout に "design" / "impl" / "none" / "ambiguous" のいずれか
+#   返り値: 0
+#
+#   優先順序（#35 AC 1.1〜1.4 / 4.4）:
+#     1. impl pattern と design pattern の両方に合致 → ambiguous
+#     2. design pattern のみ合致 + DESIGN_ENABLED=true → design
+#     3. design pattern のみ合致 + DESIGN_ENABLED!=true → none（opt-out gate）
+#     4. impl pattern のみ合致 → impl
+#     5. どちらにも合致しない → none
+#
+#   副作用なし（純粋関数）。同一入力に対して同一結果。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_classify_pr_kind() {
+  local head_ref="$1"
+  local matches_impl=false
+  local matches_design=false
+
+  if [[ "$head_ref" =~ $PR_ITERATION_HEAD_PATTERN ]]; then
+    matches_impl=true
+  fi
+  if [[ "$head_ref" =~ $PR_ITERATION_DESIGN_HEAD_PATTERN ]]; then
+    matches_design=true
+  fi
+
+  if [ "$matches_impl" = "true" ] && [ "$matches_design" = "true" ]; then
+    echo "ambiguous"
+    return 0
+  fi
+  if [ "$matches_design" = "true" ]; then
+    if [ "$PR_ITERATION_DESIGN_ENABLED" = "true" ]; then
+      echo "design"
+    else
+      echo "none"
+    fi
+    return 0
+  fi
+  if [ "$matches_impl" = "true" ]; then
+    echo "impl"
+    return 0
+  fi
+  echo "none"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_select_template: kind から prompt template ファイルパスを返す（#35 AC 2.x）
+#   入力: $1 = kind ("design" / "impl")
+#   出力: stdout に template ファイルパス
+#   返り値: 0=ok, 1=template 未配置（呼び出し元で iteration を中断）
+# ─────────────────────────────────────────────────────────────────────────────
+pi_select_template() {
+  local kind="$1"
+  local path=""
+  case "$kind" in
+    design) path="$ITERATION_TEMPLATE_DESIGN" ;;
+    impl)   path="$ITERATION_TEMPLATE" ;;
+    *)
+      pi_warn "pi_select_template: 未知の kind=${kind}"
+      return 1
+      ;;
+  esac
+  if [ ! -f "$path" ]; then
+    pi_warn "pi_select_template: template not found for kind=${kind}: ${path}"
+    return 1
+  fi
+  echo "$path"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_escalate_to_failed: 上限到達時の claude-failed 昇格 + エスカレコメント
 #   入力: $1=pr_number, $2=round, $3=max_rounds
 #   AC 7.2, 7.3
