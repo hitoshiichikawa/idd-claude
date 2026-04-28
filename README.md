@@ -825,22 +825,37 @@ idd-claude 管理下 PR を fresh context の Claude で反復対応する Proce
 - `needs-iteration` ラベルが付いている open PR
 - `claude-failed` / `needs-rebase` ラベルが付いていない（Phase A と排他）
 - draft 状態ではない
-- **head branch が `PR_ITERATION_HEAD_PATTERN` に合致**（デフォルト `^claude/`、自動生成 PR のみ）
+- **head branch が `PR_ITERATION_HEAD_PATTERN` に合致**（デフォルト
+  `^claude/issue-[0-9]+-impl-`、idd-claude 自動生成の **実装 PR** のみ）
+- もしくは `PR_ITERATION_DESIGN_ENABLED=true` のとき、head branch が
+  `PR_ITERATION_DESIGN_HEAD_PATTERN` に合致（デフォルト
+  `^claude/issue-[0-9]+-design-`、設計 PR のみ）
 - **head repo owner が base repo owner と同一**（fork PR を除外）
+
+> **#35 で既定値を厳格化**: `PR_ITERATION_HEAD_PATTERN` の旧既定値 `^claude/` は
+> idd-claude 規約外の `claude/foo` 形式の branch も拾ってしまう恐れがあったため、
+> `^claude/issue-[0-9]+-impl-` に絞り込みました。旧挙動に戻したい場合は cron 側で
+> `PR_ITERATION_HEAD_PATTERN=^claude/` を指定して override してください
+> （Migration Note 参照）。
 
 ### 挙動
 
 | 状況 | アクション |
 |---|---|
 | 候補 PR を検出 → round < MAX | hidden marker 更新 + 着手表明コメント → fresh context で Claude 起動 |
-| Claude 成功（commit+push or reply-only） | `needs-iteration` 除去 + `ready-for-review` 付与 |
+| **実装 PR** Claude 成功（commit+push or reply-only） | `needs-iteration` 除去 + `ready-for-review` 付与 |
+| **設計 PR** Claude 成功（`PR_ITERATION_DESIGN_ENABLED=true` 時） | `needs-iteration` 除去 + `awaiting-design-review` 付与 |
 | Claude 失敗（exit 非 0、turn 上限、push 失敗等） | `needs-iteration` を残置 + WARN ログ、次サイクルで再試行 |
-| 累計 round が `MAX_ROUNDS` に到達 | `needs-iteration` 除去 + `claude-failed` 付与 + エスカレコメント |
+| 累計 round が `MAX_ROUNDS` に到達（design / impl 共通） | `needs-iteration` 除去 + `claude-failed` 付与 + エスカレコメント |
 | `needs-rebase` 併存 | 本機能は skip（Phase A に処理を委ねる） |
+| branch が design / impl 両 pattern に合致（`ambiguous`） | 当該 PR を skip + WARN ログ（運用上は発生しない想定） |
 | dirty working tree 検知 | サイクル全体で本機能を skip（ERROR ログ）、後続 Issue 処理は継続 |
 
-サイクル終了時に `pr-iteration: サマリ: success=N, fail=N, skip=N, escalated=N, overflow=N`
+サイクル終了時に
+`pr-iteration: サマリ: success=N, fail=N, skip=N, escalated=N, overflow=N (design=N, impl=N)`
 が watcher ログに出力されます（`grep 'pr-iteration:' $HOME/.issue-watcher/logs/...`）。
+個別 PR のログ行には `kind=design|impl` と `round=N/MAX` が含まれるため、
+`grep 'pr-iteration:' ... | grep 'kind=design'` のように kind ごとに集計できます。
 
 ### 環境変数
 
@@ -850,8 +865,11 @@ idd-claude 管理下 PR を fresh context の Claude で反復対応する Proce
 | `PR_ITERATION_DEV_MODEL` | `claude-opus-4-7` | 既存の `DEV_MODEL` と同じ運用方針 | iteration 用の Claude モデル ID |
 | `PR_ITERATION_MAX_TURNS` | `60` | 通常レビュー対応で十分。多い場合は対象 PR が大きすぎる兆候 | 1 iteration の Claude 実行 turn 数上限 |
 | `PR_ITERATION_MAX_PRS` | `3` | watcher 実行間隔と PR 平均量に応じて調整 | 1 サイクルで処理する PR 数の上限。超過分は次回に持ち越し |
-| `PR_ITERATION_MAX_ROUNDS` | `3` | 試行回数を抑えて自動エスカレを早めに | 1 PR あたりの累計 iteration 上限。超過時は `claude-failed` 昇格 |
-| `PR_ITERATION_HEAD_PATTERN` | `^claude/` | 既存ブランチ命名規則に合わせる（Phase A と同値推奨） | 自動 iteration 対象とする head branch の正規表現（jq `test()` 互換） |
+| `PR_ITERATION_MAX_ROUNDS` | `3` | 試行回数を抑えて自動エスカレを早めに | 1 PR あたりの累計 iteration 上限。超過時は `claude-failed` 昇格（design / impl 共通） |
+| `PR_ITERATION_HEAD_PATTERN` | `^claude/issue-[0-9]+-impl-` | idd-claude 自動生成の実装 PR のみを対象とする | 実装 PR の自動 iteration 対象とする head branch の正規表現（jq `test()` 互換）。**#35 で既定厳格化**（旧 `^claude/`） |
+| `PR_ITERATION_DESIGN_ENABLED` | `false` | 設計 PR の自動 iteration を試したい場合のみ `true`（**opt-in**） | 設計 PR 拡張全体の有効化フラグ（**#35 新設**） |
+| `PR_ITERATION_DESIGN_HEAD_PATTERN` | `^claude/issue-[0-9]+-design-` | idd-claude 自動生成の設計 PR を対象とする既定値 | 設計 PR の自動 iteration 対象とする head branch の正規表現（**#35 新設**） |
+| `ITERATION_TEMPLATE_DESIGN` | `$HOME/bin/iteration-prompt-design.tmpl` | install.sh --local が配置するため通常は変更不要 | 設計 PR 用 iteration prompt template の配置先（**#35 新設**） |
 | `PR_ITERATION_GIT_TIMEOUT` | `60`（秒） | watcher 最短実行間隔の半分以内 | 各 git / gh 操作の個別タイムアウト |
 
 cron 例（opt-in する場合）:
@@ -862,6 +880,49 @@ cron 例（opt-in する場合）:
 
 `PR_ITERATION_ENABLED=true` を渡さない限り、本機能は完全に無効化されており、Issue 処理
 フローは導入前と完全に一致します（Phase A も独立した env で opt-in）。
+
+### 設計 PR 拡張 (#35)
+
+`PR_ITERATION_ENABLED=true` に加えて `PR_ITERATION_DESIGN_ENABLED=true` を渡すと、
+`claude/issue-<N>-design-<slug>` 形式の **設計 PR** にも `needs-iteration` 反復対応が
+適用されます。設計 PR iteration では:
+
+- **Architect 役割** で起動され、`docs/specs/<N>-<slug>/` 配下の spec 群（`requirements.md` /
+  `design.md` / `tasks.md`）の **書き換えが許容** されます（実装 PR では禁止のまま）
+- 編集スコープは `docs/specs/<N>-<slug>/` 配下に限定（scope 外の変更は commit せず
+  返信で別 Issue 化を提案するよう template が指示）
+- 自己レビューゲート（`.claude/rules/design-review-gate.md` の Mechanical Checks）を
+  最大 2 パスで実行
+- 成功時は `awaiting-design-review` ラベルに自動遷移（実装 PR は `ready-for-review`）
+- 上限到達時は `claude-failed` 昇格 + エスカレコメント（kind 共通）
+
+設計 PR 対応を有効化する cron 例:
+
+```bash
+*/2 * * * * REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo MERGE_QUEUE_ENABLED=true PR_ITERATION_ENABLED=true PR_ITERATION_DESIGN_ENABLED=true $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+```
+
+`PR_ITERATION_DESIGN_ENABLED=false`（デフォルト）の場合、設計 PR は対象外として
+candidate 段階で除外され、本機能導入前と完全に同一の挙動を保ちます。
+
+#### 1 PR = design or impl のどちらか（混在禁止）
+
+watcher は branch 名で **kind**（design / impl / 対象外）を判定します:
+
+- `claude/issue-<N>-design-<slug>` → `kind=design`（spec 書き換え許容）
+- `claude/issue-<N>-impl-<slug>` → `kind=impl`（spec 書き換え禁止、既存挙動）
+- 両 pattern に合致する branch（運用上は発生しない想定の保険） → `kind=ambiguous`、skip + WARN
+- どちらにも合致しない branch → `kind=none`、skip + INFO
+
+1 PR の中で spec 編集と実装変更を **同居させない** でください。混在 PR は
+ラベル遷移の意味が曖昧になるため、watcher 側で安全側に倒して skip します。
+
+#### review-notes.md (#20) との関係
+
+設計 PR では Reviewer エージェント（#20 Phase 1 Reviewer Subagent Gate）は
+**起動しません**（impl 系限定の現状仕様）。設計 PR iteration 中に
+`review-notes.md` は生成されません。将来拡張で設計 PR にも Reviewer を
+適用する場合は別 Issue で扱います。
 
 ### `needs-iteration` ラベル
 
@@ -914,34 +975,65 @@ gh pr edit <PR番号> --repo owner/your-repo --add-label needs-iteration
 
 ### Migration Note（既存ユーザー向け）
 
-PR Iteration Processor 導入による後方互換性は以下のとおり保証されます:
+PR Iteration Processor 導入（#26）および設計 PR 拡張（#35）による後方互換性は
+以下のとおり保証されます:
 
-- **既存環境変数は不変**: `REPO`, `REPO_DIR`, `LOG_DIR`, `LOCK_FILE`, `TRIAGE_MODEL`,
-  `DEV_MODEL`, `TRIAGE_MAX_TURNS`, `DEV_MAX_TURNS`, `TRIAGE_TEMPLATE`, `MERGE_QUEUE_*`
-  の名前・意味・デフォルトは変更なし
+- **既存環境変数名は不変**: `REPO`, `REPO_DIR`, `LOG_DIR`, `LOCK_FILE`, `TRIAGE_MODEL`,
+  `DEV_MODEL`, `TRIAGE_MAX_TURNS`, `DEV_MAX_TURNS`, `TRIAGE_TEMPLATE`, `MERGE_QUEUE_*`,
+  `PR_ITERATION_ENABLED`, `PR_ITERATION_DEV_MODEL`, `PR_ITERATION_MAX_TURNS`,
+  `PR_ITERATION_MAX_PRS`, `PR_ITERATION_MAX_ROUNDS`, `PR_ITERATION_GIT_TIMEOUT`,
+  `ITERATION_TEMPLATE` の名前・意味は変更なし
 - **既存ラベルは不変**: `auto-dev` / `claude-picked-up` / `awaiting-design-review` /
-  `ready-for-review` / `claude-failed` / `needs-decisions` / `skip-triage` / `needs-rebase`
-  の名前・意味・付与契約は変更なし
+  `ready-for-review` / `claude-failed` / `needs-decisions` / `skip-triage` / `needs-rebase` /
+  `needs-iteration` の名前・意味・付与契約は変更なし
 - **lock ファイル / ログ出力先 / exit code の意味は不変**: `LOCK_FILE` パス、`LOG_DIR` 配下への
   ログ出力先、watcher の exit code は導入前と同一
 - **本機能はデフォルト無効**: `PR_ITERATION_ENABLED` のデフォルトは `false`（**opt-in**）。
-  既存環境を壊すことなく段階的に有効化できる
+  `PR_ITERATION_DESIGN_ENABLED` のデフォルトも `false`（**opt-in**）。既存環境を壊すことなく
+  段階的に有効化できる
 - **依存コマンドの追加なし**: 既存の `gh` / `jq` / `git` / `flock` / `timeout` / `claude` のみ
   で動作（Phase A で `timeout` は既に依存）
 - **新規ラベル `needs-iteration` は冪等追加**: `idd-claude-labels.sh` を再実行すれば既存環境にも
-  追加されます
+  追加されます。`awaiting-design-review` / `ready-for-review` / `claude-failed` も冪等維持
 
 `PR_ITERATION_ENABLED=false`（デフォルト）の状態では PR Iteration コードパスは完全に skip
 されるため、既存運用への影響はありません。
 
+#### #35 で変更された既定値（破壊的だが override で救済可能）
+
+- **`PR_ITERATION_HEAD_PATTERN` の既定値変更**: 旧 `^claude/` → 新
+  `^claude/issue-[0-9]+-impl-`。idd-claude 規約外の `claude/foo` 形式 branch を誤検知する
+  余地を排除しました
+- **影響範囲**: idd-claude PjM が自動生成した PR
+  （`claude/issue-<N>-impl-<slug>` / `claude/issue-<N>-design-<slug>` 形式）はこれまで通り
+  対象。手書き `claude/<slug>` 形式の PR は対象外になります
+- **救済方法**: 旧挙動が必要な運用者は cron 行に
+  `PR_ITERATION_HEAD_PATTERN=^claude/` を追加して既定値を override してください:
+
+  ```bash
+  */2 * * * * REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo MERGE_QUEUE_ENABLED=true PR_ITERATION_ENABLED=true PR_ITERATION_HEAD_PATTERN='^claude/' $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+  ```
+
+- **deprecation 期間は設けません**: 影響を受ける運用者は cron 行 1 行追加で旧挙動に戻せるため
+
+#### #35 で新設された env var（opt-in 拡張）
+
+- `PR_ITERATION_DESIGN_ENABLED=true` を cron に追加すると、設計 PR
+  （`claude/issue-<N>-design-<slug>`）にも `needs-iteration` 反復対応が適用されます
+  （詳細は前述「設計 PR 拡張 (#35)」節を参照）
+- `PR_ITERATION_DESIGN_HEAD_PATTERN` を cron に追加すると、設計 PR の head branch
+  pattern を override 可能です
+- 設計 PR 対応 Reviewer エージェント（#20 連携）は本 Issue 範囲外のため未実装です
+
 ### ⚠️ merge 後の再配置が必要
 
 Phase A と同様、watcher 関連ファイルを変更する PR を merge しただけでは
-`$HOME/bin/issue-watcher.sh` および `$HOME/bin/iteration-prompt.tmpl` は古いままです。
+`$HOME/bin/issue-watcher.sh` および `$HOME/bin/iteration-prompt.tmpl` /
+`$HOME/bin/iteration-prompt-design.tmpl`（#35 設計 PR 拡張用）は古いままです。
 反映するには:
 
 ```bash
-# 推奨: install.sh の --local 再実行（iteration-prompt.tmpl も同期される）
+# 推奨: install.sh の --local 再実行（*.tmpl はワイルドカードで一括同期される）
 cd ~/.idd-claude && git pull && ./install.sh --local
 ```
 
