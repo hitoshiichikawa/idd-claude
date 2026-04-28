@@ -494,6 +494,8 @@ if $INSTALL_LOCAL; then
 
   # local-watcher/bin/ 配下の *.sh / *.tmpl をワイルドカードで一括配置。
   # 新規 *.tmpl / *.sh が追加された場合に install.sh を書き換えなくて済む。
+  # 配置されるテンプレート例: triage-prompt.tmpl / iteration-prompt.tmpl /
+  #   iteration-prompt-design.tmpl（#35 設計 PR 用）
   copy_glob_to_homebin "$LOCAL_WATCHER_DIR/bin" "*.sh"   "$HOME/bin" --executable
   copy_glob_to_homebin "$LOCAL_WATCHER_DIR/bin" "*.tmpl" "$HOME/bin"
 

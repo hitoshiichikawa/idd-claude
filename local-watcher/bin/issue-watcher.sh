@@ -95,13 +95,27 @@ PR_ITERATION_MAX_TURNS="${PR_ITERATION_MAX_TURNS:-60}"
 PR_ITERATION_MAX_PRS="${PR_ITERATION_MAX_PRS:-3}"
 # 1 PR あたりの累計 iteration 上限。到達時は claude-failed に昇格（AC 7.2）。
 PR_ITERATION_MAX_ROUNDS="${PR_ITERATION_MAX_ROUNDS:-3}"
-# 自動 iteration を許可する head ref のプレフィックス正規表現。
-# 人間が手書きした PR や fork PR を巻き込まないよう既定 `^claude/`（AC 1.2）。
-PR_ITERATION_HEAD_PATTERN="${PR_ITERATION_HEAD_PATTERN:-^claude/}"
+# 自動 iteration を許可する head ref のプレフィックス正規表現（impl PR 用）。
+# 既定値は #35 で `^claude/` から `^claude/issue-[0-9]+-impl-` に厳格化された。
+# 旧 `^claude/` 挙動に戻したい場合は cron / launchd 側で本変数を override すること
+# （Migration Note は README 参照、AC 4.3 / 5.5 / NFR 4.2）。
+PR_ITERATION_HEAD_PATTERN="${PR_ITERATION_HEAD_PATTERN:-^claude/issue-[0-9]+-impl-}"
 # 各 git / gh 操作の個別タイムアウト（秒、NFR 1.3）。
 PR_ITERATION_GIT_TIMEOUT="${PR_ITERATION_GIT_TIMEOUT:-60}"
-# Iteration プロンプトテンプレートの配置先（install.sh --local が配置）。
+# Iteration プロンプトテンプレートの配置先（install.sh --local が配置、impl PR 用）。
 ITERATION_TEMPLATE="${ITERATION_TEMPLATE:-$HOME/bin/iteration-prompt.tmpl}"
+
+# ─── PR Iteration Processor 設定: 設計 PR 拡張 (#35) ───
+# 設計 PR (`claude/issue-<N>-design-<slug>`) にも `needs-iteration` で反復対応する
+# opt-in フラグ。既定 false で本機能は無効、impl PR の挙動は #26 導入時と完全同一。
+# 有効化するには cron / launchd 側で PR_ITERATION_DESIGN_ENABLED=true を渡す
+# （AC 4.1 / 4.4 / 5.1）。
+PR_ITERATION_DESIGN_ENABLED="${PR_ITERATION_DESIGN_ENABLED:-false}"
+# 設計 PR の head branch pattern（jq の test() 互換 POSIX ERE）。
+# idd-claude PjM テンプレートが作る設計 PR は `claude/issue-<N>-design-<slug>` 形式（AC 4.2）。
+PR_ITERATION_DESIGN_HEAD_PATTERN="${PR_ITERATION_DESIGN_HEAD_PATTERN:-^claude/issue-[0-9]+-design-}"
+# 設計 PR 用 Iteration テンプレートの配置先（install.sh --local が配置）。
+ITERATION_TEMPLATE_DESIGN="${ITERATION_TEMPLATE_DESIGN:-$HOME/bin/iteration-prompt-design.tmpl}"
 
 # ─── Design Review Release Processor 設定 (#40) ───
 # 設計 PR が merge された Issue から `awaiting-design-review` ラベルを自動除去し、
@@ -157,6 +171,15 @@ done
 # 無効化（既定）時は template 未配置でも watcher 全体を起動できるよう、無条件チェックを避ける。
 if [ "$PR_ITERATION_ENABLED" = "true" ] && [ ! -f "$ITERATION_TEMPLATE" ]; then
   echo "Error: Iteration テンプレートが見つかりません: $ITERATION_TEMPLATE" >&2
+  echo "  install.sh --local 再実行で配置されます。" >&2
+  exit 1
+fi
+
+# 設計 PR Iteration が有効化されている時のみ design 用 template を必須化（#35 AC 2.2）。
+if [ "$PR_ITERATION_ENABLED" = "true" ] \
+   && [ "$PR_ITERATION_DESIGN_ENABLED" = "true" ] \
+   && [ ! -f "$ITERATION_TEMPLATE_DESIGN" ]; then
+  echo "Error: 設計 PR 用 Iteration テンプレートが見つかりません: $ITERATION_TEMPLATE_DESIGN" >&2
   echo "  install.sh --local 再実行で配置されます。" >&2
   exit 1
 fi
@@ -665,13 +688,22 @@ pi_fetch_candidate_prs() {
   fi
 
   # AC 1.2 / 1.3 / 1.4: クライアント側フィルタ（server filter の保険 + head pattern + fork 除外）
+  # #35 AC 4.4 / 5.1: design pattern は PR_ITERATION_DESIGN_ENABLED=true のときのみ OR 条件に
+  # 含める。false（既定）なら impl pattern のみで絞り込み、設計 PR は candidate 段階で除外される
+  # （= 本機能導入前と完全同一の挙動）。
   echo "$prs_json" | jq \
-    --arg pattern "$PR_ITERATION_HEAD_PATTERN" \
+    --arg impl_pattern "$PR_ITERATION_HEAD_PATTERN" \
+    --arg design_pattern "$PR_ITERATION_DESIGN_HEAD_PATTERN" \
+    --arg design_enabled "$PR_ITERATION_DESIGN_ENABLED" \
     --arg owner "$repo_owner" \
     '[.[]
       | select(.isDraft == false)
-      | select(.headRefName | test($pattern))
       | select((.headRepositoryOwner.login // "") == $owner)
+      | select(
+          (.headRefName | test($impl_pattern))
+          or
+          ($design_enabled == "true" and (.headRefName | test($design_pattern)))
+        )
     ]'
 }
 
@@ -766,6 +798,93 @@ pi_finalize_labels() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_finalize_labels_design: 設計 PR 用のラベル遷移（#35 AC 3.1）
+#   needs-iteration 除去 + awaiting-design-review 付与を 1 コマンドで原子的に発行
+# ─────────────────────────────────────────────────────────────────────────────
+pi_finalize_labels_design() {
+  local pr_number="$1"
+  if ! timeout "$PR_ITERATION_GIT_TIMEOUT" gh pr edit "$pr_number" --repo "$REPO" \
+      --remove-label "$LABEL_NEEDS_ITERATION" \
+      --add-label "$LABEL_AWAITING_DESIGN" >/dev/null 2>&1; then
+    pi_warn "PR #${pr_number}: ラベル遷移 (needs-iteration -> awaiting-design-review) に失敗"
+    return 1
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_classify_pr_kind: branch 名 + env vars から PR の iteration 種別を判定
+#   入力: $1 = head_ref
+#   出力: stdout に "design" / "impl" / "none" / "ambiguous" のいずれか
+#   返り値: 0
+#
+#   優先順序（#35 AC 1.1〜1.4 / 4.4）:
+#     1. impl pattern と design pattern の両方に合致 → ambiguous
+#     2. design pattern のみ合致 + DESIGN_ENABLED=true → design
+#     3. design pattern のみ合致 + DESIGN_ENABLED!=true → none（opt-out gate）
+#     4. impl pattern のみ合致 → impl
+#     5. どちらにも合致しない → none
+#
+#   副作用なし（純粋関数）。同一入力に対して同一結果。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_classify_pr_kind() {
+  local head_ref="$1"
+  local matches_impl=false
+  local matches_design=false
+
+  if [[ "$head_ref" =~ $PR_ITERATION_HEAD_PATTERN ]]; then
+    matches_impl=true
+  fi
+  if [[ "$head_ref" =~ $PR_ITERATION_DESIGN_HEAD_PATTERN ]]; then
+    matches_design=true
+  fi
+
+  if [ "$matches_impl" = "true" ] && [ "$matches_design" = "true" ]; then
+    echo "ambiguous"
+    return 0
+  fi
+  if [ "$matches_design" = "true" ]; then
+    if [ "$PR_ITERATION_DESIGN_ENABLED" = "true" ]; then
+      echo "design"
+    else
+      echo "none"
+    fi
+    return 0
+  fi
+  if [ "$matches_impl" = "true" ]; then
+    echo "impl"
+    return 0
+  fi
+  echo "none"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_select_template: kind から prompt template ファイルパスを返す（#35 AC 2.x）
+#   入力: $1 = kind ("design" / "impl")
+#   出力: stdout に template ファイルパス
+#   返り値: 0=ok, 1=template 未配置（呼び出し元で iteration を中断）
+# ─────────────────────────────────────────────────────────────────────────────
+pi_select_template() {
+  local kind="$1"
+  local path=""
+  case "$kind" in
+    design) path="$ITERATION_TEMPLATE_DESIGN" ;;
+    impl)   path="$ITERATION_TEMPLATE" ;;
+    *)
+      pi_warn "pi_select_template: 未知の kind=${kind}"
+      return 1
+      ;;
+  esac
+  if [ ! -f "$path" ]; then
+    pi_warn "pi_select_template: template not found for kind=${kind}: ${path}"
+    return 1
+  fi
+  echo "$path"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_escalate_to_failed: 上限到達時の claude-failed 昇格 + エスカレコメント
 #   入力: $1=pr_number, $2=round, $3=max_rounds
 #   AC 7.2, 7.3
@@ -818,15 +937,17 @@ EOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# pi_build_iteration_prompt: iteration-prompt.tmpl に変数を注入
-#   入力: $1=pr_number, $2=pr_json, $3=round
+# pi_build_iteration_prompt: 指定 template に変数を注入
+#   入力: $1=pr_number, $2=pr_json, $3=round, $4=template_path（省略時は impl 用既定）
 #   出力: stdout に prompt 文字列
-#   AC 3.1, 3.2, 3.3, 3.4, 3.5
+#   AC 3.1, 3.2, 3.3, 3.4, 3.5（#26）/ #35 で kind 引数の代わりに template path を受け取る
 # ─────────────────────────────────────────────────────────────────────────────
 pi_build_iteration_prompt() {
   local pr_number="$1"
   local pr_json="$2"
   local round="$3"
+  # #35: template path を呼び出し元から渡す。省略時は impl 用 template を使う（後方互換）。
+  local tmpl_path="${4:-$ITERATION_TEMPLATE}"
 
   local pr_title pr_url head_ref base_ref pr_body
   pr_title=$(echo "$pr_json" | jq -r '.title // ""')
@@ -893,7 +1014,6 @@ pi_build_iteration_prompt() {
   # 複数行値（LINE_COMMENTS_JSON / GENERAL_COMMENTS_JSON / PR_DIFF / REQUIREMENTS_MD）は
   # awk -v では改行を扱えないため、export 経由で ENVIRON[] から取得し、
   # 「行全体が {{KEY}} のみ」のテンプレ行をブロックごと置換する（template はその前提で書かれている）。
-  local tmpl_path="$ITERATION_TEMPLATE"
   if [ ! -f "$tmpl_path" ]; then
     pi_warn "template not found: $tmpl_path"
     return 1
@@ -954,8 +1074,10 @@ pi_build_iteration_prompt() {
 # ─────────────────────────────────────────────────────────────────────────────
 # pi_run_iteration: 1 PR 分の iteration を実行（fresh context Claude 起動）
 #   入力: $1=pr_json
-#   戻り値: 0=success(commit+push or reply-only), 1=failure, 2=skipped(round上限到達等)
-#   AC 3.6, 4.x, 5.x, 6.2, 6.3, 7.x, 8.3, 9.2, NFR 1.1, NFR 1.3
+#   戻り値: 0=success(commit+push or reply-only), 1=failure, 2=escalated(round上限到達),
+#           3=skip (kind=none/ambiguous, #35)
+#   AC 3.6, 4.x, 5.x, 6.2, 6.3, 7.x, 8.3, 9.2, NFR 1.1, NFR 1.3 (#26)
+#   #35: kind 判定で design / impl を分岐し、template と finalize 関数を切り替える
 # ─────────────────────────────────────────────────────────────────────────────
 pi_run_iteration() {
   local pr_json="$1"
@@ -965,25 +1087,52 @@ pi_run_iteration() {
   base_ref=$(echo "$pr_json"  | jq -r '.baseRefName')
   pr_url=$(echo "$pr_json"    | jq -r '.url')
 
+  # #35 AC 1.1〜1.4 / 4.4: kind 判定（design / impl / none / ambiguous）
+  local kind
+  kind=$(pi_classify_pr_kind "$head_ref")
+
+  case "$kind" in
+    none)
+      pi_log "PR #${pr_number}: kind=none head=${head_ref} (does not match design/impl pattern), skip"
+      return 3
+      ;;
+    ambiguous)
+      pi_warn "PR #${pr_number}: kind=ambiguous head=${head_ref} (matches both design and impl pattern), skip"
+      return 3
+      ;;
+    design|impl) : ;;
+    *)
+      pi_warn "PR #${pr_number}: kind=${kind} (unknown), skip"
+      return 3
+      ;;
+  esac
+
+  # #35 AC 2.x: kind に応じた template path を取得
+  local tmpl_path
+  if ! tmpl_path=$(pi_select_template "$kind"); then
+    pi_warn "PR #${pr_number}: kind=${kind} 用 template が取得できず iteration 中止"
+    return 1
+  fi
+
   local round
   round=$(pi_read_round_counter "$pr_number")
 
-  # AC 7.2: 上限到達なら escalate
+  # AC 7.2 (#26): 上限到達なら escalate（kind 共通、#35 AC 3.4 / 6.5）
   if [ "$round" -ge "$PR_ITERATION_MAX_ROUNDS" ]; then
-    pi_log "PR #${pr_number}: round=${round} >= max=${PR_ITERATION_MAX_ROUNDS}, claude-failed に昇格"
+    pi_log "PR #${pr_number}: kind=${kind} round=${round} >= max=${PR_ITERATION_MAX_ROUNDS}, claude-failed に昇格"
     pi_escalate_to_failed "$pr_number" "$round" "$PR_ITERATION_MAX_ROUNDS" || true
     return 2
   fi
 
   local next_round=$((round + 1))
 
-  # AC 6.1: 着手表明（marker 更新 + コメント）
+  # AC 6.1: 着手表明（marker 更新 + コメント、kind 非依存、#35 AC 6.1 / 6.5）
   if ! pi_post_processing_marker "$pr_number" "$next_round"; then
-    pi_warn "PR #${pr_number}: 着手表明に失敗、iteration 中止"
+    pi_warn "PR #${pr_number}: kind=${kind} 着手表明に失敗、iteration 中止"
     return 1
   fi
 
-  pi_log "PR #${pr_number}: round=${next_round}/${PR_ITERATION_MAX_ROUNDS} 着手 (${pr_url})"
+  pi_log "PR #${pr_number}: kind=${kind} round=${next_round}/${PR_ITERATION_MAX_ROUNDS} 着手 (${pr_url})"
 
   # サブシェル + trap で必ず main に戻す（AC 8.3）
   local rc=0
@@ -1002,9 +1151,9 @@ pi_run_iteration() {
       exit 1
     fi
 
-    # prompt を生成
+    # prompt を生成（#35: kind に応じた template path を渡す）
     local prompt
-    if ! prompt=$(pi_build_iteration_prompt "$pr_number" "$pr_json" "$next_round"); then
+    if ! prompt=$(pi_build_iteration_prompt "$pr_number" "$pr_json" "$next_round" "$tmpl_path"); then
       pi_warn "PR #${pr_number}: prompt 組み立てに失敗"
       exit 1
     fi
@@ -1012,7 +1161,7 @@ pi_run_iteration() {
     # AC 3.6: fresh context で起動（--resume / --continue は使わない）
     # NFR 1.1: --max-turns で turn 数上限
     local pi_log_file
-    pi_log_file="$LOG_DIR/pr-iteration-${pr_number}-round${next_round}-$(date +%Y%m%d-%H%M%S).log"
+    pi_log_file="$LOG_DIR/pr-iteration-${kind}-${pr_number}-round${next_round}-$(date +%Y%m%d-%H%M%S).log"
     if ! claude \
         --print "$prompt" \
         --model "$PR_ITERATION_DEV_MODEL" \
@@ -1021,10 +1170,10 @@ pi_run_iteration() {
         --output-format stream-json \
         --verbose \
         >> "$pi_log_file" 2>&1; then
-      pi_warn "PR #${pr_number}: Claude 実行が失敗 (log: ${pi_log_file})"
+      pi_warn "PR #${pr_number}: kind=${kind} Claude 実行が失敗 (log: ${pi_log_file})"
       exit 1
     fi
-    pi_log "PR #${pr_number}: Claude 実行完了 (log: ${pi_log_file})"
+    pi_log "PR #${pr_number}: kind=${kind} Claude 実行完了 (log: ${pi_log_file})"
     exit 0
   )
   rc=$?
@@ -1032,17 +1181,30 @@ pi_run_iteration() {
   git checkout main >/dev/null 2>&1 || true
 
   if [ $rc -eq 0 ]; then
-    # AC 6.2: 成功 → ラベル遷移
-    if pi_finalize_labels "$pr_number"; then
-      pi_log "PR #${pr_number}: round=${next_round} action=success (needs-iteration -> ready-for-review)"
+    # AC 6.2 (#26) / #35 AC 3.1 / 3.2: kind に応じたラベル遷移
+    local finalize_ok=false
+    case "$kind" in
+      design)
+        if pi_finalize_labels_design "$pr_number"; then
+          pi_log "PR #${pr_number}: kind=${kind} round=${next_round} action=success (needs-iteration -> awaiting-design-review)"
+          finalize_ok=true
+        fi
+        ;;
+      impl)
+        if pi_finalize_labels "$pr_number"; then
+          pi_log "PR #${pr_number}: kind=${kind} round=${next_round} action=success (needs-iteration -> ready-for-review)"
+          finalize_ok=true
+        fi
+        ;;
+    esac
+    if [ "$finalize_ok" = "true" ]; then
       return 0
-    else
-      pi_warn "PR #${pr_number}: ラベル遷移失敗、needs-iteration を残置"
-      return 1
     fi
+    pi_warn "PR #${pr_number}: kind=${kind} ラベル遷移失敗、needs-iteration を残置"
+    return 1
   else
-    # AC 6.3: 失敗 → needs-iteration を残し WARN
-    pi_log "PR #${pr_number}: round=${next_round} action=fail (needs-iteration を残置)"
+    # AC 6.3 (#26) / #35 AC 3.3: 失敗 → needs-iteration を残し WARN
+    pi_log "PR #${pr_number}: kind=${kind} round=${next_round} action=fail (needs-iteration を残置)"
     return 1
   fi
 }
@@ -1063,25 +1225,55 @@ process_pr_iteration() {
     return 0
   fi
 
-  pi_log "サイクル開始 (max_prs=${PR_ITERATION_MAX_PRS}, max_rounds=${PR_ITERATION_MAX_ROUNDS}, model=${PR_ITERATION_DEV_MODEL}, timeout=${PR_ITERATION_GIT_TIMEOUT}s)"
+  pi_log "サイクル開始 (max_prs=${PR_ITERATION_MAX_PRS}, max_rounds=${PR_ITERATION_MAX_ROUNDS}, model=${PR_ITERATION_DEV_MODEL}, design_enabled=${PR_ITERATION_DESIGN_ENABLED}, timeout=${PR_ITERATION_GIT_TIMEOUT}s)"
 
   local prs_json
   prs_json=$(pi_fetch_candidate_prs)
   local total
   total=$(echo "$prs_json" | jq 'length')
+
+  # #35 NFR 3.2: 候補 PR の design / impl 内訳をログに記録（kind=ambiguous も含む）。
+  # candidate 段階では impl pattern OR (DESIGN_ENABLED=true AND design pattern) で絞られる
+  # ため、ここでは bash 側で同じ正規表現照合を行って breakdown を出す。
+  local design_count=0
+  local impl_count=0
+  local ambiguous_count=0
+  if [ "$total" -gt 0 ]; then
+    local breakdown
+    breakdown=$(echo "$prs_json" | jq -r \
+      --arg impl_pattern "$PR_ITERATION_HEAD_PATTERN" \
+      --arg design_pattern "$PR_ITERATION_DESIGN_HEAD_PATTERN" \
+      --arg design_enabled "$PR_ITERATION_DESIGN_ENABLED" \
+      '[.[] | .headRefName] as $heads
+       | reduce $heads[] as $h ({"design":0, "impl":0, "ambiguous":0};
+           if ($h | test($impl_pattern)) and ($h | test($design_pattern))
+             then .ambiguous += 1
+           elif ($h | test($design_pattern)) and ($design_enabled == "true")
+             then .design += 1
+           elif ($h | test($impl_pattern))
+             then .impl += 1
+           else . end)
+       | "\(.design) \(.impl) \(.ambiguous)"')
+    # shellcheck disable=SC2086
+    set -- $breakdown
+    design_count="${1:-0}"
+    impl_count="${2:-0}"
+    ambiguous_count="${3:-0}"
+  fi
+
   local target_count="$total"
   local skipped_overflow=0
 
   if [ "$total" -gt "$PR_ITERATION_MAX_PRS" ]; then
     target_count="$PR_ITERATION_MAX_PRS"
     skipped_overflow=$((total - PR_ITERATION_MAX_PRS))
-    pi_log "対象候補 ${total} 件中、上限 ${PR_ITERATION_MAX_PRS} 件のみ処理（${skipped_overflow} 件は次回持ち越し）"
+    pi_log "対象候補 ${total} 件中、上限 ${PR_ITERATION_MAX_PRS} 件のみ処理（${skipped_overflow} 件は次回持ち越し、内訳: design=${design_count}, impl=${impl_count}, ambiguous=${ambiguous_count}）"
   else
-    pi_log "対象候補 ${total} 件、処理対象 ${target_count} 件"
+    pi_log "対象候補 ${total} 件、処理対象 ${target_count} 件（内訳: design=${design_count}, impl=${impl_count}, ambiguous=${ambiguous_count}）"
   fi
 
   if [ "$target_count" -eq 0 ]; then
-    pi_log "サマリ: success=0, fail=0, skip=0, escalated=0, overflow=${skipped_overflow}"
+    pi_log "サマリ: success=0, fail=0, skip=0, escalated=0, overflow=${skipped_overflow} (design=0, impl=0)"
     return 0
   fi
 
@@ -1094,7 +1286,7 @@ process_pr_iteration() {
   pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]")
 
   if [ -z "$pr_iter" ]; then
-    pi_log "サマリ: success=0, fail=0, skip=0, escalated=0, overflow=${skipped_overflow}"
+    pi_log "サマリ: success=0, fail=0, skip=0, escalated=0, overflow=${skipped_overflow} (design=0, impl=0)"
     return 0
   fi
 
@@ -1104,13 +1296,15 @@ process_pr_iteration() {
     case $rc in
       0)  success=$((success + 1)) ;;
       2)  escalated=$((escalated + 1)) ;;
+      3)  skip=$((skip + 1)) ;;       # #35: kind=none / ambiguous は skip としてカウント
       *)  fail=$((fail + 1)) ;;
     esac
     # 各 PR 処理後に保険で main に戻す
     git checkout main >/dev/null 2>&1 || true
   done <<< "$pr_iter"
 
-  pi_log "サマリ: success=${success}, fail=${fail}, skip=${skip}, escalated=${escalated}, overflow=${skipped_overflow}"
+  # #35 NFR 3.1 / 3.2: サマリにも design / impl 内訳を出して grep 集計可能にする
+  pi_log "サマリ: success=${success}, fail=${fail}, skip=${skip}, escalated=${escalated}, overflow=${skipped_overflow} (design=${design_count}, impl=${impl_count})"
 
   # 念のため最終確認で main に戻す
   git checkout main >/dev/null 2>&1 || true
