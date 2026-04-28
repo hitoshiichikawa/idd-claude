@@ -1154,7 +1154,7 @@ drr_already_processed() {
   fi
   local marker_re="idd-claude:design-review-release issue=${issue_number}"
   if echo "$comments_json" | jq -e --arg re "$marker_re" \
-      '.comments // [] | map(.body) | any(. // ""; test($re))' >/dev/null 2>&1; then
+      '.comments // [] | map(.body // "") | any(test($re))' >/dev/null 2>&1; then
     echo "true"
   else
     echo "false"
