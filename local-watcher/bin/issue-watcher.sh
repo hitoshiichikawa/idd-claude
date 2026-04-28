@@ -2360,6 +2360,76 @@ _slot_release() {
   return 0
 }
 
+# ─── Phase C: Hook Layer ───
+#
+# SLOT_INIT_HOOK 起動を担う薄い wrapper。
+#
+# 安全性（NFR 2.3 / Req 5.5）:
+#   - SLOT_INIT_HOOK の値はシェル展開させない（eval / `bash -c` 不使用）
+#   - 絶対パスをそのまま起動するのみ。引数文字列の空白分割を許容しない
+#   - "/path/to/script.sh --flag" のような引数渡しはサポート外（README に明記、
+#     ユーザーは wrapper script を書く）
+
+# SLOT_INIT_HOOK を起動する。未設定なら no-op。
+# 引数: $1 = slot 番号, $2 = worktree 絶対パス
+# 戻り値: 0 = 起動成功 / 1 = 起動失敗（path 不在 / 非実行可能 / 非ゼロ exit）
+# 副作用: hook 子プロセスの stdout / stderr は呼び出し元の標準出力 / エラー出力に流れる
+#
+# Req 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 5.7, NFR 2.3
+_hook_invoke() {
+  local n="$1"
+  local wt="$2"
+  if [ -z "${SLOT_INIT_HOOK:-}" ]; then
+    return 0
+  fi
+  if [ ! -x "$SLOT_INIT_HOOK" ]; then
+    echo "[$(date '+%F %T')] slot-${n}: ERROR: SLOT_INIT_HOOK が存在しないか実行可能ではありません: $SLOT_INIT_HOOK" >&2
+    return 1
+  fi
+
+  # stderr を一時ファイルに捕捉して非ゼロ exit 時にログ転記する（Req 5.7）
+  local stderr_tmp
+  stderr_tmp="$(mktemp -t slot-init-hook-XXXXXX.err 2>/dev/null || echo "")"
+  local rc=0
+
+  # IDD_SLOT_NUMBER / IDD_SLOT_WORKTREE / PARALLEL_SLOTS / REPO / REPO_DIR を export
+  # して子プロセスに引き継ぐ。直接 exec のみ（Req 5.5: shell 展開なし）。
+  if [ -n "$stderr_tmp" ]; then
+    IDD_SLOT_NUMBER="$n" \
+      IDD_SLOT_WORKTREE="$wt" \
+      PARALLEL_SLOTS="$PARALLEL_SLOTS" \
+      REPO="$REPO" \
+      REPO_DIR="$REPO_DIR" \
+      "$SLOT_INIT_HOOK" 2> >(tee -a "$stderr_tmp" >&2) || rc=$?
+  else
+    IDD_SLOT_NUMBER="$n" \
+      IDD_SLOT_WORKTREE="$wt" \
+      PARALLEL_SLOTS="$PARALLEL_SLOTS" \
+      REPO="$REPO" \
+      REPO_DIR="$REPO_DIR" \
+      "$SLOT_INIT_HOOK" || rc=$?
+  fi
+
+  if [ "$rc" -ne 0 ]; then
+    local tail_text=""
+    if [ -n "$stderr_tmp" ] && [ -f "$stderr_tmp" ]; then
+      tail_text="$(tail -c 2000 "$stderr_tmp" 2>/dev/null || true)"
+    fi
+    echo "[$(date '+%F %T')] slot-${n}: ERROR: SLOT_INIT_HOOK が exit code ${rc} で失敗しました: $SLOT_INIT_HOOK" >&2
+    if [ -n "$tail_text" ]; then
+      echo "[$(date '+%F %T')] slot-${n}: hook stderr (tail):" >&2
+      echo "$tail_text" >&2
+    fi
+  fi
+
+  [ -n "$stderr_tmp" ] && rm -f "$stderr_tmp" 2>/dev/null || true
+
+  if [ "$rc" -ne 0 ]; then
+    return 1
+  fi
+  return 0
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 未処理 Issue を取得
 #   auto-dev ラベルがあり、かつ以下のラベルが付いていないもの:
