@@ -11,8 +11,9 @@
 #   - impl-resume   : Developer → PjM（設計 PR が merge 済みで docs/specs/<N>-*/ が main に存在）
 #
 # ラベルによる状態遷移:
-#   auto-dev  → Triage → (needs-decisions | awaiting-design-review | claude-picked-up)
-#             → ready-for-review / claude-failed
+#   auto-dev  → claude-claimed (Dispatcher claim) → Triage
+#                              → (needs-decisions | awaiting-design-review | claude-picked-up)
+#                              → ready-for-review / claude-failed
 #
 # 配置先: ~/bin/issue-watcher.sh
 # 依存  : gh / jq / claude / flock / git
@@ -49,6 +50,7 @@ REPO_DIR="${REPO_DIR:-$HOME/work/your-repo}"
 REPO_SLUG="$(echo "$REPO" | tr '/' '-')"
 
 LABEL_TRIGGER="auto-dev"
+LABEL_CLAIMED="claude-claimed"
 LABEL_PICKED="claude-picked-up"
 LABEL_NEEDS_DECISIONS="needs-decisions"
 LABEL_AWAITING_DESIGN="awaiting-design-review"
@@ -2201,8 +2203,12 @@ mark_issue_failed() {
   local stage="$1"
   local extra_body="$2"
 
+  # Issue #52: 通常経路では Stage A 開始時点で Issue は claude-picked-up のみ持つ
+  # （Slot Runner が Triage 通過時に claude-claimed → claude-picked-up に付け替え済）。
+  # 想定外シーケンス（design ルート Stage C 失敗で本ヘルパへ流入する等）でも残置を防ぐ
+  # ため、両系統除去で安全側に倒す。gh CLI は未付与ラベルの除去を no-op として扱う。
   gh issue edit "$NUMBER" --repo "$REPO" \
-    --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
+    --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
 
   local hostname_val
   hostname_val=$(hostname)
@@ -2674,15 +2680,23 @@ slot_error() {
   echo "[$(date '+%F %T')] slot-${IDD_SLOT_NUMBER:-?}: #${NUMBER:-?}: ERROR: $*" >&2
 }
 
-# claude-picked-up を claude-failed に置き換える共通フロー（Worktree / Hook / その他
-# サブシェル内エラー用）。run_impl_pipeline 内の mark_issue_failed と同じ操作を slot
-# worker 文脈で再現する（mark_issue_failed は MODE / LOG 等を要求するため代用しない）。
+# claim 系ラベル（claude-claimed / claude-picked-up）を claude-failed に置き換える
+# 共通フロー（Worktree / Hook / その他サブシェル内エラー用）。run_impl_pipeline 内の
+# mark_issue_failed と同じ操作を slot worker 文脈で再現する（mark_issue_failed は
+# MODE / LOG 等を要求するため代用しない）。
+#
+# Issue #52: 両系統除去で post-Triage / pre-Triage どちらの失敗にも対応する。
+# - pre-Triage 失敗時点では Issue は claude-claimed のみ持つ
+# - post-Triage（impl 着手後）失敗時点では Issue は claude-picked-up のみ持つ
+# - design ルートで Stage C 失敗等の想定外シーケンスでも残置を防ぐため両方除去する
+# gh CLI は未付与ラベルの除去を no-op として扱うため安全（既存 || true で吸収）。
+#
 # 引数: $1 = stage 識別子, $2 = Issue コメントに追加する補足
 _slot_mark_failed() {
   local stage="$1"
   local extra="$2"
   gh issue edit "$NUMBER" --repo "$REPO" \
-    --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" >/dev/null 2>&1 || true
+    --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" >/dev/null 2>&1 || true
   local hostname_val
   hostname_val=$(hostname)
   local body="⚠️ 自動開発が失敗しました（${hostname_val} / slot=${IDD_SLOT_NUMBER:-?} / 失敗 stage: ${stage}）。"
@@ -2871,15 +2885,16 @@ _slot_run_issue() {
       ' "$TRIAGE_FILE")
 
       gh issue comment "$NUMBER" --repo "$REPO" --body "$COMMENT" >/dev/null 2>&1 || true
-      # Phase C: claim を取り消す（claude-picked-up 除去）+ needs-decisions 付与。
+      # Phase C / Issue #52: claim を取り消す（claude-claimed 除去）+ needs-decisions 付与。
       # 次サイクルで人間が needs-decisions を外したら再ピックアップされる必要があるため、
-      # claude-picked-up を残してはいけない。本機能導入前は claude-picked-up は未付与
-      # だったが、Phase C では Dispatcher が事前に付与しているためここで取り消す。
+      # claim 系ラベルを残してはいけない。本機能導入前は claude-picked-up は未付与
+      # だったが、Phase C 以降は Dispatcher が claim ラベル（Issue #52 で claude-claimed
+      # に分離）を事前に付与しているためここで取り消す。
       gh issue edit "$NUMBER" --repo "$REPO" \
-        --remove-label "$LABEL_PICKED" \
+        --remove-label "$LABEL_CLAIMED" \
         --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1 || true
       echo "🟡 #$NUMBER: $DECISION_COUNT 件の決定事項を起票しました" | tee -a "$LOG"
-      slot_log "Triage 結果: needs-decisions（claude-picked-up 取り消し済）"
+      slot_log "Triage 結果: needs-decisions（claude-claimed 取り消し済）"
       return 0
     fi
 
@@ -2890,6 +2905,26 @@ _slot_run_issue() {
       MODE="impl"
       echo "✅ #$NUMBER: Triage 通過（Architect 不要） → impl モード" | tee -a "$LOG"
     fi
+  fi
+
+  # ── Issue #52: Triage 通過後のラベル付け替え（claude-claimed → claude-picked-up）──
+  # impl / impl-resume モードでは、ここから先「実装フェーズ」に入るため Issue ラベルを
+  # claude-picked-up に付け替える。design モードは PjM (design-review) が
+  # claude-claimed → awaiting-design-review に直接付け替えるため、ここでは何もしない
+  # （Req 8.3 / 設計論点 4 結論: design ルートは claude-picked-up を経由しない）。
+  #
+  # 単一の PATCH /issues/{n}（--remove-label A --add-label B）で原子的に行うことで
+  # NFR 1.2（同時 2 ラベル状態が 5 秒以上続かない）を構造的に満たす。branch 作成より
+  # 前に実行するため、後続の長時間操作中はラベル状態が常に正しい。
+  if [ "$MODE" = "impl" ] || [ "$MODE" = "impl-resume" ]; then
+    if ! gh issue edit "$NUMBER" --repo "$REPO" \
+        --remove-label "$LABEL_CLAIMED" \
+        --add-label "$LABEL_PICKED" >/dev/null 2>&1; then
+      slot_warn "Triage 通過後のラベル付け替えに失敗（claude-claimed → claude-picked-up）"
+      _slot_mark_failed "label-handover" "Triage 通過後のラベル付け替え (claude-claimed → claude-picked-up) に失敗しました。"
+      return 1
+    fi
+    slot_log "ラベル付け替え: claude-claimed → claude-picked-up（impl 着手）"
   fi
 
   # ── ピックアップ表明コメント（claim 表明ラベルは Dispatcher が事前に付与済）──
@@ -2932,7 +2967,7 @@ _slot_run_issue() {
 3. project-manager サブエージェントを **design-review モード** で起動
    - 成果物は ${SPEC_DIR_REL}/ 配下の requirements / design / tasks のみ（実装コードは含めない）
    - title: \`spec(#${NUMBER}): <1 行サマリ>\`
-   - Issue ラベル: claude-picked-up → awaiting-design-review に付け替え
+   - Issue ラベル: claude-claimed → awaiting-design-review に付け替え
    - Issue にコメントで設計 PR リンクと案内を投稿
 
 この設計 PR が merge されるまで、実装フェーズには進みません。人間が merge した後、
@@ -3002,8 +3037,11 @@ EOF
 # Phase C: Dispatcher
 #
 # 1 サイクル中に 1 度起動される。Issue 候補をローカルキューに pop し、空き slot を
-# 探索して claim（claude-picked-up ラベル付与）してから Slot Runner をバックグラウンド
+# 探索して claim（claude-claimed ラベル付与）してから Slot Runner をバックグラウンド
 # 起動する。サイクル終端で `wait` により全 Worker 完了を待ち合わせる。
+# claim ラベルは Issue #52 で claude-picked-up → claude-claimed に変更した
+# （claim/Triage 段階を実装中段階と区別するため）。Triage 通過後の Slot Runner で
+# claude-claimed → claude-picked-up に付け替える。
 #
 # Req 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 6.3, 6.4, 6.5, 7.5, NFR 1.1, NFR 1.2
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3066,7 +3104,7 @@ _dispatcher_run() {
     --repo "$REPO" \
     --label "$LABEL_TRIGGER" \
     --state open \
-    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\"" \
+    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\"" \
     --json number,title,body,url,labels \
     --limit 5)
 
@@ -3117,10 +3155,13 @@ _dispatcher_run() {
       continue
     fi
 
-    # ── claim（claude-picked-up ラベル付与）──
-    if ! gh issue edit "$issue_number" --repo "$REPO" --add-label "$LABEL_PICKED" >/dev/null 2>&1; then
+    # ── claim（claude-claimed ラベル付与）──
+    # Issue #52: claim/Triage 段階のラベルを claude-claimed に分離（claude-picked-up は
+    # Triage 通過後に Slot Runner が付け替える）。これにより Issue activity 上で
+    # claim 済 / Triage 中 / 実装中 が 1 ラベル単位で識別可能になる。
+    if ! gh issue edit "$issue_number" --repo "$REPO" --add-label "$LABEL_CLAIMED" >/dev/null 2>&1; then
       # Req 2.3: ラベル付与失敗 → WARN + slot lock 解放 + 次 Issue へ
-      dispatcher_warn "Issue #${issue_number}: claude-picked-up ラベル付与に失敗、slot-${slot} を解放して次 Issue へ"
+      dispatcher_warn "Issue #${issue_number}: claude-claimed ラベル付与に失敗、slot-${slot} を解放して次 Issue へ"
       _slot_release "$slot"
       continue
     fi

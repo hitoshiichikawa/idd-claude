@@ -65,6 +65,7 @@ LABELS=(
   "auto-dev|1f77b4|【Issue 用】 自動開発対象"
   "needs-decisions|f1c40f|【Issue 用】 人間の判断が必要"
   "awaiting-design-review|e67e22|【Issue 用】 設計 PR レビュー待ち（Architect 発動時）"
+  "claude-claimed|c39bd3|【Issue 用】 Claude Code が claim 済（Triage 実行中）"
   "claude-picked-up|9b59b6|【Issue 用】 Claude Code 実行中"
   "ready-for-review|2ecc71|【Issue 用】 PR 作成完了"
   "claude-failed|e74c3c|【Issue 用】 自動実行が失敗"

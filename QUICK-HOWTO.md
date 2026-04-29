@@ -69,8 +69,8 @@ bash .github/scripts/idd-claude-labels.sh
 ```
 
 冪等なので何度実行しても安全です（既存ラベルはスキップ）。
-作成されるラベル: `auto-dev` / `needs-decisions` / `awaiting-design-review` / `claude-picked-up` /
-`ready-for-review` / `claude-failed` / `skip-triage` / `needs-rebase` / `needs-iteration`
+作成されるラベル: `auto-dev` / `needs-decisions` / `awaiting-design-review` / `claude-claimed` /
+`claude-picked-up` / `ready-for-review` / `claude-failed` / `skip-triage` / `needs-rebase` / `needs-iteration`
 
 ---
 
@@ -149,7 +149,9 @@ Issue を検出し、以下の流れが自動進行します:
 ```
 auto-dev (起票)
    ↓
-claude-picked-up   ← Triage 開始
+claude-claimed     ← Dispatcher が claim、Triage 実行中
+   ↓
+claude-picked-up   ← Triage 通過、実装フェーズ開始
    ↓
 ready-for-review   ← 実装 PR 作成完了 (10〜30 分)
 ```
