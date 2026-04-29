@@ -3151,6 +3151,55 @@ ${extra}"
   gh issue comment "$NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
 }
 
+# ─── impl-resume 保護ヘルパ群 (Issue #67) ───
+#
+# `IMPL_RESUME_PRESERVE_COMMITS=true` 配下で:
+#   - `_resume_normalize_flag`            : env 値の strict 正規化（純粋関数）
+#   - `_resume_detect_existing_branch`    : origin に branch があるかを ls-remote で判定
+#   - `_resume_branch_init`               : impl-resume 用 branch 初期化の Strategy 分岐
+#   - `_resume_push`                      : fast-forward 制約 push と non-ff 検出
+#   - `_resume_mark_nonff_failed`         : non-ff 専用 claude-failed 遷移ヘルパ
+#
+# `_slot_mark_failed` / `slot_log` / `slot_warn` を再利用するため、それらの定義より
+# 後ろ、`_slot_run_issue` より前に配置する（forward reference を避ける）。
+# 設計詳細: docs/specs/67-feat-watcher-impl-resume-branch-commit-f/design.md
+
+# env var の生値を厳密に "true" / "false" に正規化する純粋関数（副作用なし）。
+# 引数:
+#   $1 = mode（"preserve_default_off" | "tracking_default_on"）
+#   $2 = 生 env 値（unset を許容 = 空文字として渡す）
+# stdout: "true" または "false"
+# 戻り値: 常に 0
+#
+# Req 1.3 / 3.6: 受理値は完全一致 "true" / "false" のみ。それ以外（空 / "True" /
+# "1" / "yes" 等の typo）は安全側に倒す:
+#   - preserve_default_off: "true" 完全一致のみ true、それ以外は false
+#   - tracking_default_on : "false" 完全一致のみ false、それ以外（空文字含む）は true
+_resume_normalize_flag() {
+  local mode="$1"
+  local raw="${2:-}"
+  case "$mode" in
+    preserve_default_off)
+      if [ "$raw" = "true" ]; then
+        echo "true"
+      else
+        echo "false"
+      fi
+      ;;
+    tracking_default_on)
+      if [ "$raw" = "false" ]; then
+        echo "false"
+      else
+        echo "true"
+      fi
+      ;;
+    *)
+      # 不明な mode は安全側に倒して false を返す（呼び出し元の bug を表面化させる）
+      echo "false"
+      ;;
+  esac
+}
+
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
 # サブシェル `( _slot_run_issue n issue_json ) &` から呼び出される前提。
 #
