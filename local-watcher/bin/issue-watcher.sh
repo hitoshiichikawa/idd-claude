@@ -15,6 +15,12 @@
 #                              → (needs-decisions | awaiting-design-review | claude-picked-up)
 #                              → ready-for-review / claude-failed
 #
+# Stage Checkpoint Resume 経路 (#68, opt-in):
+#   STAGE_CHECKPOINT_ENABLED=true で impl / impl-resume の Stage A/B/C 失敗時に
+#   完了済み Stage を成果物（impl-notes.md / review-notes.md / 既存 impl PR）の
+#   存在で観測し、未完了 Stage 以降のみを再実行する。デフォルト false で従来挙動と
+#   完全一致（NFR 1.1）。判定根拠は `stage-checkpoint:` prefix のログで観測可能。
+#
 # 配置先: ~/bin/issue-watcher.sh
 # 依存  : gh / jq / claude / flock / git
 #
@@ -134,6 +140,15 @@ DESIGN_REVIEW_RELEASE_HEAD_PATTERN="${DESIGN_REVIEW_RELEASE_HEAD_PATTERN:-^claud
 # 各 gh 操作の個別タイムアウト（秒、AC 5.4）。専用 env var は導入せず、
 # Phase A の MERGE_QUEUE_GIT_TIMEOUT を流用してデフォルト 60 秒。
 DRR_GH_TIMEOUT="${DRR_GH_TIMEOUT:-${MERGE_QUEUE_GIT_TIMEOUT:-60}}"
+
+# ─── Stage Checkpoint 設定 (#68) ───
+# impl / impl-resume の Stage A/B/C 単位で完了 checkpoint を成果物
+# （impl-notes.md / review-notes.md / 既存 impl PR）の有無で観測し、失敗 Stage 以降
+# のみを再実行する opt-in 機能。既存運用への影響を避けるため、初回導入は opt-in
+# （デフォルト false）。`true` のみが opt-in で、空文字 / `0` / `False` / typo は
+# すべて opt-out として解釈される（Req 3.3、安全側）。
+# 有効化するには cron / launchd 側で STAGE_CHECKPOINT_ENABLED=true を渡す。
+STAGE_CHECKPOINT_ENABLED="${STAGE_CHECKPOINT_ENABLED:-false}"
 
 # LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
 # 環境変数で明示上書きもできる。
