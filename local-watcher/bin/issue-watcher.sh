@@ -286,9 +286,16 @@ qa_format_iso8601() {
 # - reset 時刻フィールド名は claude CLI のスキーマ揺れを考慮して
 #   `.resetsAt` / `.reset_at` / `.resets_at` の順に試す
 # - 値が ISO 8601 文字列の場合は `fromdateiso8601` で epoch 化、数値はそのまま採用
+#
+# 実装メモ: jq は default だと stdin を "concatenated JSON" として一括 parse する
+# ため、無効な 1 行があると stream 全体が fatal で止まる。stream を停止させない
+# 要件（Req 2.5）を満たすため、`-R`（raw input）で 1 行ずつ受け取り、各行を
+# `try fromjson catch null` で個別 parse する。
 qa_detect_rate_limit() {
-  jq -r '
-    select(type == "object")
+  jq -R -r '
+    . as $line
+    | (try ($line | fromjson) catch null)
+    | select(type == "object")
     | select(.type? == "rate_limit_event")
     | select(.status? == "exceeded")
     | (.resetsAt // .reset_at // .resets_at // empty)
