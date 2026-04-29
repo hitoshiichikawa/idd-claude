@@ -1,0 +1,127 @@
+# Implementation Plan
+
+- [ ] 1. ラベル定義の冪等追加（Label Setup Script）
+- [ ] 1.1 `repo-template/.github/scripts/idd-claude-labels.sh` の LABELS 配列に `needs-quota-wait` 行を追加 (P)
+  - 行内容: `"needs-quota-wait|c5def5|【Issue 用】 Claude Max quota 超過で reset 待ち（Quota Resume Processor が自動除去）"`（color は雪色系で進行中ラベル群と区別）
+  - 既存 10 ラベル行（auto-dev / needs-decisions / awaiting-design-review / claude-claimed / claude-picked-up / ready-for-review / claude-failed / skip-triage / needs-rebase / needs-iteration）の name / color / description は変更しない（Req 1.6 / 6.4）
+  - description 文字列の長さが GitHub の 100 文字制限内（【Issue 用】prefix 含む）であることを実測で確認
+  - _Requirements: 1.6, 6.1, 6.2, 6.3, 6.4, 6.5, NFR 4.2_
+  - _Boundary: Label Setup Script_
+- [ ] 1.2 `.github/scripts/idd-claude-labels.sh`（self-hosting / dogfooding 用）にも同行を追加 (P)
+  - `repo-template/` 同等品と差分一致
+  - 既存 10 ラベルは不変（Req 1.6）
+  - _Requirements: 1.6, 6.1, 6.4, NFR 2.3, NFR 4.2_
+  - _Boundary: Label Setup Script_
+
+- [ ] 2. Quota-Aware ヘルパー関数群を `local-watcher/bin/issue-watcher.sh` に追加
+- [ ] 2.1 Config 節への env / ラベル定数追加
+  - `QUOTA_AWARE_ENABLED="${QUOTA_AWARE_ENABLED:-false}"` を Phase A セクションの直前または Reviewer 設定の直後に追加（既定 false → opt-out → 既存 cron 文字列のまま起動可、Req 1.5）
+  - `QUOTA_RESUME_GRACE_SEC="${QUOTA_RESUME_GRACE_SEC:-60}"` を同位置に追加
+  - `LABEL_NEEDS_QUOTA_WAIT="needs-quota-wait"` をラベル定数群（L52-61）の末尾に追加
+  - 既存 env var 名（REPO / REPO_DIR / LOG_DIR / LOCK_FILE / TRIAGE_MODEL / DEV_MODEL 等）は一切変更しない（Req 1.4）
+  - _Requirements: 1.1, 1.3, 1.4, 1.5, 5.5, NFR 4.1_
+- [ ] 2.2 Quota-Aware ロガーと検知 / 永続化 / 整形ヘルパー追加 (P)
+  - 新規セクション「Quota-Aware Watcher Helpers」を Phase A セクションの直前に挿入
+  - `qa_log` / `qa_warn` / `qa_error` を既存 `mq_log` / `pi_log` と同形式（`[%F %T] quota-aware: ...`）で実装
+  - `qa_detect_rate_limit`: stdin の stream-json を jq fold して `type=="rate_limit_event"` かつ `status=="exceeded"` の最新 reset epoch を stdout 出力。失敗で stream を止めない
+  - `qa_persist_reset_time` / `qa_load_reset_time`: Issue body の `<!-- idd-claude:quota-reset:<epoch>:v1 -->` marker を 1 件のみ保持する形で読み書き
+  - `qa_format_iso8601`: GNU date / BSD date 互換で epoch → ISO 8601 with TZ
+  - 各イベントを `qa_log` で `issue=<N> stage=<S> reset_epoch=<E> reset_iso=<I>` を含む形式で記録
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 4.1, 4.2, 4.3, 4.4, NFR 1.1, NFR 1.2, NFR 4.1_
+  - _Boundary: Quota Stream Parser, Quota Persistence_
+- [ ] 2.3 Stage Wrapper `qa_run_claude_stage` 追加 (P)
+  - 引数: `<stage_label> <reset_file> -- claude <args...>`
+  - opt-out（`QUOTA_AWARE_ENABLED != "true"`）時は `"$@"` 素通しで claude を起動（既存挙動 100% 互換、NFR 2.1）
+  - opt-in 時は `tee -a "$LOG"` + `qa_detect_rate_limit > "$reset_file"` を並走させる
+  - $reset_file に値が書かれた場合 exit 99 を返し、無ければ claude 本体の `${PIPESTATUS[0]}` を返す
+  - _Requirements: 1.1, 1.2, 2.1, NFR 2.1, NFR 4.1_
+  - _Boundary: Quota Stream Parser_
+- [ ] 2.4 Quota Handler `qa_handle_quota_exceeded` 追加
+  - 引数: `<issue_number> <stage_label> <reset_epoch>`
+  - 副作用順序: `qa_persist_reset_time` → `gh issue edit --remove-label CLAIMED --remove-label PICKED --add-label NEEDS_QUOTA_WAIT` → `gh issue comment` → `qa_log`
+  - escalation コメント本文は design.md 「Escalation Comment Template」を逐語使用（Stage 種別 / reset epoch / ISO 8601 / grace 値を含む）
+  - **`claude-failed` を付与しない**（Req 3.2 / 3.7）
+  - 副作用失敗は `qa_warn` でログのみ、return 0 で続行
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.7, 4.1, NFR 1.1, NFR 1.2_
+  - _Depends: 2.2_
+
+- [ ] 3. Quota Resume Processor を cron tick 冒頭に組み込む
+- [ ] 3.1 `process_quota_resume` 関数の実装
+  - 先頭で `[ "$QUOTA_AWARE_ENABLED" != "true" ] && return 0`（opt-out）
+  - `gh issue list --label needs-quota-wait --state open --json number --limit 50` で対象取得（0 件時 API 1 回で return 0、NFR 3.1）
+  - 各 Issue で `qa_load_reset_time` 失敗時は `qa_warn` + skip（Req 4.4: ラベル維持）
+  - 現在時刻 ≥ `reset_epoch + QUOTA_RESUME_GRACE_SEC` のとき `gh issue edit --remove-label NEEDS_QUOTA_WAIT`
+  - Stage 実行 / claim はトリガーしない（Req 5.4）
+  - GitHub API 失敗は `qa_warn || true` で吸収し return 0 を保証（Req 5.6 / NFR 3.2）
+  - grace 60 秒固定で同一 cron tick 内の付与/除去往復を構造的に抑止（NFR 3.3）
+  - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, NFR 1.1, NFR 3.1, NFR 3.2, NFR 3.3_
+  - _Depends: 2.2_
+- [ ] 3.2 cron tick の Processor 順序に挿入
+  - `git fetch / pull` 直後、`process_merge_queue_recheck` の **前** に `process_quota_resume || qa_warn ...` を挿入
+  - 既存 Processor 群（merge_queue / merge_queue_recheck / pr_iteration / design_review_release / Dispatcher）の起動順序とエラー継続契約を保つ
+  - _Requirements: 5.1, 5.6, NFR 3.2_
+  - _Depends: 3.1_
+- [ ] 3.3 Dispatcher exclusion query への `-label:needs-quota-wait` 追加
+  - `_dispatcher_run` 内 `gh issue list --search` 文字列に既存除外条件（`needs-decisions` / `awaiting-design-review` / `claude-claimed` / `claude-picked-up` / `ready-for-review` / `claude-failed` / `needs-iteration`）と並んで `-label:"$LABEL_NEEDS_QUOTA_WAIT"` を追加
+  - 既存除外条件は意味・順序ともに変更しない（Req 3.6）
+  - _Requirements: 3.5, 3.6, NFR 2.2_
+
+- [ ] 4. 6 箇所の既存 claude 呼び出しを `qa_run_claude_stage` 経由に書き換え
+- [ ] 4.1 Triage Stage（L2837 周辺）の wrap (P)
+  - 既存 `claude --print "$TRIAGE_PROMPT" --model "$TRIAGE_MODEL" --max-turns "$TRIAGE_MAX_TURNS" >> "$LOG" 2>&1` を `qa_run_claude_stage "Triage" "$_qa_reset_file" -- claude ...` に置き換え
+  - exit 99 受領時は `qa_handle_quota_exceeded "$NUMBER" "Triage" "$(cat "$_qa_reset_file")"` を呼び、`_slot_mark_failed` を **踏まずに** `return 0` でサブシェル正常終了
+  - opt-out 時は既存の `_slot_mark_failed "triage" ...` パスがそのまま走る（Triage 失敗時の既存挙動を保持）
+  - _Requirements: 1.1, 1.2, 2.1, 3.1, 3.2, 3.3, 3.4, NFR 2.1_
+  - _Boundary: Stage Wrapper, Quota Handler_
+  - _Depends: 2.3, 2.4_
+- [ ] 4.2 Stage A / Stage A' / Stage C（impl pipeline 内、L2256 / L2284 / L2345）の wrap
+  - 3 箇所すべてで design.md 「Stage Wrapping Pattern」テンプレートに従って書き換え
+  - StageLabel 文字列はそれぞれ `"StageA"` / `"StageA-redo"` / `"StageC"`
+  - exit 99 受領時は `qa_handle_quota_exceeded` を呼び、`mark_issue_failed` を踏まずに `return 0` で `run_impl_pipeline` から正常終了（呼び出し元の `_slot_run_issue` も `return 0`）
+  - opt-out 時は既存の `mark_issue_failed` パスを保持（Stage A / A' / C それぞれ "stageA" / "stageA-redo" / "stageC" の identifier）
+  - _Requirements: 1.1, 1.2, 2.1, 3.1, 3.2, 3.3, 3.4, NFR 2.1_
+  - _Depends: 2.3, 2.4_
+- [ ] 4.3 Reviewer Stage B/B'（L2157、`run_reviewer_stage` 内）の wrap (P)
+  - StageLabel は `round` 引数に応じて `"Reviewer-r1"` / `"Reviewer-r2"`
+  - exit 99 受領時は `qa_handle_quota_exceeded` を呼び、`run_reviewer_stage` の戻り値として **特別な exit code 99** または「正常終了して `run_impl_pipeline` から `return 0` させる」のどちらかで実装する
+  - 推奨実装: `run_reviewer_stage` を 99 受領時に return 99 にし、`run_impl_pipeline` 側の case 分岐で 99 を「quota 検出済み・後続 Stage skip・return 0」として扱う
+  - opt-out 時の既存パス（return 0=approve / 1=reject / 2=error）を保持
+  - _Requirements: 1.1, 1.2, 2.1, 3.1, 3.2, 3.3, 3.4, NFR 2.1_
+  - _Boundary: Stage Wrapper, Quota Handler_
+  - _Depends: 2.3, 2.4_
+- [ ] 4.4 design 経路（L3006、`_slot_run_issue` 内 design 分岐）の wrap (P)
+  - StageLabel は `"design"`
+  - exit 99 受領時は `qa_handle_quota_exceeded "$NUMBER" "design" "$(cat ...)"` を呼び、`_slot_mark_failed "$MODE" ...` を踏まずに `return 0`
+  - opt-out 時は既存の design 失敗時 `_slot_mark_failed` パスを保持
+  - _Requirements: 1.1, 1.2, 2.1, 3.1, 3.2, 3.3, 3.4, NFR 2.1_
+  - _Boundary: Stage Wrapper, Quota Handler_
+  - _Depends: 2.3, 2.4_
+
+- [ ] 5. README ドキュメント整合
+- [ ] 5.1 ラベル一覧表 / 手動作成コマンド例 / ラベル状態遷移表 / ポーリングクエリ / 状態遷移図に `needs-quota-wait` を追加
+  - 「ラベル一括作成」表（L295-306）に `| `needs-quota-wait` | 雪 | Claude Max quota 超過で reset 待ち（Quota Resume Processor が自動除去） |` を追加
+  - 「手動で作成する場合」コマンド例（L311-321）に `gh label create needs-quota-wait --repo owner/repo --color c5def5 --description "Claude Max quota 超過で reset 待ち"` を追加
+  - 「ラベル状態遷移まとめ」表（L531-542）に「適用先=Issue / 付与主=Claude（Quota-Aware Watcher）」の行を追加（付与タイミング: quota 超過検知時 / 除去タイミング: reset 経過時に Quota Resume Processor が自動除去）
+  - ポーリングクエリブロック（L544-555）に `-label:needs-quota-wait` を追加
+  - 状態遷移図（L561-585）に `claude-claimed → needs-quota-wait → auto-dev` 経路と `claude-picked-up → needs-quota-wait → auto-dev` 経路を追加
+  - _Requirements: 7.2, 7.4_
+- [ ] 5.2 「opt-in 一覧」表に Quota-Aware Watcher 行を追加し、新規節「## Quota-Aware Watcher」を挿入
+  - 「opt-in（既定 OFF、明示的に有効化が必要）」表（L605-613）に `Quota-Aware Watcher | QUOTA_AWARE_ENABLED | false | リンク | #66` を追加
+  - 「## Reviewer Gate」節の **直前** に新規節「## Quota-Aware Watcher」を挿入し、以下を含める:
+    - 機能概要（rate_limit_event 検知 → `needs-quota-wait` → reset+grace 経過で自動除去）
+    - 環境変数表（`QUOTA_AWARE_ENABLED` 既定 false / `QUOTA_RESUME_GRACE_SEC` 既定 60）
+    - reset 時刻永続化方式（Issue body hidden marker `<!-- idd-claude:quota-reset:<epoch>:v1 -->`）
+    - 検知契約（Triage / StageA / StageA-redo / Reviewer-r1 / Reviewer-r2 / StageC / design の 7 stage label）
+    - escalation コメントフォーマット（design.md と同一テンプレート）
+    - 自動 resume の条件（reset + grace 経過）
+    - opt-out 既定で完全互換である旨の明記（Req 7.5 / Req 1.5: 既存 cron 文字列のままで動作）
+    - Migration Note: 既存 install 済み repo は labels.sh 再実行のみで足り、cron 文字列は不変（NFR 2.3）
+  - _Requirements: 1.5, 7.1, 7.3, 7.5, NFR 2.3_
+
+- [ ]* 6. dogfooding fixture テスト手順を `impl-notes.md` に整理（Developer 段階で着手）
+  - claude モック fixture（PATH 上書きスクリプト）の置き場と内容
+  - test issue 起票 → 1 cron tick → ラベル / body marker / コメント観測 → epoch を過去に書き換え → 次 tick で resume → Dispatcher pickup までの 5 ステップ手順
+  - 観測ログのうち PR 本文 Test plan に転記する部分を抽出
+  - opt-out 時の互換性検証手順（同一 fixture を `QUOTA_AWARE_ENABLED` 未設定で流して `claude-failed` 付与を確認）
+  - shellcheck 実行コマンドと期待結果（新規警告 0 件）
+  - _Requirements: 8.1, 8.2, 8.3, 8.4, NFR 2.1, NFR 4.1, NFR 4.2_
