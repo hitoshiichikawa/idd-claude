@@ -2929,128 +2929,177 @@ ${extra_body}"
 #
 #   Stage A / A' / C の非 0 exit は既存 Developer 失敗時遷移と同等メッセージ。
 #
+# Stage Checkpoint Resume (#68, opt-in): `STAGE_CHECKPOINT_ENABLED=true` のときのみ、
+#   関数冒頭で stage_checkpoint_resolve_resume_point を呼び START_STAGE を取得する。
+#   START_STAGE ∈ {A, B, C, TERMINAL_OK, TERMINAL_FAILED}。
+#     - TERMINAL_OK     → 既存 impl PR 検出。何もせず return 0（自動進行停止、ラベル不変）
+#     - TERMINAL_FAILED → round=2 reject 残骸検出。claude-failed 化して return 1
+#     - A               → 通常通り Stage A から実行（fallback / no-checkpoint / INCONSISTENT）
+#     - B               → Stage A をスキップ（既存 impl-notes.md を再利用）
+#     - C               → Stage A / Stage B をスキップ（既存 impl-notes / approve を再利用）
+#   既定の `STAGE_CHECKPOINT_ENABLED=false` では resolve は呼ばず、本関数は導入前と
+#   1 行も挙動を変えない（NFR 1.1）。
+#
 # 入力 (環境変数経由): NUMBER, TITLE, BODY, URL, BRANCH, MODE, SPEC_DIR_REL, LOG, REPO,
-#                      DEV_MODEL, DEV_MAX_TURNS, REVIEWER_MODEL, REVIEWER_MAX_TURNS
+#                      DEV_MODEL, DEV_MAX_TURNS, REVIEWER_MODEL, REVIEWER_MAX_TURNS,
+#                      STAGE_CHECKPOINT_ENABLED (#68 opt-in, default=false)
 # 戻り値:
-#   0 = pipeline 成功（Stage C も成功 / PR 作成済み）
+#   0 = pipeline 成功（Stage C も成功 / PR 作成済み）または TERMINAL_OK 相当の停止
 #   1 = Stage A / A' / B / B' / C いずれかで失敗 → claude-failed 既に付与済み
 run_impl_pipeline() {
   local prompt_a prompt_redo prompt_c
   local rev_rc
+  # START_STAGE: opt-in 時は resolve_resume_point が値を上書きする。
+  # opt-out（既定）では "A" 固定で従来挙動と完全一致（Req 3.2 / NFR 1.1）。
+  local START_STAGE="A"
 
-  # ── Stage A: PM + Developer（impl-resume では PM スキップ）──
-  echo "--- Stage A 実行（$MODE / PM + Developer）---" >> "$LOG"
-  prompt_a=$(build_dev_prompt_a "$MODE")
-  # Issue #66: Quota-Aware Watcher 経由で claude を起動（Req 1.1, 1.2, 2.1）
-  local _qa_reset_file_a _qa_rc_a=0 _qa_ts_a
-  _qa_ts_a=$(date +%Y%m%d-%H%M%S)
-  _qa_reset_file_a="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-${_qa_ts_a}"
-  qa_run_claude_stage "StageA" "$_qa_reset_file_a" -- \
-    claude \
-      --print "$prompt_a" \
-      --model "$DEV_MODEL" \
-      --permission-mode bypassPermissions \
-      --max-turns "$DEV_MAX_TURNS" \
-      --output-format stream-json \
-      --verbose \
-      >> "$LOG" 2>&1 || _qa_rc_a=$?
-  case "$_qa_rc_a" in
-    0)
-      echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
-      ;;
-    99)
-      local _qa_epoch_a
-      _qa_epoch_a=$(cat "$_qa_reset_file_a")
-      qa_handle_quota_exceeded "$NUMBER" "StageA" "$_qa_epoch_a"
-      rm -f "$_qa_reset_file_a"
-      echo "⏸️ #$NUMBER: Stage A で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
-      return 0
-      ;;
-    *)
-      rm -f "$_qa_reset_file_a"
-      echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
-      mark_issue_failed "stageA" ""
-      return 1
-      ;;
-  esac
-  rm -f "$_qa_reset_file_a"
+  # Stage Checkpoint Resume (#68 opt-in): START_STAGE を resolve_resume_point で
+  # 上書き。既定 OFF では本ブロックは skip され START_STAGE="A" のままで、
+  # 本機能導入前と完全等価な挙動になる（NFR 1.1）。
+  if [ "${STAGE_CHECKPOINT_ENABLED:-false}" = "true" ]; then
+    if ! stage_checkpoint_resolve_resume_point; then
+      sc_warn "resolve 異常 → Stage A 起点で安全フォールバック" >> "$LOG"
+      START_STAGE="A"
+    fi
+    case "$START_STAGE" in
+      TERMINAL_OK)
+        sc_log "既存 impl PR 検出 → Stage C 再実行を停止 (Req 2.6)" >> "$LOG"
+        echo "✅ #$NUMBER: 既存 impl PR を検出（Stage Checkpoint）→ 自動進行を停止" | tee -a "$LOG"
+        return 0
+        ;;
+      TERMINAL_FAILED)
+        sc_log "round=2 reject 残骸検出 → claude-failed 化 (Req 2.5)" >> "$LOG"
+        echo "❌ #$NUMBER: Reviewer round=2 reject の checkpoint 残骸検出 → claude-failed" | tee -a "$LOG"
+        mark_issue_failed "stage-checkpoint-terminal-failed" \
+          "Reviewer round=2 reject の checkpoint が当該 branch に残っているため、自動進行を停止します。\`${SPEC_DIR_REL}/review-notes.md\` の RESULT 行を確認し、人間判断で対応してください。"
+        return 1
+        ;;
+    esac
+  fi
 
-  # ── Stage B (round=1): Reviewer ──
-  rev_rc=0
-  run_reviewer_stage 1 || rev_rc=$?
-  case $rev_rc in
-    0)
-      echo "✅ #$NUMBER: Reviewer round=1 approve" | tee -a "$LOG"
-      ;;
-    99)
-      # Issue #66: Reviewer round=1 で quota 超過検出。run_reviewer_stage 内で
-      # qa_handle_quota_exceeded 済 / needs-quota-wait に遷移済 → 正常終了で抜ける。
-      echo "⏸️ #$NUMBER: Reviewer round=1 で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
-      return 0
-      ;;
-    1)
-      echo "🔁 #$NUMBER: Reviewer round=1 reject → Developer 再実行" | tee -a "$LOG"
-      rv_dev_log "redo by reviewer reject (round=1)" >> "$LOG"
-
-      # ── Stage A' (Developer 再実行) ──
-      echo "--- Stage A' 実行（Developer 再実行 / Reviewer reject 差し戻し）---" >> "$LOG"
-      prompt_redo=$(build_dev_prompt_redo "$REPO_DIR/$SPEC_DIR_REL/review-notes.md")
-      # Issue #66: Quota-Aware Watcher 経由で claude を起動
-      local _qa_reset_file_aredo _qa_rc_aredo=0 _qa_ts_aredo
-      _qa_ts_aredo=$(date +%Y%m%d-%H%M%S)
-      _qa_reset_file_aredo="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-redo-${_qa_ts_aredo}"
-      qa_run_claude_stage "StageA-redo" "$_qa_reset_file_aredo" -- \
+  # ── Stage A: PM + Developer（impl-resume では PM スキップ / Stage Checkpoint resume 時は skip 可）──
+  case "$START_STAGE" in
+    A)
+      echo "--- Stage A 実行（$MODE / PM + Developer）---" >> "$LOG"
+      prompt_a=$(build_dev_prompt_a "$MODE")
+      # Issue #66: Quota-Aware Watcher 経由で claude を起動（Req 1.1, 1.2, 2.1）
+      local _qa_reset_file_a _qa_rc_a=0 _qa_ts_a
+      _qa_ts_a=$(date +%Y%m%d-%H%M%S)
+      _qa_reset_file_a="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-${_qa_ts_a}"
+      qa_run_claude_stage "StageA" "$_qa_reset_file_a" -- \
         claude \
-          --print "$prompt_redo" \
+          --print "$prompt_a" \
           --model "$DEV_MODEL" \
           --permission-mode bypassPermissions \
           --max-turns "$DEV_MAX_TURNS" \
           --output-format stream-json \
           --verbose \
-          >> "$LOG" 2>&1 || _qa_rc_aredo=$?
-      case "$_qa_rc_aredo" in
+          >> "$LOG" 2>&1 || _qa_rc_a=$?
+      case "$_qa_rc_a" in
         0)
-          echo "✅ #$NUMBER: Stage A' 完了" | tee -a "$LOG"
+          echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
           ;;
         99)
-          local _qa_epoch_aredo
-          _qa_epoch_aredo=$(cat "$_qa_reset_file_aredo")
-          qa_handle_quota_exceeded "$NUMBER" "StageA-redo" "$_qa_epoch_aredo"
-          rm -f "$_qa_reset_file_aredo"
-          echo "⏸️ #$NUMBER: Stage A' で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+          local _qa_epoch_a
+          _qa_epoch_a=$(cat "$_qa_reset_file_a")
+          qa_handle_quota_exceeded "$NUMBER" "StageA" "$_qa_epoch_a"
+          rm -f "$_qa_reset_file_a"
+          echo "⏸️ #$NUMBER: Stage A で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
           return 0
           ;;
         *)
-          rm -f "$_qa_reset_file_aredo"
-          echo "❌ #$NUMBER: Stage A' (Developer 再実行) 失敗" | tee -a "$LOG"
-          mark_issue_failed "stageA-redo" ""
+          rm -f "$_qa_reset_file_a"
+          echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
+          mark_issue_failed "stageA" ""
           return 1
           ;;
       esac
-      rm -f "$_qa_reset_file_aredo"
+      rm -f "$_qa_reset_file_a"
+      ;;
+    B|C)
+      sc_log "Stage A をスキップ（START_STAGE=$START_STAGE / 既存 impl-notes.md を再利用）" >> "$LOG"
+      echo "⏭️  #$NUMBER: Stage A スキップ（Stage Checkpoint resume）" | tee -a "$LOG"
+      ;;
+  esac
 
-      # ── Stage B (round=2): Reviewer 最終回 ──
+  # ── Stage B (round=1): Reviewer / Stage A' / Stage B(round=2) ──
+  case "$START_STAGE" in
+    A|B)
       rev_rc=0
-      run_reviewer_stage 2 || rev_rc=$?
+      run_reviewer_stage 1 || rev_rc=$?
       case $rev_rc in
         0)
-          echo "✅ #$NUMBER: Reviewer round=2 approve" | tee -a "$LOG"
+          echo "✅ #$NUMBER: Reviewer round=1 approve" | tee -a "$LOG"
           ;;
         99)
-          # Issue #66: Reviewer round=2 で quota 超過検出。run_reviewer_stage 内で
+          # Issue #66: Reviewer round=1 で quota 超過検出。run_reviewer_stage 内で
           # qa_handle_quota_exceeded 済 / needs-quota-wait に遷移済 → 正常終了で抜ける。
-          echo "⏸️ #$NUMBER: Reviewer round=2 で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+          echo "⏸️ #$NUMBER: Reviewer round=1 で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
           return 0
           ;;
         1)
-          # 2 回目 reject → claude-failed + Issue コメントに reject 理由 / 対象 ID を含める
-          echo "❌ #$NUMBER: Reviewer round=2 reject → claude-failed" | tee -a "$LOG"
-          local parsed2 cat2 tgt2
-          parsed2=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
-          cat2=$(echo "$parsed2" | cut -f2)
-          tgt2=$(echo "$parsed2" | cut -f3)
-          local reject_body
-          reject_body="Reviewer が 2 回連続で reject を出したため、自動 iteration を打ち切り、人間判断に委ねます。
+          echo "🔁 #$NUMBER: Reviewer round=1 reject → Developer 再実行" | tee -a "$LOG"
+          rv_dev_log "redo by reviewer reject (round=1)" >> "$LOG"
+
+          # ── Stage A' (Developer 再実行) ──
+          echo "--- Stage A' 実行（Developer 再実行 / Reviewer reject 差し戻し）---" >> "$LOG"
+          prompt_redo=$(build_dev_prompt_redo "$REPO_DIR/$SPEC_DIR_REL/review-notes.md")
+          # Issue #66: Quota-Aware Watcher 経由で claude を起動
+          local _qa_reset_file_aredo _qa_rc_aredo=0 _qa_ts_aredo
+          _qa_ts_aredo=$(date +%Y%m%d-%H%M%S)
+          _qa_reset_file_aredo="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-redo-${_qa_ts_aredo}"
+          qa_run_claude_stage "StageA-redo" "$_qa_reset_file_aredo" -- \
+            claude \
+              --print "$prompt_redo" \
+              --model "$DEV_MODEL" \
+              --permission-mode bypassPermissions \
+              --max-turns "$DEV_MAX_TURNS" \
+              --output-format stream-json \
+              --verbose \
+              >> "$LOG" 2>&1 || _qa_rc_aredo=$?
+          case "$_qa_rc_aredo" in
+            0)
+              echo "✅ #$NUMBER: Stage A' 完了" | tee -a "$LOG"
+              ;;
+            99)
+              local _qa_epoch_aredo
+              _qa_epoch_aredo=$(cat "$_qa_reset_file_aredo")
+              qa_handle_quota_exceeded "$NUMBER" "StageA-redo" "$_qa_epoch_aredo"
+              rm -f "$_qa_reset_file_aredo"
+              echo "⏸️ #$NUMBER: Stage A' で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+              return 0
+              ;;
+            *)
+              rm -f "$_qa_reset_file_aredo"
+              echo "❌ #$NUMBER: Stage A' (Developer 再実行) 失敗" | tee -a "$LOG"
+              mark_issue_failed "stageA-redo" ""
+              return 1
+              ;;
+          esac
+          rm -f "$_qa_reset_file_aredo"
+
+          # ── Stage B (round=2): Reviewer 最終回 ──
+          rev_rc=0
+          run_reviewer_stage 2 || rev_rc=$?
+          case $rev_rc in
+            0)
+              echo "✅ #$NUMBER: Reviewer round=2 approve" | tee -a "$LOG"
+              ;;
+            99)
+              # Issue #66: Reviewer round=2 で quota 超過検出。run_reviewer_stage 内で
+              # qa_handle_quota_exceeded 済 / needs-quota-wait に遷移済 → 正常終了で抜ける。
+              echo "⏸️ #$NUMBER: Reviewer round=2 で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+              return 0
+              ;;
+            1)
+              # 2 回目 reject → claude-failed + Issue コメントに reject 理由 / 対象 ID を含める
+              echo "❌ #$NUMBER: Reviewer round=2 reject → claude-failed" | tee -a "$LOG"
+              local parsed2 cat2 tgt2
+              parsed2=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
+              cat2=$(echo "$parsed2" | cut -f2)
+              tgt2=$(echo "$parsed2" | cut -f3)
+              local reject_body
+              reject_body="Reviewer が 2 回連続で reject を出したため、自動 iteration を打ち切り、人間判断に委ねます。
 
 - 対象 requirement ID: ${tgt2:-(unknown)}
 - reject カテゴリ: ${cat2:-(unknown)}
@@ -3060,22 +3109,28 @@ run_impl_pipeline() {
 1. review-notes.md と watcher ログを読み、Reviewer 判定が妥当か確認
 2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
 3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
-          mark_issue_failed "reviewer-reject2" "$reject_body"
-          return 1
+              mark_issue_failed "reviewer-reject2" "$reject_body"
+              return 1
+              ;;
+            *)
+              # round=2 reviewer error
+              echo "❌ #$NUMBER: Reviewer round=2 異常終了 → claude-failed" | tee -a "$LOG"
+              mark_issue_failed "reviewer-error" "Reviewer round=2 が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+              return 1
+              ;;
+          esac
           ;;
         *)
-          # round=2 reviewer error
-          echo "❌ #$NUMBER: Reviewer round=2 異常終了 → claude-failed" | tee -a "$LOG"
-          mark_issue_failed "reviewer-error" "Reviewer round=2 が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+          # round=1 reviewer error → claude-failed + Issue コメント (要件 4.8)
+          echo "❌ #$NUMBER: Reviewer round=1 異常終了 → claude-failed" | tee -a "$LOG"
+          mark_issue_failed "reviewer-error" "Reviewer round=1 が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
           return 1
           ;;
       esac
       ;;
-    *)
-      # round=1 reviewer error → claude-failed + Issue コメント (要件 4.8)
-      echo "❌ #$NUMBER: Reviewer round=1 異常終了 → claude-failed" | tee -a "$LOG"
-      mark_issue_failed "reviewer-error" "Reviewer round=1 が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
-      return 1
+    C)
+      sc_log "Stage B をスキップ（START_STAGE=C / 既存 review-notes.md approve を再利用）" >> "$LOG"
+      echo "⏭️  #$NUMBER: Stage B スキップ（Stage Checkpoint resume）" | tee -a "$LOG"
       ;;
   esac
 
