@@ -2257,6 +2257,155 @@ stage_checkpoint_find_impl_pr() {
   return 0
 }
 
+# ─── stage_checkpoint_resolve_resume_point ───
+#
+# Stage A/B/C の checkpoint を観測し、START_STAGE を 1 つに決定する。
+# 出力 domain: A / B / C / TERMINAL_OK / TERMINAL_FAILED。
+#
+# Decision Table（design.md と同期、設計参照: docs/specs/68-*/design.md）:
+#   既存 PR あり                                      → TERMINAL_OK
+#   impl-notes 無 / review-notes 有 (任意)            → A (INCONSISTENT, Req 5.1)
+#   impl-notes 無 / review-notes 無                   → A (Req 2.2)
+#   impl-notes 有 / review-notes 無                   → B (Req 2.3)
+#   impl-notes 有 / review-notes parse 失敗            → B (Req 4.3)
+#   impl-notes 有 / RESULT=approve                     → C (Req 2.4)
+#   impl-notes 有 / RESULT=reject (round=2 と推定)     → TERMINAL_FAILED (Req 2.5)
+#   impl-notes 有 / RESULT=reject (round=1 と推定)     → A (D-3, INCONSISTENT 扱い)
+#
+# round=1 / round=2 判別: review-notes.md 内 `<!-- idd-claude:review round=N -->`
+# を grep。いずれも見つからなければ INCONSISTENT として Stage A から再実行する
+# （safe fallback）。
+#
+# 入力: 環境変数 NUMBER / BRANCH / REPO / REPO_DIR / SPEC_DIR_REL / LOG
+# 副作用:
+#   - グローバル変数 START_STAGE に "A" / "B" / "C" / "TERMINAL_OK" / "TERMINAL_FAILED" を代入
+#   - $LOG / stdout に 1 ブロックの判定根拠ログを sc_log で出力（NFR 2.1, NFR 2.2）
+# 戻り値:
+#   0 = 判定成功（START_STAGE 設定済）
+#   1 = 内部エラー（START_STAGE="A" にフォールバック、Req 5.4）
+stage_checkpoint_resolve_resume_point() {
+  # 内部エラーの安全側フォールバックのため、エラーを補足できるよう || true で個別ガード。
+  # START_STAGE は呼び出し元 run_impl_pipeline（task 4）が読み取る共有変数。
+  # task 3 単独では read 側が無いため SC2034 を一括抑制（task 4 で消える）。
+  # shellcheck disable=SC2034
+  START_STAGE="A"
+
+  sc_log "--- begin resolve (issue=#$NUMBER branch=$BRANCH) ---" >> "$LOG"
+  sc_log "input: spec_dir=$SPEC_DIR_REL" >> "$LOG"
+
+  # 1) 既存 impl PR を最優先で検出（Req 2.6: TERMINAL_OK）。
+  local pr_info pr_rc
+  pr_info=$(stage_checkpoint_find_impl_pr 2>/dev/null) && pr_rc=0 || pr_rc=$?
+  case "$pr_rc" in
+    0)
+      sc_log "input: existing-impl-pr=$pr_info" >> "$LOG"
+      START_STAGE="TERMINAL_OK"
+      sc_log "decision: START_STAGE=TERMINAL_OK reason=existing-impl-pr" >> "$LOG"
+      sc_log "--- end resolve ---" >> "$LOG"
+      return 0
+      ;;
+    1)
+      sc_log "input: existing-impl-pr=none" >> "$LOG"
+      ;;
+    *)
+      sc_warn "gh pr list failed (rc=$pr_rc) → safe fallback: existing-impl-pr=unknown" >> "$LOG"
+      sc_log "input: existing-impl-pr=unknown" >> "$LOG"
+      # gh API エラーは判定継続（fallback="A"）。Stage A 再実行は安全（Req 5.4）
+      ;;
+  esac
+
+  # 2) impl-notes.md tracked 判定（Stage A 完了 checkpoint）。
+  local has_impl="no"
+  if stage_checkpoint_has_impl_notes; then
+    has_impl="yes"
+  fi
+  sc_log "input: impl-notes.md tracked=$has_impl" >> "$LOG"
+
+  # 3) review-notes.md tracked + RESULT 行 parse（Stage B 完了 checkpoint）。
+  # stdout 側の TSV は本箇所では未使用（result/round は別途 grep で取得）。
+  local rev_rc=0
+  stage_checkpoint_read_review_result >/dev/null 2>&1 || rev_rc=$?
+  local rev_result="(none)"
+  case "$rev_rc" in
+    0) rev_result="approve" ;;
+    1) rev_result="reject" ;;
+    *) rev_result="(missing-or-unparsed)" ;;
+  esac
+  # tracked 判定（rev_rc から逆算するのではなく、ls-tree で実態を直接観測する）。
+  local rev_path="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
+  local rev_tracked="no"
+  if [ -f "$rev_path" ]; then
+    local rev_ls_out
+    rev_ls_out=$(git -C "$REPO_DIR" ls-tree --name-only HEAD -- "$SPEC_DIR_REL/review-notes.md" 2>/dev/null || true)
+    [ -n "$rev_ls_out" ] && rev_tracked="yes"
+  fi
+  # round 判定: review-notes.md 内に round=N が無ければ "unknown"（INCONSISTENT 扱い）
+  local rev_round="unknown"
+  if [ "$has_impl" = "yes" ] && [ -f "$rev_path" ]; then
+    if grep -q '^<!-- idd-claude:review round=2' "$rev_path" 2>/dev/null \
+       || grep -q '^round=2$' "$rev_path" 2>/dev/null; then
+      rev_round="2"
+    elif grep -q '^<!-- idd-claude:review round=1' "$rev_path" 2>/dev/null \
+       || grep -q '^round=1$' "$rev_path" 2>/dev/null; then
+      rev_round="1"
+    fi
+  fi
+  sc_log "input: review-notes.md tracked=$rev_tracked result=$rev_result round=$rev_round" >> "$LOG"
+
+  # 4) Decision Table（評価順序: 矛盾検出 → 通常分岐）。
+  if [ "$has_impl" = "no" ]; then
+    if [ "$rev_rc" -eq 2 ]; then
+      # impl-notes 無 / review-notes 無 → 通常の Stage A (Req 2.2)
+      START_STAGE="A"
+      sc_log "decision: START_STAGE=A reason=no-checkpoint" >> "$LOG"
+    else
+      # impl-notes 無 / review-notes 有 → INCONSISTENT (Req 5.1)
+      START_STAGE="A"
+      sc_log "decision: START_STAGE=A reason=inconsistent-review-notes-without-impl-notes" >> "$LOG"
+    fi
+    sc_log "--- end resolve ---" >> "$LOG"
+    return 0
+  fi
+
+  # ここから has_impl=yes 系
+  case "$rev_rc" in
+    2)
+      # review-notes 不在 or 解釈不能 → Stage B から再実行 (Req 2.3, 4.3)
+      START_STAGE="B"
+      sc_log "decision: START_STAGE=B reason=impl-notes-only-or-review-unparsed" >> "$LOG"
+      ;;
+    0)
+      # approve → Stage C (Req 2.4)
+      START_STAGE="C"
+      sc_log "decision: START_STAGE=C reason=approve+no-pr" >> "$LOG"
+      ;;
+    1)
+      # reject → round で分岐 (D-3, Req 2.5)
+      case "$rev_round" in
+        2)
+          START_STAGE="TERMINAL_FAILED"
+          sc_log "decision: START_STAGE=TERMINAL_FAILED reason=round2-reject-residual" >> "$LOG"
+          ;;
+        1)
+          # round=1 reject の中断状態は同 tick 完結前提が破れた状況 → Stage A 再実行 (D-3)
+          # shellcheck disable=SC2034
+          START_STAGE="A"
+          sc_log "decision: START_STAGE=A reason=round1-reject-mid-tick-fallback" >> "$LOG"
+          ;;
+        *)
+          # round=N が読み取れない（手動編集 / 旧フォーマット）→ INCONSISTENT 扱い
+          # shellcheck disable=SC2034
+          START_STAGE="A"
+          sc_log "decision: START_STAGE=A reason=reject-with-unknown-round" >> "$LOG"
+          ;;
+      esac
+      ;;
+  esac
+
+  sc_log "--- end resolve ---" >> "$LOG"
+  return 0
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Reviewer Gate (#20 Phase 1) — impl 系モード stage 分割パイプライン
 #
