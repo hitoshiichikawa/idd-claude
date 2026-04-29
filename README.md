@@ -1488,18 +1488,26 @@ rm -f "$HOME/.issue-watcher/<repo-slug>-slot-4.lock"
 
 #### claim タイミングの挙動変更（既存運用への小影響）
 
-Phase C では Dispatcher が **Triage 実行前に** `claude-picked-up` ラベルを付与します
+Phase C では Dispatcher が **Triage 実行前に** claim ラベルを付与します
 （claim atomicity の構造的保証のため）。本機能導入前は Triage 後にラベル付与していたため、
 以下の挙動差が発生します:
 
-| シナリオ | 本機能導入前 | Phase C |
+| シナリオ | 本機能導入前 | Phase C（Issue #52 適用後） |
 |---|---|---|
-| Triage 結果が `needs-decisions` | `claude-picked-up` は **未付与** のまま `needs-decisions` を付与 | `claude-picked-up` を **一度付与した後に除去** + `needs-decisions` 付与 |
-| Triage 自体が失敗（Claude crash） | ラベル変更なし、次サイクルで再 Triage | `claude-picked-up` → `claude-failed` に遷移、人間判断に委ねる |
+| Triage 結果が `needs-decisions` | `claude-picked-up` は **未付与** のまま `needs-decisions` を付与 | `claude-claimed` を **一度付与した後に除去** + `needs-decisions` 付与 |
+| Triage 自体が失敗（Claude crash） | ラベル変更なし、次サイクルで再 Triage | `claude-claimed` → `claude-failed` に遷移、人間判断に委ねる |
 
 `PARALLEL_SLOTS=1`（既定）の場合も同じ挙動になります。GitHub の Issue activity log には
-`claude-picked-up` ラベルの付与・除去の 2 イベントが残りますが、最終的な Issue ラベルは
+`claude-claimed` ラベルの付与・除去の 2 イベントが残りますが、最終的な Issue ラベルは
 従来と同じ集合に収束します。
+
+> **Issue #52 (claude-claimed 導入) の Migration Note**
+>
+> - `bash .github/scripts/idd-claude-labels.sh` を再実行すると `claude-claimed` ラベルが対象 repo に追加されます（既存ラベルは name / color / description ともに変更されません）
+> - 在進行中 Issue（旧 watcher が `claude-picked-up` のみで進行中の Issue）は新版 watcher が pickup せず自然に完走します（exclusion query に `claude-picked-up` も引き続き含まれているため）
+> - 既存環境変数（`REPO` / `REPO_DIR` / `LOG_DIR` / `LOCK_FILE` / `TRIAGE_MODEL` / `DEV_MODEL` 等）と cron / launchd 登録文字列は不変
+> - 既存 9 ラベル（`auto-dev` / `claude-picked-up` / `needs-decisions` / `awaiting-design-review` / `ready-for-review` / `claude-failed` / `skip-triage` / `needs-rebase` / `needs-iteration`）の name / color / description は不変
+> - ⚠️ Triage 通過後の `claude-claimed → claude-picked-up` 付け替えで GitHub API が失敗した場合は `label-handover` stage 失敗として `claude-failed` に遷移します。両系統除去のため通常は `claude-failed` のみ残りますが、ごく稀に API レイテンシ等で `claude-claimed` が残置するケースがあれば、人間が手動で `claude-claimed` も外してください。
 
 ### ⚠️ merge 後の再配置が必要
 
