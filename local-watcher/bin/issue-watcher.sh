@@ -59,6 +59,7 @@ LABEL_FAILED="claude-failed"
 LABEL_SKIP_TRIAGE="skip-triage"
 LABEL_NEEDS_REBASE="needs-rebase"
 LABEL_NEEDS_ITERATION="needs-iteration"
+LABEL_NEEDS_QUOTA_WAIT="needs-quota-wait"
 
 # ─── Phase A: Merge Queue Processor 設定 ───
 # 既存運用への影響を避けるため、初回導入は opt-in（デフォルト false）。
@@ -151,6 +152,17 @@ DEV_MAX_TURNS="${DEV_MAX_TURNS:-60}"
 REVIEWER_MODEL="${REVIEWER_MODEL:-claude-opus-4-7}"
 REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-30}"
 
+# ─── Quota-Aware Watcher 設定 (#66) ───
+# Claude Max の 5 時間ローリング quota を claude CLI の `rate_limit_event` JSON で
+# 検知し、quota 起因の停止と他失敗を `needs-quota-wait` ラベルで分離する。
+# reset 経過後に Quota Resume Processor が自動でラベル除去して通常 pickup に戻す。
+# 既存運用への影響を避けるため、初回導入は opt-in（デフォルト false / Req 1.3, 1.5）。
+# 有効化するには cron / launchd 側で QUOTA_AWARE_ENABLED=true を渡す。
+QUOTA_AWARE_ENABLED="${QUOTA_AWARE_ENABLED:-false}"
+# reset 予定時刻 + 本秒数を経過するまで `needs-quota-wait` を除去しない（NFR 3.3:
+# 同 cron tick 内で付与/除去を往復させない構造的抑止）。
+QUOTA_RESUME_GRACE_SEC="${QUOTA_RESUME_GRACE_SEC:-60}"
+
 # ─── Phase C: Issue 並列化 (worktree slot + dispatcher, #16) ───
 # 入口（auto-dev Issue 処理）の並列度を制御する env var 群。
 # 既存運用との後方互換のため、すべてデフォルトで本機能導入前と同一挙動になるよう配置:
@@ -216,6 +228,318 @@ cd "$REPO_DIR"
 git fetch origin --prune
 git checkout main
 git pull --ff-only origin main
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Quota-Aware Watcher Helpers (#66)
+#   Claude Max の 5 時間ローリング quota 超過を、Stage 実行中の claude CLI が出す
+#   `rate_limit_event` (status=exceeded) JSON で検知する。検知時は当該 Issue を
+#   `needs-quota-wait` 状態にし、reset 予定時刻を Issue body の hidden marker として
+#   永続化。次サイクル以降の Quota Resume Processor が reset+grace 経過した Issue
+#   からラベルを除去して通常 pickup ループに戻す。
+#
+#   QUOTA_AWARE_ENABLED=false（既定）では本セクションの全関数は呼ばれるが、
+#   gate 早期 return で副作用を一切起こさない。Stage Wrapper も `"$@"` 素通しで
+#   既存挙動 100% 互換（Req 1.1, NFR 2.1）。
+#
+#   設計参照: docs/specs/66-feat-watcher-claude-max-quota-rate-limit/design.md
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# quota-aware 専用ロガー（既存 mq_log / pi_log と同形式 / NFR 1.1, 1.2）
+qa_log() {
+  echo "[$(date '+%F %T')] quota-aware: $*"
+}
+qa_warn() {
+  echo "[$(date '+%F %T')] quota-aware: WARN: $*" >&2
+}
+qa_error() {
+  echo "[$(date '+%F %T')] quota-aware: ERROR: $*" >&2
+}
+
+# epoch 秒 → ISO 8601 (タイムゾーン付き) 文字列。GNU date / BSD date 両対応。
+# 失敗時は epoch をそのまま返す（escalation コメントの整合性維持）。
+# Args: $1 = epoch seconds (integer)
+# Stdout: ISO 8601 string with TZ offset (e.g. "2026-04-29T15:00:00+09:00")
+qa_format_iso8601() {
+  local epoch="$1"
+  local out=""
+  # GNU date (Linux): -d @epoch -Iseconds
+  if out=$(date -d "@${epoch}" -Iseconds 2>/dev/null) && [ -n "$out" ]; then
+    printf '%s' "$out"
+    return 0
+  fi
+  # BSD date (macOS): -r epoch +format
+  if out=$(date -r "${epoch}" "+%Y-%m-%dT%H:%M:%S%z" 2>/dev/null) && [ -n "$out" ]; then
+    printf '%s' "$out"
+    return 0
+  fi
+  # フォールバック: epoch をそのまま返す
+  printf '%s' "$epoch"
+}
+
+# stdin の stream-json（1 行 1 JSON）を fold し、`type=="rate_limit_event"` かつ
+# `status=="exceeded"` の最新 reset epoch を stdout に出力する（Req 2.1, 2.2, 2.3,
+# 2.4, 2.5, 2.6）。
+#
+# - 解析失敗（非 JSON / schema 違い）の行は無視して継続（Req 2.5）
+# - allowed のみは無視（Req 2.6）
+# - 同一 stream に複数 exceeded があれば最終行（最新）の epoch のみ stdout（Req 2.4）
+# - reset 時刻フィールド名は claude CLI のスキーマ揺れを考慮して
+#   `.resetsAt` / `.reset_at` / `.resets_at` の順に試す
+# - 値が ISO 8601 文字列の場合は `fromdateiso8601` で epoch 化、数値はそのまま採用
+#
+# 実装メモ: jq は default だと stdin を "concatenated JSON" として一括 parse する
+# ため、無効な 1 行があると stream 全体が fatal で止まる。stream を停止させない
+# 要件（Req 2.5）を満たすため、`-R`（raw input）で 1 行ずつ受け取り、各行を
+# `try fromjson catch null` で個別 parse する。
+qa_detect_rate_limit() {
+  jq -R -r '
+    . as $line
+    | (try ($line | fromjson) catch null)
+    | select(type == "object")
+    | select(.type? == "rate_limit_event")
+    | select(.status? == "exceeded")
+    | (.resetsAt // .reset_at // .resets_at // empty)
+    | (
+        if type == "number" then (. | floor)
+        elif type == "string" then
+          (try (. | fromdateiso8601) catch (try (. | tonumber) catch empty))
+        else empty end
+      )
+  ' 2>/dev/null \
+    | tail -1
+}
+
+# 既存 6 stage の claude 呼び出しを横断ラップする Stage Wrapper（Req 1.1, 1.2,
+# 2.1, NFR 2.1）。
+#
+# 引数: <stage_label> <reset_file> -- claude <claude args...>
+# Returns:
+#   0     : claude 正常終了 + quota 検出なし（既存挙動互換）
+#   99    : quota 検出（reset epoch が $reset_file に書かれている）
+#   N≠0,99: claude 自体の非ゼロ exit（quota 以外の失敗、既存フロー委譲）
+#
+# 副作用:
+#   - $LOG（呼び出し側で設定済み）に stream 出力を追記
+#   - $reset_file は空（quota 検出なし）または epoch 1 行
+qa_run_claude_stage() {
+  local stage_label="$1"
+  local reset_file="$2"
+  shift 2
+  # 引数 separator '--' を skip
+  if [ "${1:-}" = "--" ]; then
+    shift
+  fi
+
+  # opt-out: 既存挙動の素通し実行。tee も解析も走らない（Req 1.1, NFR 2.1）。
+  if [ "$QUOTA_AWARE_ENABLED" != "true" ]; then
+    "$@"
+    return $?
+  fi
+
+  # opt-in: stream-json を tee で 2 系統に分岐
+  #   系統 1: 既存 $LOG への append（観測ログを破壊しない）
+  #   系統 2: qa_detect_rate_limit への pipe → reset epoch を $reset_file に書き出し
+  : > "$reset_file"
+  qa_log "stage start label=$stage_label"
+
+  # set -e / pipefail 配下で個別の非 0 exit を握り潰すため、|| true で確実に到達
+  # PIPESTATUS で claude 本体（pipeline 先頭）の exit code を後段で取り出す。
+  "$@" 2>&1 | tee -a "$LOG" | qa_detect_rate_limit > "$reset_file" || true
+  local claude_rc="${PIPESTATUS[0]:-0}"
+
+  if [ -s "$reset_file" ]; then
+    local _epoch
+    _epoch=$(tr -d '[:space:]' < "$reset_file")
+    if [[ "$_epoch" =~ ^[0-9]+$ ]]; then
+      qa_log "stage detected exceeded label=$stage_label reset_epoch=$_epoch"
+      return 99
+    fi
+    # 非数値だった場合は検出失敗扱い → 既存フローに委譲（Req 2.5）
+    qa_warn "stage detected non-numeric reset value label=$stage_label value=$_epoch (既存フローに委譲)"
+    : > "$reset_file"
+  fi
+  return "$claude_rc"
+}
+
+# Issue body の hidden marker として reset 予定時刻を 1 件のみ保持する形で
+# 永続化する（Req 4.1, 4.3）。既存 marker 行があれば全削除してから新値を追記。
+#
+# Args: $1 = issue number, $2 = reset epoch (integer)
+# Return: 0 = persisted, 1 = gh failure (warn only, do not fail caller)
+qa_persist_reset_time() {
+  local issue_number="$1"
+  local epoch="$2"
+  local body
+  if ! body=$(gh issue view "$issue_number" --repo "$REPO" --json body --jq '.body' 2>/dev/null); then
+    return 1
+  fi
+  # 既存 marker 行を全削除（複数あったとしても落とす）
+  local cleaned
+  cleaned=$(printf '%s\n' "$body" | sed -E '/<!-- idd-claude:quota-reset:[0-9]+:v1 -->/d')
+  # body 末尾を空行 1 つで区切って marker を 1 行追記
+  local new_body
+  new_body=$(printf '%s\n\n<!-- idd-claude:quota-reset:%s:v1 -->' "$cleaned" "$epoch")
+  if ! gh issue edit "$issue_number" --repo "$REPO" --body "$new_body" >/dev/null 2>&1; then
+    return 1
+  fi
+  return 0
+}
+
+# Issue body から hidden marker を読み出して reset epoch を返す（Req 4.2, 4.4）。
+# marker 不在 / 不正値 / API 失敗いずれの場合も数値以外を返さない。
+#
+# Args: $1 = issue number
+# Stdout: epoch (integer) on success, empty on failure
+# Return: 0 = found, 1 = absent or malformed (caller must skip removal)
+qa_load_reset_time() {
+  local issue_number="$1"
+  local body
+  if ! body=$(gh issue view "$issue_number" --repo "$REPO" --json body --jq '.body' 2>/dev/null); then
+    return 1
+  fi
+  local epoch
+  epoch=$(printf '%s' "$body" \
+    | sed -nE 's/.*<!-- idd-claude:quota-reset:([0-9]+):v1 -->.*/\1/p' \
+    | tail -1)
+  if [[ "$epoch" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$epoch"
+    return 0
+  fi
+  return 1
+}
+
+# escalation コメント本文を組み立てる（design.md 「Escalation Comment Template」を逐語使用）。
+# Args: $1 = stage label, $2 = epoch, $3 = ISO 8601 string
+# Stdout: コメント本文（markdown）
+qa_build_escalation_comment() {
+  local stage_label="$1" epoch="$2" iso8601="$3"
+  cat <<EOF
+## ⏸️ Claude Max quota exceeded（quota wait）
+
+watcher が \`${stage_label}\` 実行中に Claude CLI から \`rate_limit_event (status=exceeded)\` を検知しました。
+当該 Issue を一時的に **\`needs-quota-wait\`** 状態にしています。Claude Max の 5 時間ローリング quota
+が reset された後、watcher が自動的に通常 pickup ループへ戻します。
+
+### 検知情報
+
+- 検知 Stage: \`${stage_label}\`
+- reset 予定時刻 (UNIX epoch): \`${epoch}\`
+- reset 予定時刻 (ISO 8601): \`${iso8601}\`
+- 適用 grace 秒数: \`${QUOTA_RESUME_GRACE_SEC}\` 秒（reset 後この秒数を経過するまで pickup を抑止）
+
+### 自動復帰の条件
+
+- 次サイクルの Quota Resume Processor が、現在時刻が \`reset 予定時刻 + grace\` を超えていることを
+  検知すると、\`needs-quota-wait\` ラベルを自動除去します
+- ラベル除去後の cron tick で Dispatcher が通常 pickup 候補として再選定します
+- \`claude-failed\` ラベルは付与していません（quota 起因と他失敗の混同を避けるため、Req 3.2）
+
+### 手動介入したい場合
+
+- 即時再開: \`needs-quota-wait\` ラベルを手動で外すと次サイクルで pickup されます
+- quota 起因でないと判断する場合: 当該 Issue body の \`<!-- idd-claude:quota-reset:...:v1 -->\` 行を
+  削除した上で \`needs-quota-wait\` を \`claude-failed\` に手動付け替えしてください
+
+---
+
+_本コメントは Quota-Aware Watcher（Issue #66）が自動投稿しました。_
+EOF
+}
+
+# quota 検知時の副作用（永続化 → ラベル付け替え → escalation コメント → ログ）を
+# 1 関数で原子的に実行する（Req 3.1, 3.2, 3.3, 3.4, 3.7, 4.1, NFR 1.1, 1.2）。
+# `claude-failed` は **付与しない**（Req 3.2）。
+#
+# Args: $1 = issue number, $2 = stage label, $3 = reset epoch
+# Return: 0 always（副作用失敗は warn でログ、呼び出し側はラベル付与済み前提で続行）
+qa_handle_quota_exceeded() {
+  local issue_number="$1" stage_label="$2" epoch="$3"
+  local iso8601
+  iso8601=$(qa_format_iso8601 "$epoch")
+
+  # 1. 永続化（失敗してもラベル付与に進む。次 tick で再判定可能）
+  if ! qa_persist_reset_time "$issue_number" "$epoch"; then
+    qa_warn "issue=$issue_number stage=$stage_label reset 永続化に失敗（ラベル付与は継続）"
+  fi
+
+  # 2. ラベル付け替え（claude-claimed / claude-picked-up を除去 → needs-quota-wait 付与。
+  #    claude-failed は付与しない / Req 3.2）
+  if ! gh issue edit "$issue_number" --repo "$REPO" \
+      --remove-label "$LABEL_CLAIMED" \
+      --remove-label "$LABEL_PICKED" \
+      --add-label "$LABEL_NEEDS_QUOTA_WAIT" >/dev/null 2>&1; then
+    qa_warn "issue=$issue_number stage=$stage_label ラベル付け替えに失敗"
+  fi
+
+  # 3. escalation コメント
+  local comment_body
+  comment_body=$(qa_build_escalation_comment "$stage_label" "$epoch" "$iso8601")
+  if ! gh issue comment "$issue_number" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1; then
+    qa_warn "issue=$issue_number stage=$stage_label escalation コメント投稿に失敗"
+  fi
+
+  # 4. ログ（NFR 1.1, 1.2 / grep 可能形式）
+  qa_log "exceeded issue=#$issue_number stage=$stage_label reset_epoch=$epoch reset_iso=$iso8601 grace_sec=$QUOTA_RESUME_GRACE_SEC"
+  return 0
+}
+
+# Quota Resume Processor: cron tick 冒頭で `needs-quota-wait` 付き Issue を走査し、
+# reset+grace 経過分のラベルを自動除去する（Req 5.1〜5.6, NFR 3.1〜3.3）。
+#
+# - opt-out 時は即時 return 0（NFR 2.1）
+# - 0 件時は API 1 回で return 0（NFR 3.1）
+# - 各 Issue で reset 取得失敗 / 不正値はラベル維持（Req 4.4）
+# - API 失敗は warn 吸収して return 0 を保証（Req 5.6）
+process_quota_resume() {
+  if [ "$QUOTA_AWARE_ENABLED" != "true" ]; then
+    return 0
+  fi
+  qa_log "Resume Processor 開始 (grace=${QUOTA_RESUME_GRACE_SEC}s)"
+
+  local issues_json
+  if ! issues_json=$(gh issue list --repo "$REPO" \
+        --label "$LABEL_NEEDS_QUOTA_WAIT" --state open \
+        --json number --limit 50 2>/dev/null); then
+    qa_warn "needs-quota-wait Issue 取得に失敗（後続 Processor 継続）"
+    return 0
+  fi
+
+  local count
+  count=$(printf '%s' "$issues_json" | jq 'length' 2>/dev/null || echo 0)
+  if [ "$count" -eq 0 ]; then
+    qa_log "対象 Issue なし"
+    return 0
+  fi
+
+  local now_epoch
+  now_epoch=$(date -u +%s)
+
+  local issue_number reset_epoch threshold
+  while IFS= read -r issue_number; do
+    [ -z "$issue_number" ] && continue
+    if ! reset_epoch=$(qa_load_reset_time "$issue_number"); then
+      qa_warn "issue=$issue_number reset 時刻読み出し失敗 → ラベル維持（Req 4.4）"
+      continue
+    fi
+    threshold=$((reset_epoch + QUOTA_RESUME_GRACE_SEC))
+    if [ "$now_epoch" -lt "$threshold" ]; then
+      qa_log "issue=#$issue_number waiting reset_epoch=$reset_epoch now=$now_epoch wait_sec=$((threshold - now_epoch))"
+      continue
+    fi
+    if gh issue edit "$issue_number" --repo "$REPO" \
+        --remove-label "$LABEL_NEEDS_QUOTA_WAIT" >/dev/null 2>&1; then
+      qa_log "resumed issue=#$issue_number reset_epoch=$reset_epoch reset_iso=$(qa_format_iso8601 "$reset_epoch") elapsed_sec=$((now_epoch - reset_epoch))"
+    else
+      qa_warn "issue=$issue_number ラベル除去に失敗（次サイクルで再評価）"
+    fi
+  done < <(printf '%s' "$issues_json" | jq -r '.[].number')
+
+  return 0
+}
+
+# Quota Resume Processor を全 Processor の先頭で実行する（Req 5.1, 5.6 / NFR 3.2）。
+# 失敗時も後続 Processor を阻害しないよう || qa_warn で吸収。
+process_quota_resume || qa_warn "process_quota_resume が想定外のエラーで終了しました（後続 Processor は継続）"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Phase A: Merge Queue Processor
@@ -2154,17 +2478,39 @@ run_reviewer_stage() {
   prompt=$(build_reviewer_prompt "$round" "$prev_result")
 
   echo "--- Reviewer 実行 (round=$round) ---" >> "$LOG"
-  if ! claude \
+  # Issue #66: Quota-Aware Watcher 経由で claude を起動。99 を受領した場合は
+  # quota 超過検出として呼び出し側（run_impl_pipeline）に伝搬する。
+  local _qa_reset_file_rv _qa_rc_rv=0 _qa_ts_rv _qa_stage_label_rv
+  _qa_ts_rv=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file_rv="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-reviewer-r${round}-${_qa_ts_rv}"
+  _qa_stage_label_rv="Reviewer-r${round}"
+  qa_run_claude_stage "$_qa_stage_label_rv" "$_qa_reset_file_rv" -- \
+    claude \
       --print "$prompt" \
       --model "$REVIEWER_MODEL" \
       --permission-mode bypassPermissions \
       --max-turns "$REVIEWER_MAX_TURNS" \
       --output-format stream-json \
       --verbose \
-      >> "$LOG" 2>&1; then
-    rv_log "round=$round result=error reason=claude-exit-nonzero" >> "$LOG"
-    return 2
-  fi
+      >> "$LOG" 2>&1 || _qa_rc_rv=$?
+  case "$_qa_rc_rv" in
+    0)
+      rm -f "$_qa_reset_file_rv"
+      ;;
+    99)
+      local _qa_epoch_rv
+      _qa_epoch_rv=$(cat "$_qa_reset_file_rv")
+      qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label_rv" "$_qa_epoch_rv"
+      rm -f "$_qa_reset_file_rv"
+      rv_log "round=$round result=quota-exceeded → needs-quota-wait" >> "$LOG"
+      return 99
+      ;;
+    *)
+      rm -f "$_qa_reset_file_rv"
+      rv_log "round=$round result=error reason=claude-exit-nonzero" >> "$LOG"
+      return 2
+      ;;
+  esac
 
   # review-notes.md を parse
   local parsed
@@ -2253,19 +2599,39 @@ run_impl_pipeline() {
   # ── Stage A: PM + Developer（impl-resume では PM スキップ）──
   echo "--- Stage A 実行（$MODE / PM + Developer）---" >> "$LOG"
   prompt_a=$(build_dev_prompt_a "$MODE")
-  if ! claude \
+  # Issue #66: Quota-Aware Watcher 経由で claude を起動（Req 1.1, 1.2, 2.1）
+  local _qa_reset_file_a _qa_rc_a=0 _qa_ts_a
+  _qa_ts_a=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file_a="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-${_qa_ts_a}"
+  qa_run_claude_stage "StageA" "$_qa_reset_file_a" -- \
+    claude \
       --print "$prompt_a" \
       --model "$DEV_MODEL" \
       --permission-mode bypassPermissions \
       --max-turns "$DEV_MAX_TURNS" \
       --output-format stream-json \
       --verbose \
-      >> "$LOG" 2>&1; then
-    echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
-    mark_issue_failed "stageA" ""
-    return 1
-  fi
-  echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
+      >> "$LOG" 2>&1 || _qa_rc_a=$?
+  case "$_qa_rc_a" in
+    0)
+      echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
+      ;;
+    99)
+      local _qa_epoch_a
+      _qa_epoch_a=$(cat "$_qa_reset_file_a")
+      qa_handle_quota_exceeded "$NUMBER" "StageA" "$_qa_epoch_a"
+      rm -f "$_qa_reset_file_a"
+      echo "⏸️ #$NUMBER: Stage A で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+      return 0
+      ;;
+    *)
+      rm -f "$_qa_reset_file_a"
+      echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
+      mark_issue_failed "stageA" ""
+      return 1
+      ;;
+  esac
+  rm -f "$_qa_reset_file_a"
 
   # ── Stage B (round=1): Reviewer ──
   rev_rc=0
@@ -2274,6 +2640,12 @@ run_impl_pipeline() {
     0)
       echo "✅ #$NUMBER: Reviewer round=1 approve" | tee -a "$LOG"
       ;;
+    99)
+      # Issue #66: Reviewer round=1 で quota 超過検出。run_reviewer_stage 内で
+      # qa_handle_quota_exceeded 済 / needs-quota-wait に遷移済 → 正常終了で抜ける。
+      echo "⏸️ #$NUMBER: Reviewer round=1 で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+      return 0
+      ;;
     1)
       echo "🔁 #$NUMBER: Reviewer round=1 reject → Developer 再実行" | tee -a "$LOG"
       rv_dev_log "redo by reviewer reject (round=1)" >> "$LOG"
@@ -2281,19 +2653,39 @@ run_impl_pipeline() {
       # ── Stage A' (Developer 再実行) ──
       echo "--- Stage A' 実行（Developer 再実行 / Reviewer reject 差し戻し）---" >> "$LOG"
       prompt_redo=$(build_dev_prompt_redo "$REPO_DIR/$SPEC_DIR_REL/review-notes.md")
-      if ! claude \
+      # Issue #66: Quota-Aware Watcher 経由で claude を起動
+      local _qa_reset_file_aredo _qa_rc_aredo=0 _qa_ts_aredo
+      _qa_ts_aredo=$(date +%Y%m%d-%H%M%S)
+      _qa_reset_file_aredo="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-redo-${_qa_ts_aredo}"
+      qa_run_claude_stage "StageA-redo" "$_qa_reset_file_aredo" -- \
+        claude \
           --print "$prompt_redo" \
           --model "$DEV_MODEL" \
           --permission-mode bypassPermissions \
           --max-turns "$DEV_MAX_TURNS" \
           --output-format stream-json \
           --verbose \
-          >> "$LOG" 2>&1; then
-        echo "❌ #$NUMBER: Stage A' (Developer 再実行) 失敗" | tee -a "$LOG"
-        mark_issue_failed "stageA-redo" ""
-        return 1
-      fi
-      echo "✅ #$NUMBER: Stage A' 完了" | tee -a "$LOG"
+          >> "$LOG" 2>&1 || _qa_rc_aredo=$?
+      case "$_qa_rc_aredo" in
+        0)
+          echo "✅ #$NUMBER: Stage A' 完了" | tee -a "$LOG"
+          ;;
+        99)
+          local _qa_epoch_aredo
+          _qa_epoch_aredo=$(cat "$_qa_reset_file_aredo")
+          qa_handle_quota_exceeded "$NUMBER" "StageA-redo" "$_qa_epoch_aredo"
+          rm -f "$_qa_reset_file_aredo"
+          echo "⏸️ #$NUMBER: Stage A' で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+          return 0
+          ;;
+        *)
+          rm -f "$_qa_reset_file_aredo"
+          echo "❌ #$NUMBER: Stage A' (Developer 再実行) 失敗" | tee -a "$LOG"
+          mark_issue_failed "stageA-redo" ""
+          return 1
+          ;;
+      esac
+      rm -f "$_qa_reset_file_aredo"
 
       # ── Stage B (round=2): Reviewer 最終回 ──
       rev_rc=0
@@ -2301,6 +2693,12 @@ run_impl_pipeline() {
       case $rev_rc in
         0)
           echo "✅ #$NUMBER: Reviewer round=2 approve" | tee -a "$LOG"
+          ;;
+        99)
+          # Issue #66: Reviewer round=2 で quota 超過検出。run_reviewer_stage 内で
+          # qa_handle_quota_exceeded 済 / needs-quota-wait に遷移済 → 正常終了で抜ける。
+          echo "⏸️ #$NUMBER: Reviewer round=2 で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+          return 0
           ;;
         1)
           # 2 回目 reject → claude-failed + Issue コメントに reject 理由 / 対象 ID を含める
@@ -2342,20 +2740,40 @@ run_impl_pipeline() {
   # ── Stage C: PjM (PR 作成) ──
   echo "--- Stage C 実行（PjM / PR 作成）---" >> "$LOG"
   prompt_c=$(build_dev_prompt_c "$MODE")
-  if ! claude \
+  # Issue #66: Quota-Aware Watcher 経由で claude を起動
+  local _qa_reset_file_c _qa_rc_c=0 _qa_ts_c
+  _qa_ts_c=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file_c="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageC-${_qa_ts_c}"
+  qa_run_claude_stage "StageC" "$_qa_reset_file_c" -- \
+    claude \
       --print "$prompt_c" \
       --model "$DEV_MODEL" \
       --permission-mode bypassPermissions \
       --max-turns "$DEV_MAX_TURNS" \
       --output-format stream-json \
       --verbose \
-      >> "$LOG" 2>&1; then
-    echo "❌ #$NUMBER: Stage C (PjM) 失敗" | tee -a "$LOG"
-    mark_issue_failed "stageC" ""
-    return 1
-  fi
-  echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み" | tee -a "$LOG"
-  return 0
+      >> "$LOG" 2>&1 || _qa_rc_c=$?
+  case "$_qa_rc_c" in
+    0)
+      echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み" | tee -a "$LOG"
+      rm -f "$_qa_reset_file_c"
+      return 0
+      ;;
+    99)
+      local _qa_epoch_c
+      _qa_epoch_c=$(cat "$_qa_reset_file_c")
+      qa_handle_quota_exceeded "$NUMBER" "StageC" "$_qa_epoch_c"
+      rm -f "$_qa_reset_file_c"
+      echo "⏸️ #$NUMBER: Stage C で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+      return 0
+      ;;
+    *)
+      rm -f "$_qa_reset_file_c"
+      echo "❌ #$NUMBER: Stage C (PjM) 失敗" | tee -a "$LOG"
+      mark_issue_failed "stageC" ""
+      return 1
+      ;;
+  esac
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2834,19 +3252,42 @@ _slot_run_issue() {
       "$TRIAGE_TEMPLATE")
 
     echo "--- Triage 実行 ---" >> "$LOG"
-    if ! claude \
+    # Issue #66: Quota-Aware Watcher 経由で claude を起動。opt-out 時は素通し
+    # （既存挙動互換）、opt-in 時は rate_limit_event 検知で exit 99 を返す。
+    local _qa_reset_file_triage="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-triage-${TS}"
+    local _qa_rc_triage=0
+    qa_run_claude_stage "Triage" "$_qa_reset_file_triage" -- \
+      claude \
         --print "$TRIAGE_PROMPT" \
         --model "$TRIAGE_MODEL" \
         --permission-mode bypassPermissions \
         --max-turns "$TRIAGE_MAX_TURNS" \
-        >> "$LOG" 2>&1; then
-      echo "❌ Triage の実行に失敗" | tee -a "$LOG"
-      # claude-picked-up は Dispatcher 側で付与済。Triage 失敗時は claude-failed に
-      # 遷移して人間判断に委ねる（既存挙動: Triage 失敗時は continue だったが、
-      # Phase C ではすでに claim 済のため、ラベルを残置せず claude-failed 化する）。
-      _slot_mark_failed "triage" "Triage（Claude 実行）に失敗しました。"
-      return 1
-    fi
+        >> "$LOG" 2>&1 || _qa_rc_triage=$?
+    case "$_qa_rc_triage" in
+      0)
+        : # 正常終了 → 後続処理へ
+        ;;
+      99)
+        # quota 超過検出（opt-in 時のみ発生）→ needs-quota-wait に遷移し、
+        # _slot_mark_failed を踏まずに正常終了する（Req 3.1, 3.2）
+        local _qa_epoch_triage
+        _qa_epoch_triage=$(cat "$_qa_reset_file_triage")
+        qa_handle_quota_exceeded "$NUMBER" "Triage" "$_qa_epoch_triage"
+        rm -f "$_qa_reset_file_triage"
+        slot_log "Triage で quota 超過検出 → needs-quota-wait に遷移"
+        return 0
+        ;;
+      *)
+        rm -f "$_qa_reset_file_triage"
+        echo "❌ Triage の実行に失敗" | tee -a "$LOG"
+        # claude-picked-up は Dispatcher 側で付与済。Triage 失敗時は claude-failed に
+        # 遷移して人間判断に委ねる（既存挙動: Triage 失敗時は continue だったが、
+        # Phase C ではすでに claim 済のため、ラベルを残置せず claude-failed 化する）。
+        _slot_mark_failed "triage" "Triage（Claude 実行）に失敗しました。"
+        return 1
+        ;;
+    esac
+    rm -f "$_qa_reset_file_triage"
 
     if [ ! -f "$TRIAGE_FILE" ]; then
       echo "❌ Triage 結果 JSON が生成されませんでした" | tee -a "$LOG"
@@ -3003,22 +3444,41 @@ EOF
 )
 
     echo "--- Development 実行（$MODE）---" >> "$LOG"
-    if claude \
+    # Issue #66: Quota-Aware Watcher 経由で claude を起動
+    local _qa_reset_file_design _qa_rc_design=0 _qa_ts_design
+    _qa_ts_design=$(date +%Y%m%d-%H%M%S)
+    _qa_reset_file_design="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-design-${_qa_ts_design}"
+    qa_run_claude_stage "design" "$_qa_reset_file_design" -- \
+      claude \
         --print "$DEV_PROMPT" \
         --model "$DEV_MODEL" \
         --permission-mode bypassPermissions \
         --max-turns "$DEV_MAX_TURNS" \
         --output-format stream-json \
         --verbose \
-        >> "$LOG" 2>&1; then
-      echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
-      slot_log "$MODE 完了"
-      return 0
-    else
-      echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
-      _slot_mark_failed "$MODE" "design モードでの Claude 実行が失敗しました。"
-      return 1
-    fi
+        >> "$LOG" 2>&1 || _qa_rc_design=$?
+    case "$_qa_rc_design" in
+      0)
+        echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
+        slot_log "$MODE 完了"
+        rm -f "$_qa_reset_file_design"
+        return 0
+        ;;
+      99)
+        local _qa_epoch_design
+        _qa_epoch_design=$(cat "$_qa_reset_file_design")
+        qa_handle_quota_exceeded "$NUMBER" "design" "$_qa_epoch_design"
+        rm -f "$_qa_reset_file_design"
+        slot_log "$MODE で quota 超過検出 → needs-quota-wait に遷移"
+        return 0
+        ;;
+      *)
+        rm -f "$_qa_reset_file_design"
+        echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
+        _slot_mark_failed "$MODE" "design モードでの Claude 実行が失敗しました。"
+        return 1
+        ;;
+    esac
   else
     # impl / impl-resume → Reviewer ゲートを含む stage 分割パイプラインへ
     if run_impl_pipeline; then
@@ -3099,12 +3559,14 @@ _dispatcher_run() {
   # Req 7.5: 既存の Issue 取得クエリ（フィルタ・limit 5）を据え置き
   # Issue #54 Req 1.1 / 1.3 / 5.2: PR 専用ラベル `needs-iteration` が誤って Issue 側に
   # 付与されているケースを除外する（人為ミスでの impl-resume 起動 → 既存 PR 破壊事故防止）。
+  # Issue #66 Req 3.5 / 3.6: quota wait 中の Issue は再 claim しないよう
+  # `needs-quota-wait` を除外条件に追加。既存除外条件の意味・順序は変更しない。
   local issues
   issues=$(gh issue list \
     --repo "$REPO" \
     --label "$LABEL_TRIGGER" \
     --state open \
-    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\"" \
+    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\"" \
     --json number,title,body,url,labels \
     --limit 5)
 

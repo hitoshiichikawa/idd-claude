@@ -72,6 +72,7 @@ LABELS=(
   "skip-triage|95a5a6|【Issue 用】 Triage をスキップ"
   "needs-rebase|fbca04|【PR 用】 approved PR で base が古い／conflict が発生済み（Phase A: Merge Queue Processor が付与）"
   "needs-iteration|d4c5f9|【PR 用】 PR レビューコメントの反復対応待ち（#26 PR Iteration Processor が処理）"
+  "needs-quota-wait|c5def5|【Issue 用】 Claude Max quota 超過で reset 待ち（Quota Resume Processor が自動除去）"
 )
 
 echo "📌 idd-claude ラベルを作成します"
