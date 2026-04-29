@@ -1,0 +1,122 @@
+# Implementation Plan
+
+- [ ] 1. Label Setup Script に `claude-claimed` を追加
+- [ ] 1.1 `.github/scripts/idd-claude-labels.sh` の LABELS 配列に `claude-claimed` 行を追加 (P)
+  - 行内容: `"claude-claimed|c39bd3|【Issue 用】 Claude Code が claim 済（Triage 実行中）"`
+  - 既存 `claude-picked-up` 行の直前に挿入（ワークフロー順）
+  - 他 9 ラベル行（name / color / description）は不変であることを diff で確認（Req 6.4）
+  - 冪等再実行・`--force` 上書き経路の挙動は既存ロジックそのまま流用可能なことを確認
+  - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
+  - _Boundary: Label Setup Script_
+- [ ] 1.2 `repo-template/.github/scripts/idd-claude-labels.sh` に同等変更を適用 (P)
+  - 1.1 と完全同一の LABELS 配列差分を反映（consumer repo 配布用）
+  - install.sh 再実行で consumer repo にコピーされる設計を踏襲
+  - _Requirements: 6.1, 6.4, 6.5, NFR 2.1_
+  - _Boundary: Label Setup Script (repo-template)_
+
+- [ ] 2. `issue-watcher.sh` に `LABEL_CLAIMED` 定数を追加し Dispatcher の claim/exclusion を切り替え
+- [ ] 2.1 ファイル冒頭の LABEL 定数群と冒頭ヘッダコメント遷移図を更新
+  - L52 周辺に `LABEL_CLAIMED="claude-claimed"` を追加（`LABEL_PICKED` の直前を推奨）
+  - L14 の状態遷移コメントに `claude-claimed` を挿入（`auto-dev → Triage → (needs-decisions | awaiting-design-review | claude-claimed → claude-picked-up)` 等）
+  - _Requirements: 1.1, 5.4_
+- [ ] 2.2 Dispatcher の exclusion query に `claude-claimed` を追加
+  - L3069 の `--search "..."` に `-label:\"$LABEL_CLAIMED\"` を追加
+  - 既存除外ラベル群（`NEEDS_DECISIONS` / `AWAITING_DESIGN` / `PICKED` / `READY` / `FAILED` / `NEEDS_ITERATION`）はすべて維持（Req 5.1 後方互換）
+  - _Requirements: 4.1, 4.2, 5.1_
+  - _Depends: 2.1_
+- [ ] 2.3 Dispatcher の claim 付与を `LABEL_PICKED` から `LABEL_CLAIMED` に切り替え
+  - L3120-3126 の `gh issue edit ... --add-label "$LABEL_PICKED"` を `--add-label "$LABEL_CLAIMED"` に変更
+  - WARN メッセージ文言（`dispatcher_warn`）の `claude-picked-up ラベル付与に失敗` を `claude-claimed ラベル付与に失敗` に更新
+  - L3005 / L3120 周辺コメント（`claude-picked-up ラベル付与` 表現）を `claude-claimed ラベル付与` に更新
+  - claim 失敗時の slot 解放経路（`_slot_release` 呼び出し）は不変（Req 1.4 / 5.5）
+  - _Requirements: 1.1, 1.2, 1.4, 4.3, 5.5_
+  - _Depends: 2.1_
+
+- [ ] 3. Slot Runner で Triage 後のラベル付け替えと終端クリーンアップを実装
+- [ ] 3.1 `_slot_mark_failed` を両系統除去（CLAIMED + PICKED）に拡張
+  - L2685 を `--remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED"` に変更
+  - 未付与ラベルの除去で gh CLI がエラー終了しないことを確認（既存 `|| true` を維持）
+  - 関数冒頭コメント（L2677-2679）も「両系統除去で post-Triage / pre-Triage どちらの失敗にも対応」と書き換え
+  - _Requirements: 3.3, 3.4_
+  - _Depends: 2.1_
+- [ ] 3.2 `_slot_run_issue` の `needs-decisions` 分岐を `LABEL_CLAIMED` 除去に切り替え
+  - L2878-2882 の `--remove-label "$LABEL_PICKED"` を `--remove-label "$LABEL_CLAIMED"` に変更
+  - 周辺コメント（L2874-2877 の Phase C 注記）を `claude-claimed 取り消し` 表現に更新
+  - `slot_log` メッセージも `claude-claimed 取り消し済` に更新
+  - _Requirements: 3.1, 3.4_
+  - _Depends: 2.1, 3.1_
+- [ ] 3.3 `_slot_run_issue` の Triage 通過後 mode 判定直後に `claude-claimed → claude-picked-up` 付け替えを挿入
+  - L2886-2892 の mode 判定 `if [ "$NEEDS_ARCHITECT" = "true" ]; then MODE="design"; else MODE="impl"; fi` の **else 節（impl 確定時のみ）** に、`gh issue edit "$NUMBER" --repo "$REPO" --remove-label "$LABEL_CLAIMED" --add-label "$LABEL_PICKED"` を 1 コール挿入
+  - 失敗時は `_slot_mark_failed "label-handover" "..."` を呼んで `return 1`
+  - design 経路（then 節）では付け替えを行わず `claude-claimed` を保持（Req 8.3 / 設計論点 4 結論）
+  - 成功時に `slot_log "ラベル付け替え: claude-claimed → claude-picked-up（impl 着手）"` を追加（NFR 1.1）
+  - branch 作成（L2909）より前に挿入することで NFR 1.2（5 秒以内）を構造的に満たす
+  - _Requirements: 2.1, 2.2, 2.3, 3.4, NFR 1.1, NFR 1.2_
+  - _Depends: 2.1, 3.1_
+- [ ] 3.4 `_slot_run_issue` の design ルート prompt 内ラベル指示を更新
+  - L2935 の `STEPS` heredoc 内 `Issue ラベル: claude-picked-up → awaiting-design-review に付け替え` を `Issue ラベル: claude-claimed → awaiting-design-review に付け替え` に変更
+  - impl ルートの prompt（L2061）は不変（Stage C で `claude-picked-up → ready-for-review` 維持）
+  - _Requirements: 3.2, 3.4, 8.3_
+  - _Depends: 3.3_
+- [ ] 3.5 `mark_issue_failed`（impl pipeline 用）を両系統除去に拡張
+  - L2204-2206 を `--remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED"` に変更
+  - 通常経路では Stage A 開始時点で `claude-picked-up` のみ持つが、想定外シーケンス（design ルート Stage C 失敗）でも残置を防ぐ防御的措置
+  - _Requirements: 3.4_
+  - _Depends: 2.1_
+
+- [ ] 4. PjM agent template を更新
+- [ ] 4.1 `.claude/agents/project-manager.md` の design-review モードを更新 (P)
+  - 「実施事項」3 番の `削除: claude-picked-up` を `削除: claude-claimed` に変更
+  - 「失敗時の挙動」末尾の `claude-picked-up を外し` を `claude-claimed または claude-picked-up を外し` に変更（design / impl 双方を許容）
+  - implementation モードの「実施事項」3 番 (`削除: claude-picked-up / 追加: ready-for-review`) は不変
+  - _Requirements: 3.2, 3.4, 7.4, 8.3_
+  - _Boundary: PjM Agent (local)_
+- [ ] 4.2 `repo-template/.claude/agents/project-manager.md` に同等変更を適用 (P)
+  - 4.1 と同じ差分を反映（consumer repo 配布用、install.sh 再実行で展開）
+  - _Requirements: 3.2, 3.4, 7.4, 8.3_
+  - _Boundary: PjM Agent (repo-template)_
+
+- [ ] 5. README / QUICK-HOWTO を更新
+- [ ] 5.1 README.md のラベル一覧と状態遷移図に `claude-claimed` を反映
+  - L298-302 周辺のラベル定義表に `claude-claimed | 紫(淡) | claim 済 / Triage 実行中` 行を `claude-picked-up` の直前に追加
+  - L307-315 周辺の `gh label create` コマンド例にも `gh label create claude-claimed --repo owner/repo --color c39bd3 --description "【Issue 用】 Claude Code が claim 済（Triage 実行中）"` を追加
+  - L529-539 周辺の「適用先」表に `claude-claimed | Issue | Claude Code が claim 済 / Triage 実行中 | Claude` 行を追加
+  - L541-551 のポーリングクエリ例に `-label:claude-claimed` を追加
+  - L557-579 の状態遷移図と説明文を新フロー (`auto-dev → claude-claimed → claude-picked-up → ready-for-review` / `auto-dev → claude-claimed → needs-decisions` / `auto-dev → claude-claimed → awaiting-design-review`) に書き換え
+  - _Requirements: 7.1, 7.2_
+- [ ] 5.2 README.md の「claim タイミングの挙動変更」節と Migration Note を更新
+  - L1474-1487 周辺の Phase C「claim タイミングの挙動変更」表で `claude-picked-up を一度付与した後に除去` を `claude-claimed を一度付与した後に除去` に書き換え
+  - 既存の Migration Note 群（L250 / L762 / L1018 / L1207 / L1387 / L1611 / L1698 のいずれか適切な位置、または Phase C 節の末尾）に **#52 移行注記** を追記:
+    - 「`bash .github/scripts/idd-claude-labels.sh` 再実行で `claude-claimed` ラベルが追加される」
+    - 「在進行中 Issue（旧 `claude-picked-up` のみ付き）は新版 watcher が pickup せず自然に完走する」
+    - 「既存 env var / cron / 既存 9 ラベル名・color・description は不変」
+    - 「Triage 後の付け替え失敗で `label-handover` stage 失敗が発生した場合、Issue は `claude-failed` + `claude-claimed` の 2 ラベル状態になる可能性がある（人間が両方外す必要あり）」
+  - _Requirements: 5.1, 5.2, 5.3, 5.4, 7.3, NFR 2.1, NFR 2.2_
+  - _Depends: 5.1_
+- [ ] 5.3 QUICK-HOWTO.md にも `claude-claimed` を反映 (P)
+  - L72-73 のラベル一覧文字列に `claude-claimed` を追加
+  - L150-154 の簡易遷移図 (`auto-dev → claude-picked-up → ready-for-review`) を `auto-dev → claude-claimed → claude-picked-up → ready-for-review` に修正
+  - _Requirements: 7.1, 7.2_
+  - _Boundary: Documentation (QUICK-HOWTO)_
+
+- [ ] 6. 静的解析・スモーク・dogfooding 検証
+- [ ] 6.1 静的解析を実施 (P)
+  - `shellcheck local-watcher/bin/issue-watcher.sh .github/scripts/idd-claude-labels.sh repo-template/.github/scripts/idd-claude-labels.sh` を新規警告 0 件で通す
+  - `actionlint .github/workflows/*.yml repo-template/.github/workflows/*.yml` を新規警告 0 件で通す（YAML 不変だが diff スコープに含めて確認）
+  - 結果を PR 本文の Test plan に貼付
+  - _Requirements: NFR 3.1, NFR 3.2_
+  - _Boundary: Static Analysis_
+- [ ] 6.2 手動スモークテストを実施 (P)
+  - `idd-claude-labels.sh` を scratch repo で実行し、`claude-claimed` の created → already exists (skipped) → `--force` で created/updated が観測されることを確認（Req 6.1 / 6.2 / 6.3）
+  - cron-like 最小 PATH での起動を確認（CLAUDE.md「テスト・検証」節の既存規約に従う）: `env -i HOME=$HOME PATH=/usr/bin:/bin bash -c 'command -v claude gh jq flock git'`
+  - dry-run（対象なし）: 任意の空 scratch repo で `REPO=owner/empty REPO_DIR=/tmp/empty $HOME/bin/issue-watcher.sh` を実行 → `処理対象の Issue なし` 終了確認
+  - exclusion query に `-label:claude-claimed` が含まれることを `set -x` 一時挿入で確認
+  - _Requirements: 5.5, 6.1, 6.2, 6.3, NFR 2.1_
+  - _Boundary: Smoke Test_
+- [ ] 6.3 dogfooding E2E（本リポジトリで test issue 3 種を流す）
+  - **impl ルート** test issue（trivial 修正）→ `auto-dev → claude-claimed → claude-picked-up → ready-for-review` の Activity log を確認（Req 8.1）
+  - **needs-decisions ルート** test issue（曖昧要件）→ `auto-dev → claude-claimed → needs-decisions` を確認、`claude-picked-up` が現れないことを Issue Activity の event 順で目視（Req 8.2）
+  - **awaiting-design-review ルート** test issue（新規 API / スキーマ変更相当）→ `auto-dev → claude-claimed → awaiting-design-review` を確認、`claude-picked-up` が現れないこと（Req 8.3）
+  - 結果を PR 本文「dogfooding 検証結果」セクションに記録
+  - _Requirements: 8.1, 8.2, 8.3_
+  - _Depends: 1.1, 2.3, 3.3, 3.4, 4.1, 5.1_
