@@ -2203,8 +2203,12 @@ mark_issue_failed() {
   local stage="$1"
   local extra_body="$2"
 
+  # Issue #52: 通常経路では Stage A 開始時点で Issue は claude-picked-up のみ持つ
+  # （Slot Runner が Triage 通過時に claude-claimed → claude-picked-up に付け替え済）。
+  # 想定外シーケンス（design ルート Stage C 失敗で本ヘルパへ流入する等）でも残置を防ぐ
+  # ため、両系統除去で安全側に倒す。gh CLI は未付与ラベルの除去を no-op として扱う。
   gh issue edit "$NUMBER" --repo "$REPO" \
-    --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
+    --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
 
   local hostname_val
   hostname_val=$(hostname)
