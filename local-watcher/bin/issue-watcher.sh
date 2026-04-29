@@ -175,6 +175,23 @@ SLOT_INIT_HOOK="${SLOT_INIT_HOOK:-}"
 WORKTREE_BASE_DIR="${WORKTREE_BASE_DIR:-$HOME/.issue-watcher/worktrees}"
 SLOT_LOCK_DIR="${SLOT_LOCK_DIR:-$HOME/.issue-watcher}"
 
+# ─── impl-resume 保護 (Issue #67) ───
+# `impl-resume` モードで対象ブランチが origin に既存する場合、当該ブランチの commit を
+# 保持したまま resume する opt-in 機能。既存運用への影響を避けるため初回導入は opt-in
+# （デフォルト false）。`true` の場合のみ、既存 origin branch から resume + fast-forward
+# 制約 push + 非 fast-forward 検出時の `claude-failed` 安全停止が有効化される。
+# `false` の場合は本機能導入前と完全に等価な挙動（origin/main 起点での強制リセット +
+# `git push --force-with-lease`）を維持する（Req 1.1, 1.2, 4.4, NFR 1.1）。
+IMPL_RESUME_PRESERVE_COMMITS="${IMPL_RESUME_PRESERVE_COMMITS:-false}"
+# Developer がタスクを完了した時点で `tasks.md` の対応する未完了マーカー (`- [ ]`) を
+# 完了マーカー (`- [x]`) に書き換え、`docs(tasks): mark <id> as done` で commit する
+# 規約を有効化するフラグ。既定 `true` だが、`IMPL_RESUME_PRESERVE_COMMITS=false`
+# （opt-in 機能 OFF）の状態では Developer prompt 注入経路を通らないため、結果的に
+# 進捗追跡指示は注入されない（NFR 1.1 を構造的に保証）。`false` に明示すると
+# `IMPL_RESUME_PRESERVE_COMMITS=true` の場合でも進捗マーカー更新指示を抑止できる
+# （Req 3.1, 3.2, 3.6）。
+IMPL_RESUME_PROGRESS_TRACKING="${IMPL_RESUME_PROGRESS_TRACKING:-true}"
+
 # Triage プロンプトテンプレート
 TRIAGE_TEMPLATE="${TRIAGE_TEMPLATE:-$HOME/bin/triage-prompt.tmpl}"
 
