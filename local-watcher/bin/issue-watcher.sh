@@ -3668,16 +3668,27 @@ _slot_run_issue() {
       BRANCH="claude/issue-${NUMBER}-impl-${SLUG}"
       ;;
   esac
-  # worktree は detached HEAD で起動するため -B で新規 branch 作成（local main を持たない）
-  if ! git checkout -B "$BRANCH" "origin/main"; then
-    slot_warn "branch 作成に失敗: $BRANCH"
-    _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
-    return 1
-  fi
-  if ! git push -u origin "$BRANCH" --force-with-lease; then
-    slot_warn "branch push に失敗: $BRANCH"
-    _slot_mark_failed "branch-push" "ブランチ \`$BRANCH\` の push に失敗しました。"
-    return 1
+  # impl-resume モードのときだけ Strategy Pattern による branch 初期化に分岐させる
+  # （Issue #67）。design / impl モードでは本機能導入前と完全に等価な挙動を維持する
+  # （Req 1.1, 1.2, NFR 1.1, NFR 1.2）。`_resume_branch_init` は内部で
+  # `IMPL_RESUME_PRESERVE_COMMITS` を見て legacy / preserve 戦略にディスパッチし、
+  # 失敗時は `_slot_mark_failed` 既に発射済の状態で非 0 を返す。
+  if [ "$MODE" = "impl-resume" ]; then
+    if ! _resume_branch_init; then
+      return 1
+    fi
+  else
+    # worktree は detached HEAD で起動するため -B で新規 branch 作成（local main を持たない）
+    if ! git checkout -B "$BRANCH" "origin/main"; then
+      slot_warn "branch 作成に失敗: $BRANCH"
+      _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
+      return 1
+    fi
+    if ! git push -u origin "$BRANCH" --force-with-lease; then
+      slot_warn "branch push に失敗: $BRANCH"
+      _slot_mark_failed "branch-push" "ブランチ \`$BRANCH\` の push に失敗しました。"
+      return 1
+    fi
   fi
 
   # ── モード別ディスパッチ ──
