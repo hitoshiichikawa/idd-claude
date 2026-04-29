@@ -27,7 +27,7 @@ Architect の直後に呼ばれます。`docs/specs/<番号>-<slug>/` 配下の 
    - body: 後述の「設計 PR 本文テンプレート」に従う
    - **PR 作成前後に「自己点検: auto-close キーワードの禁止」節の手順を必ず実施する**
 3. Issue のラベル更新:
-   - 削除: `claude-picked-up`
+   - 削除: `claude-claimed`
    - 追加: `awaiting-design-review`
 4. Issue へコメントで設計 PR リンクと案内を投稿:
    > 🎨 設計レビュー PR を作成しました: #<design-pr-number>
@@ -235,7 +235,7 @@ Closes #<issue-number>
   - implementation モード: `requirements.md`（+ design.md/tasks.md が存在するなら impl-notes.md）が欠落
 - **design-review モード: 自己点検で auto-close キーワードを検出し、自動修正でも除去しきれなかった**
 
-このとき、Issue のラベルは `claude-picked-up` を外し、`claude-failed` を付与してください。
+このとき、Issue のラベルは `claude-claimed` または `claude-picked-up` を外し、`claude-failed` を付与してください。
 これで次回のポーリングで自動リトライ対象から外れ、人間の介入待ちになります。
 
 # やらないこと
