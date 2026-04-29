@@ -2903,6 +2903,26 @@ _slot_run_issue() {
     fi
   fi
 
+  # ── Issue #52: Triage 通過後のラベル付け替え（claude-claimed → claude-picked-up）──
+  # impl / impl-resume モードでは、ここから先「実装フェーズ」に入るため Issue ラベルを
+  # claude-picked-up に付け替える。design モードは PjM (design-review) が
+  # claude-claimed → awaiting-design-review に直接付け替えるため、ここでは何もしない
+  # （Req 8.3 / 設計論点 4 結論: design ルートは claude-picked-up を経由しない）。
+  #
+  # 単一の PATCH /issues/{n}（--remove-label A --add-label B）で原子的に行うことで
+  # NFR 1.2（同時 2 ラベル状態が 5 秒以上続かない）を構造的に満たす。branch 作成より
+  # 前に実行するため、後続の長時間操作中はラベル状態が常に正しい。
+  if [ "$MODE" = "impl" ] || [ "$MODE" = "impl-resume" ]; then
+    if ! gh issue edit "$NUMBER" --repo "$REPO" \
+        --remove-label "$LABEL_CLAIMED" \
+        --add-label "$LABEL_PICKED" >/dev/null 2>&1; then
+      slot_warn "Triage 通過後のラベル付け替えに失敗（claude-claimed → claude-picked-up）"
+      _slot_mark_failed "label-handover" "Triage 通過後のラベル付け替え (claude-claimed → claude-picked-up) に失敗しました。"
+      return 1
+    fi
+    slot_log "ラベル付け替え: claude-claimed → claude-picked-up（impl 着手）"
+  fi
+
   # ── ピックアップ表明コメント（claim 表明ラベルは Dispatcher が事前に付与済）──
   gh issue comment "$NUMBER" --repo "$REPO" \
     --body "🤖 ローカル Claude Code ($(hostname)) が処理を開始しました（slot=${IDD_SLOT_NUMBER} / モード: ${MODE}）。" >/dev/null 2>&1 || true
