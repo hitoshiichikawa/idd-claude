@@ -841,6 +841,122 @@ pi_general_truncate() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_collect_general_comments: 一般コメント収集 + 3 段フィルタ + 削減のオーケストレーション
+#   入力: $1=pr_number
+#         $2=pr_body (gh pr view --json body --jq '.body // ""' で取得済みの文字列)
+#   出力: stdout に JSON 配列文字列。要素スキーマ:
+#         { id, user, body, url, created_at }
+#         取得失敗時 / コメント 0 件時は "[]"。
+#   返り値: 0 固定（エラーは degraded path = "[]" + WARN ログに倒す）
+#   AC #55 Req 1.1, 1.2, 1.5, 2.5, 3.2, 4.2, 4.3, 4.4, 4.6, 6.2, NFR 1.1, NFR 1.2,
+#         NFR 2.1, NFR 2.2
+#
+#   設計判断:
+#     - kind（design/impl）に依存する分岐を持たない（impl/design PR で共通呼び出し、Req 6.2）
+#     - @claude 文字列を判定式に使わない（Req 2.7、`@claude` mention 必須を opt-out で
+#       復活させる新規 env var を追加しない、Req 4.4）
+#     - 上限値は内部定数 PI_GENERAL_MAX_COMMENTS（既定 50、env override 可）
+#       README には載せない（運用上 default で十分、Req 4.4 の対象外）
+#     - サマリは 1 行で出力し、truncate 発動時のみ pi_warn、それ以外は pi_log（NFR 2.2）
+# ─────────────────────────────────────────────────────────────────────────────
+pi_collect_general_comments() {
+  local pr_number="$1"
+  local pr_body="${2-}"
+  local limit="${PI_GENERAL_MAX_COMMENTS:-50}"
+
+  # 1. GitHub API から raw 一般コメントを取得（既存と同じ timeout / fall-back 方式）
+  local raw_general
+  if ! raw_general=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
+      gh api "/repos/${REPO}/issues/${pr_number}/comments" 2>/dev/null); then
+    pi_warn "PR #${pr_number}: 一般コメント取得に失敗、空配列で続行"
+    echo "[]"
+    return 0
+  fi
+
+  # 2. 射影: { id, user, body, url, created_at } のスキーマに整形（Req 6.2 / Data Model）
+  local projected
+  if ! projected=$(echo "$raw_general" | jq '[.[] | {
+        id,
+        user: (.user.login // ""),
+        body: (.body // ""),
+        url: .html_url,
+        created_at: (.created_at // ""),
+        "_meta_user_type": (.user.type // "")
+      }]' 2>/dev/null); then
+    pi_warn "PR #${pr_number}: 一般コメント JSON の整形に失敗、空配列で続行"
+    echo "[]"
+    return 0
+  fi
+  local fetched
+  fetched=$(echo "$projected" | jq 'length' 2>/dev/null || echo "0")
+
+  # 3. last-run TS を抽出（marker 不在時は空文字列 = 初回 round）
+  local last_run
+  last_run=$(pi_read_last_run "$pr_body")
+
+  # 4. フィルタを順次適用しながら各段の length を測定
+  #    順序: self → resolved → event_style → truncate
+  local after_self after_resolved after_event final
+  local filter_event_input
+
+  # event_style filter は射影段で残した _meta_user_type を user.type の代理として使う
+  # （元 jq schema を {id,user,body,url,created_at} に保つ理由: prompt template 互換）
+  if ! after_self=$(echo "$projected" | pi_general_filter_self 2>/dev/null); then
+    pi_warn "PR #${pr_number}: 自己投稿フィルタに失敗、空配列で続行"
+    echo "[]"
+    return 0
+  fi
+  local count_self
+  count_self=$(echo "$after_self" | jq 'length' 2>/dev/null || echo "0")
+
+  if ! after_resolved=$(echo "$after_self" | pi_general_filter_resolved "$last_run" 2>/dev/null); then
+    pi_warn "PR #${pr_number}: 過去 round フィルタに失敗、空配列で続行"
+    echo "[]"
+    return 0
+  fi
+  local count_resolved
+  count_resolved=$(echo "$after_resolved" | jq 'length' 2>/dev/null || echo "0")
+
+  # event_style フィルタは _meta_user_type を user.type 相当に詰め直してから判定する
+  filter_event_input=$(echo "$after_resolved" | jq '[.[] | . + {user: {type: ._meta_user_type, login: (.user)}}]' 2>/dev/null || echo "[]")
+  if ! after_event=$(echo "$filter_event_input" | pi_general_filter_event_style 2>/dev/null); then
+    pi_warn "PR #${pr_number}: event-style フィルタに失敗、空配列で続行"
+    echo "[]"
+    return 0
+  fi
+  # スキーマ復元: user は文字列 (login) のみに戻し、_meta_user_type も落とす
+  after_event=$(echo "$after_event" | jq '[.[] | {id, user: (.user.login // ""), body, url, created_at}]' 2>/dev/null || echo "[]")
+  local count_event
+  count_event=$(echo "$after_event" | jq 'length' 2>/dev/null || echo "0")
+
+  if ! final=$(echo "$after_event" | pi_general_truncate "$limit" 2>/dev/null); then
+    pi_warn "PR #${pr_number}: truncate に失敗、空配列で続行"
+    echo "[]"
+    return 0
+  fi
+  local count_final
+  count_final=$(echo "$final" | jq 'length' 2>/dev/null || echo "0")
+
+  # 5. サマリ 1 行ログ
+  local filtered_self filtered_resolved filtered_event truncated
+  filtered_self=$((fetched - count_self))
+  filtered_resolved=$((count_self - count_resolved))
+  filtered_event=$((count_resolved - count_event))
+  truncated=$((count_event - count_final))
+
+  # サマリは stderr に出力する（本関数の stdout は JSON 配列に予約されているため）。
+  # pi_warn は元々 stderr 直行、pi_log は stdout のため明示的に >&2 で逃がす。
+  if [ "$truncated" -gt 0 ]; then
+    pi_warn "PR #${pr_number} general comments: fetched=${fetched}, filtered_self=${filtered_self}, filtered_resolved=${filtered_resolved}, filtered_event=${filtered_event}, truncated=${truncated} (limit=${limit}), final=${count_final}"
+  else
+    pi_log "PR #${pr_number} general comments: fetched=${fetched}, filtered_self=${filtered_self}, filtered_resolved=${filtered_resolved}, filtered_event=${filtered_event}, truncated=0, final=${count_final}" >&2
+  fi
+
+  echo "$final"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_post_processing_marker: PR body に hidden marker を書き込み + 着手表明コメント投稿
 #   入力: $1=pr_number, $2=new_round
 #   AC 6.1, 7.1
@@ -1108,14 +1224,10 @@ pi_build_iteration_prompt() {
     fi
   fi
 
-  # AC 3.2: @claude mention 付き general コメント
-  local general_comments_json="[]"
-  local raw_general
-  if raw_general=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
-      gh api "/repos/${REPO}/issues/${pr_number}/comments" 2>/dev/null); then
-    general_comments_json=$(echo "$raw_general" \
-      | jq '[.[] | select((.body // "") | test("@claude"; "i")) | {id, user: (.user.login // ""), body, url: .html_url}]')
-  fi
+  # #55: 一般コメント収集（mention 篩い分けを撤廃 + 自己投稿 / 過去 round / system 除外
+  #     + 大量時 truncate）。kind に依存せず impl/design 共通で同一ロジックを通す（Req 6.2）。
+  local general_comments_json
+  general_comments_json=$(pi_collect_general_comments "$pr_number" "$pr_body")
 
   # template に変数を注入する。
   # 単一行値（PR 番号 / タイトル / URL 等）は awk -v で渡し、行内の {{KEY}} を文字列置換。
