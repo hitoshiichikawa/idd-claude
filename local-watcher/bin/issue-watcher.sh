@@ -3295,14 +3295,111 @@ _resume_branch_init() {
     slot_log "resume-mode=fresh-from-main branch=$BRANCH"
   fi
 
-  # opt-in パスの push（task 3.1 で _resume_push に切り出される予定）。
-  # force 系オプションを一切付けない fast-forward 制約付き push。
-  if ! git push -u origin "$BRANCH"; then
-    slot_warn "branch push に失敗: $BRANCH（fast-forward 制約付き push）"
-    _slot_mark_failed "branch-push" "ブランチ \`$BRANCH\` の fast-forward push に失敗しました。"
+  # opt-in パスの push は fast-forward 制約付き（_resume_push に委譲）。
+  # _resume_push が non-ff を検出した場合は内部で claude-failed 付与済み。
+  if ! _resume_push "$BRANCH"; then
     return 1
   fi
   return 0
+}
+
+# fast-forward 制約付き push を実行し、stderr から非 fast-forward 検出時は
+# 専用 stage `branch-nonff` で claude-failed に遷移する。
+# 引数: $1 = branch
+# 戻り値:
+#   0 = push 成功
+#   1 = non-ff reject または push 失敗（claude-failed 付与済み）
+# 副作用:
+#   - git push -u origin <branch>（force 系オプションを一切付けない）
+#   - non-ff 検出時 / 失敗時は _slot_mark_failed が gh issue edit + comment 発射
+#
+# Req 4.1, 4.2, 4.5: 失敗してもリトライしない / reset / rebase / merge を行わない。
+# stderr 解析で "non-fast-forward" / "rejected.*non-fast" / "Updates were rejected"
+# パターンを ERE で判定。non-ff 以外の push 失敗（ネットワーク等）は既存 branch-push
+# 失敗パスに合流させる。
+#
+# 注意: non-ff 専用 Issue コメント本文の組み立ては task 3.2 で `_resume_mark_nonff_failed`
+# として切り出し予定。本 commit では inline body で _slot_mark_failed "branch-nonff" を呼ぶ。
+_resume_push() {
+  local branch="$1"
+  local stderr_tmp
+  stderr_tmp=$(mktemp -t resume-push-XXXXXX.err 2>/dev/null || echo "")
+
+  local rc=0
+  if [ -n "$stderr_tmp" ]; then
+    git push -u origin "$branch" 2>"$stderr_tmp" || rc=$?
+  else
+    # mktemp 失敗時のフォールバック（stderr 捕捉できないが push は試みる）
+    git push -u origin "$branch" || rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    if [ -n "$stderr_tmp" ]; then
+      rm -f "$stderr_tmp" 2>/dev/null || true
+    fi
+    return 0
+  fi
+
+  # 失敗。stderr の内容で non-ff か否かを判別
+  local stderr_content=""
+  if [ -n "$stderr_tmp" ] && [ -f "$stderr_tmp" ]; then
+    stderr_content=$(cat "$stderr_tmp" 2>/dev/null || true)
+  fi
+
+  local stderr_tail=""
+  if [ -n "$stderr_content" ]; then
+    # コメント本文に過剰な行を入れないよう末尾 1500 文字程度に制限
+    stderr_tail=$(echo "$stderr_content" | tail -c 1500)
+  fi
+
+  # POSIX ERE で non-fast-forward / rejected パターンを検出
+  if echo "$stderr_content" | grep -Eq '(non-fast-forward|rejected.*non-fast|Updates were rejected because the (tip|remote))'; then
+    slot_warn "non-ff push detected; aborting (branch=$branch)"
+    slot_log "resume-failure=non-ff issue=#${NUMBER:-?} branch=$branch"
+    local body="自動 force-push を抑制したため停止しました（impl-resume 保護機能）。
+
+- 対象 branch: \`$branch\`
+- 対象 Issue : #${NUMBER:-?}
+- 検出理由 : non-fast-forward push（既存 origin branch に対し remote がローカル HEAD の祖先ではない）
+
+### 次の手順
+
+1. ローカルで \`git fetch origin\` 後、当該 branch の差分を確認
+2. 必要なら手動で merge / rebase / cherry-pick で衝突解消
+3. 解消できたら本 Issue から \`claude-failed\` ラベルを除去すると次サイクルで再 pickup されます
+
+> 注意: 本機能は \`IMPL_RESUME_PRESERVE_COMMITS=true\` でのみ動作します。
+> 強制 fresh が必要なら \`IMPL_RESUME_PRESERVE_COMMITS=false\` に戻すか、
+> \`git push origin :$branch\` で origin branch を削除してから再 pickup してください。"
+    if [ -n "$stderr_tail" ]; then
+      body="$body
+
+### git stderr (tail)
+
+\`\`\`
+$stderr_tail
+\`\`\`"
+    fi
+    _slot_mark_failed "branch-nonff" "$body"
+  else
+    # non-ff 以外の push 失敗（ネットワーク等）。既存 branch-push 失敗パスに合流。
+    slot_warn "push に失敗（non-ff ではない）: $branch"
+    slot_log "resume-failure=push-error issue=#${NUMBER:-?} branch=$branch"
+    local body="ブランチ \`$branch\` の push に失敗しました（fast-forward 制約付き push）。"
+    if [ -n "$stderr_tail" ]; then
+      body="$body
+
+\`\`\`
+$stderr_tail
+\`\`\`"
+    fi
+    _slot_mark_failed "branch-push" "$body"
+  fi
+
+  if [ -n "$stderr_tmp" ]; then
+    rm -f "$stderr_tmp" 2>/dev/null || true
+  fi
+  return 1
 }
 
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
