@@ -33,7 +33,8 @@ Architect の直後に呼ばれます。`docs/specs/<番号>-<slug>/` 配下の 
    >
    > - 問題なければ **merge** してください。merge 後に Issue から `awaiting-design-review` ラベルを外すと、次回のポーリングで Developer が自動起動し、実装 PR が別途作成されます
    > - 修正が必要な場合: PR に直接 commit / suggest-edit / line comment で指摘してください
-   > - **`needs-iteration` ラベルでの自動反復**（idd-claude 側で `PR_ITERATION_DESIGN_ENABLED=true` 有効時）: line コメント / `@claude` mention general コメントを残してから `needs-iteration` ラベルを付与すると、watcher が次サイクルで Architect 役割の iteration を起動し、`docs/specs/<N>-<slug>/` 配下の spec 群を更新する。成功時は `awaiting-design-review` に自動遷移
+   > - **`needs-iteration` ラベルでの自動反復**（idd-claude 側で `PR_ITERATION_DESIGN_ENABLED=true` 有効時）: line コメント / 一般コメント（mention 不要）を残してから `needs-iteration` ラベルを付与すると、watcher が次サイクルで Architect 役割の iteration を起動し、`docs/specs/<N>-<slug>/` 配下の spec 群を更新する。成功時は `awaiting-design-review` に自動遷移
+   > - 一般コメントの自動除外規約（idd-claude 側で適用）: watcher 自身の自動投稿（着手表明 / エスカレ等の hidden marker `<!-- idd-claude:... -->` を含むコメント）と、過去 round で対応済みのコメント（PR body の `last-run` TS より前に作成されたもの）は prompt から除外される。`@claude` mention は不要
    > - ⚠ `needs-iteration` ラベルは **必ずこの PR に付与** してください（**Issue ではなく PR に**）。Issue へ誤付与すると watcher が当該 Issue の pickup を抑止します
    > - 設計をやり直したい場合: PR を close し、この Issue から `awaiting-design-review` ラベルを外すと再 Triage されます
    >
