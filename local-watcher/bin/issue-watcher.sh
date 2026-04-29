@@ -774,6 +774,73 @@ pi_read_last_run() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_general_filter_self: watcher 自身の自動投稿コメントを除外（marker ベース）
+#   入力: stdin に一般コメント JSON 配列
+#   出力: stdout にフィルタ後の JSON 配列
+#   AC #55 Req 2.1, 2.7
+#
+#   判定: comment.body 中に `idd-claude:` で始まる HTML hidden marker を含むなら
+#   watcher 投稿として除外する。GitHub user 同一性に依存しない（cron 実行ホストが
+#   異なる GitHub user で動いていても確実に除外できる）。`@claude` 文字列には
+#   一切依存しない（Req 2.7）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_general_filter_self() {
+  jq '[.[] | select((.body // "") | contains("idd-claude:") | not)]'
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_general_filter_resolved: 過去 round で対応済みと判定できるコメントを除外
+#   入力: $1=last_run (ISO8601 string, 空文字列 = 初回 round)
+#         stdin に一般コメント JSON 配列
+#   出力: stdout にフィルタ後の JSON 配列
+#   AC #55 Req 2.2, 2.3, 2.4, 2.5, 2.7
+#
+#   判定: last_run が空文字列なら no-op（全件採用 = 初回 round, Req 2.4）。
+#         last_run が指定されている場合は `created_at > last_run` のコメントのみ採用。
+#         境界（`==`）は採用側に倒さず除外する（fail-safe、設計判断 Req 2.3 解釈）。
+#         比較は ISO8601 lex compare（GitHub の created_at は UTC `Z` 終端で揃う）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_general_filter_resolved() {
+  local last_run="${1-}"
+  jq --arg last_run "$last_run" \
+    '[.[] | select($last_run == "" or (.created_at // "") > $last_run)]'
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_general_filter_event_style: GitHub system 由来の event-style コメントを除外
+#   入力: stdin に一般コメント JSON 配列
+#   出力: stdout にフィルタ後の JSON 配列
+#   AC #55 Req 2.6, 2.7
+#
+#   判定: user.type == "Bot" のコメント、および body が空のコメントを除外する。
+#         /repos/.../issues/<n>/comments は基本的にユーザーコメントしか返さないため
+#         保険的なフィルタだが、Req 2.6 を観測可能に保つために独立化する。
+#         watcher 自身の投稿は marker で既に除外済みのため、ここで Bot を全体除外しても
+#         二重除外にならず安全。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_general_filter_event_style() {
+  jq '[.[] | select((.user.type // "") != "Bot" and (.body // "") != "")]'
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_general_truncate: 件数上限超過時に古い順 drop で削減
+#   入力: $1=limit (件数上限)
+#         stdin に一般コメント JSON 配列
+#   出力: stdout に削減後の JSON 配列
+#   AC #55 Req 3.1, 3.4
+#
+#   アルゴリズム:
+#     1. 入力配列 length が limit 以下 → no-op（Req 3.4）
+#     2. length > limit → created_at 昇順ソート → 末尾 limit 件を採用（古い順 drop）
+#       新しいコメントが残るため、レビュワーが直近に追加した指摘を優先できる。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_general_truncate() {
+  local limit="${1:-50}"
+  jq --argjson limit "$limit" \
+    'if length <= $limit then . else (sort_by(.created_at // "") | .[-$limit:]) end'
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_post_processing_marker: PR body に hidden marker を書き込み + 着手表明コメント投稿
 #   入力: $1=pr_number, $2=new_round
 #   AC 6.1, 7.1
