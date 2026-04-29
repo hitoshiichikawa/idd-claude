@@ -745,6 +745,35 @@ pi_read_round_counter() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_read_last_run: PR body から hidden marker の last-run ISO8601 タイムスタンプを抽出
+#   入力: $1=pr_body（gh pr view --json body --jq '.body // ""' で取得済みの文字列）
+#   出力: stdout に last-run の ISO8601 文字列（例: "2026-04-25T12:34:56Z"）。
+#         marker / last-run キーが無ければ空文字列を出力。
+#   返り値: 0 固定（呼び出し元で空文字列を初回 round 扱いにする）
+#   AC #55 Req 2.3, 2.4 / 4.1
+#
+#   marker 形式: <!-- idd-claude:pr-iteration round=N last-run=ISO8601 -->
+#   複数検出時は最後（最新）の値を採用（pi_read_round_counter の `tail -1` と整合）。
+#   読み取り専用であり、書き込み側は pi_post_processing_marker のまま温存（後方互換性）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_read_last_run() {
+  local pr_body="${1-}"
+  if [ -z "$pr_body" ]; then
+    echo ""
+    return 0
+  fi
+  local last_run
+  # 1. marker 行を抽出 → 2. `last-run=...` 部分のみを抽出 → 3. 末尾を採用
+  #    値部分はスペース・`>` 以外を許容（pi_post_processing_marker は ISO8601 UTC を打刻するが、
+  #    fail-safe としてスペース直前 / `>` 直前まで拾う）。
+  last_run=$(echo "$pr_body" \
+    | grep -oE 'idd-claude:pr-iteration round=[0-9]+ last-run=[^ >]+' \
+    | sed -E 's|.*last-run=||' \
+    | tail -1)
+  echo "${last_run:-}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_post_processing_marker: PR body に hidden marker を書き込み + 着手表明コメント投稿
 #   入力: $1=pr_number, $2=new_round
 #   AC 6.1, 7.1
