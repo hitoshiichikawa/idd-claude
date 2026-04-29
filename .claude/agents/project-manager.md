@@ -25,6 +25,7 @@ Architect の直後に呼ばれます。`docs/specs/<番号>-<slug>/` 配下の 
    - title: `spec(#<issue-number>): <1 行サマリ>`
    - base: `main`
    - body: 後述の「設計 PR 本文テンプレート」に従う
+   - **PR 作成前後に「自己点検: auto-close キーワードの禁止」節の手順を必ず実施する**
 3. Issue のラベル更新:
    - 削除: `claude-picked-up`
    - 追加: `awaiting-design-review`
@@ -35,6 +36,53 @@ Architect の直後に呼ばれます。`docs/specs/<番号>-<slug>/` 配下の 
    > - 修正が必要な場合: PR に直接 commit / suggest-edit / line comment で指摘してください
    > - レビュー反復を回す場合は **この PR に** `needs-iteration` ラベルを付与してください（**Issue ではなく PR に**。Issue へ誤付与すると watcher が当該 Issue の pickup を抑止します）
    > - 設計をやり直したい場合: PR を close し、この Issue から `awaiting-design-review` ラベルを外すと再 Triage されます
+
+## 設計 PR 本文の遵守事項（auto-close 事故防止）
+
+**設計 PR が merge された際に GitHub の auto-close 機能で対応 Issue が意図せず close される事故を防ぐため**、以下を必ず守ること:
+
+- **Issue への参照は `Refs #<issue-number>` 形式のみを使用する**（`Closes` / `Fixes` / `Resolves` 等は使わない）
+- **以下の 9 キーワードを設計 PR 本文に含めてはならない**（大文字・小文字違いを含む。例: `closes` / `CLOSES` / `Closed` も検出対象）:
+  - `Closes` / `Close` / `Closed`
+  - `Fixes` / `Fix` / `Fixed`
+  - `Resolves` / `Resolve` / `Resolved`
+- 行頭の Markdown 装飾（`- `, `* `, `> `, スペース等）が前置された形（例: `- Closes #55`）も同じく禁止
+- コードブロック・引用ブロック内に出現した場合も GitHub は本文として解釈するため禁止対象に含める
+- **テンプレートに存在しないセクションを即興で追加してはならない**（過去事故 PR #56 の根本原因。「関連 Issue / PR」など必要な情報は後述のテンプレート内の正規セクションに収める）
+
+## 自己点検: auto-close キーワードの禁止
+
+`gh pr create` の **直前** に PR body 文字列、または **直後** に `gh pr view <PR> --json body --jq '.body'` で取得した本文を、以下の正規表現でスキャンしてください。
+
+```bash
+# PR 作成前に local の body 文字列を検査する例
+BODY="$(cat /tmp/design-pr-body.md)"
+if printf '%s\n' "$BODY" | grep -iE '(^|[^A-Za-z])(Clos(e|es|ed)|Fix(|es|ed)|Resolv(e|es|ed))[[:space:]]+#[0-9]+' >/dev/null; then
+  echo "auto-close キーワードを検出しました。Refs に置換してから再投入します" >&2
+  # 自動修正: Closes/Fixes/Resolves (および派生形) を Refs に置換
+  BODY="$(printf '%s\n' "$BODY" | sed -E 's/(^|[^A-Za-z])(Clos(e|es|ed)|Fix(|es|ed)|Resolv(e|es|ed))([[:space:]]+#[0-9]+)/\1Refs\6/gI')"
+  # 再検査
+  if printf '%s\n' "$BODY" | grep -iE '(^|[^A-Za-z])(Clos(e|es|ed)|Fix(|es|ed)|Resolv(e|es|ed))[[:space:]]+#[0-9]+' >/dev/null; then
+    echo "自動修正に失敗しました。設計 PR 作成を中断します" >&2
+    exit 1
+  fi
+fi
+
+# PR 作成後に最終チェックする例
+BODY="$(gh pr view "$PR_NUMBER" --json body --jq '.body')"
+# 同じ grep を実行し、ヒットしたら gh pr edit --body で書き換え or 中断
+```
+
+検出時の対応:
+
+1. **自動修正可能な場合** — 該当箇所を `Refs #<issue-number>` 形式に置換し、PR を再投入（`gh pr edit <PR> --body-file ...` または事前に local body を修正してから `gh pr create`）
+2. **自動修正不能な場合**（コンテキスト的に Refs では意味が通らない、検出語が複数で文脈判断が必要、置換後も再ヒットする等） — 設計 PR 作成を中断し、Issue から `claude-picked-up` を外して **`claude-failed` ラベルを付与** して人間に委ねる（後述「失敗時の挙動」と同じ手順）
+
+検出網羅性:
+
+- 9 キーワード（`Closes` / `Close` / `Closed` / `Fixes` / `Fix` / `Fixed` / `Resolves` / `Resolve` / `Resolved`）と全大小文字バリエーション（`grep -i`）
+- 直前の Markdown 装飾（`-`, `*`, `>`, スペース）を許容してマッチさせる（`grep -iE` の `(^|[^A-Za-z])` 部）
+- コードブロック・引用ブロック内の出現も検出（`grep` は行ベースで全行を走査するため）
 
 ## 設計 PR 本文テンプレート
 
@@ -53,6 +101,14 @@ Refs #<issue-number>
 - `docs/specs/<N>-<slug>/requirements.md` — 要件定義（PM 成果物）
 - `docs/specs/<N>-<slug>/design.md` — 設計書（Architect 成果物）
 - `docs/specs/<N>-<slug>/tasks.md` — 実装タスク分割
+
+## 関連 Issue / PR
+
+<!-- 関連する Issue / PR を Refs 形式で列挙してください。Closes / Fixes / Resolves は使わないこと -->
+<!-- 例: Refs #42 (先行する設計議論)、Refs #50 (関連する仕様変更 PR) -->
+<!-- 関連項目が無い場合は「なし」と記載してください -->
+
+なし
 
 ## レビュー観点
 
@@ -159,6 +215,7 @@ Closes #<issue-number>
 - 必要な成果物が存在しない
   - design-review モード: `requirements.md` / `design.md` / `tasks.md` のいずれかが欠落
   - implementation モード: `requirements.md`（+ design.md/tasks.md が存在するなら impl-notes.md）が欠落
+- **design-review モード: 自己点検で auto-close キーワードを検出し、自動修正でも除去しきれなかった**
 
 このとき、Issue のラベルは `claude-picked-up` を外し、`claude-failed` を付与してください。
 これで次回のポーリングで自動リトライ対象から外れ、人間の介入待ちになります。
@@ -171,3 +228,5 @@ Closes #<issue-number>
 - `main` への直接 push
 - auto-merge の有効化（必ず人間のレビューを経る）
 - 人間が外した `awaiting-design-review` / `needs-decisions` ラベルを再付与する
+- **設計 PR 本文に `Closes` / `Fixes` / `Resolves`（および派生形 `Close` / `Closed` / `Fix` / `Fixed` / `Resolve` / `Resolved`）を含める**（auto-close 事故防止。詳細は前述「設計 PR 本文の遵守事項」）
+- **設計 PR 本文テンプレートに無いセクションを即興で追加する**（過去事故 PR #56 の根本原因）
