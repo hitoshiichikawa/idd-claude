@@ -2471,17 +2471,39 @@ run_reviewer_stage() {
   prompt=$(build_reviewer_prompt "$round" "$prev_result")
 
   echo "--- Reviewer 実行 (round=$round) ---" >> "$LOG"
-  if ! claude \
+  # Issue #66: Quota-Aware Watcher 経由で claude を起動。99 を受領した場合は
+  # quota 超過検出として呼び出し側（run_impl_pipeline）に伝搬する。
+  local _qa_reset_file_rv _qa_rc_rv=0 _qa_ts_rv _qa_stage_label_rv
+  _qa_ts_rv=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file_rv="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-reviewer-r${round}-${_qa_ts_rv}"
+  _qa_stage_label_rv="Reviewer-r${round}"
+  qa_run_claude_stage "$_qa_stage_label_rv" "$_qa_reset_file_rv" -- \
+    claude \
       --print "$prompt" \
       --model "$REVIEWER_MODEL" \
       --permission-mode bypassPermissions \
       --max-turns "$REVIEWER_MAX_TURNS" \
       --output-format stream-json \
       --verbose \
-      >> "$LOG" 2>&1; then
-    rv_log "round=$round result=error reason=claude-exit-nonzero" >> "$LOG"
-    return 2
-  fi
+      >> "$LOG" 2>&1 || _qa_rc_rv=$?
+  case "$_qa_rc_rv" in
+    0)
+      rm -f "$_qa_reset_file_rv"
+      ;;
+    99)
+      local _qa_epoch_rv
+      _qa_epoch_rv=$(cat "$_qa_reset_file_rv")
+      qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label_rv" "$_qa_epoch_rv"
+      rm -f "$_qa_reset_file_rv"
+      rv_log "round=$round result=quota-exceeded → needs-quota-wait" >> "$LOG"
+      return 99
+      ;;
+    *)
+      rm -f "$_qa_reset_file_rv"
+      rv_log "round=$round result=error reason=claude-exit-nonzero" >> "$LOG"
+      return 2
+      ;;
+  esac
 
   # review-notes.md を parse
   local parsed
@@ -2570,19 +2592,39 @@ run_impl_pipeline() {
   # ── Stage A: PM + Developer（impl-resume では PM スキップ）──
   echo "--- Stage A 実行（$MODE / PM + Developer）---" >> "$LOG"
   prompt_a=$(build_dev_prompt_a "$MODE")
-  if ! claude \
+  # Issue #66: Quota-Aware Watcher 経由で claude を起動（Req 1.1, 1.2, 2.1）
+  local _qa_reset_file_a _qa_rc_a=0 _qa_ts_a
+  _qa_ts_a=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file_a="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-${_qa_ts_a}"
+  qa_run_claude_stage "StageA" "$_qa_reset_file_a" -- \
+    claude \
       --print "$prompt_a" \
       --model "$DEV_MODEL" \
       --permission-mode bypassPermissions \
       --max-turns "$DEV_MAX_TURNS" \
       --output-format stream-json \
       --verbose \
-      >> "$LOG" 2>&1; then
-    echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
-    mark_issue_failed "stageA" ""
-    return 1
-  fi
-  echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
+      >> "$LOG" 2>&1 || _qa_rc_a=$?
+  case "$_qa_rc_a" in
+    0)
+      echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
+      ;;
+    99)
+      local _qa_epoch_a
+      _qa_epoch_a=$(cat "$_qa_reset_file_a")
+      qa_handle_quota_exceeded "$NUMBER" "StageA" "$_qa_epoch_a"
+      rm -f "$_qa_reset_file_a"
+      echo "⏸️ #$NUMBER: Stage A で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+      return 0
+      ;;
+    *)
+      rm -f "$_qa_reset_file_a"
+      echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
+      mark_issue_failed "stageA" ""
+      return 1
+      ;;
+  esac
+  rm -f "$_qa_reset_file_a"
 
   # ── Stage B (round=1): Reviewer ──
   rev_rc=0
@@ -2591,6 +2633,12 @@ run_impl_pipeline() {
     0)
       echo "✅ #$NUMBER: Reviewer round=1 approve" | tee -a "$LOG"
       ;;
+    99)
+      # Issue #66: Reviewer round=1 で quota 超過検出。run_reviewer_stage 内で
+      # qa_handle_quota_exceeded 済 / needs-quota-wait に遷移済 → 正常終了で抜ける。
+      echo "⏸️ #$NUMBER: Reviewer round=1 で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+      return 0
+      ;;
     1)
       echo "🔁 #$NUMBER: Reviewer round=1 reject → Developer 再実行" | tee -a "$LOG"
       rv_dev_log "redo by reviewer reject (round=1)" >> "$LOG"
@@ -2598,19 +2646,39 @@ run_impl_pipeline() {
       # ── Stage A' (Developer 再実行) ──
       echo "--- Stage A' 実行（Developer 再実行 / Reviewer reject 差し戻し）---" >> "$LOG"
       prompt_redo=$(build_dev_prompt_redo "$REPO_DIR/$SPEC_DIR_REL/review-notes.md")
-      if ! claude \
+      # Issue #66: Quota-Aware Watcher 経由で claude を起動
+      local _qa_reset_file_aredo _qa_rc_aredo=0 _qa_ts_aredo
+      _qa_ts_aredo=$(date +%Y%m%d-%H%M%S)
+      _qa_reset_file_aredo="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-redo-${_qa_ts_aredo}"
+      qa_run_claude_stage "StageA-redo" "$_qa_reset_file_aredo" -- \
+        claude \
           --print "$prompt_redo" \
           --model "$DEV_MODEL" \
           --permission-mode bypassPermissions \
           --max-turns "$DEV_MAX_TURNS" \
           --output-format stream-json \
           --verbose \
-          >> "$LOG" 2>&1; then
-        echo "❌ #$NUMBER: Stage A' (Developer 再実行) 失敗" | tee -a "$LOG"
-        mark_issue_failed "stageA-redo" ""
-        return 1
-      fi
-      echo "✅ #$NUMBER: Stage A' 完了" | tee -a "$LOG"
+          >> "$LOG" 2>&1 || _qa_rc_aredo=$?
+      case "$_qa_rc_aredo" in
+        0)
+          echo "✅ #$NUMBER: Stage A' 完了" | tee -a "$LOG"
+          ;;
+        99)
+          local _qa_epoch_aredo
+          _qa_epoch_aredo=$(cat "$_qa_reset_file_aredo")
+          qa_handle_quota_exceeded "$NUMBER" "StageA-redo" "$_qa_epoch_aredo"
+          rm -f "$_qa_reset_file_aredo"
+          echo "⏸️ #$NUMBER: Stage A' で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+          return 0
+          ;;
+        *)
+          rm -f "$_qa_reset_file_aredo"
+          echo "❌ #$NUMBER: Stage A' (Developer 再実行) 失敗" | tee -a "$LOG"
+          mark_issue_failed "stageA-redo" ""
+          return 1
+          ;;
+      esac
+      rm -f "$_qa_reset_file_aredo"
 
       # ── Stage B (round=2): Reviewer 最終回 ──
       rev_rc=0
@@ -2618,6 +2686,12 @@ run_impl_pipeline() {
       case $rev_rc in
         0)
           echo "✅ #$NUMBER: Reviewer round=2 approve" | tee -a "$LOG"
+          ;;
+        99)
+          # Issue #66: Reviewer round=2 で quota 超過検出。run_reviewer_stage 内で
+          # qa_handle_quota_exceeded 済 / needs-quota-wait に遷移済 → 正常終了で抜ける。
+          echo "⏸️ #$NUMBER: Reviewer round=2 で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+          return 0
           ;;
         1)
           # 2 回目 reject → claude-failed + Issue コメントに reject 理由 / 対象 ID を含める
@@ -2659,20 +2733,40 @@ run_impl_pipeline() {
   # ── Stage C: PjM (PR 作成) ──
   echo "--- Stage C 実行（PjM / PR 作成）---" >> "$LOG"
   prompt_c=$(build_dev_prompt_c "$MODE")
-  if ! claude \
+  # Issue #66: Quota-Aware Watcher 経由で claude を起動
+  local _qa_reset_file_c _qa_rc_c=0 _qa_ts_c
+  _qa_ts_c=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file_c="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageC-${_qa_ts_c}"
+  qa_run_claude_stage "StageC" "$_qa_reset_file_c" -- \
+    claude \
       --print "$prompt_c" \
       --model "$DEV_MODEL" \
       --permission-mode bypassPermissions \
       --max-turns "$DEV_MAX_TURNS" \
       --output-format stream-json \
       --verbose \
-      >> "$LOG" 2>&1; then
-    echo "❌ #$NUMBER: Stage C (PjM) 失敗" | tee -a "$LOG"
-    mark_issue_failed "stageC" ""
-    return 1
-  fi
-  echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み" | tee -a "$LOG"
-  return 0
+      >> "$LOG" 2>&1 || _qa_rc_c=$?
+  case "$_qa_rc_c" in
+    0)
+      echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み" | tee -a "$LOG"
+      rm -f "$_qa_reset_file_c"
+      return 0
+      ;;
+    99)
+      local _qa_epoch_c
+      _qa_epoch_c=$(cat "$_qa_reset_file_c")
+      qa_handle_quota_exceeded "$NUMBER" "StageC" "$_qa_epoch_c"
+      rm -f "$_qa_reset_file_c"
+      echo "⏸️ #$NUMBER: Stage C で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+      return 0
+      ;;
+    *)
+      rm -f "$_qa_reset_file_c"
+      echo "❌ #$NUMBER: Stage C (PjM) 失敗" | tee -a "$LOG"
+      mark_issue_failed "stageC" ""
+      return 1
+      ;;
+  esac
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3151,19 +3245,42 @@ _slot_run_issue() {
       "$TRIAGE_TEMPLATE")
 
     echo "--- Triage 実行 ---" >> "$LOG"
-    if ! claude \
+    # Issue #66: Quota-Aware Watcher 経由で claude を起動。opt-out 時は素通し
+    # （既存挙動互換）、opt-in 時は rate_limit_event 検知で exit 99 を返す。
+    local _qa_reset_file_triage="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-triage-${TS}"
+    local _qa_rc_triage=0
+    qa_run_claude_stage "Triage" "$_qa_reset_file_triage" -- \
+      claude \
         --print "$TRIAGE_PROMPT" \
         --model "$TRIAGE_MODEL" \
         --permission-mode bypassPermissions \
         --max-turns "$TRIAGE_MAX_TURNS" \
-        >> "$LOG" 2>&1; then
-      echo "❌ Triage の実行に失敗" | tee -a "$LOG"
-      # claude-picked-up は Dispatcher 側で付与済。Triage 失敗時は claude-failed に
-      # 遷移して人間判断に委ねる（既存挙動: Triage 失敗時は continue だったが、
-      # Phase C ではすでに claim 済のため、ラベルを残置せず claude-failed 化する）。
-      _slot_mark_failed "triage" "Triage（Claude 実行）に失敗しました。"
-      return 1
-    fi
+        >> "$LOG" 2>&1 || _qa_rc_triage=$?
+    case "$_qa_rc_triage" in
+      0)
+        : # 正常終了 → 後続処理へ
+        ;;
+      99)
+        # quota 超過検出（opt-in 時のみ発生）→ needs-quota-wait に遷移し、
+        # _slot_mark_failed を踏まずに正常終了する（Req 3.1, 3.2）
+        local _qa_epoch_triage
+        _qa_epoch_triage=$(cat "$_qa_reset_file_triage")
+        qa_handle_quota_exceeded "$NUMBER" "Triage" "$_qa_epoch_triage"
+        rm -f "$_qa_reset_file_triage"
+        slot_log "Triage で quota 超過検出 → needs-quota-wait に遷移"
+        return 0
+        ;;
+      *)
+        rm -f "$_qa_reset_file_triage"
+        echo "❌ Triage の実行に失敗" | tee -a "$LOG"
+        # claude-picked-up は Dispatcher 側で付与済。Triage 失敗時は claude-failed に
+        # 遷移して人間判断に委ねる（既存挙動: Triage 失敗時は continue だったが、
+        # Phase C ではすでに claim 済のため、ラベルを残置せず claude-failed 化する）。
+        _slot_mark_failed "triage" "Triage（Claude 実行）に失敗しました。"
+        return 1
+        ;;
+    esac
+    rm -f "$_qa_reset_file_triage"
 
     if [ ! -f "$TRIAGE_FILE" ]; then
       echo "❌ Triage 結果 JSON が生成されませんでした" | tee -a "$LOG"
@@ -3320,22 +3437,41 @@ EOF
 )
 
     echo "--- Development 実行（$MODE）---" >> "$LOG"
-    if claude \
+    # Issue #66: Quota-Aware Watcher 経由で claude を起動
+    local _qa_reset_file_design _qa_rc_design=0 _qa_ts_design
+    _qa_ts_design=$(date +%Y%m%d-%H%M%S)
+    _qa_reset_file_design="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-design-${_qa_ts_design}"
+    qa_run_claude_stage "design" "$_qa_reset_file_design" -- \
+      claude \
         --print "$DEV_PROMPT" \
         --model "$DEV_MODEL" \
         --permission-mode bypassPermissions \
         --max-turns "$DEV_MAX_TURNS" \
         --output-format stream-json \
         --verbose \
-        >> "$LOG" 2>&1; then
-      echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
-      slot_log "$MODE 完了"
-      return 0
-    else
-      echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
-      _slot_mark_failed "$MODE" "design モードでの Claude 実行が失敗しました。"
-      return 1
-    fi
+        >> "$LOG" 2>&1 || _qa_rc_design=$?
+    case "$_qa_rc_design" in
+      0)
+        echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
+        slot_log "$MODE 完了"
+        rm -f "$_qa_reset_file_design"
+        return 0
+        ;;
+      99)
+        local _qa_epoch_design
+        _qa_epoch_design=$(cat "$_qa_reset_file_design")
+        qa_handle_quota_exceeded "$NUMBER" "design" "$_qa_epoch_design"
+        rm -f "$_qa_reset_file_design"
+        slot_log "$MODE で quota 超過検出 → needs-quota-wait に遷移"
+        return 0
+        ;;
+      *)
+        rm -f "$_qa_reset_file_design"
+        echo "❌ #$NUMBER: $MODE 失敗" | tee -a "$LOG"
+        _slot_mark_failed "$MODE" "design モードでの Claude 実行が失敗しました。"
+        return 1
+        ;;
+    esac
   else
     # impl / impl-resume → Reviewer ゲートを含む stage 分割パイプラインへ
     if run_impl_pipeline; then
