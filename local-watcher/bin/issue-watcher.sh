@@ -3225,6 +3225,86 @@ _resume_detect_existing_branch() {
   return 1
 }
 
+# `impl-resume` モードの branch 初期化を opt-in flag によって 2 戦略のいずれかに
+# ディスパッチする。既存の `git checkout -B "$BRANCH" "origin/main"` +
+# `git push -u origin "$BRANCH" --force-with-lease` シーケンスを内包する。
+#
+# 入力（環境変数経由）:
+#   BRANCH                          : claude/issue-N-impl-<slug> 形式
+#   IMPL_RESUME_PRESERVE_COMMITS    : "true" / "false" / unset
+#   MODE                            : "impl-resume" 前提（呼び出し元で gate 済み）
+# 戻り値:
+#   0 = init 成功（HEAD = $BRANCH、push 済み）
+#   非 0 = 失敗（呼び出し元で _slot_mark_failed 既に発射済み）
+# 副作用:
+#   - git checkout -B（local branch 作成）
+#   - git push -u origin（fast-forward または force-with-lease。flag 値で分岐）
+#   - SLOT_LOG / 標準出力にイベントログ追記
+#   - 失敗時は _slot_mark_failed が gh issue edit + comment を発射
+#   - 呼び出し後 RESUME_PRESERVE 変数を export（後段 prompt builder が参照）
+#
+# Req 1.1, 1.2, 2.1, 2.2, 2.3, 2.5, 4.4, NFR 1.3, NFR 2.1
+#
+# 戦略:
+#   PRESERVE=false（既定）→ 既存挙動: checkout -B BRANCH origin/main + force-with-lease push
+#   PRESERVE=true + branch 存在 → checkout -B BRANCH origin/BRANCH + fast-forward push
+#   PRESERVE=true + branch 不在 → checkout -B BRANCH origin/main + fast-forward push
+#
+# 注意: opt-in パスの fast-forward push と non-ff 検出ロジックは task 3.1 / 3.2 で
+# `_resume_push` / `_resume_mark_nonff_failed` 関数に切り出す（PR 履歴上の独立性確保のため、
+# 本 task では inline で git push を呼ぶ最小実装）。
+_resume_branch_init() {
+  local preserve
+  preserve=$(_resume_normalize_flag preserve_default_off "${IMPL_RESUME_PRESERVE_COMMITS:-}")
+  export RESUME_PRESERVE="$preserve"
+
+  if [ "$preserve" != "true" ]; then
+    # ── 既定パス: 本機能導入前と完全に等価な挙動 ──
+    # worktree は detached HEAD で起動するため -B で新規 branch 作成（local main を持たない）
+    if ! git checkout -B "$BRANCH" "origin/main"; then
+      slot_warn "branch 作成に失敗: $BRANCH"
+      _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
+      return 1
+    fi
+    if ! git push -u origin "$BRANCH" --force-with-lease; then
+      slot_warn "branch push に失敗: $BRANCH"
+      _slot_mark_failed "branch-push" "ブランチ \`$BRANCH\` の push に失敗しました。"
+      return 1
+    fi
+    slot_log "resume-mode=legacy-force-push branch=$BRANCH"
+    return 0
+  fi
+
+  # ── opt-in パス: PRESERVE=true ──
+  # origin に branch が存在するか判定。存在すればそこから resume、不在なら origin/main 起点。
+  local origin_sha=""
+  if _resume_detect_existing_branch "$BRANCH"; then
+    if ! git checkout -B "$BRANCH" "origin/$BRANCH"; then
+      slot_warn "既存 branch resume に失敗: $BRANCH"
+      _slot_mark_failed "branch-checkout" "既存 origin branch \`$BRANCH\` からの resume に失敗しました。"
+      return 1
+    fi
+    origin_sha=$(git rev-parse --short=7 "origin/$BRANCH" 2>/dev/null || echo "unknown")
+    slot_log "resume-mode=existing-branch branch=$BRANCH origin_sha=$origin_sha"
+  else
+    if ! git checkout -B "$BRANCH" "origin/main"; then
+      slot_warn "branch 作成に失敗: $BRANCH"
+      _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
+      return 1
+    fi
+    slot_log "resume-mode=fresh-from-main branch=$BRANCH"
+  fi
+
+  # opt-in パスの push（task 3.1 で _resume_push に切り出される予定）。
+  # force 系オプションを一切付けない fast-forward 制約付き push。
+  if ! git push -u origin "$BRANCH"; then
+    slot_warn "branch push に失敗: $BRANCH（fast-forward 制約付き push）"
+    _slot_mark_failed "branch-push" "ブランチ \`$BRANCH\` の fast-forward push に失敗しました。"
+    return 1
+  fi
+  return 0
+}
+
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
 # サブシェル `( _slot_run_issue n issue_json ) &` から呼び出される前提。
 #
