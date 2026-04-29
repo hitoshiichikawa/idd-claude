@@ -11,8 +11,9 @@
 #   - impl-resume   : Developer → PjM（設計 PR が merge 済みで docs/specs/<N>-*/ が main に存在）
 #
 # ラベルによる状態遷移:
-#   auto-dev  → Triage → (needs-decisions | awaiting-design-review | claude-picked-up)
-#             → ready-for-review / claude-failed
+#   auto-dev  → claude-claimed (Dispatcher claim) → Triage
+#                              → (needs-decisions | awaiting-design-review | claude-picked-up)
+#                              → ready-for-review / claude-failed
 #
 # 配置先: ~/bin/issue-watcher.sh
 # 依存  : gh / jq / claude / flock / git
@@ -49,6 +50,7 @@ REPO_DIR="${REPO_DIR:-$HOME/work/your-repo}"
 REPO_SLUG="$(echo "$REPO" | tr '/' '-')"
 
 LABEL_TRIGGER="auto-dev"
+LABEL_CLAIMED="claude-claimed"
 LABEL_PICKED="claude-picked-up"
 LABEL_NEEDS_DECISIONS="needs-decisions"
 LABEL_AWAITING_DESIGN="awaiting-design-review"
