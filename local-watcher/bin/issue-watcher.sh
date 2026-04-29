@@ -2221,6 +2221,67 @@ EOF
       ;;
   esac
 
+  # Issue #67: impl-resume + IMPL_RESUME_PRESERVE_COMMITS=true 時のみ追加注入する
+  # 「resume 指示」セクションと、`IMPL_RESUME_PROGRESS_TRACKING` の値による
+  # `tasks.md` 進捗マーカー更新指示の分岐。既存 prompt の Step 1 / 制約節は変更せず、
+  # 末尾に節を追加するだけ（既存挙動と差分等価 / NFR 1.1）。
+  #
+  # `RESUME_PRESERVE` は `_resume_branch_init` が export している（Slot Runner 内）。
+  # `IMPL_RESUME_PROGRESS_TRACKING` は cron / launchd 経由で渡される env 値。
+  # `_resume_normalize_flag` で 2 値正規化（Req 3.6: "false" 完全一致のみ false、
+  # それ以外は true）。
+  local resume_section=""
+  if [ "$mode" = "impl-resume" ] && [ "${RESUME_PRESERVE:-false}" = "true" ]; then
+    local tracking
+    tracking=$(_resume_normalize_flag tracking_default_on "${IMPL_RESUME_PROGRESS_TRACKING:-}")
+
+    local progress_block
+    if [ "$tracking" = "true" ]; then
+      progress_block=$(cat <<'EOF'
+### tasks.md 進捗追跡（IMPL_RESUME_PROGRESS_TRACKING=true）
+
+- 各タスクが完了した時点で `tasks.md` の対応する未完了マーカー行 `- [ ] N.M ...` を
+  `- [x] N.M ...` に書き換えること
+- 進捗マーカー更新は **専用 commit** として積む:
+  - commit メッセージ: `docs(tasks): mark <task-id> as done`（例: `docs(tasks): mark 1.2 as done`）
+  - 当該 commit には `tasks.md` 以外のファイルを含めない
+- **書き換え禁止領域**: タスク本文 / `_Requirements:_` / `_Boundary:_` / `_Depends:_` /
+  タスク順序 / 親タスクのインデント / deferrable 印 `- [ ]*`（アスタリスク付き）
+- 親タスク（例: `- [ ] 1.`）は、その配下の全子タスクが `- [x]` になったタイミングで親側も
+  `- [x]` に更新する（deferrable 子タスク `- [ ]*` は未完了のまま親完了を判定可能）
+- すべてのタスクが完了済み（未完了マーカー `- [ ]` が残っていない）なら、追加実装を行わず
+  impl-notes.md にその旨を記録すること
+EOF
+)
+    else
+      progress_block=$(cat <<'EOF'
+### tasks.md 進捗追跡（IMPL_RESUME_PROGRESS_TRACKING=false）
+
+- 本サイクルでは `tasks.md` の進捗マーカー（`- [ ]` ↔ `- [x]`）を **書き換えない**
+- 通常通り numeric ID 順にタスクを消化し、impl-notes.md に進捗の根拠を記録する
+EOF
+)
+    fi
+
+    resume_section=$(cat <<EOF
+
+## 既存 commit からの resume（IMPL_RESUME_PRESERVE_COMMITS=true）
+
+このサイクルは **既存の作業ブランチからの resume** で起動されました。
+worktree は \`origin/main\` から fresh init されておらず、\`origin/${BRANCH}\` の先端から
+checkout されています。**過去 Developer / 人間が積んだ commit を温存してください**。
+
+- 作業前に必ず \`git log --oneline main..HEAD\` で既存 commit を確認すること
+- \`git reset\` / \`git rebase\` / branch の切り替えは **禁止**
+- 未完了タスクの判定基準: \`tasks.md\` の \`- [ ]\` 行（未完了マーカー）の先頭から再開
+- 既存 commit と矛盾する変更が必要な場合は、既存 commit を打ち消す追加 commit を積む
+  か、impl-notes.md の「確認事項」に矛盾内容を記載して人間判断を仰ぐ
+
+${progress_block}
+EOF
+)
+  fi
+
   cat <<EOF
 あなたはこのリポジトリの Claude Code オーケストレーターです。
 以下の Issue を ${flow_label} のフローで進めてください。
@@ -2246,6 +2307,7 @@ ${steps}
 - 既存のテストを壊さないこと
 - 不明点は推測せず、impl-notes.md の「確認事項」セクションに列挙すること
 - **PR は作成しないこと**（次の Reviewer ステージで独立レビューを受けます）
+${resume_section}
 EOF
 }
 
