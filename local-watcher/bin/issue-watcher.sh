@@ -3356,31 +3356,7 @@ _resume_push() {
   if echo "$stderr_content" | grep -Eq '(non-fast-forward|rejected.*non-fast|Updates were rejected because the (tip|remote))'; then
     slot_warn "non-ff push detected; aborting (branch=$branch)"
     slot_log "resume-failure=non-ff issue=#${NUMBER:-?} branch=$branch"
-    local body="自動 force-push を抑制したため停止しました（impl-resume 保護機能）。
-
-- 対象 branch: \`$branch\`
-- 対象 Issue : #${NUMBER:-?}
-- 検出理由 : non-fast-forward push（既存 origin branch に対し remote がローカル HEAD の祖先ではない）
-
-### 次の手順
-
-1. ローカルで \`git fetch origin\` 後、当該 branch の差分を確認
-2. 必要なら手動で merge / rebase / cherry-pick で衝突解消
-3. 解消できたら本 Issue から \`claude-failed\` ラベルを除去すると次サイクルで再 pickup されます
-
-> 注意: 本機能は \`IMPL_RESUME_PRESERVE_COMMITS=true\` でのみ動作します。
-> 強制 fresh が必要なら \`IMPL_RESUME_PRESERVE_COMMITS=false\` に戻すか、
-> \`git push origin :$branch\` で origin branch を削除してから再 pickup してください。"
-    if [ -n "$stderr_tail" ]; then
-      body="$body
-
-### git stderr (tail)
-
-\`\`\`
-$stderr_tail
-\`\`\`"
-    fi
-    _slot_mark_failed "branch-nonff" "$body"
+    _resume_mark_nonff_failed "$branch" "$stderr_tail"
   else
     # non-ff 以外の push 失敗（ネットワーク等）。既存 branch-push 失敗パスに合流。
     slot_warn "push に失敗（non-ff ではない）: $branch"
@@ -3400,6 +3376,49 @@ $stderr_tail
     rm -f "$stderr_tmp" 2>/dev/null || true
   fi
   return 1
+}
+
+# non-ff 専用の `claude-failed` 遷移ヘルパ。
+# 既存 `_slot_mark_failed` の薄い wrapper として、Issue コメントに「force-push 抑制で
+# 停止した」旨と人間操作手順を記載する。
+# 引数:
+#   $1 = branch
+#   $2 = stderr の tail（任意。診断情報として Issue コメントに含める）
+# 戻り値: 常に 0
+#
+# Req 4.2, 4.3, NFR 2.2: 運用者がログ単独で原因と Issue 番号を特定できる粒度で記録。
+# 既存 stage 識別子セット（branch-checkout / branch-push 等）に branch-nonff を追加。
+_resume_mark_nonff_failed() {
+  local branch="$1"
+  local stderr_tail="${2:-}"
+  local body="自動 force-push を抑制したため停止しました（impl-resume 保護機能）。
+
+- 対象 branch: \`$branch\`
+- 対象 Issue : #${NUMBER:-?}
+- 検出理由 : non-fast-forward push（既存 origin branch に対し remote がローカル HEAD の祖先ではない）
+
+### 次の手順
+
+1. ローカルで \`git fetch origin\` 後、当該 branch の差分を確認
+2. 必要なら手動で merge / rebase / cherry-pick で衝突解消
+3. 解消できたら本 Issue から \`claude-failed\` ラベルを除去すると次サイクルで再 pickup されます
+
+> 注意: 本機能は \`IMPL_RESUME_PRESERVE_COMMITS=true\` でのみ動作します。
+> 強制 fresh が必要なら \`IMPL_RESUME_PRESERVE_COMMITS=false\` に戻すか、
+> \`git push origin :$branch\` で origin branch を削除してから再 pickup してください。"
+
+  if [ -n "$stderr_tail" ]; then
+    body="$body
+
+### git stderr (tail)
+
+\`\`\`
+$stderr_tail
+\`\`\`"
+  fi
+
+  _slot_mark_failed "branch-nonff" "$body"
+  return 0
 }
 
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
