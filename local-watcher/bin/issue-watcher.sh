@@ -3004,8 +3004,11 @@ EOF
 # Phase C: Dispatcher
 #
 # 1 サイクル中に 1 度起動される。Issue 候補をローカルキューに pop し、空き slot を
-# 探索して claim（claude-picked-up ラベル付与）してから Slot Runner をバックグラウンド
+# 探索して claim（claude-claimed ラベル付与）してから Slot Runner をバックグラウンド
 # 起動する。サイクル終端で `wait` により全 Worker 完了を待ち合わせる。
+# claim ラベルは Issue #52 で claude-picked-up → claude-claimed に変更した
+# （claim/Triage 段階を実装中段階と区別するため）。Triage 通過後の Slot Runner で
+# claude-claimed → claude-picked-up に付け替える。
 #
 # Req 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 6.3, 6.4, 6.5, 7.5, NFR 1.1, NFR 1.2
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3119,10 +3122,13 @@ _dispatcher_run() {
       continue
     fi
 
-    # ── claim（claude-picked-up ラベル付与）──
-    if ! gh issue edit "$issue_number" --repo "$REPO" --add-label "$LABEL_PICKED" >/dev/null 2>&1; then
+    # ── claim（claude-claimed ラベル付与）──
+    # Issue #52: claim/Triage 段階のラベルを claude-claimed に分離（claude-picked-up は
+    # Triage 通過後に Slot Runner が付け替える）。これにより Issue activity 上で
+    # claim 済 / Triage 中 / 実装中 が 1 ラベル単位で識別可能になる。
+    if ! gh issue edit "$issue_number" --repo "$REPO" --add-label "$LABEL_CLAIMED" >/dev/null 2>&1; then
       # Req 2.3: ラベル付与失敗 → WARN + slot lock 解放 + 次 Issue へ
-      dispatcher_warn "Issue #${issue_number}: claude-picked-up ラベル付与に失敗、slot-${slot} を解放して次 Issue へ"
+      dispatcher_warn "Issue #${issue_number}: claude-claimed ラベル付与に失敗、slot-${slot} を解放して次 Issue へ"
       _slot_release "$slot"
       continue
     fi
