@@ -46,9 +46,21 @@ design / tasks）の修正 commit を head branch に push して、各レビュ
 {{LINE_COMMENTS_JSON}}
 ```
 
-## @claude mention 付き general コメント（JSON 配列）
+## PR の一般コメント (Conversation タブ、JSON 配列)
 
-各要素のスキーマ: `{ id, user, body, url }`
+各要素のスキーマ: `{ id, user, body, url, created_at }`
+
+watcher が事前に **(a) 自分自身の自動投稿（着手表明 / エスカレ等の hidden marker
+`<!-- idd-claude:... -->` を含むコメント）**、**(b) 過去 round で対応済みのもの（PR body の
+`last-run` TS より前に作成されたコメント）**、**(c) GitHub system 由来の event-style
+コメント** を除外しています。さらにコメント件数が `PI_GENERAL_MAX_COMMENTS`（既定 50）を
+超える場合は古いものから自動 truncate されます（truncate された分は次 round 以降または
+人間レビュワーに委ねられます）。
+
+本節の JSON が空配列でない場合、各コメントを精読し、対応すべきと判断したものに対して
+**spec 群（`{{SPEC_DIR}}` 配下）の修正 commit または返信** を行ってください。`@claude`
+mention の有無に関係なく、本節に含まれるコメントは（人間レビュワーが Claude に取り込んで
+欲しい指摘として残したものとみなして）すべて取り扱い対象です。
 
 ```json
 {{GENERAL_COMMENTS_JSON}}
@@ -103,11 +115,14 @@ design / tasks）の修正 commit を head branch に push して、各レビュ
    ```
    - **1 line comment = 1 reply の 1:1 返信を厳守**（まとめ返信は不可）
    - 返信本文には「spec のどこを更新したか」または「なぜ取り込まないか」を明記する
-6. **@claude mention 付き general コメントへの返信は同一 PR の一般コメントとして投稿**:
+6. **general コメントへの返信は同一 PR の一般コメントとして投稿**:
    ```bash
    gh pr comment {{PR_NUMBER}} --repo {{REPO}} --body "@<元コメント著者>\n> <引用>\n\n<返信本文>"
    ```
    - 引用 quoting で元コメントとリンクすることで、誰の指摘への返信かが明示される
+   - `@claude` mention の有無は判断材料にしない（mention の有無に関わらず watcher が事前に
+     対象コメントを抽出済み）
+   - 返信先は同一 PR の一般コメント。編集許容スコープは `{{SPEC_DIR}}` 配下のみ（既存規約）
 7. **修正不要時は commit / push を行わず、返信コメントの投稿のみで完了**
    - すべてのコメントが「対応しない理由の返信」だけで足りるなら、push なしで `exit 0` にする
 8. **返信 API がエラーを返したら WARN として後続コメントの処理は継続**
