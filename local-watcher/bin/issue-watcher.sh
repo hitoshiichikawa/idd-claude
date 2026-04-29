@@ -2881,15 +2881,16 @@ _slot_run_issue() {
       ' "$TRIAGE_FILE")
 
       gh issue comment "$NUMBER" --repo "$REPO" --body "$COMMENT" >/dev/null 2>&1 || true
-      # Phase C: claim を取り消す（claude-picked-up 除去）+ needs-decisions 付与。
+      # Phase C / Issue #52: claim を取り消す（claude-claimed 除去）+ needs-decisions 付与。
       # 次サイクルで人間が needs-decisions を外したら再ピックアップされる必要があるため、
-      # claude-picked-up を残してはいけない。本機能導入前は claude-picked-up は未付与
-      # だったが、Phase C では Dispatcher が事前に付与しているためここで取り消す。
+      # claim 系ラベルを残してはいけない。本機能導入前は claude-picked-up は未付与
+      # だったが、Phase C 以降は Dispatcher が claim ラベル（Issue #52 で claude-claimed
+      # に分離）を事前に付与しているためここで取り消す。
       gh issue edit "$NUMBER" --repo "$REPO" \
-        --remove-label "$LABEL_PICKED" \
+        --remove-label "$LABEL_CLAIMED" \
         --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1 || true
       echo "🟡 #$NUMBER: $DECISION_COUNT 件の決定事項を起票しました" | tee -a "$LOG"
-      slot_log "Triage 結果: needs-decisions（claude-picked-up 取り消し済）"
+      slot_log "Triage 結果: needs-decisions（claude-claimed 取り消し済）"
       return 0
     fi
 
