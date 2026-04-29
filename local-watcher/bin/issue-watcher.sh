@@ -2676,15 +2676,23 @@ slot_error() {
   echo "[$(date '+%F %T')] slot-${IDD_SLOT_NUMBER:-?}: #${NUMBER:-?}: ERROR: $*" >&2
 }
 
-# claude-picked-up を claude-failed に置き換える共通フロー（Worktree / Hook / その他
-# サブシェル内エラー用）。run_impl_pipeline 内の mark_issue_failed と同じ操作を slot
-# worker 文脈で再現する（mark_issue_failed は MODE / LOG 等を要求するため代用しない）。
+# claim 系ラベル（claude-claimed / claude-picked-up）を claude-failed に置き換える
+# 共通フロー（Worktree / Hook / その他サブシェル内エラー用）。run_impl_pipeline 内の
+# mark_issue_failed と同じ操作を slot worker 文脈で再現する（mark_issue_failed は
+# MODE / LOG 等を要求するため代用しない）。
+#
+# Issue #52: 両系統除去で post-Triage / pre-Triage どちらの失敗にも対応する。
+# - pre-Triage 失敗時点では Issue は claude-claimed のみ持つ
+# - post-Triage（impl 着手後）失敗時点では Issue は claude-picked-up のみ持つ
+# - design ルートで Stage C 失敗等の想定外シーケンスでも残置を防ぐため両方除去する
+# gh CLI は未付与ラベルの除去を no-op として扱うため安全（既存 || true で吸収）。
+#
 # 引数: $1 = stage 識別子, $2 = Issue コメントに追加する補足
 _slot_mark_failed() {
   local stage="$1"
   local extra="$2"
   gh issue edit "$NUMBER" --repo "$REPO" \
-    --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" >/dev/null 2>&1 || true
+    --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" >/dev/null 2>&1 || true
   local hostname_val
   hostname_val=$(hostname)
   local body="⚠️ 自動開発が失敗しました（${hostname_val} / slot=${IDD_SLOT_NUMBER:-?} / 失敗 stage: ${stage}）。"
