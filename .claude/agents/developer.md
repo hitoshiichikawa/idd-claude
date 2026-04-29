@@ -83,6 +83,41 @@ main に載っている）前提です。矛盾や実装上の問題に気づい
 
 `opt-out` および無宣言の場合、上記の追加フローは **適用しない**（Req 3.4 / NFR 1.1）。
 
+## impl-resume / tasks.md 進捗追跡規約（Issue #67 / opt-in）
+
+`local-watcher/bin/issue-watcher.sh` の Stage A prompt が以下のいずれかに該当する追加
+セクションを末尾に注入する場合があります。注入の有無は env 値で gate されており、
+opt-in が無効なら本節は **適用しない**:
+
+- `### 既存 commit からの resume`（`IMPL_RESUME_PRESERVE_COMMITS=true` でかつ既存 origin
+  branch から resume した場合）
+- `### tasks.md 進捗追跡（IMPL_RESUME_PROGRESS_TRACKING=true|false）`
+
+該当セクションが prompt に含まれる場合、Developer は以下の規約を守ること:
+
+- **既存 commit を温存する**: `git log --oneline main..HEAD` で既存 commit を確認した上で
+  実装する。`git reset` / `git rebase` / branch 切替は禁止。既存 commit を打ち消す必要が
+  あれば追加 commit で打ち消す
+- **未完了タスクの先頭から再開**: `tasks.md` の `- [ ]` 行（未完了マーカー）の先頭から
+  実装を継続する（AC 3.3）
+- **全完了時は追加実装をしない**: 未完了マーカーが残っていない場合、追加実装をせず
+  `impl-notes.md` にその旨を記録する（AC 3.4）
+- **進捗マーカー更新が許可される唯一の書き換え範囲**: tracking=true 時に許可されるのは
+  `- [ ]` → `- [x]` の **行内 4 文字差分**のみ（AC 3.5）
+- **書き換え禁止領域**: タスク本文 / `_Requirements:_` / `_Boundary:_` / `_Depends:_` /
+  タスク順序 / 親タスクのインデント / deferrable 印 `- [ ]*`（アスタリスク付き、
+  tasks-generation.md の deferrable 規約）
+- **進捗 commit は別 commit**: マーカー更新は実装 commit と分けて
+  `docs(tasks): mark <task-id> as done` で commit する。当該 commit には `tasks.md` 以外を
+  含めない
+- **親タスクの完了判定**: 子タスクが全て `- [x]` になったタイミングで親タスクも `- [x]`
+  に更新する。deferrable 子タスク `- [ ]*` は未完了でも親完了に含めて良い
+- **hidden marker は使わない**（設計論点 2: `- [x]` の markdown checkbox のみで進捗を表現）
+
+opt-in 機能 OFF（`IMPL_RESUME_PRESERVE_COMMITS=false` または未設定）の場合、本節は適用
+されない。watcher は注入セクション自体を出力しないため、Developer は通常通り tasks.md
+の番号順で消化する。
+
 # テスト作成ルール
 
 - **AC 起点**: 新規テストは requirements.md の numeric ID と 1 対 1 で紐付ける。AC が無い挙動のテストを書かない
