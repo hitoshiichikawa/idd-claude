@@ -3200,6 +3200,31 @@ _resume_normalize_flag() {
   esac
 }
 
+# 対象 branch が origin に存在するかを `git ls-remote --exit-code` で検出する。
+# 引数: $1 = branch name（例: "claude/issue-67-impl-..."）
+# 戻り値:
+#   0 = origin に存在
+#   1 = 不在 / 検出失敗（ネットワーク失敗・タイムアウトを含めて呼び出し元では同等扱い）
+# 副作用: なし（git ls-remote は read-only）
+#
+# Req 2.1, 2.2: PR の有無とは独立に branch 存在の真実値を取得する。`gh pr list` には
+# 依存しない（設計論点 1: PR が close 済 / 未作成のケースで false negative を避ける）。
+# 失敗時は安全側に倒して fresh-init 経路に倒す（NFR 2.1: WARN ログ）。
+# timeout 30 秒は既存 MERGE_QUEUE_GIT_TIMEOUT より短め。watcher 全体の cron 周期
+# （最短 2 分）を圧迫しないため。
+_resume_detect_existing_branch() {
+  local branch="$1"
+  if [ -z "$branch" ]; then
+    return 1
+  fi
+  # `git ls-remote --exit-code` は ref 不在で exit code 2 を返す。timeout は 30 秒。
+  # ネットワーク失敗等の予期せぬ exit code はすべて「不在」として fail-safe。
+  if timeout 30 git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
 # サブシェル `( _slot_run_issue n issue_json ) &` から呼び出される前提。
 #
