@@ -2963,7 +2963,7 @@ _slot_run_issue() {
 3. project-manager サブエージェントを **design-review モード** で起動
    - 成果物は ${SPEC_DIR_REL}/ 配下の requirements / design / tasks のみ（実装コードは含めない）
    - title: \`spec(#${NUMBER}): <1 行サマリ>\`
-   - Issue ラベル: claude-picked-up → awaiting-design-review に付け替え
+   - Issue ラベル: claude-claimed → awaiting-design-review に付け替え
    - Issue にコメントで設計 PR リンクと案内を投稿
 
 この設計 PR が merge されるまで、実装フェーズには進みません。人間が merge した後、
