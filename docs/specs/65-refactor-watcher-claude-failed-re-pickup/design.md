@@ -98,7 +98,7 @@ cron tick → flock → process_quota_resume → process_merge_queue
   Checkpoint Resume (#68) の opt-in 機能** であり、worktree reset 後 / claim 後に
   動く。これは「同じ branch に既に PR があったらパイプライン途中で停止」の責務で、
   「claim 前に Issue ↔ PR 連携を見て Dispatcher を skip させる」責務とは別。本機能は
-  GraphQL `closingIssuesReferences` で Issue 視点の linked PR を取得する別経路を
+  GraphQL `closedByPullRequestsReferences` で Issue 視点の linked PR を取得する別経路を
   追加する（責務分離）。
 
 ### Architecture Pattern & Boundary Map
@@ -130,7 +130,7 @@ flowchart TD
   B --> C[既存 Processor 群<br/>変更なし]
   C --> D["_dispatcher_run<br/>gh issue list (フィルタ変更なし)"]
   D --> E{各 Issue}
-  E --> F1["★ check_existing_impl_pr<br/>GraphQL closingIssuesReferences"]
+  E --> F1["★ check_existing_impl_pr<br/>GraphQL closedByPullRequestsReferences"]
   F1 -->|OPEN/MERGED 検出| F2["skip + 識別 prefix ログ<br/>claim ラベル付与せず"]
   F1 -->|該当無し or<br/>CLOSED のみ| F3["claim<br/>(claude-claimed 付与)"]
   F1 -->|GraphQL 失敗| F2
@@ -148,7 +148,7 @@ flowchart TD
   - 既存の Phase C Dispatcher セマンティクス（claim → fork → wait）を変えず、claim の
     前に「Issue → PR の整合性チェック」を 1 段追加するだけ。
 - ドメイン／機能境界:
-  - **Issue Linkage Probe**: GraphQL `closingIssuesReferences` で linked PR を取得し、
+  - **Issue Linkage Probe**: GraphQL `closedByPullRequestsReferences` で linked PR を取得し、
     OPEN / MERGED / CLOSED の判定と impl PR / design PR 区別を行う。新規関数
     `check_existing_impl_pr` の単一責務。`_dispatcher_run` から呼ばれる。
   - **Recovery Documentation**: ラベル description / escalation コメント / README の
@@ -174,7 +174,7 @@ flowchart TD
 | Layer | Choice / Version | Role in Feature | Notes |
 |-------|------------------|-----------------|-------|
 | CLI / Orchestration | bash 4+ | Dispatcher / Pre-Claim Filter / Logger | 既存スクリプトに追記 |
-| External API | GitHub GraphQL (`gh api graphql`) | linked PR 取得 (`closingIssuesReferences`) | 本 watcher で初の GraphQL 利用。Phase A / DRR は REST のみ |
+| External API | GitHub GraphQL (`gh api graphql`) | linked PR 取得 (`closedByPullRequestsReferences`) | 本 watcher で初の GraphQL 利用。Phase A / DRR は REST のみ |
 | External API (補助) | GitHub REST (`gh issue list` / `gh issue edit` / `gh issue comment`) | 既存と同じ。本機能では **追加呼び出しなし** | Dispatcher が既に呼んでいる API のみ |
 | Data Processing | jq | GraphQL response パース、impl/design 判別、複数 PR の state 集約 | 既存依存 |
 | Time Control | timeout | GraphQL 呼び出しの hang ガード | 既存依存（Phase A / DRR と同じ規律） |
@@ -185,9 +185,9 @@ GraphQL を選択した根拠（Open Question 1 の確定）:
 
 - impl PR は PjM template により本文に **`Closes #<N>`** で記述される
   （`repo-template/.claude/agents/project-manager.md:186` 確認済み。`Closes` は GitHub の
-  auto-close キーワードの 1 つ）。よって `closingIssuesReferences` に **必ず現れる**。
+  auto-close キーワードの 1 つ）。よって `closedByPullRequestsReferences` に **必ず現れる**。
 - design PR は `Refs #<N>` 形式（同 PjM template）で auto-close キーワード非該当の
-  ため `closingIssuesReferences` に **現れない**。これは設計上の好都合で、本機能では
+  ため `closedByPullRequestsReferences` に **現れない**。これは設計上の好都合で、本機能では
   **GraphQL 結果に含まれた PR は impl 候補とみなしてよい**（design は構造的に弾かれる）。
   ただし安全側として head branch pattern `^claude/issue-<N>-impl(-resume)?-` での確認も
   行い、未知の branch pattern は **「impl とみなして skip」** に倒す（false positive
@@ -266,7 +266,7 @@ README.md                         # ★ 手動復旧節を新規追加
 | 1.3 | MERGED impl PR → skip + claim ラベル付与せず | `check_existing_impl_pr` / `_dispatcher_run` | `issue-watcher.sh` | Pre-Claim Filter |
 | 1.4 | skip 理由（issue / PR / state）を識別 prefix でログ | `pclp_log` / `check_existing_impl_pr` | `issue-watcher.sh` | Pre-Claim Filter |
 | 1.5 | 不在 / CLOSED のみは pickup 続行 | `check_existing_impl_pr` / `_dispatcher_run` | `issue-watcher.sh` | Pre-Claim Filter |
-| 1.6 | impl PR と design PR を区別、design は判定対象外 | `check_existing_impl_pr` (head pattern + closingIssuesReferences) | `issue-watcher.sh` | Pre-Claim Filter |
+| 1.6 | impl PR と design PR を区別、design は判定対象外 | `check_existing_impl_pr` (head pattern + closedByPullRequestsReferences) | `issue-watcher.sh` | Pre-Claim Filter |
 | 1.7 | API 失敗 → skip + 識別 prefix ログ（fail-safe） | `check_existing_impl_pr` / `pclp_warn` | `issue-watcher.sh` | Pre-Claim Filter |
 | 2.1 | `claude-failed` description に復旧手順 | label spec (line 71) | `idd-claude-labels.sh` × 2 | Label Provisioning |
 | 2.2 | description が 100 文字以内 | label spec | `idd-claude-labels.sh` × 2 | Label Provisioning |
@@ -311,7 +311,7 @@ README.md                         # ★ 手動復旧節を新規追加
 
 **Responsibilities & Constraints**
 
-- 主責務: GraphQL `closingIssuesReferences` を 1 query 呼ぶ → linked PR の集合を
+- 主責務: GraphQL `closedByPullRequestsReferences` を 1 query 呼ぶ → linked PR の集合を
   取得 → impl / design 判別 → state 集約 → skip 判定値を stdout / exit code で返す。
 - ドメイン境界: Issue 視点の linked PR 集合を扱う（branch 視点の
   `stage_checkpoint_find_impl_pr` とは別境界）。GraphQL 失敗 / 4xx / 5xx /
@@ -363,7 +363,7 @@ check_existing_impl_pr() {
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     issue(number: $number) {
-      closingIssuesReferences(first: 20) {
+      closedByPullRequestsReferences(first: 20, includeClosedPrs: true) {
         nodes {
           number
           state            # OPEN | CLOSED | MERGED
@@ -375,7 +375,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
 }
 ```
 
-- `closingIssuesReferences` は GitHub の auto-close キーワード（`Closes` / `Fixes` /
+- `closedByPullRequestsReferences` は GitHub の auto-close キーワード（`Closes` / `Fixes` /
   `Resolves`）に該当する PR のみを返す。
 - impl PR は PjM template で `Closes #<N>` を使うので必ず含まれる。
 - design PR は `Refs #<N>` のみ使用するので **構造的に含まれない** → 判別ロジック
@@ -384,7 +384,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
 ##### 判別ロジック (impl / design)
 
 ```
-linked_prs = (closingIssuesReferences.nodes from GraphQL)
+linked_prs = (closedByPullRequestsReferences.nodes from GraphQL)
 
 # 1. 構造的にすべて impl 候補（Refs # は含まれないため）。
 #    安全側の二重ガードとして head pattern を併用。
@@ -561,7 +561,7 @@ EOF
 - 既存 Dispatcher の構造（claim → fork → wait）を保ったまま、per-issue iteration の
   先頭に 4 行程度の if ブロックを追加するだけ。
 - 既存 `gh issue list` のフィルタは **変更しない**（Req 4.5 の互換性 / NFR 1.5）。
-  pickup 候補の絞り込みクエリで `closingIssuesReferences` 起点の除外を server-side
+  pickup 候補の絞り込みクエリで `closedByPullRequestsReferences` 起点の除外を server-side
   で表現する API は GitHub が提供していない（`-search` の `linked-pr:` 述語は無い）
   ため、client-side filter のみで実現する。
 
@@ -614,7 +614,7 @@ while IFS= read -r issue; do
   "data": {
     "repository": {
       "issue": {
-        "closingIssuesReferences": {
+        "closedByPullRequestsReferences": {
           "nodes": [
             {
               "number": 62,
@@ -668,7 +668,7 @@ GraphQL 結果が信頼できないなら **判定を見送って人間に委ね
 | API Network Error | timeout / DNS 失敗 / TCP リセット | warn ログ + skip（exit 1）。次 cycle で再試行 |
 | API HTTP Error | 4xx (auth) / 5xx (server) | warn ログ + skip。`gh api graphql` の exit code を観測 |
 | GraphQL Error | `errors[].type == "RATE_LIMITED"` / `"NOT_FOUND"` | warn ログ + skip |
-| Schema Mismatch | `closingIssuesReferences` 不在 / 型不正 | warn ログ + skip。GraphQL schema は GitHub 側で安定（GA 済み API）だが防衛的に handle |
+| Schema Mismatch | `closedByPullRequestsReferences` 不在 / 型不正 | warn ログ + skip。GraphQL schema は GitHub 側で安定（GA 済み API）だが防衛的に handle |
 | jq Parse Error | レスポンス JSON 不正 | warn ログ + skip |
 | Empty issue_number | 呼び出し側ミス | error ログ + skip + return 1 |
 
@@ -804,7 +804,7 @@ Phase 1 では **per-cycle キャッシュは導入しない**（YAGNI）。pick
 
 | # | 論点 | 採用 | 根拠 |
 |---|------|------|------|
-| 1 | linked impl PR 検出 API 方式 | **GraphQL `closingIssuesReferences`** | impl PR は PjM template で `Closes #<N>`（auto-close キーワード）を必ず使うため、GraphQL に確実に現れる。design PR は `Refs #<N>` のみ使うため構造的に弾かれる。1 query で完結し、REST `gh pr list --search` のような text search の token 分解事故（Issue #80）も起きない |
+| 1 | linked impl PR 検出 API 方式 | **GraphQL `closedByPullRequestsReferences`** | impl PR は PjM template で `Closes #<N>`（auto-close キーワード）を必ず使うため、GraphQL に確実に現れる。design PR は `Refs #<N>` のみ使うため構造的に弾かれる。1 query で完結し、REST `gh pr list --search` のような text search の token 分解事故（Issue #80）も起きない |
 | 2 | 判定タイミング | **Dispatcher の per-issue ループ先頭（claim 前）** | 要件 1.1 で「claim する前」が要求。worktree 操作前に skip して resource 消費を回避。Slot Runner 内ではなく Dispatcher 内に置くことで、Phase C 並列化の per-slot 競合を生まない |
 | 3 | impl / design 判別 | **GraphQL の包含 + head pattern `^claude/issue-<N>-impl(-resume)?-` 二重ガード** | GraphQL 包含で structural に弾かれるが、未知 branch pattern を **「impl とみなして skip」** に倒す（false positive 許容、false negative＝既存 PR 破壊 を回避） |
 | 4 | CLOSED PR (非 merge) の扱い | **続行（pickup する）** | 要件 1.5 / Out of Scope と整合。人間が意図的に PR を close した場合の再起動を尊重する |

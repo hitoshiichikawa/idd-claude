@@ -3389,7 +3389,8 @@ pclp_error() {
 #            リスクを最小化するため（Req 1.7 / NFR 4.2）。
 #
 # 判別ロジック:
-#   linked_prs = closingIssuesReferences.nodes（GraphQL は auto-close キーワード
+#   linked_prs = closedByPullRequestsReferences.nodes（Issue 視点の逆引き field、
+#                GitHub は auto-close キーワード
 #                `Closes` / `Fixes` / `Resolves` でのみ収集 → impl PR 専用に集約される）
 #   for pr in linked_prs:
 #     if headRefName が `^claude/issue-${N}-impl(-resume)?-` → impl 採用
@@ -3424,14 +3425,18 @@ check_existing_impl_pr() {
     return 1
   fi
 
-  # GraphQL クエリ: closingIssuesReferences で linked PR を取得。
+  # GraphQL クエリ: Issue 視点の `closedByPullRequestsReferences` で linked PR を取得。
+  # （PullRequest 側 `closingIssuesReferences` の Issue 側 reciprocal field。
+  # `Issue.closingIssuesReferences` は schema 上存在しないので使えない。）
+  # `includeClosedPrs: true` を明示して CLOSED PR も含めて返させる（CLOSED のみなら
+  # continue する判定ロジックを正しく機能させるため / Req 1.5）。
   # `first: 20` は idd-claude の typical（impl + impl-resume を数回繰り返しても数件レベル）
   # に対して十分なマージン。
   # shellcheck disable=SC2016  # `$owner` / `$repo` / `$number` は GraphQL 変数記法であり bash 展開ではない（`-F` で値を渡す）
   local query='query($owner: String!, $repo: String!, $number: Int!) {
     repository(owner: $owner, name: $repo) {
       issue(number: $number) {
-        closingIssuesReferences(first: 20) {
+        closedByPullRequestsReferences(first: 20, includeClosedPrs: true) {
           nodes {
             number
             state
@@ -3474,7 +3479,7 @@ check_existing_impl_pr() {
 
   # nodes 取得（schema mismatch / null は防衛的に空配列扱い）。
   local nodes_json
-  if ! nodes_json=$(echo "$response" | jq -c '.data.repository.issue.closingIssuesReferences.nodes // []' 2>/dev/null); then
+  if ! nodes_json=$(echo "$response" | jq -c '.data.repository.issue.closedByPullRequestsReferences.nodes // []' 2>/dev/null); then
     pclp_warn "skip issue=#${issue_number} reason=jq-parse-error"
     return 1
   fi
@@ -3515,7 +3520,7 @@ check_existing_impl_pr() {
 
     # impl/design 判別
     if [[ "$pr_head" =~ $design_pattern ]]; then
-      # design PR が closingIssuesReferences に含まれるのは設計上の異常
+      # design PR が closedByPullRequestsReferences に含まれるのは設計上の異常
       # （PjM template は `Refs #N` を使うため）。warn だけ出して採用しない。
       pclp_warn "ignore issue=#${issue_number} pr=#${pr_num} head=${pr_head} reason=design-pr-in-closing-refs"
       continue

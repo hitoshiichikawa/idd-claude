@@ -23,10 +23,10 @@
   - 配置位置: `_dispatcher_run` より前で、かつ logger を使う関数より前（design.md File Structure Plan 参照）
   - _Requirements: NFR 2.1_
 - [x] 2.2 `check_existing_impl_pr <issue_number>` 関数本体の実装
-  - GraphQL query は `closingIssuesReferences(first: 20) { nodes { number, state, headRefName } }`（design.md GraphQL Query 節）
+  - GraphQL query は `closedByPullRequestsReferences(first: 20) { nodes { number, state, headRefName } }`（design.md GraphQL Query 節）
   - `gh api graphql -f query=... -F owner=... -F repo=... -F number=...` を `timeout "${DRR_GH_TIMEOUT:-${MERGE_QUEUE_GIT_TIMEOUT:-60}}"` でラップ（既存規律 / 新 env var 導入禁止）
   - 入力検証: 空文字 / 非数値で warn + exit 1
-  - jq で `.data.repository.issue.closingIssuesReferences.nodes` 取得
+  - jq で `.data.repository.issue.closedByPullRequestsReferences.nodes` 取得
   - impl / design 判別: `headRefName` を `^claude/issue-${N}-impl(-resume)?-` で照合、design pattern (`^claude/issue-${N}-design-`) は warn 出して無視、未知 pattern は **safe-side で impl 扱い**（design.md 判別ロジック節）
   - state 集約: `OPEN` あり → skip / `MERGED` のみ → skip / `CLOSED` のみ → continue / 該当無し → continue（design.md State 集約規則）
   - 出力ログ: design.md Log Format 節の固定 key=value 形式（`issue=#N pr=#P state=S reason=R`）
