@@ -74,8 +74,8 @@
   - _Boundary: Recovery Documentation_
   - _Depends: 4.1_
 
-- [ ] 5. README への手動復旧節の追加（Req 4 系）
-- [ ] 5.1 README.md に手動復旧節を新規追加
+- [x] 5. README への手動復旧節の追加（Req 4 系）
+- [x] 5.1 README.md に手動復旧節を新規追加
   - 配置: 既存「失敗時」節（line 521-524）を拡充するか、その直下に新規 h3 / h4 として追加
   - 構成（design.md File Structure Plan 参照）:
     1. PR が既に作成済みの場合の手順: `ready-for-review` 先付与 → `claude-failed` 除去（Req 4.3）
