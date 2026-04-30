@@ -2737,9 +2737,49 @@ ${design_pr_note}
 EOF
 }
 
+# ─── extract_review_result_token <path> ───
+#
+# review-notes.md 全文を scan し、`RESULT: approve` または `RESULT: reject` トークンの
+# **最後のマッチ**を採用して `approve` / `reject` を stdout に echo する（Issue #63）。
+#
+# 抽出ルール（Issue #63 Req 1.x）:
+#   - 全文 scan（行頭固定マッチではない）
+#   - 行頭・行末のバッククォート / bullet (`-` `*`) / blockquote (`>`) / 引用符 / 空白等の
+#     decoration を許容（前後の文字を問わない）
+#   - 同一行内に末尾プローズが続いても許容（例: `RESULT: approve ...`）
+#   - 複数マッチ時は **ファイル順で最後のマッチ** を採用
+#   - lowercase の `approve` / `reject` のみ受理（`Approve` / `APPROVE` は不可、Req 1.7）
+#   - "approve" / "reject" の前後は word boundary 相当（後続が単語文字なら不採用）
+#
+# 戻り値:
+#   0 = マッチあり（stdout に approve / reject）
+#   1 = マッチなし（stdout は空、ファイル無も含む）
+extract_review_result_token() {
+  local path="$1"
+  [ -f "$path" ] || return 1
+
+  # `RESULT:` の後に 1 個以上の空白、続いて `approve` または `reject`、
+  # その直後が単語文字でない（または行末）場合のみマッチ。
+  # grep -oE で全マッチを行ごとに抽出 → tail -1 で最後の 1 件を採用。
+  # set -euo pipefail 下で grep no-match (rc=1) を呑み込むため `|| true` を付与。
+  local matches last
+  matches=$(grep -oE 'RESULT:[[:space:]]+(approve|reject)([^[:alnum:]_]|$)' "$path" 2>/dev/null || true)
+  [ -n "$matches" ] || return 1
+  last=$(printf '%s\n' "$matches" | tail -n 1)
+
+  # 末尾の境界文字を取り除いて approve / reject だけを残す。
+  case "$last" in
+    *approve*) echo "approve"; return 0 ;;
+    *reject*)  echo "reject";  return 0 ;;
+  esac
+  return 1
+}
+
 # ─── parse_review_result <path> ───
 #
-# review-notes.md から「最後に出現する RESULT 行」と Findings の Category / Target を抽出する。
+# review-notes.md から RESULT 行（最後に出現するもの）と Findings の Category / Target を
+# 抽出する。RESULT 行抽出は `extract_review_result_token` に委譲し、装飾・インライン記述
+# (Issue #63) に耐性を持つ。
 # stdout に TSV 1 行で出力: <result>\t<categories>\t<target_ids>
 #
 # - result      ∈ {approve, reject}
@@ -2748,22 +2788,17 @@ EOF
 #
 # 戻り値:
 #   0 = 抽出成功
-#   2 = ファイル無 / RESULT 行欠落 / 値不正
+#   2 = ファイル無 / RESULT トークン欠落 / 値不正
 parse_review_result() {
   local path="$1"
   if [ ! -f "$path" ]; then
     return 2
   fi
 
-  # 最後に出現する RESULT 行のみを採用（fail-safe）。
-  # 行頭がそのまま `RESULT: approve` または `RESULT: reject` のもののみ受け付ける。
-  local result_line
-  result_line=$(grep -E '^RESULT: (approve|reject)$' "$path" | tail -1 || true)
-  if [ -z "$result_line" ]; then
+  local result
+  if ! result=$(extract_review_result_token "$path"); then
     return 2
   fi
-
-  local result="${result_line#RESULT: }"
   case "$result" in
     approve|reject) ;;
     *) return 2 ;;
@@ -2808,10 +2843,15 @@ run_reviewer_stage() {
   local round="$1"
   local prev_result="(none)"
 
-  # round=2 の場合、直前 review-notes.md の RESULT 行を Reviewer に伝える
+  # round=2 の場合、直前 review-notes.md の RESULT 行を Reviewer に伝える。
+  # Issue #63: 装飾・インライン記述に耐性のある extract_review_result_token に委譲。
+  # トークンが見つからない場合は従来どおり "(none)" を維持して prompt 互換性を保つ。
   local notes_path="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
   if [ "$round" = "2" ] && [ -f "$notes_path" ]; then
-    prev_result=$(grep -E '^RESULT: (approve|reject)$' "$notes_path" | tail -1 || echo "(none)")
+    local _prev_token
+    if _prev_token=$(extract_review_result_token "$notes_path"); then
+      prev_result="RESULT: $_prev_token"
+    fi
   fi
 
   rv_log "round=$round start (model=$REVIEWER_MODEL, max-turns=$REVIEWER_MAX_TURNS)" >> "$LOG"

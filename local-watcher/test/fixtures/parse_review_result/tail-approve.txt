@@ -1,0 +1,20 @@
+# Review Notes
+
+<!-- idd-claude:review round=1 model=claude-opus-4-7 timestamp=2026-04-30T00:00:00Z -->
+
+## Reviewed Scope
+- Branch: claude/issue-99-impl-sample
+- HEAD commit: deadbeef
+- Compared to: main..HEAD
+
+## Verified Requirements
+- 1.1 — sample test
+- 1.2 — sample test
+
+## Findings
+なし
+
+## Summary
+all green.
+
+RESULT: approve
