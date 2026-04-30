@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. ラベル description の更新（Req 2 系）
-- [ ] 1.1 `idd-claude-labels.sh` の `claude-failed` description を復旧手順入り文言に更新（local 側） (P)
+- [x] 1.1 `idd-claude-labels.sh` の `claude-failed` description を復旧手順入り文言に更新（local 側） (P)
   - `local-watcher` 側ではなく `.github/scripts/idd-claude-labels.sh` の LABELS 配列を更新
   - line 71 の `"claude-failed|e74c3c|【Issue 用】 自動実行が失敗"` を design.md 採用案 A の文言（`【Issue 用】 自動実行が失敗（復旧時は ready-for-review を先に付与してから外す）`、56 文字）に置換
   - **name と color は変更しない**（Req 2.4 / NFR 1.4）
