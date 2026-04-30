@@ -64,7 +64,7 @@ LABELS=(
   "claude-claimed|c39bd3|Claude Code が claim 済（Triage 実行中）"
   "claude-picked-up|9b59b6|Claude Code 実行中"
   "ready-for-review|2ecc71|PR 作成完了"
-  "claude-failed|e74c3c|自動実行が失敗"
+  "claude-failed|e74c3c|自動実行が失敗（復旧時は ready-for-review を先に付与してから外す）"
   "skip-triage|95a5a6|Triage をスキップ"
   "needs-rebase|fbca04|approved PR で base が古い／conflict が発生済み（Phase A: Merge Queue Processor が付与）"
   "needs-iteration|d4c5f9|PR レビューコメントの反復対応待ち（#26 PR Iteration Processor が処理）"
