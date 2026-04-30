@@ -4543,6 +4543,18 @@ _dispatcher_run() {
     local issue_number
     issue_number=$(echo "$issue" | jq -r '.number')
 
+    # ── Pre-Claim Filter (Issue #65 Req 1.1〜1.7) ──
+    # claim 直前に linked impl PR を GraphQL で確認し、OPEN/MERGED が存在すれば
+    # 当該サイクルを skip する。claim ラベル（claude-claimed）を一切付与しないため、
+    # 次サイクル以降の `gh issue list` フィルタからも除外されず、人間が PR を解消
+    # するか `auto-dev` を外すまで本 Issue を触らない（事故防止 / Req 1.2 / 1.3）。
+    # check_existing_impl_pr 内で skip 判定行は pclp_log/warn で記録済み（NFR 2.1〜2.3）。
+    # GraphQL 失敗 / レート制限も内部で skip 側に倒される（fail-safe / Req 1.7 / NFR 4.2）。
+    # PR 不在の通常運用では exit 0 で素通り = 本機能導入前と完全等価（NFR 1.5）。
+    if ! check_existing_impl_pr "$issue_number"; then
+      continue
+    fi
+
     # ── 空き slot 探索（busy なら 1 件完了するまで待機）──
     local slot=""
     while true; do
