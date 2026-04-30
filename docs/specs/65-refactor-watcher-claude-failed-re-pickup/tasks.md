@@ -87,14 +87,14 @@
   - **`repo-template/CLAUDE.md` には追記しない**（design.md Migration Strategy 節 / consumer repo の責務範囲外）
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5_
 
-- [ ] 6. 静的解析と dogfood test（NFR 3 系）
+- [x] 6. 静的解析と dogfood test（NFR 3 系）
 - [x] 6.1 shellcheck / 互換性検証
   - `shellcheck local-watcher/bin/issue-watcher.sh .github/scripts/idd-claude-labels.sh repo-template/.github/scripts/idd-claude-labels.sh` で warning 0
   - cron-like 最小 PATH での起動確認: `env -i HOME=$HOME PATH=/usr/bin:/bin bash -c 'command -v claude gh jq flock git timeout'`
   - 既存 dry run: `REPO=owner/test REPO_DIR=/tmp/test-repo $HOME/bin/issue-watcher.sh` を対象なし状態で流し、`処理対象の Issue なし` で正常終了すること（NFR 1.5 / NFR 1.3 構造的検証）
   - 既存 cron 登録文字列（`*/2 * * * * REPO=... REPO_DIR=... $HOME/bin/issue-watcher.sh ...`）を 1 文字も変更していないこと
   - _Requirements: NFR 1.1, NFR 1.2, NFR 1.3, NFR 3.1, NFR 3.2_
-- [ ] 6.2 dogfood test 手順記述（PR 本文 Test plan 用）
+- [x] 6.2 dogfood test 手順記述（PR 本文 Test plan 用）
   - **dogfood-A (OPEN PR シナリオ)**: test Issue を立て `auto-dev` 付与 → 手動 impl PR を作成（branch `claude/issue-<N>-impl-test-<slug>`、本文に `Closes #<N>`、空 commit OK）→ Issue に `claude-failed` 付与 → `claude-failed` のみ除去（誤操作シナリオ）→ watcher を 1 cycle 走らせ、`pre-claim-probe: skip issue=#N pr=#P state=OPEN` ログが出ること、`claude-claimed` ラベルが付かないこと、worktree が触られないことを確認（NFR 3.3）
   - **dogfood-B (CLOSED PR シナリオ)**: 同様に PR を作って `gh pr close <PR>`（merge せず close）→ watcher 1 cycle で `pre-claim-probe: continue issue=#N reason=closed-only pr=#P` ログ → 既存フローに進むことを確認（NFR 3.4）
   - **dogfood-C (PR 不在の通常運用)**: 既存任意 auto-dev Issue で 1 cycle、`pre-claim-probe: continue issue=#N reason=no-linked-impl-pr` ログ → 本機能導入前と同一に Triage / impl が起動することを確認（NFR 1.5 構造的検証）
