@@ -19,6 +19,8 @@
 #   --force          .claude/agents/ / .claude/rules/ / CLAUDE.md について、
 #                    内容差分があれば再 .bak 退避して強制上書き
 #                    （既存 *.bak は once-only 規律で保護されたまま）
+#   --no-labels      対象リポジトリ配置時に走る GitHub ラベル自動セットアップを完全に skip
+#                    （`IDD_CLAUDE_SKIP_LABELS=true` env でも同等の opt-out が可能）
 # =============================================================================
 
 set -euo pipefail
@@ -48,6 +50,15 @@ LOCAL_WATCHER_DIR="$SCRIPT_DIR/local-watcher"
 # 冪等性 / dry-run 制御フラグ（後段の引数パースで上書き可能）
 DRY_RUN=false
 FORCE=false
+
+# ラベル自動セットアップ opt-out 制御
+#   true: ラベルセットアップを完全に skip（`--no-labels` または
+#         `IDD_CLAUDE_SKIP_LABELS=true` env で有効化）
+#   false: 既定（対象リポジトリ配置時にラベルセットアップを試行する）
+SKIP_LABELS=false
+case "${IDD_CLAUDE_SKIP_LABELS:-}" in
+  true|TRUE|True|1|yes|YES) SKIP_LABELS=true ;;
+esac
 
 REPO_PATH=""
 INSTALL_LOCAL=false
@@ -84,8 +95,12 @@ while [[ $# -gt 0 ]]; do
       FORCE=true
       shift
       ;;
+    --no-labels)
+      SKIP_LABELS=true
+      shift
+      ;;
     -h|--help)
-      sed -n '3,21p' "$0"
+      sed -n '3,23p' "$0"
       exit 0
       ;;
     *)
@@ -394,6 +409,171 @@ copy_agents_rules() {
   fi
 }
 
+# ─────────────────────────────────────────────────────────────
+# ラベル自動セットアップ（Issue #85）
+#   テンプレート配置完了直後に対象リポジトリ向けラベルを冪等作成する。
+#   gh 不在 / 未認証 / 権限なし / API 失敗時は skip し install 全体を止めない（fail-soft）。
+#   `--no-labels` または `IDD_CLAUDE_SKIP_LABELS=true` で完全 opt-out。
+#   `--dry-run` 時は API 呼び出しせず、これから走る予定だけを表示する。
+# ─────────────────────────────────────────────────────────────
+
+# log_label_action <STATUS> <message>
+#   ラベルセットアップ系の出力を grep 可能な統一書式で記録する（NFR 2.3）。
+#   STATUS は OK / SKIP / DRY-RUN / FAIL のいずれか。
+log_label_action() {
+  local status="$1"
+  local message="$2"
+  printf '%s %-9s [labels] %s\n' "[INSTALL]" "$status" "$message"
+}
+
+# print_label_manual_command <repo_or_path>
+#   skip 時にユーザーが手動実行できる完全コマンド文字列を 1 ブロックで提示する（Req 3.5, 3.6）。
+#   引数:
+#     - owner/repo 形式が解決できていれば --repo 付き、解決できていなければ
+#       repo path に cd してからの実行例の両方を出す
+print_label_manual_command() {
+  local repo="$1"
+  local repo_path="$2"
+  cat <<MANUAL
+   手動でラベル一括作成を実行するには:
+       cd $repo_path
+       bash .github/scripts/idd-claude-labels.sh
+     または repo 外から:
+       bash $repo_path/.github/scripts/idd-claude-labels.sh${repo:+ --repo $repo}
+MANUAL
+}
+
+# resolve_repo_slug <repo_path>
+#   対象 repo path から `owner/repo` を解決する（fail-soft）。
+#   解決順序:
+#     1. gh repo view --json nameWithOwner
+#     2. git -C remote get-url origin → 正規表現抽出
+#   いずれも失敗したら空文字列を stdout に返す（呼び出し側で skip 判断）。
+resolve_repo_slug() {
+  local repo_path="$1"
+  local slug=""
+
+  if command -v gh >/dev/null 2>&1; then
+    if slug=$(gh repo view --json nameWithOwner -q .nameWithOwner -R "$repo_path" 2>/dev/null); then
+      if [ -n "$slug" ]; then
+        printf '%s' "$slug"
+        return 0
+      fi
+    fi
+  fi
+
+  # gh が解決できない / repo path 内が clone 済みでない場合: git remote から推測
+  local remote=""
+  if remote=$(git -C "$repo_path" remote get-url origin 2>/dev/null); then
+    # SSH / HTTPS / git 形式すべて対応
+    # 例: git@github.com:owner/repo.git → owner/repo
+    #     https://github.com/owner/repo.git → owner/repo
+    slug=$(printf '%s\n' "$remote" \
+      | sed -E -e 's#^[^:]+://[^/]+/##' \
+              -e 's#^git@[^:]+:##' \
+              -e 's#\.git$##' \
+              -e 's#/$##')
+    if printf '%s' "$slug" | grep -Eq '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$'; then
+      printf '%s' "$slug"
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+# setup_repo_labels <repo_path>
+#   対象 repo へのラベル一括作成を起動する。fail-soft 設計のため、エラーが起きても
+#   exit 0 で戻る。出力は log_label_action / print_label_manual_command に集約する。
+setup_repo_labels() {
+  local repo_path="$1"
+  local labels_script="$repo_path/.github/scripts/idd-claude-labels.sh"
+
+  echo ""
+  echo "🏷  GitHub ラベル自動セットアップ"
+
+  # opt-out: --no-labels / IDD_CLAUDE_SKIP_LABELS
+  if [ "$SKIP_LABELS" = "true" ]; then
+    log_label_action "SKIP" "opt-out (--no-labels / IDD_CLAUDE_SKIP_LABELS)"
+    print_label_manual_command "" "$repo_path"
+    return 0
+  fi
+
+  # gh 未インストール → skip
+  #   dry-run でも gh 不在を可視化したいので最初に判定する
+  if ! command -v gh >/dev/null 2>&1; then
+    log_label_action "SKIP" "gh CLI not found"
+    print_label_manual_command "" "$repo_path"
+    return 0
+  fi
+
+  # 対象 repo slug 解決（Req 1.1, 1.5）
+  #   dry-run でも実 git remote から解決可能なので先に行う
+  local repo_slug=""
+  if ! repo_slug=$(resolve_repo_slug "$repo_path"); then
+    repo_slug=""
+  fi
+  if [ -z "$repo_slug" ]; then
+    log_label_action "SKIP" "could not resolve owner/repo from $repo_path"
+    print_label_manual_command "" "$repo_path"
+    return 0
+  fi
+
+  # dry-run: 実 API 呼び出しせず、予定を表示する（Req 5.4）
+  #   dry-run 下ではラベルスクリプト自体は配置されない可能性があるため、ここで早期 return
+  if [ "$DRY_RUN" = "true" ]; then
+    log_label_action "DRY-RUN" "would run: bash $labels_script --repo $repo_slug"
+    return 0
+  fi
+
+  # gh 認証チェック（Req 3.2）
+  if ! gh auth status >/dev/null 2>&1; then
+    log_label_action "SKIP" "gh CLI is not authenticated (run: gh auth login)"
+    print_label_manual_command "" "$repo_path"
+    return 0
+  fi
+
+  # 配置されたラベルスクリプトの存在確認（自分自身が配置したはずだが念のため）
+  if [ ! -f "$labels_script" ]; then
+    log_label_action "SKIP" "labels script not found: $labels_script"
+    return 0
+  fi
+
+  # 実行: 既存 idd-claude-labels.sh の interface を変更せず呼び出す（Req 6.3）
+  #   - --repo owner/name を渡す
+  #   - --force は付けない（既存ラベルの color/description を上書きしない）（Req 2.5）
+  #   - bash で起動（実行ビット欠落でも動かせる保険）
+  echo "   対象: $repo_slug"
+  local labels_output=""
+  local labels_rc=0
+  if labels_output=$(bash "$labels_script" --repo "$repo_slug" 2>&1); then
+    labels_rc=0
+  else
+    labels_rc=$?
+  fi
+
+  # 全行をユーザーに見せる
+  printf '%s\n' "$labels_output"
+
+  # 集計行を取り出して要約（Req 5.1）
+  local created exists updated failed
+  created=$(printf '%s\n' "$labels_output" | sed -n 's/^[[:space:]]*新規作成:[[:space:]]*//p' | tail -n1)
+  exists=$(printf '%s\n' "$labels_output" | sed -n 's/^[[:space:]]*既存スキップ:[[:space:]]*//p' | tail -n1)
+  updated=$(printf '%s\n' "$labels_output" | sed -n 's/^[[:space:]]*上書き更新:[[:space:]]*//p' | tail -n1)
+  failed=$(printf '%s\n' "$labels_output" | sed -n 's/^[[:space:]]*失敗:[[:space:]]*//p' | tail -n1)
+
+  if [ "$labels_rc" -eq 0 ]; then
+    log_label_action "OK" "created=${created:-?} exists=${exists:-?} updated=${updated:-?} failed=${failed:-0}"
+    return 0
+  fi
+
+  # rc != 0: API / 権限 / レート制限などで一部または全部失敗（Req 3.3, 3.4）
+  log_label_action "FAIL" "label setup partially failed (created=${created:-?} failed=${failed:-?}, rc=$labels_rc)"
+  print_label_manual_command "$repo_slug" "$repo_path"
+  # fail-soft: install 全体は止めない
+  return 0
+}
+
 # 対話モード（引数なし）
 if ! $INSTALL_LOCAL && ! $INSTALL_REPO; then
   echo "=== idd-claude install ==="
@@ -463,10 +643,9 @@ if $INSTALL_REPO; then
 
      1. CLAUDE.md をプロジェクト固有の内容に編集（技術スタック・規約など）
      2. git add / commit / push
-     3. GitHub ラベルを一括作成:
-          cd $REPO_PATH
-          bash .github/scripts/idd-claude-labels.sh
-        （repo 外から実行する場合は --repo owner/repo を付与）
+     3. GitHub ラベルを一括作成: 直後にこの install.sh が自動実行します
+        （skip 時のメッセージが出た場合のみ手動 fallback してください。
+         opt-out したい場合は --no-labels を付けて再実行）
      4. 実行基盤の選択:
         - **ローカル watcher のみ使う場合**: 何もしない（.github/workflows/issue-to-pr.yml は
           repository variable 未設定なので自動でスキップされます）
@@ -480,6 +659,12 @@ if $INSTALL_REPO; then
             -f required_pull_request_reviews.required_approving_review_count=1 \\
             -F enforce_admins=false
 REPO_HINT
+
+  # ラベル自動セットアップ（Issue #85）
+  #   - 配置完了直後にラベルを冪等作成して、初回 cron で claim ラベル付与に
+  #     失敗しないようにする
+  #   - fail-soft: 失敗・skip しても install 全体は exit 0 で完走する
+  setup_repo_labels "$REPO_PATH"
 fi
 
 # ─────────────────────────────────────────────────────────────
