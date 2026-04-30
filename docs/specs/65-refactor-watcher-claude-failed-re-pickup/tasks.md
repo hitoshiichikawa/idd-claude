@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. ラベル description の更新（Req 2 系）
+- [x] 1. ラベル description の更新（Req 2 系）
 - [x] 1.1 `idd-claude-labels.sh` の `claude-failed` description を復旧手順入り文言に更新（local 側） (P)
   - `local-watcher` 側ではなく `.github/scripts/idd-claude-labels.sh` の LABELS 配列を更新
   - line 71 の `"claude-failed|e74c3c|【Issue 用】 自動実行が失敗"` を design.md 採用案 A の文言（`【Issue 用】 自動実行が失敗（復旧時は ready-for-review を先に付与してから外す）`、56 文字）に置換
@@ -9,7 +9,7 @@
   - shellcheck で warning 0 を維持（NFR 3.2）
   - _Requirements: 2.1, 2.2, 2.3, 2.4, NFR 1.4, NFR 3.2_
   - _Boundary: Label Provisioning Update_
-- [ ] 1.2 `repo-template/.github/scripts/idd-claude-labels.sh` の同一更新（template 同期） (P)
+- [x] 1.2 `repo-template/.github/scripts/idd-claude-labels.sh` の同一更新（template 同期） (P)
   - line 67 の `"claude-failed|e74c3c|自動実行が失敗"` を `1.1` と同じ文言に更新（template 側は `【Issue 用】` prefix が付かない既存スタイルを踏襲しつつ、復旧手順の本文は同じ）
   - consumer repo への波及は `install.sh --force` 再実行が前提（README に migration note の追加は不要 / 既存運用パターン）
   - shellcheck で warning 0 を維持（NFR 3.2）
