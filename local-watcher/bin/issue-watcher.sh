@@ -3266,6 +3266,209 @@ pclp_error() {
   echo "[$(date '+%F %T')] pre-claim-probe: ERROR: $*" >&2
 }
 
+# ─── check_existing_impl_pr (Issue #65 / Pre-Claim Filter) ───
+#
+# 与えられた Issue 番号にリンクされた impl PR の有無と state を GraphQL で取得し、
+# Dispatcher が当該 Issue を **claim する前** に skip すべきかを判定する。
+#
+# 事故起点の整理（Issue #65 / 2026-04-29 PR #62 orphan 化）:
+#   `claude-failed` 復旧で `claude-failed` のみが除去された Issue は、`auto-dev` が
+#   残っているため次 cron tick で再 pickup されてしまう。`_dispatcher_run` は claim
+#   直前に linked PR の存在を一切確認していなかったため、impl-resume が起動して
+#   既存 PR を `force-push` で破壊する事故が発生する。本関数はその claim 直前の
+#   ガードとして機能する。
+#
+# 入力:  $1 = issue_number（数値）
+# 出力:  exit code で判定結果を返す
+#        - 0 = pickup 続行 OK（linked impl PR なし or CLOSED のみ）
+#        - 1 = skip すべき（OPEN or MERGED の impl PR が存在 / API 失敗 / レート制限）
+# 副作用:
+#        - 判定結果を pclp_log / pclp_warn で 1 行ログ出力
+#          （fixed key=value 形式: `issue=#N pr=#P state=S reason=R` / NFR 2.1〜2.3）
+#        - GitHub GraphQL を `timeout "$DRR_GH_TIMEOUT"` で 1 回呼ぶ（NFR 4.1）
+#
+# Fail-safe: GraphQL 失敗 / timeout / 4xx / 5xx / RATE_LIMITED / 不正レスポンスは
+#            **すべて skip 扱い**（exit 1）に倒す。誤って claim して既存 PR を破壊する
+#            リスクを最小化するため（Req 1.7 / NFR 4.2）。
+#
+# 判別ロジック:
+#   linked_prs = closingIssuesReferences.nodes（GraphQL は auto-close キーワード
+#                `Closes` / `Fixes` / `Resolves` でのみ収集 → impl PR 専用に集約される）
+#   for pr in linked_prs:
+#     if headRefName が `^claude/issue-${N}-impl(-resume)?-` → impl 採用
+#     elif headRefName が `^claude/issue-${N}-design-`     → design として無視 (warn)
+#     else                                                  → 未知 pattern → safe-side で
+#                                                            impl 扱い (false positive
+#                                                            許容、false negative=
+#                                                            既存 PR 破壊 を回避)
+#   states 集約:
+#     OPEN 含む                        → skip (Req 1.2)
+#     MERGED 含み OPEN なし            → skip (Req 1.3)
+#     CLOSED のみ                      → continue (Req 1.5 / Out of Scope と整合)
+#     採用 PR 集合が空                 → continue (Req 1.5 / 通常運用)
+#
+# Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, NFR 1.5, NFR 2.1, NFR 2.2,
+#               NFR 4.1, NFR 4.2
+check_existing_impl_pr() {
+  local issue_number="$1"
+
+  # 入力検証: 空 / 非数値は呼び出し側のミス。fail-safe で skip + error ログ。
+  if [[ ! "$issue_number" =~ ^[1-9][0-9]*$ ]]; then
+    pclp_error "skip issue=#${issue_number:-<empty>} reason=invalid-issue-number"
+    return 1
+  fi
+
+  # $REPO は "owner/repo" 形式（既存 watcher 全体の前提）。GraphQL の引数として分解する。
+  local owner repo_name
+  owner="${REPO%%/*}"
+  repo_name="${REPO##*/}"
+  if [ -z "$owner" ] || [ -z "$repo_name" ] || [ "$owner" = "$REPO" ]; then
+    pclp_error "skip issue=#${issue_number} reason=invalid-repo-env repo=${REPO:-<empty>}"
+    return 1
+  fi
+
+  # GraphQL クエリ: closingIssuesReferences で linked PR を取得。
+  # `first: 20` は idd-claude の typical（impl + impl-resume を数回繰り返しても数件レベル）
+  # に対して十分なマージン。
+  local query='query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      issue(number: $number) {
+        closingIssuesReferences(first: 20) {
+          nodes {
+            number
+            state
+            headRefName
+          }
+        }
+      }
+    }
+  }'
+
+  # `gh api graphql` を timeout でラップ（既存 DRR / Phase A と同じ規律 / NFR 1.1 で
+  # 新規 env var を導入しない）。stderr を捕捉してエラー本文をログに残せるようにする。
+  local response gh_rc
+  response=$(timeout "${DRR_GH_TIMEOUT:-${MERGE_QUEUE_GIT_TIMEOUT:-60}}" \
+    gh api graphql \
+      -f query="$query" \
+      -F owner="$owner" \
+      -F repo="$repo_name" \
+      -F number="$issue_number" 2>&1) && gh_rc=0 || gh_rc=$?
+
+  if [ "$gh_rc" -ne 0 ]; then
+    # レート制限の場合は専用 reason で記録（NFR 4.2）。それ以外は generic な失敗として記録。
+    if echo "$response" | grep -qiE 'rate.?limit|RATE_LIMITED|HTTP 429|too many requests'; then
+      pclp_warn "skip issue=#${issue_number} reason=rate-limited rc=${gh_rc}"
+    else
+      pclp_warn "skip issue=#${issue_number} reason=graphql-failed rc=${gh_rc}"
+    fi
+    return 1
+  fi
+
+  # GraphQL は HTTP 200 でも errors を返すケースがあるため明示的に検査する。
+  if echo "$response" | jq -e '.errors // empty | length > 0' >/dev/null 2>&1; then
+    if echo "$response" | jq -e '.errors // [] | map(.type // "") | any(. == "RATE_LIMITED")' >/dev/null 2>&1; then
+      pclp_warn "skip issue=#${issue_number} reason=rate-limited"
+    else
+      pclp_warn "skip issue=#${issue_number} reason=graphql-errors"
+    fi
+    return 1
+  fi
+
+  # nodes 取得（schema mismatch / null は防衛的に空配列扱い）。
+  local nodes_json
+  if ! nodes_json=$(echo "$response" | jq -c '.data.repository.issue.closingIssuesReferences.nodes // []' 2>/dev/null); then
+    pclp_warn "skip issue=#${issue_number} reason=jq-parse-error"
+    return 1
+  fi
+
+  # impl PR と判別された PR の (number, state) ペアを抽出する。
+  # head pattern マッチング:
+  #   - `claude/issue-${N}-design-...`  → design として無視（warn）
+  #   - その他すべて                     → impl として採用（safe-side / 未知 pattern も
+  #                                       含めて skip 側に倒す）
+  # 安全側に倒すことで未知の branch pattern が原因で既存 PR を壊すリスクを排除する。
+  # 明示的な impl pattern マッチ判定はせず、design 以外を一括で impl 扱いにする。
+  local design_pattern="^claude/issue-${issue_number}-design-"
+
+  # nodes を 1 件ずつ評価して採用/不採用を確定する。
+  # bash の連想配列で state ごとに「最初に見つけた PR 番号」を保持する。
+  declare -A first_pr_by_state=()
+  declare -A best_pr_by_state=()  # MERGED は最大番号 = 最新を採用
+  local node total_nodes
+  total_nodes=$(echo "$nodes_json" | jq 'length')
+  if [ "$total_nodes" -eq 0 ]; then
+    pclp_log "continue issue=#${issue_number} reason=no-linked-impl-pr"
+    return 0
+  fi
+
+  local i=0
+  while [ "$i" -lt "$total_nodes" ]; do
+    node=$(echo "$nodes_json" | jq -c ".[$i]")
+    local pr_num pr_state pr_head
+    pr_num=$(echo "$node" | jq -r '.number // empty')
+    pr_state=$(echo "$node" | jq -r '.state // empty')
+    pr_head=$(echo "$node" | jq -r '.headRefName // empty')
+    i=$((i+1))
+
+    # 必須フィールド欠落は防衛的に skip（GraphQL schema は GA 済み API だが念のため）
+    if [ -z "$pr_num" ] || [ -z "$pr_state" ]; then
+      continue
+    fi
+
+    # impl/design 判別
+    if [[ "$pr_head" =~ $design_pattern ]]; then
+      # design PR が closingIssuesReferences に含まれるのは設計上の異常
+      # （PjM template は `Refs #N` を使うため）。warn だけ出して採用しない。
+      pclp_warn "ignore issue=#${issue_number} pr=#${pr_num} head=${pr_head} reason=design-pr-in-closing-refs"
+      continue
+    fi
+
+    # impl pattern に厳密マッチ または unknown pattern は impl として採用する（safe-side）
+    # 採用された PR の state を集約する。OPEN は最初に見つけた番号を、MERGED は最大番号を、
+    # CLOSED は最初に見つけた番号を採用する。
+    case "$pr_state" in
+      OPEN)
+        if [ -z "${first_pr_by_state[OPEN]:-}" ]; then
+          first_pr_by_state[OPEN]="$pr_num"
+        fi
+        ;;
+      MERGED)
+        if [ -z "${best_pr_by_state[MERGED]:-}" ] || [ "$pr_num" -gt "${best_pr_by_state[MERGED]}" ]; then
+          best_pr_by_state[MERGED]="$pr_num"
+        fi
+        ;;
+      CLOSED)
+        if [ -z "${first_pr_by_state[CLOSED]:-}" ]; then
+          first_pr_by_state[CLOSED]="$pr_num"
+        fi
+        ;;
+      *)
+        # 未知 state（GraphQL schema 拡張等）は防衛的に skip 側に倒す
+        pclp_warn "skip issue=#${issue_number} pr=#${pr_num} reason=unknown-pr-state state=${pr_state}"
+        return 1
+        ;;
+    esac
+  done
+
+  # state 集約結果から判定（OPEN > MERGED > CLOSED の包含関係 / Req 1.2 / 1.3 / 1.5）
+  if [ -n "${first_pr_by_state[OPEN]:-}" ]; then
+    pclp_log "skip issue=#${issue_number} pr=#${first_pr_by_state[OPEN]} state=OPEN reason=existing-impl-pr"
+    return 1
+  fi
+  if [ -n "${best_pr_by_state[MERGED]:-}" ]; then
+    pclp_log "skip issue=#${issue_number} pr=#${best_pr_by_state[MERGED]} state=MERGED reason=existing-impl-pr"
+    return 1
+  fi
+  if [ -n "${first_pr_by_state[CLOSED]:-}" ]; then
+    pclp_log "continue issue=#${issue_number} pr=#${first_pr_by_state[CLOSED]} reason=closed-only"
+    return 0
+  fi
+
+  # 採用 PR 集合が空（すべての node が design として無視 / フィールド欠落 等）
+  pclp_log "continue issue=#${issue_number} reason=no-linked-impl-pr"
+  return 0
+}
+
 # ─── _parallel_validate_slots ───
 #
 # PARALLEL_SLOTS が正の整数として解釈できるかを検証する。
