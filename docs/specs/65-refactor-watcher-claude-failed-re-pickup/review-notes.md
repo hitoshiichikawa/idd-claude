@@ -18,7 +18,7 @@ CLAUDE.md に `## Feature Flag Protocol` 節は存在しないため、本レビ
 - 1.3 — 同関数が MERGED 集合で `return 1`、Dispatcher が `continue`（line 3458）
 - 1.4 — `pclp_log` / `pclp_warn` / `pclp_error` の prefix `pre-claim-probe:` 固定、key=value 形式 `issue=#N pr=#P state=S reason=R`（line 3354-3361 + 各判定ログ）
 - 1.5 — 採用 PR 集合空または CLOSED のみで `return 0`、Dispatcher は既存 claim → fork → wait に合流（line 3462 / 3466）
-- 1.6 — head pattern `^claude/issue-${N}-design-` で design PR を warn 出して除外、それ以外は impl 扱い（line 3437-3443）。GraphQL `closingIssuesReferences` 自体が auto-close キーワード（`Closes`）でのみ収集するため design PR は構造的に含まれず、二重ガードとして head pattern 確認も実装
+- 1.6 — head pattern `^claude/issue-${N}-design-` で design PR を warn 出して除外、それ以外は impl 扱い（line 3437-3443）。GraphQL `closedByPullRequestsReferences` 自体が auto-close キーワード（`Closes`）でのみ収集するため design PR は構造的に含まれず、二重ガードとして head pattern 確認も実装
 - 1.7 — `gh api graphql` rc!=0 / `errors[]` / RATE_LIMITED / jq parse error をすべて `pclp_warn` + `return 1`（line 3413-3431）
 - 2.1 — `.github/scripts/idd-claude-labels.sh` line 71 / `repo-template/.github/scripts/idd-claude-labels.sh` line 67 の `claude-failed` description に「復旧時は ready-for-review を先に付与してから外す」を追記
 - 2.2 — local 側 52 文字 / template 側 42 文字（`wc -m` で確認、いずれも 100 文字制限内）
