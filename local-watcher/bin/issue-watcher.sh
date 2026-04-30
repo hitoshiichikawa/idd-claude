@@ -3427,6 +3427,7 @@ check_existing_impl_pr() {
   # GraphQL クエリ: closingIssuesReferences で linked PR を取得。
   # `first: 20` は idd-claude の typical（impl + impl-resume を数回繰り返しても数件レベル）
   # に対して十分なマージン。
+  # shellcheck disable=SC2016  # `$owner` / `$repo` / `$number` は GraphQL 変数記法であり bash 展開ではない（`-F` で値を渡す）
   local query='query($owner: String!, $repo: String!, $number: Int!) {
     repository(owner: $owner, name: $repo) {
       issue(number: $number) {
