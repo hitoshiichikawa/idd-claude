@@ -53,7 +53,7 @@
   - _Depends: 2.2_
 
 - [ ] 4. escalation コメントへの手動復旧手順統合（Req 3 系）
-- [ ] 4.1 共通関数 `build_recovery_hint <pr_present>` の実装
+- [x] 4.1 共通関数 `build_recovery_hint <pr_present>` の実装
   - 引数: `pr_present` ∈ {`yes`, `no`, `unknown`}（既定 `unknown`）
   - 出力: heredoc で markdown 文字列を stdout に
   - 必須キーワード: `ready-for-review` / `claude-failed` / 「先に付与」「外す」/ 「force-push」「orphan」「再 pickup」（Req 3.1 / 3.2）
