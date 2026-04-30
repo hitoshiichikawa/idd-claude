@@ -175,6 +175,23 @@ SLOT_INIT_HOOK="${SLOT_INIT_HOOK:-}"
 WORKTREE_BASE_DIR="${WORKTREE_BASE_DIR:-$HOME/.issue-watcher/worktrees}"
 SLOT_LOCK_DIR="${SLOT_LOCK_DIR:-$HOME/.issue-watcher}"
 
+# ─── impl-resume 保護 (Issue #67) ───
+# `impl-resume` モードで対象ブランチが origin に既存する場合、当該ブランチの commit を
+# 保持したまま resume する opt-in 機能。既存運用への影響を避けるため初回導入は opt-in
+# （デフォルト false）。`true` の場合のみ、既存 origin branch から resume + fast-forward
+# 制約 push + 非 fast-forward 検出時の `claude-failed` 安全停止が有効化される。
+# `false` の場合は本機能導入前と完全に等価な挙動（origin/main 起点での強制リセット +
+# `git push --force-with-lease`）を維持する（Req 1.1, 1.2, 4.4, NFR 1.1）。
+IMPL_RESUME_PRESERVE_COMMITS="${IMPL_RESUME_PRESERVE_COMMITS:-false}"
+# Developer がタスクを完了した時点で `tasks.md` の対応する未完了マーカー (`- [ ]`) を
+# 完了マーカー (`- [x]`) に書き換え、`docs(tasks): mark <id> as done` で commit する
+# 規約を有効化するフラグ。既定 `true` だが、`IMPL_RESUME_PRESERVE_COMMITS=false`
+# （opt-in 機能 OFF）の状態では Developer prompt 注入経路を通らないため、結果的に
+# 進捗追跡指示は注入されない（NFR 1.1 を構造的に保証）。`false` に明示すると
+# `IMPL_RESUME_PRESERVE_COMMITS=true` の場合でも進捗マーカー更新指示を抑止できる
+# （Req 3.1, 3.2, 3.6）。
+IMPL_RESUME_PROGRESS_TRACKING="${IMPL_RESUME_PROGRESS_TRACKING:-true}"
+
 # Triage プロンプトテンプレート
 TRIAGE_TEMPLATE="${TRIAGE_TEMPLATE:-$HOME/bin/triage-prompt.tmpl}"
 
@@ -2204,6 +2221,67 @@ EOF
       ;;
   esac
 
+  # Issue #67: impl-resume + IMPL_RESUME_PRESERVE_COMMITS=true 時のみ追加注入する
+  # 「resume 指示」セクションと、`IMPL_RESUME_PROGRESS_TRACKING` の値による
+  # `tasks.md` 進捗マーカー更新指示の分岐。既存 prompt の Step 1 / 制約節は変更せず、
+  # 末尾に節を追加するだけ（既存挙動と差分等価 / NFR 1.1）。
+  #
+  # `RESUME_PRESERVE` は `_resume_branch_init` が export している（Slot Runner 内）。
+  # `IMPL_RESUME_PROGRESS_TRACKING` は cron / launchd 経由で渡される env 値。
+  # `_resume_normalize_flag` で 2 値正規化（Req 3.6: "false" 完全一致のみ false、
+  # それ以外は true）。
+  local resume_section=""
+  if [ "$mode" = "impl-resume" ] && [ "${RESUME_PRESERVE:-false}" = "true" ]; then
+    local tracking
+    tracking=$(_resume_normalize_flag tracking_default_on "${IMPL_RESUME_PROGRESS_TRACKING:-}")
+
+    local progress_block
+    if [ "$tracking" = "true" ]; then
+      progress_block=$(cat <<'EOF'
+### tasks.md 進捗追跡（IMPL_RESUME_PROGRESS_TRACKING=true）
+
+- 各タスクが完了した時点で `tasks.md` の対応する未完了マーカー行 `- [ ] N.M ...` を
+  `- [x] N.M ...` に書き換えること
+- 進捗マーカー更新は **専用 commit** として積む:
+  - commit メッセージ: `docs(tasks): mark <task-id> as done`（例: `docs(tasks): mark 1.2 as done`）
+  - 当該 commit には `tasks.md` 以外のファイルを含めない
+- **書き換え禁止領域**: タスク本文 / `_Requirements:_` / `_Boundary:_` / `_Depends:_` /
+  タスク順序 / 親タスクのインデント / deferrable 印 `- [ ]*`（アスタリスク付き）
+- 親タスク（例: `- [ ] 1.`）は、その配下の全子タスクが `- [x]` になったタイミングで親側も
+  `- [x]` に更新する（deferrable 子タスク `- [ ]*` は未完了のまま親完了を判定可能）
+- すべてのタスクが完了済み（未完了マーカー `- [ ]` が残っていない）なら、追加実装を行わず
+  impl-notes.md にその旨を記録すること
+EOF
+)
+    else
+      progress_block=$(cat <<'EOF'
+### tasks.md 進捗追跡（IMPL_RESUME_PROGRESS_TRACKING=false）
+
+- 本サイクルでは `tasks.md` の進捗マーカー（`- [ ]` ↔ `- [x]`）を **書き換えない**
+- 通常通り numeric ID 順にタスクを消化し、impl-notes.md に進捗の根拠を記録する
+EOF
+)
+    fi
+
+    resume_section=$(cat <<EOF
+
+## 既存 commit からの resume（IMPL_RESUME_PRESERVE_COMMITS=true）
+
+このサイクルは **既存の作業ブランチからの resume** で起動されました。
+worktree は \`origin/main\` から fresh init されておらず、\`origin/${BRANCH}\` の先端から
+checkout されています。**過去 Developer / 人間が積んだ commit を温存してください**。
+
+- 作業前に必ず \`git log --oneline main..HEAD\` で既存 commit を確認すること
+- \`git reset\` / \`git rebase\` / branch の切り替えは **禁止**
+- 未完了タスクの判定基準: \`tasks.md\` の \`- [ ]\` 行（未完了マーカー）の先頭から再開
+- 既存 commit と矛盾する変更が必要な場合は、既存 commit を打ち消す追加 commit を積む
+  か、impl-notes.md の「確認事項」に矛盾内容を記載して人間判断を仰ぐ
+
+${progress_block}
+EOF
+)
+  fi
+
   cat <<EOF
 あなたはこのリポジトリの Claude Code オーケストレーターです。
 以下の Issue を ${flow_label} のフローで進めてください。
@@ -2229,6 +2307,7 @@ ${steps}
 - 既存のテストを壊さないこと
 - 不明点は推測せず、impl-notes.md の「確認事項」セクションに列挙すること
 - **PR は作成しないこと**（次の Reviewer ステージで独立レビューを受けます）
+${resume_section}
 EOF
 }
 
@@ -3134,6 +3213,276 @@ ${extra}"
   gh issue comment "$NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
 }
 
+# ─── impl-resume 保護ヘルパ群 (Issue #67) ───
+#
+# `IMPL_RESUME_PRESERVE_COMMITS=true` 配下で:
+#   - `_resume_normalize_flag`            : env 値の strict 正規化（純粋関数）
+#   - `_resume_detect_existing_branch`    : origin に branch があるかを ls-remote で判定
+#   - `_resume_branch_init`               : impl-resume 用 branch 初期化の Strategy 分岐
+#   - `_resume_push`                      : fast-forward 制約 push と non-ff 検出
+#   - `_resume_mark_nonff_failed`         : non-ff 専用 claude-failed 遷移ヘルパ
+#
+# `_slot_mark_failed` / `slot_log` / `slot_warn` を再利用するため、それらの定義より
+# 後ろ、`_slot_run_issue` より前に配置する（forward reference を避ける）。
+# 設計詳細: docs/specs/67-feat-watcher-impl-resume-branch-commit-f/design.md
+
+# env var の生値を厳密に "true" / "false" に正規化する純粋関数（副作用なし）。
+# 引数:
+#   $1 = mode（"preserve_default_off" | "tracking_default_on"）
+#   $2 = 生 env 値（unset を許容 = 空文字として渡す）
+# stdout: "true" または "false"
+# 戻り値: 常に 0
+#
+# Req 1.3 / 3.6: 受理値は完全一致 "true" / "false" のみ。それ以外（空 / "True" /
+# "1" / "yes" 等の typo）は安全側に倒す:
+#   - preserve_default_off: "true" 完全一致のみ true、それ以外は false
+#   - tracking_default_on : "false" 完全一致のみ false、それ以外（空文字含む）は true
+_resume_normalize_flag() {
+  local mode="$1"
+  local raw="${2:-}"
+  case "$mode" in
+    preserve_default_off)
+      if [ "$raw" = "true" ]; then
+        echo "true"
+      else
+        echo "false"
+      fi
+      ;;
+    tracking_default_on)
+      if [ "$raw" = "false" ]; then
+        echo "false"
+      else
+        echo "true"
+      fi
+      ;;
+    *)
+      # 不明な mode は安全側に倒して false を返す（呼び出し元の bug を表面化させる）
+      echo "false"
+      ;;
+  esac
+}
+
+# 対象 branch が origin に存在するかを `git ls-remote --exit-code` で検出する。
+# 引数: $1 = branch name（例: "claude/issue-67-impl-..."）
+# 戻り値:
+#   0 = origin に存在
+#   1 = 不在 / 検出失敗（ネットワーク失敗・タイムアウトを含めて呼び出し元では同等扱い）
+# 副作用: なし（git ls-remote は read-only）
+#
+# Req 2.1, 2.2: PR の有無とは独立に branch 存在の真実値を取得する。`gh pr list` には
+# 依存しない（設計論点 1: PR が close 済 / 未作成のケースで false negative を避ける）。
+# 失敗時は安全側に倒して fresh-init 経路に倒す（NFR 2.1: WARN ログ）。
+# timeout 30 秒は既存 MERGE_QUEUE_GIT_TIMEOUT より短め。watcher 全体の cron 周期
+# （最短 2 分）を圧迫しないため。
+_resume_detect_existing_branch() {
+  local branch="$1"
+  if [ -z "$branch" ]; then
+    return 1
+  fi
+  # `git ls-remote --exit-code` は ref 不在で exit code 2 を返す。timeout は 30 秒。
+  # ネットワーク失敗等の予期せぬ exit code はすべて「不在」として fail-safe。
+  if timeout 30 git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1; then
+    return 0
+  fi
+  return 1
+}
+
+# `impl-resume` モードの branch 初期化を opt-in flag によって 2 戦略のいずれかに
+# ディスパッチする。既存の `git checkout -B "$BRANCH" "origin/main"` +
+# `git push -u origin "$BRANCH" --force-with-lease` シーケンスを内包する。
+#
+# 入力（環境変数経由）:
+#   BRANCH                          : claude/issue-N-impl-<slug> 形式
+#   IMPL_RESUME_PRESERVE_COMMITS    : "true" / "false" / unset
+#   MODE                            : "impl-resume" 前提（呼び出し元で gate 済み）
+# 戻り値:
+#   0 = init 成功（HEAD = $BRANCH、push 済み）
+#   非 0 = 失敗（呼び出し元で _slot_mark_failed 既に発射済み）
+# 副作用:
+#   - git checkout -B（local branch 作成）
+#   - git push -u origin（fast-forward または force-with-lease。flag 値で分岐）
+#   - SLOT_LOG / 標準出力にイベントログ追記
+#   - 失敗時は _slot_mark_failed が gh issue edit + comment を発射
+#   - 呼び出し後 RESUME_PRESERVE 変数を export（後段 prompt builder が参照）
+#
+# Req 1.1, 1.2, 2.1, 2.2, 2.3, 2.5, 4.4, NFR 1.3, NFR 2.1
+#
+# 戦略:
+#   PRESERVE=false（既定）→ 既存挙動: checkout -B BRANCH origin/main + force-with-lease push
+#   PRESERVE=true + branch 存在 → checkout -B BRANCH origin/BRANCH + fast-forward push
+#   PRESERVE=true + branch 不在 → checkout -B BRANCH origin/main + fast-forward push
+#
+# 注意: opt-in パスの fast-forward push と non-ff 検出ロジックは task 3.1 / 3.2 で
+# `_resume_push` / `_resume_mark_nonff_failed` 関数に切り出す（PR 履歴上の独立性確保のため、
+# 本 task では inline で git push を呼ぶ最小実装）。
+_resume_branch_init() {
+  local preserve
+  preserve=$(_resume_normalize_flag preserve_default_off "${IMPL_RESUME_PRESERVE_COMMITS:-}")
+  export RESUME_PRESERVE="$preserve"
+
+  if [ "$preserve" != "true" ]; then
+    # ── 既定パス: 本機能導入前と完全に等価な挙動 ──
+    # worktree は detached HEAD で起動するため -B で新規 branch 作成（local main を持たない）
+    if ! git checkout -B "$BRANCH" "origin/main"; then
+      slot_warn "branch 作成に失敗: $BRANCH"
+      _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
+      return 1
+    fi
+    if ! git push -u origin "$BRANCH" --force-with-lease; then
+      slot_warn "branch push に失敗: $BRANCH"
+      _slot_mark_failed "branch-push" "ブランチ \`$BRANCH\` の push に失敗しました。"
+      return 1
+    fi
+    slot_log "resume-mode=legacy-force-push branch=$BRANCH"
+    return 0
+  fi
+
+  # ── opt-in パス: PRESERVE=true ──
+  # origin に branch が存在するか判定。存在すればそこから resume、不在なら origin/main 起点。
+  local origin_sha=""
+  if _resume_detect_existing_branch "$BRANCH"; then
+    if ! git checkout -B "$BRANCH" "origin/$BRANCH"; then
+      slot_warn "既存 branch resume に失敗: $BRANCH"
+      _slot_mark_failed "branch-checkout" "既存 origin branch \`$BRANCH\` からの resume に失敗しました。"
+      return 1
+    fi
+    origin_sha=$(git rev-parse --short=7 "origin/$BRANCH" 2>/dev/null || echo "unknown")
+    slot_log "resume-mode=existing-branch branch=$BRANCH origin_sha=$origin_sha"
+  else
+    if ! git checkout -B "$BRANCH" "origin/main"; then
+      slot_warn "branch 作成に失敗: $BRANCH"
+      _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
+      return 1
+    fi
+    slot_log "resume-mode=fresh-from-main branch=$BRANCH"
+  fi
+
+  # opt-in パスの push は fast-forward 制約付き（_resume_push に委譲）。
+  # _resume_push が non-ff を検出した場合は内部で claude-failed 付与済み。
+  if ! _resume_push "$BRANCH"; then
+    return 1
+  fi
+  return 0
+}
+
+# fast-forward 制約付き push を実行し、stderr から非 fast-forward 検出時は
+# 専用 stage `branch-nonff` で claude-failed に遷移する。
+# 引数: $1 = branch
+# 戻り値:
+#   0 = push 成功
+#   1 = non-ff reject または push 失敗（claude-failed 付与済み）
+# 副作用:
+#   - git push -u origin <branch>（force 系オプションを一切付けない）
+#   - non-ff 検出時 / 失敗時は _slot_mark_failed が gh issue edit + comment 発射
+#
+# Req 4.1, 4.2, 4.5: 失敗してもリトライしない / reset / rebase / merge を行わない。
+# stderr 解析で "non-fast-forward" / "rejected.*non-fast" / "Updates were rejected"
+# パターンを ERE で判定。non-ff 以外の push 失敗（ネットワーク等）は既存 branch-push
+# 失敗パスに合流させる。
+#
+# 注意: non-ff 専用 Issue コメント本文の組み立ては task 3.2 で `_resume_mark_nonff_failed`
+# として切り出し予定。本 commit では inline body で _slot_mark_failed "branch-nonff" を呼ぶ。
+_resume_push() {
+  local branch="$1"
+  local stderr_tmp
+  stderr_tmp=$(mktemp -t resume-push-XXXXXX.err 2>/dev/null || echo "")
+
+  local rc=0
+  if [ -n "$stderr_tmp" ]; then
+    git push -u origin "$branch" 2>"$stderr_tmp" || rc=$?
+  else
+    # mktemp 失敗時のフォールバック（stderr 捕捉できないが push は試みる）
+    git push -u origin "$branch" || rc=$?
+  fi
+
+  if [ "$rc" -eq 0 ]; then
+    if [ -n "$stderr_tmp" ]; then
+      rm -f "$stderr_tmp" 2>/dev/null || true
+    fi
+    return 0
+  fi
+
+  # 失敗。stderr の内容で non-ff か否かを判別
+  local stderr_content=""
+  if [ -n "$stderr_tmp" ] && [ -f "$stderr_tmp" ]; then
+    stderr_content=$(cat "$stderr_tmp" 2>/dev/null || true)
+  fi
+
+  local stderr_tail=""
+  if [ -n "$stderr_content" ]; then
+    # コメント本文に過剰な行を入れないよう末尾 1500 文字程度に制限
+    stderr_tail=$(echo "$stderr_content" | tail -c 1500)
+  fi
+
+  # POSIX ERE で non-fast-forward / rejected パターンを検出
+  if echo "$stderr_content" | grep -Eq '(non-fast-forward|rejected.*non-fast|Updates were rejected because the (tip|remote))'; then
+    slot_warn "non-ff push detected; aborting (branch=$branch)"
+    slot_log "resume-failure=non-ff issue=#${NUMBER:-?} branch=$branch"
+    _resume_mark_nonff_failed "$branch" "$stderr_tail"
+  else
+    # non-ff 以外の push 失敗（ネットワーク等）。既存 branch-push 失敗パスに合流。
+    slot_warn "push に失敗（non-ff ではない）: $branch"
+    slot_log "resume-failure=push-error issue=#${NUMBER:-?} branch=$branch"
+    local body="ブランチ \`$branch\` の push に失敗しました（fast-forward 制約付き push）。"
+    if [ -n "$stderr_tail" ]; then
+      body="$body
+
+\`\`\`
+$stderr_tail
+\`\`\`"
+    fi
+    _slot_mark_failed "branch-push" "$body"
+  fi
+
+  if [ -n "$stderr_tmp" ]; then
+    rm -f "$stderr_tmp" 2>/dev/null || true
+  fi
+  return 1
+}
+
+# non-ff 専用の `claude-failed` 遷移ヘルパ。
+# 既存 `_slot_mark_failed` の薄い wrapper として、Issue コメントに「force-push 抑制で
+# 停止した」旨と人間操作手順を記載する。
+# 引数:
+#   $1 = branch
+#   $2 = stderr の tail（任意。診断情報として Issue コメントに含める）
+# 戻り値: 常に 0
+#
+# Req 4.2, 4.3, NFR 2.2: 運用者がログ単独で原因と Issue 番号を特定できる粒度で記録。
+# 既存 stage 識別子セット（branch-checkout / branch-push 等）に branch-nonff を追加。
+_resume_mark_nonff_failed() {
+  local branch="$1"
+  local stderr_tail="${2:-}"
+  local body="自動 force-push を抑制したため停止しました（impl-resume 保護機能）。
+
+- 対象 branch: \`$branch\`
+- 対象 Issue : #${NUMBER:-?}
+- 検出理由 : non-fast-forward push（既存 origin branch に対し remote がローカル HEAD の祖先ではない）
+
+### 次の手順
+
+1. ローカルで \`git fetch origin\` 後、当該 branch の差分を確認
+2. 必要なら手動で merge / rebase / cherry-pick で衝突解消
+3. 解消できたら本 Issue から \`claude-failed\` ラベルを除去すると次サイクルで再 pickup されます
+
+> 注意: 本機能は \`IMPL_RESUME_PRESERVE_COMMITS=true\` でのみ動作します。
+> 強制 fresh が必要なら \`IMPL_RESUME_PRESERVE_COMMITS=false\` に戻すか、
+> \`git push origin :$branch\` で origin branch を削除してから再 pickup してください。"
+
+  if [ -n "$stderr_tail" ]; then
+    body="$body
+
+### git stderr (tail)
+
+\`\`\`
+$stderr_tail
+\`\`\`"
+  fi
+
+  _slot_mark_failed "branch-nonff" "$body"
+  return 0
+}
+
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
 # サブシェル `( _slot_run_issue n issue_json ) &` から呼び出される前提。
 #
@@ -3381,16 +3730,27 @@ _slot_run_issue() {
       BRANCH="claude/issue-${NUMBER}-impl-${SLUG}"
       ;;
   esac
-  # worktree は detached HEAD で起動するため -B で新規 branch 作成（local main を持たない）
-  if ! git checkout -B "$BRANCH" "origin/main"; then
-    slot_warn "branch 作成に失敗: $BRANCH"
-    _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
-    return 1
-  fi
-  if ! git push -u origin "$BRANCH" --force-with-lease; then
-    slot_warn "branch push に失敗: $BRANCH"
-    _slot_mark_failed "branch-push" "ブランチ \`$BRANCH\` の push に失敗しました。"
-    return 1
+  # impl-resume モードのときだけ Strategy Pattern による branch 初期化に分岐させる
+  # （Issue #67）。design / impl モードでは本機能導入前と完全に等価な挙動を維持する
+  # （Req 1.1, 1.2, NFR 1.1, NFR 1.2）。`_resume_branch_init` は内部で
+  # `IMPL_RESUME_PRESERVE_COMMITS` を見て legacy / preserve 戦略にディスパッチし、
+  # 失敗時は `_slot_mark_failed` 既に発射済の状態で非 0 を返す。
+  if [ "$MODE" = "impl-resume" ]; then
+    if ! _resume_branch_init; then
+      return 1
+    fi
+  else
+    # worktree は detached HEAD で起動するため -B で新規 branch 作成（local main を持たない）
+    if ! git checkout -B "$BRANCH" "origin/main"; then
+      slot_warn "branch 作成に失敗: $BRANCH"
+      _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
+      return 1
+    fi
+    if ! git push -u origin "$BRANCH" --force-with-lease; then
+      slot_warn "branch push に失敗: $BRANCH"
+      _slot_mark_failed "branch-push" "ブランチ \`$BRANCH\` の push に失敗しました。"
+      return 1
+    fi
   fi
 
   # ── モード別ディスパッチ ──

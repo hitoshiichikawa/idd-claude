@@ -128,6 +128,11 @@
 - Architect は Triage の `needs_architect: true` 判定時のみ PM と Developer の間に挟まれる
 - Architect が起動した Issue では **設計 PR ゲート**を経由する（設計 PR を merge してから実装 PR が別途作られる）
 - Reviewer は impl / impl-resume の Developer 完了直後に **独立 context** で起動され、reject 時は Developer に最大 1 回だけ自動差し戻し、再 reject では `claude-failed` で人間に委ねる（差し戻しループは Reviewer 最大 2 回 / Developer 最大 2 回で打ち切り）
+- **`impl-resume` の branch policy（idd-claude 側 opt-in / #67）**:
+  - idd-claude 側で `IMPL_RESUME_PRESERVE_COMMITS=true` を有効化したリポジトリの場合、`impl-resume` モードは既存 origin branch の commit を温存したまま resume する。Developer は `git reset` / `git rebase` / branch 切替を行わず、未完了タスクの先頭から続行すること
+  - 同条件下で `IMPL_RESUME_PROGRESS_TRACKING=true`（既定）が有効なら、Developer は各タスク完了ごとに `tasks.md` の `- [ ]` → `- [x]` 行内編集を行い、`docs(tasks): mark <task-id> as done` で **専用 commit** を積む。タスク本文 / `_Requirements:_` / `_Boundary:_` / `_Depends:_` / 順序は変更しない
+  - 詳細規約は `.claude/agents/developer.md` の「impl-resume / tasks.md 進捗追跡規約」節を参照
+  - opt-in 機能 OFF / 無宣言の場合は本ルールは適用されない（既定挙動: `origin/main` 起点で fresh init + force-push）
 - Developer は **実装 PR** で `design.md` / `tasks.md` / `requirements.md` を書き換えない（設計 PR で人間レビュー済みのため）。矛盾は PR 本文「確認事項」で指摘する
 - **PR Iteration（`needs-iteration` ラベル）の責務境界**:
   - **設計 PR (`claude/issue-<N>-design-<slug>`)** で `needs-iteration` が付いた場合、watcher が次サイクルで Architect 役割の iteration を起動する。`docs/specs/<N>-<slug>/` 配下（`requirements.md` / `design.md` / `tasks.md`）の **書き換えは許容** され、成功時 `awaiting-design-review` に遷移する
