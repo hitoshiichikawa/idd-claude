@@ -1946,25 +1946,31 @@ drr_find_merged_design_pr() {
   local prs_json
   # head pattern を server-side クエリで一次絞り込み（in:head + 規約 prefix）。
   # 複数件マッチを許容するため limit=20。
+  # 注意（Issue #80）: GitHub の text search はトークン分解（"claude" / "issue" / "${N}" /
+  # "design" の各語）で他 Issue 用の merged 設計 PR もヒットさせるため、ここでは候補
+  # 取得（noisy）に留め、最終一致判定は後段の jq で issue 番号 fix の strict prefix で行う。
   if ! prs_json=$(timeout "$DRR_GH_TIMEOUT" gh pr list \
       --repo "$REPO" \
       --state merged \
       --search "is:pr is:merged claude/issue-${issue_number}-design- in:head" \
-      --json number,headRefName,body,mergedAt \
+      --json number,headRefName,mergedAt \
       --limit 20 2>/dev/null); then
     return 1
   fi
 
-  # 取得結果が空 / 不正な場合に jq エラーで落ちないよう fail-safe で `// []` を挟む。
-  local pattern="$DESIGN_REVIEW_RELEASE_HEAD_PATTERN"
-  local refs_pattern="(Refs|refs|Ref|ref) #${issue_number}([^0-9]|$)"
+  # Issue #80: head 名を issue 番号で strict 比較する（旧 `^claude/issue-[0-9]+-design-`
+  # では他 Issue 用 PR が通過していた）。body の `Refs #N` 検査は cross-reference
+  # （Architect が design PR 本文で別 Issue を参照する）と衝突して誤検知の原因に
+  # なっていたため drop。head が `claude/issue-${N}-design-<slug>` で始まることを
+  # 唯一の同定条件とする。
+  # 同 issue 番号の merged 設計 PR が複数ある場合（再 design 等）は、PR 番号最大
+  # （= 最新と看做す）を採用。
+  local strict_head_prefix="claude/issue-${issue_number}-design-"
   local pr_number
   pr_number=$(echo "$prs_json" | jq -r \
-    --arg pattern "$pattern" \
-    --arg refs_re "$refs_pattern" \
+    --arg prefix "$strict_head_prefix" \
     '[(. // [])[]
-      | select(.headRefName | test($pattern))
-      | select((.body // "") | test($refs_re))
+      | select(.headRefName | startswith($prefix))
       | .number
     ] | sort | last // ""' 2>/dev/null || echo "")
   echo "$pr_number"
