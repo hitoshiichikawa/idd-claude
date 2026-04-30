@@ -3855,6 +3855,12 @@ _slot_run_issue() {
     return 1
   fi
 
+  # Issue #76: slot worktree が REPO_DIR の意味を担う。サブシェル内で上書きするため
+  # parent cron / launchd 側の REPO_DIR には伝播せず、後段の parse_review_result /
+  # stage_checkpoint_* / `git -C "$REPO_DIR"` 系すべてが slot worktree を参照するようになる。
+  # 既存 cron 起動文字列を変更する必要はない。
+  REPO_DIR="$WT"
+
   # ── Worktree を origin/main 最新へ強制リセット ──
   if ! _worktree_reset "$WT"; then
     slot_warn "worktree reset に失敗 (path=$WT)"
