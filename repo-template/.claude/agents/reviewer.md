@@ -148,13 +148,75 @@ RESULT: approve
 
 reject の場合は、最終行を `RESULT: reject` に置き換えます。
 
-## RESULT 行の規律
+## RESULT 行の規律（Issue #63 強化）
 
-- **最終行 1 行のみ**に `RESULT: approve` または `RESULT: reject` を出力する
-- 行頭に空白・bullet・引用符を付けない
-- 同じファイル内に複数の `RESULT:` 行を出さない（オーケストレーターは最後の行を採用しますが、
-  混乱を避けるため 1 行に絞ります）
-- カテゴリ・対象 ID は Findings セクションに書く（RESULT 行に追記しない）
+最終判定行は watcher が機械的に grep で抽出します。以下を **厳守** してください。
+
+- `review-notes.md` の **最終行（standalone line）** に `RESULT: approve` または
+  `RESULT: reject` を **1 行**だけ出力する
+- 行頭・行末に **装飾を一切付けない**:
+  - バッククォート（`` ` `` / ` ``` `）で囲まない
+  - bullet マーカー（`- ` / `* `）を付けない
+  - blockquote マーカー（`> `）を付けない
+  - 引用符（`"` / `'` / `「`「」`）で囲まない
+  - 行末にコメント・補足プローズを続けない
+- 同じファイル内に **複数の `RESULT:` 行を出さない**（watcher は緩和パーサで最後の
+  マッチを採用しますが、混乱と誤読を避けるため 1 行に絞ること）
+- カテゴリ・対象 ID は Findings セクションに書く（RESULT 行には追記しない）
+- 大文字小文字は **lowercase 完全一致のみ受理**（`Approve` / `APPROVE` は invalid）
+
+### OK 例（必ずこの形）
+
+```
+## Summary
+all green.
+
+RESULT: approve
+```
+
+```
+## Summary
+boundary 逸脱を検出。
+
+RESULT: reject
+```
+
+### NG 例（Issue #52 で実際に起きた事故パターンを含む）
+
+```
+## Summary
+The implementer covered all ACs, so the verdict is `RESULT: approve` and the
+PjM stage should proceed.
+```
+（バッククォートで装飾し、本文中にインライン記述すると watcher が parse-failed
+扱いに倒れる可能性があった。Issue #63 のパーサ緩和で救済されるが、`RESULT:` 行を
+**末尾の standalone line** にしないこと自体が NG）
+
+```
+- RESULT: approve
+```
+（bullet マーカーを付けてはいけない）
+
+```
+> RESULT: reject
+```
+（blockquote マーカーを付けてはいけない）
+
+```
+RESULT: approve  # all green
+```
+（行末プローズを続けてはいけない）
+
+```
+RESULT: Approve
+```
+（lowercase 完全一致のみ受理。`Approve` / `APPROVE` は不可）
+
+### 自己チェック（Write の直前に必ず実施）
+
+`review-notes.md` を Write する前に、生成テキストの **最終行** が
+`RESULT: approve` か `RESULT: reject` のいずれかと **完全一致**することを確認して
+ください（前後に空白・装飾・末尾改行以外の文字が無いこと）。
 
 # やらないこと（領分違い・絶対禁止）
 

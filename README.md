@@ -1780,7 +1780,24 @@ cron 例（モデルや turn 数を override する場合）:
 
 Reviewer は `docs/specs/<N>-<slug>/review-notes.md` に以下のフォーマットで判定を書き出し、
 最終行に必ず `RESULT: approve` または `RESULT: reject` を出力します。watcher はこの行を
-grep して機械的に判定を取り出します。
+機械抽出して approve / reject を判定します。
+
+**watcher 側の抽出ロジック（Issue #63 緩和パーサ）**:
+
+- ファイル全体を scan して `RESULT: approve` / `RESULT: reject` トークンを探す
+- バッククォート / bullet (`-` `*`) / blockquote (`>`) / 引用符 / 末尾プローズ等の
+  装飾を **許容** する（Issue #52 事故対応）
+- 複数マッチ時は **ファイル順で最後のマッチ**を採用（fail-safe）
+- lowercase の `approve` / `reject` のみ受理（`Approve` / `APPROVE` は不採用）
+- ファイル不在 / トークン皆無 → 既存 `parse-failed` として扱われる
+
+**Reviewer 出力側の規律（依然として canonical）**:
+
+緩和パーサは **安全網**であり、deviation を許可するものではありません。Reviewer は
+引き続き `RESULT:` 行を **最終行の standalone line（装飾なし）** として出力する
+canonical フォーマットを守ってください（多層防御）。詳細な OK / NG 例は
+[`repo-template/.claude/agents/reviewer.md`](./repo-template/.claude/agents/reviewer.md)
+の「RESULT 行の規律」節を参照。
 
 ```markdown
 # Review Notes
