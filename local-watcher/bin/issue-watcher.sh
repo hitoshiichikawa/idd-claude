@@ -1596,6 +1596,12 @@ pi_escalate_to_failed() {
 _本コメントは PR Iteration Processor (#26) が自動投稿しました。_
 EOF
 )
+  # Issue #65 Req 3.1/3.2/3.3/3.4: 手動復旧手順を末尾に append。
+  # pi_escalate_to_failed は PR Iteration（needs-iteration ラベル付き PR）からの遷移
+  # であり、文脈上 PR が必ず存在するため pr_present="yes" を渡す。
+  escalation_body="${escalation_body}
+$(build_recovery_hint "yes")"
+
   if ! timeout "$PR_ITERATION_GIT_TIMEOUT" \
       gh pr comment "$pr_number" --repo "$REPO" --body "$escalation_body" >/dev/null 2>&1; then
     pi_warn "PR #${pr_number}: エスカレコメントの投稿に失敗（ラベル遷移は完了済み）"
@@ -3043,6 +3049,12 @@ ${extra_body}"
 
 問題を解決してから \`claude-failed\` ラベルを外してください。"
 
+  # Issue #65 Req 3.1/3.2/3.3/3.4: 手動復旧手順を末尾に append。
+  # mark_issue_failed は run_impl_pipeline 内の各 stage 失敗から呼ばれ、PR の有無が
+  # 文脈で確定しないため pr_present="unknown" を渡す（両ケース併記）。
+  body="${body}
+$(build_recovery_hint "unknown")"
+
   gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
 }
 
@@ -3877,6 +3889,12 @@ ${extra}"
   body="${body}
 
 問題を解決してから \`claude-failed\` ラベルを外してください。"
+
+  # Issue #65 Req 3.1/3.2/3.3/3.4: 手動復旧手順を末尾に append。
+  # _slot_mark_failed は worktree / Hook / Triage 失敗等から呼ばれ、PR の有無が
+  # 文脈で確定しないため pr_present="unknown" を渡す（両ケース併記）。
+  body="${body}
+$(build_recovery_hint "unknown")"
   gh issue comment "$NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
 }
 
