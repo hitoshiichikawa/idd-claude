@@ -88,7 +88,7 @@
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5_
 
 - [ ] 6. 静的解析と dogfood test（NFR 3 系）
-- [ ] 6.1 shellcheck / 互換性検証
+- [x] 6.1 shellcheck / 互換性検証
   - `shellcheck local-watcher/bin/issue-watcher.sh .github/scripts/idd-claude-labels.sh repo-template/.github/scripts/idd-claude-labels.sh` で warning 0
   - cron-like 最小 PATH での起動確認: `env -i HOME=$HOME PATH=/usr/bin:/bin bash -c 'command -v claude gh jq flock git timeout'`
   - 既存 dry run: `REPO=owner/test REPO_DIR=/tmp/test-repo $HOME/bin/issue-watcher.sh` を対象なし状態で流し、`処理対象の Issue なし` で正常終了すること（NFR 1.5 / NFR 1.3 構造的検証）
