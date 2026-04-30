@@ -52,7 +52,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.5, 1.7, NFR 1.5, NFR 2.3, NFR 3.1_
   - _Depends: 2.2_
 
-- [ ] 4. escalation コメントへの手動復旧手順統合（Req 3 系）
+- [x] 4. escalation コメントへの手動復旧手順統合（Req 3 系）
 - [x] 4.1 共通関数 `build_recovery_hint <pr_present>` の実装
   - 引数: `pr_present` ∈ {`yes`, `no`, `unknown`}（既定 `unknown`）
   - 出力: heredoc で markdown 文字列を stdout に
@@ -63,7 +63,7 @@
   - 配置位置: `mark_issue_failed` / `_slot_mark_failed` / `pi_escalate_to_failed` のいずれよりも前
   - _Requirements: 3.1, 3.2, 3.3_
   - _Boundary: Recovery Documentation_
-- [ ] 4.2 既存 escalation コメント生成 3 経路への組み込み (P)
+- [x] 4.2 既存 escalation コメント生成 3 経路への組み込み (P)
   - `mark_issue_failed` (line 2936) の body 末尾に `$(build_recovery_hint "unknown")` を append
   - `_slot_mark_failed` (line 3556) の body 末尾に `$(build_recovery_hint "unknown")` を append
   - `pi_escalate_to_failed` (line 1474) の body 末尾に `$(build_recovery_hint "yes")` を append（PR Iteration は必ず PR 存在文脈）
