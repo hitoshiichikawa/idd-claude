@@ -3251,6 +3251,21 @@ dispatcher_error() {
   echo "[$(date '+%F %T')] dispatcher: ERROR: $*" >&2
 }
 
+# ─── Pre-Claim Probe Logger (Issue #65) ───
+# claim 直前に linked impl PR を検出する Pre-Claim Filter 用 logger。
+# 既存 mq_log / pi_log / drr_log / qa_log / sc_log / dispatcher_log と同じ
+# `[$(date '+%F %T')] <prefix>: ...` 形式に揃え、識別 prefix `pre-claim-probe:`
+# で grep 集計できるようにする（Req NFR 2.1）。
+pclp_log() {
+  echo "[$(date '+%F %T')] pre-claim-probe: $*"
+}
+pclp_warn() {
+  echo "[$(date '+%F %T')] pre-claim-probe: WARN: $*" >&2
+}
+pclp_error() {
+  echo "[$(date '+%F %T')] pre-claim-probe: ERROR: $*" >&2
+}
+
 # ─── _parallel_validate_slots ───
 #
 # PARALLEL_SLOTS が正の整数として解釈できるかを検証する。
