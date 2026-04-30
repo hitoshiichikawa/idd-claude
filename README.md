@@ -141,6 +141,40 @@ curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/set
 **カレントディレクトリ (`./`)** にテンプレートを配置します。対話モードでも
 プロンプトで Enter のみ入力すると同じくカレントがデフォルトです。
 
+#### GitHub ラベルの自動セットアップ (#85)
+
+`install.sh --repo` または `install.sh --all` で対象リポジトリに配置した直後、
+同梱の `.github/scripts/idd-claude-labels.sh` を **自動実行**して、idd-claude が
+状態遷移に使う必須ラベル（`auto-dev` / `claude-claimed` / `ready-for-review` 等）を
+冪等作成します。これにより初回 cron / Actions 起動時に watcher が claim ラベル付与に
+失敗する事故を防げます。
+
+- **opt-out**: `--no-labels` フラグまたは `IDD_CLAUDE_SKIP_LABELS=true` 環境変数で
+  ラベル処理を完全に skip できます。CI / 別ツールでラベルを自前管理しているリポジトリで
+  推奨します
+- **fail-soft**: `gh` 未インストール / `gh auth login` 未実施 / 権限なし / API 失敗時は
+  ラベル処理だけを skip し、install 全体は exit 0 で完走します。skip 時は手動 fallback の
+  完全コマンドが出力されるので、それをコピペで実行してください
+- **冪等**: 既存ラベルは name / color / description ともに変更されません（既存値は保護）。
+  色や説明を上書きしたい場合は手動で `bash .github/scripts/idd-claude-labels.sh --force`
+- **`--local` 単独時は走りません**: 対象リポジトリ配置がない場合はラベル処理も発生しません
+- **`--dry-run`**: 実 API 呼び出しせず、これから実行されるコマンドだけを表示します
+
+```bash
+# 通常: 配置 + ラベル自動作成（既存ラベルは保護）
+./install.sh --repo /path/to/your-project
+
+# ラベル処理を完全に skip（自前管理する運用向け）
+./install.sh --repo /path/to/your-project --no-labels
+# あるいは env で
+IDD_CLAUDE_SKIP_LABELS=true ./install.sh --repo /path/to/your-project
+```
+
+`gh auth login` 未実施・private fork で権限が無い等で skip 扱いになった場合は、認証等を
+解消してから手動 fallback として後述の [ラベル一括作成（推奨）](#ラベル一括作成推奨) を
+実行してください。自動実行が成功している場合、手動 step を改めて実行する必要はありません
+（再実行しても既存ラベルが保護されるため、害はありません）。
+
 環境変数で挙動を調整できます（特定タグの検証や fork からのインストール向け）:
 
 | 変数 | デフォルト | 用途 |
@@ -278,6 +312,13 @@ git push
 
 Step 1 で同梱される `.github/scripts/idd-claude-labels.sh` を実行すると、必要なラベルを
 冪等に作成できます（既存ラベルはスキップ、`--force` で color / description を上書き）。
+
+> **既に `install.sh --repo` を使った場合は手動実行は不要です** — install.sh は配置直後に
+> 同じスクリプトを `--repo owner/name` 付きで自動実行します
+> （[GitHub ラベルの自動セットアップ (#85)](#github-ラベルの自動セットアップ-85) 参照）。
+> ここに記載する手動実行は、(a) 手動セットアップ（`cp -r` 経由）を選んだ場合、
+> (b) 自動実行が `gh` 未認証等で skip された場合、(c) 既存リポジトリで `--force` 指定の
+> color / description 更新を行いたい場合の fallback として残しています。
 
 ```bash
 cd /path/to/your-project
