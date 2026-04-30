@@ -17,7 +17,7 @@
   - _Boundary: Label Provisioning Update_
 
 - [ ] 2. Pre-Claim Filter 関数 `check_existing_impl_pr` の実装（Req 1 系）
-- [ ] 2.1 logger 関数 `pclp_log` / `pclp_warn` / `pclp_error` の追加
+- [x] 2.1 logger 関数 `pclp_log` / `pclp_warn` / `pclp_error` の追加
   - prefix `pre-claim-probe:` 固定（NFR 2.1）
   - 既存 `mq_log` / `pi_log` / `drr_log` / `qa_log` / `sc_log` と同形式（`[$(date '+%F %T')] pre-claim-probe: $*`）
   - 配置位置: `_dispatcher_run` より前で、かつ logger を使う関数より前（design.md File Structure Plan 参照）
