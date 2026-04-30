@@ -1467,6 +1467,91 @@ pi_select_template() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# build_recovery_hint (Issue #65 Req 3.1〜3.4)
+#
+# `claude-failed` ラベル付与時に escalation コメントへ含める「手動復旧手順」共通
+# 文字列を組み立てる。
+#
+# 事故事例（2026-04-29 / Issue #52 復旧時 PR #62 orphan 化）の再発を防ぐため、
+# 以下を必ず含める:
+#   - ラベル操作の正しい順序: `ready-for-review` 先付与 → `claude-failed` 除去
+#   - 順序逆転で再 pickup → 既存 PR が orphan 化するリスク注意
+#   - PR 無し時は `claude-failed` 除去のみで再 pickup される旨
+#
+# 入力: $1 = pr_present ("yes"|"no"|"unknown"; 既定 "unknown")
+# 出力: stdout に markdown 文字列（escalation コメント本文の末尾に append される想定）
+# 副作用: なし（純粋関数）
+#
+# 呼び出し側: mark_issue_failed / _slot_mark_failed / pi_escalate_to_failed
+# ─────────────────────────────────────────────────────────────────────────────
+build_recovery_hint() {
+  local pr_present="${1:-unknown}"
+  case "$pr_present" in
+    yes|no|unknown) ;;
+    *) pr_present="unknown" ;;
+  esac
+
+  cat <<'EOF'
+
+---
+
+### 手動復旧の正しい手順 (Issue #65)
+
+ラベル操作の順序を間違えると、watcher が次サイクルで再 pickup し、既存の
+PR を `force-push` で破壊する事故が起こります（過去事例: PR #62 orphan 化）。
+
+EOF
+
+  case "$pr_present" in
+    yes)
+      cat <<'EOF'
+**この Issue には既に PR が紐付いています**。復旧する場合は順序が重要です:
+
+1. `ready-for-review` ラベルを **先に付与** する
+2. その後で `claude-failed` ラベルを除去する
+
+`claude-failed` を先に外すと、`auto-dev` のみが残った状態になり、watcher が次
+サイクルで再 pickup → impl-resume が起動して既存 PR が `force-push` 破壊
+される可能性があります。
+
+なお watcher 側にも Pre-Claim Filter が組まれているため、linked impl PR が
+OPEN/MERGED の場合は claim が抑止されますが、二重ガードのために順序は厳守
+してください。
+
+EOF
+      ;;
+    no)
+      cat <<'EOF'
+**この Issue には現時点で PR が紐付いていません**。復旧する場合:
+
+- `claude-failed` を除去すると次サイクルで watcher が再 pickup します
+  （PR が無ければ Pre-Claim Filter は素通りするため、impl/Triage が再起動
+  されます）
+- これ以上自動再実行したくない場合は `claude-failed` を残したまま
+  `auto-dev` を外す方法もあります
+
+EOF
+      ;;
+    *)
+      cat <<'EOF'
+**復旧手順は PR の有無で分岐します**:
+
+- PR が既に作成済みの場合: `ready-for-review` を **先に付与** してから
+  `claude-failed` を除去する。順序を逆にすると watcher が次サイクルで再
+  pickup し、impl-resume が起動して既存 PR が `force-push` 破壊される
+  可能性があります。
+- PR が無い場合: `claude-failed` を除去すると次サイクルで再 pickup される
+  ため、自動再実行を望まないときは `auto-dev` も外す。
+
+watcher 側にも Pre-Claim Filter（linked impl PR が OPEN/MERGED なら claim
+を抑止）が組まれていますが、二重ガードのため順序は厳守してください。
+
+EOF
+      ;;
+  esac
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_escalate_to_failed: 上限到達時の claude-failed 昇格 + エスカレコメント
 #   入力: $1=pr_number, $2=round, $3=max_rounds
 #   AC 7.2, 7.3
