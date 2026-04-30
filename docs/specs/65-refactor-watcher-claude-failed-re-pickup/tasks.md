@@ -36,8 +36,8 @@
   - _Boundary: Issue Linkage Probe_
   - _Depends: 2.1_
 
-- [ ] 3. Dispatcher per-issue ループへの skip 分岐挿入
-- [ ] 3.1 `_dispatcher_run` の per-issue 先頭に `check_existing_impl_pr` 呼び出しを挿入
+- [x] 3. Dispatcher per-issue ループへの skip 分岐挿入
+- [x] 3.1 `_dispatcher_run` の per-issue 先頭に `check_existing_impl_pr` 呼び出しを挿入
   - 挿入位置: line 4326 直後（`issue_number=$(echo "$issue" | jq -r '.number')` の直後、空き slot 探索 line 4329 より前）
   - パターン:
     ```bash
