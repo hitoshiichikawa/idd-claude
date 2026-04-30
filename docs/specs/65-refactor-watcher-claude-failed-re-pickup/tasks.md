@@ -16,13 +16,13 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, NFR 1.4, NFR 3.2_
   - _Boundary: Label Provisioning Update_
 
-- [ ] 2. Pre-Claim Filter 関数 `check_existing_impl_pr` の実装（Req 1 系）
+- [x] 2. Pre-Claim Filter 関数 `check_existing_impl_pr` の実装（Req 1 系）
 - [x] 2.1 logger 関数 `pclp_log` / `pclp_warn` / `pclp_error` の追加
   - prefix `pre-claim-probe:` 固定（NFR 2.1）
   - 既存 `mq_log` / `pi_log` / `drr_log` / `qa_log` / `sc_log` と同形式（`[$(date '+%F %T')] pre-claim-probe: $*`）
   - 配置位置: `_dispatcher_run` より前で、かつ logger を使う関数より前（design.md File Structure Plan 参照）
   - _Requirements: NFR 2.1_
-- [ ] 2.2 `check_existing_impl_pr <issue_number>` 関数本体の実装
+- [x] 2.2 `check_existing_impl_pr <issue_number>` 関数本体の実装
   - GraphQL query は `closingIssuesReferences(first: 20) { nodes { number, state, headRefName } }`（design.md GraphQL Query 節）
   - `gh api graphql -f query=... -F owner=... -F repo=... -F number=...` を `timeout "${DRR_GH_TIMEOUT:-${MERGE_QUEUE_GIT_TIMEOUT:-60}}"` でラップ（既存規律 / 新 env var 導入禁止）
   - 入力検証: 空文字 / 非数値で warn + exit 1
