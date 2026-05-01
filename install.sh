@@ -16,9 +16,11 @@
 # オプション（既存フラグと組み合わせ可）:
 #   --dry-run        実コピーせず、予定操作を [DRY-RUN] プレフィクスで列挙
 #                    （ファイルシステムを変更しない。出力分類は実実行時と一致）
-#   --force          .claude/agents/ / .claude/rules/ / CLAUDE.md について、
-#                    内容差分があれば再 .bak 退避して強制上書き
-#                    （既存 *.bak は once-only 規律で保護されたまま）
+#   --force          .claude/agents/ / .claude/rules/ について、内容差分があれば
+#                    .bak once-only 退避して強制上書き（既存 *.bak は保護）。
+#                    CLAUDE.md は --force 指定時のみ従来挙動（.bak 退避＋ template
+#                    で上書き）。--force なしでは既存 CLAUDE.md は据え置き、
+#                    template を CLAUDE.md.org として並置（差分時のみ）。
 #   --no-labels      対象リポジトリ配置時に走る GitHub ラベル自動セットアップを完全に skip
 #                    （`IDD_CLAUDE_SKIP_LABELS=true` env でも同等の opt-out が可能）
 # =============================================================================
@@ -409,6 +411,128 @@ copy_agents_rules() {
   fi
 }
 
+# CLAUDE_MD_ORG_TOUCHED
+#   `copy_claude_md_with_org` が `CLAUDE.md.org` を NEW / OVERWRITE した場合に
+#   "true" を立てるグローバルフラグ（Req 6.1）。配置完了サマリ末尾の merge
+#   ガイドメッセージ表示判定に使う。SKIP / 既存 CLAUDE.md 不在 / `--force`
+#   経路では立てない（Req 6.2）。
+CLAUDE_MD_ORG_TOUCHED=false
+
+# copy_claude_md_with_org <src> <dest>
+#   CLAUDE.md 専用の安全配置ロジック（Issue #87）。
+#   既存 CLAUDE.md が編集済みであることを前提に、template を `.org` として
+#   並置することで「ユーザー記述が主、template は参考」という関係に反転する。
+#
+#   - dest 不在 + FORCE=any                 → NEW（template を CLAUDE.md として配置、.org は作らない）
+#   - dest 存在 + 内容同一                  → SKIP（.org も作らない）
+#   - dest 存在 + 差分あり + FORCE=false:
+#     - dest.org 不在                       → NEW dest.org（template を並置、本体は据え置き）
+#     - dest.org 存在 + 内容同一            → SKIP dest.org
+#     - dest.org 存在 + 差分あり            → OVERWRITE dest.org（最新 template に追従）
+#   - dest 存在 + 差分あり + FORCE=true:
+#     既存 backup_claude_md_once の挙動に委譲（.bak once-only 退避 + template で上書き）。
+#     `.org` は触らない（Req 3.4）。
+#
+#   既存 `CLAUDE.md.bak` は本関数では一切触らない（Req 4.1, 4.2）。
+copy_claude_md_with_org() {
+  local src="$1"
+  local dest="$2"
+  local org="$dest.org"
+  local org_name
+  org_name="$(basename "$dest").org"
+
+  if [ ! -f "$src" ]; then
+    echo "Error: source file not found: $src" >&2
+    return 1
+  fi
+
+  # FORCE 指定時は従来挙動（NFR 1.2 / Req 3.1〜3.4）。
+  # backup_claude_md_once → copy_template_file 相当のシーケンスを再現するため、
+  # 呼び出し側で backup_claude_md_once を先に呼ぶ前提を保ち、本関数では
+  # template で上書きするだけに留める。
+  if [ "$FORCE" = "true" ]; then
+    # `.org` は --force 経路では作らない / 触らない（Req 3.4）
+    local action
+    action="$(classify_action "$src" "$dest")"
+    case "$action" in
+      NEW)
+        log_action "NEW" "$dest"
+        if [ "$DRY_RUN" = "false" ]; then
+          ensure_dir "$(dirname "$dest")"
+          cp "$src" "$dest"
+        fi
+        ;;
+      SKIP)
+        log_action "SKIP" "$dest" "(identical to template)"
+        ;;
+      OVERWRITE)
+        log_action "OVERWRITE" "$dest" "(--force)"
+        if [ "$DRY_RUN" = "false" ]; then
+          cp "$src" "$dest"
+        fi
+        ;;
+    esac
+    return 0
+  fi
+
+  # 通常経路（--force なし）
+  local action
+  action="$(classify_action "$src" "$dest")"
+
+  case "$action" in
+    NEW)
+      # CLAUDE.md 不在: template を CLAUDE.md としてそのまま配置。
+      # `.org` は作らない（Req 1.2）。
+      log_action "NEW" "$dest"
+      if [ "$DRY_RUN" = "false" ]; then
+        ensure_dir "$(dirname "$dest")"
+        cp "$src" "$dest"
+      fi
+      ;;
+    SKIP)
+      # 既存 CLAUDE.md が template と同一: 何も触らない（Req 2.5）。
+      log_action "SKIP" "$dest" "(identical to template)"
+      ;;
+    OVERWRITE)
+      # 既存 CLAUDE.md は据え置き、template を `.org` として並置（Req 2.1）。
+      # 本体側は変更しないので OVERWRITE ログは出さず、SKIP として明示する。
+      log_action "SKIP" "$dest" "(existing kept, template placed as $org_name)"
+
+      local org_action
+      if [ ! -e "$org" ]; then
+        # `.org` 不在: 新規並置（Req 2.2）
+        log_action "NEW" "$org"
+        if [ "$DRY_RUN" = "false" ]; then
+          cp "$src" "$org"
+        fi
+        CLAUDE_MD_ORG_TOUCHED=true
+      else
+        org_action="$(classify_action "$src" "$org")"
+        case "$org_action" in
+          SKIP)
+            # `.org` 既存 + 内容同一（Req 2.3）
+            log_action "SKIP" "$org" "(identical to template)"
+            ;;
+          OVERWRITE)
+            # `.org` 既存 + 差分あり: template の最新内容で更新（Req 2.4）
+            log_action "OVERWRITE" "$org" "(refresh from template)"
+            if [ "$DRY_RUN" = "false" ]; then
+              cp "$src" "$org"
+            fi
+            CLAUDE_MD_ORG_TOUCHED=true
+            ;;
+          NEW)
+            # 通常 to-here ない経路だが念のため（org が存在するのに NEW 判定なら
+            # ファイルではなくディレクトリの可能性 → 安全側でエラー）
+            echo "Error: $org exists but is not a regular file" >&2
+            return 1
+            ;;
+        esac
+      fi
+      ;;
+  esac
+}
+
 # ─────────────────────────────────────────────────────────────
 # ラベル自動セットアップ（Issue #85）
 #   テンプレート配置完了直後に対象リポジトリ向けラベルを冪等作成する。
@@ -610,16 +734,17 @@ if $INSTALL_REPO; then
   echo "📦 対象リポジトリにファイルを配置: $REPO_PATH_ABS"
   REPO_PATH="$REPO_PATH_ABS"
 
-  # CLAUDE.md.bak の once-only 保護（初回 install 時のオリジナルを温存）
-  # → 既存 CLAUDE.md があれば `.bak` に退避（既存 `.bak` は尊重、再退避しない）
-  backup_claude_md_once "$REPO_PATH"
-
-  # CLAUDE.md 本体は backup_claude_md_once が `.bak` 退避を引き受けたあと、
-  # copy_template_file で template を常に配置する（既存と同一なら SKIP）。
-  # → design.md「setup_repo ブロック」設計判断: ハイブリッド側は `.bak` 退避を
-  #   スキップしてそのまま OVERWRITE / SKIP のみを行う、と整合
-  # → 要件 2.5 / 5.4: 既存挙動（無条件で template 由来 CLAUDE.md を配置）を維持
-  copy_template_file "$REPO_TEMPLATE_DIR/CLAUDE.md" "$REPO_PATH/CLAUDE.md"
+  # CLAUDE.md は Issue #87 で挙動を分岐：
+  #   - `--force` あり: 従来挙動（`.bak` once-only 退避 + template で上書き）
+  #   - `--force` なし: 既存 CLAUDE.md は据え置き、template を `CLAUDE.md.org` として並置
+  # `.bak` once-only 退避は `--force` 経路でのみ意味があるため、その時だけ呼ぶ。
+  # 既存 `CLAUDE.md.bak` は通常経路では一切触らない（Req 4.1, 4.2）。
+  if [ "$FORCE" = "true" ]; then
+    backup_claude_md_once "$REPO_PATH"
+  fi
+  copy_claude_md_with_org \
+    "$REPO_TEMPLATE_DIR/CLAUDE.md" \
+    "$REPO_PATH/CLAUDE.md"
 
   copy_agents_rules "$REPO_TEMPLATE_DIR/.claude/agents" "$REPO_PATH/.claude/agents"
   copy_agents_rules "$REPO_TEMPLATE_DIR/.claude/rules"  "$REPO_PATH/.claude/rules"
@@ -659,6 +784,28 @@ if $INSTALL_REPO; then
             -f required_pull_request_reviews.required_approving_review_count=1 \\
             -F enforce_admins=false
 REPO_HINT
+
+  # CLAUDE.md.org の merge ガイド（Req 6.1, 6.2）
+  #   `.org` を NEW / OVERWRITE した場合のみ表示。既存 CLAUDE.md 不在で
+  #   `.org` を作らなかったケースや、SKIP しかなかったケースでは表示しない。
+  if [ "$CLAUDE_MD_ORG_TOUCHED" = "true" ]; then
+    cat <<'CLAUDE_MD_ORG_HINT'
+
+  📝 CLAUDE.md.org（最新 template 並置）の merge ガイド:
+
+     既存の CLAUDE.md は変更されていません。最新 template を CLAUDE.md.org
+     として並置しました。差分を確認して必要な箇所だけ手動で取り込んでください。
+
+       diff CLAUDE.md CLAUDE.md.org              # 差分確認
+       diff -u CLAUDE.md.org CLAUDE.md           # template を base に左右反転
+       vimdiff CLAUDE.md CLAUDE.md.org           # 対話的に merge
+       # merge 完了後、必要なら CLAUDE.md.org は削除して構いません
+       #   （次回 install で template が更新されていれば再作成されます）
+
+     どうしても template で完全上書きしたい場合は、`./install.sh --repo <path> --force`
+     を使用してください（既存 CLAUDE.md は CLAUDE.md.bak に once-only 退避されます）。
+CLAUDE_MD_ORG_HINT
+  fi
 
   # ラベル自動セットアップ（Issue #85）
   #   - 配置完了直後にラベルを冪等作成して、初回 cron で claim ラベル付与に
