@@ -204,17 +204,55 @@ IDD_CLAUDE_SKIP_LABELS=true ./install.sh --repo /path/to/your-project
 `install.sh` は何度再実行しても安全に冪等動作するよう設計されています。再実行時の各ファイル
 カテゴリの扱いは以下のとおりです。
 
-#### `CLAUDE.md.bak` の once-only 保護
+#### `CLAUDE.md` の `.org` 並置 (#87)
 
-- **初回 install** で対象 repo に既存 `CLAUDE.md` があれば `CLAUDE.md.bak` に退避し、
-  `repo-template/CLAUDE.md` を新規配置します
-- **2 回目以降** は `CLAUDE.md.bak` を**上書きしません**（既存 `.bak` を検知して `SKIP` ログを
-  出します）。これによりオリジナルの自分の `CLAUDE.md` を後から参照・復元できます
+`CLAUDE.md` は技術スタック・規約・プロジェクト固有メタを利用者が手で書き込む
+プロジェクト憲章であるため、**install.sh は既存 `CLAUDE.md` を上書きしません**。
+代わりに最新 template を `CLAUDE.md.org` として並置します（差分があるときのみ）。
 
-> **過去バージョンからの Migration**: #36 以前の `install.sh` は再実行のたびに `.bak` を
-> テンプレ由来内容で書き換えていました。当該バージョンで複数回 install を回した既存利用者は、
-> 初回のオリジナル `CLAUDE.md` が `.bak` から失われている可能性があります（`git log` から
-> 復元してください）。本改修以降は発生しません。
+| 対象 repo の状態 | 既定挙動（`--force` なし） | `--force` 指定時 |
+|---|---|---|
+| `CLAUDE.md` 不在 | `NEW` `CLAUDE.md`（template をそのまま配置、`.org` は作らない） | `NEW`（同上） |
+| `CLAUDE.md` ありかつ template と同一 | `SKIP`（`.org` も `.bak` も作らない） | `SKIP`（同上） |
+| `CLAUDE.md` ありかつ差分あり、`.org` 不在 | `SKIP CLAUDE.md` + `NEW CLAUDE.md.org`（既存据え置き、template を並置） | `BACKUP CLAUDE.md → CLAUDE.md.bak` + `OVERWRITE CLAUDE.md`（`.org` は触らない） |
+| `CLAUDE.md` ありかつ差分あり、`.org` 既存 + 内容同一 | `SKIP CLAUDE.md` + `SKIP CLAUDE.md.org` | `OVERWRITE CLAUDE.md`（`.bak` 既存は once-only で温存、`.org` は触らない） |
+| `CLAUDE.md` ありかつ差分あり、`.org` 既存 + 差分あり | `SKIP CLAUDE.md` + `OVERWRITE CLAUDE.md.org`（最新 template に追従） | `OVERWRITE CLAUDE.md`（`.org` は触らない） |
+
+**`CLAUDE.md.org` の merge 手順**: install 直後にこのファイルが新規作成・更新された
+場合、`install.sh` がコンソール末尾に merge ガイドを表示します。基本フロー:
+
+```bash
+# 差分確認
+diff CLAUDE.md CLAUDE.md.org
+
+# 対話的に merge
+vimdiff CLAUDE.md CLAUDE.md.org
+
+# 必要な箇所を CLAUDE.md に取り込んだら .org は削除して構いません。
+# 次回 install で template が更新されていれば再作成されます。
+rm CLAUDE.md.org
+```
+
+**`CLAUDE.md.bak` の once-only 保護（`--force` 経路）**:
+
+- `--force` 指定時のみ、既存 `CLAUDE.md` を `CLAUDE.md.bak` に退避してから template で
+  上書きします
+- 既存 `CLAUDE.md.bak` は **`--force` 経路でも上書きしません**（once-only 規律）。これに
+  よりオリジナルの自分の `CLAUDE.md` を後から参照・復元できます
+- `--force` なしの通常経路では `.bak` を作成・更新しません（既存 `.bak` も触りません）
+
+> **過去バージョンからの Migration**:
+> - #87 以前は `--force` なしでも `CLAUDE.md` が template で上書きされる挙動でした。
+>   再 install 時に `.bak` once-only に退避はされていましたが、本体側はカスタム編集が
+>   毎回 template に置き換わる UX でした。本改修以降は **既定で既存 `CLAUDE.md` を据え置き**、
+>   `CLAUDE.md.org` を参照用に並置する形に変更されました。従来の上書き挙動が必要な場合は
+>   `--force` を明示してください
+> - #36 以前の `install.sh` は再実行のたびに `.bak` をテンプレ由来内容で書き換えていました。
+>   当該バージョンで複数回 install を回した既存利用者は、初回のオリジナル `CLAUDE.md` が
+>   `.bak` から失われている可能性があります（`git log` から復元してください）。#36 以降は
+>   発生しません
+> - 既存 `CLAUDE.md.bak` は `CLAUDE.md.org` に **自動マイグレーションしません**。`.bak` の
+>   内容を `.org` に取り込みたい場合は手動でコピーしてください
 
 #### `.claude/agents/` / `.claude/rules/` のハイブリッド safe-overwrite
 
@@ -231,11 +269,11 @@ IDD_CLAUDE_SKIP_LABELS=true ./install.sh --repo /path/to/your-project
 指定時でも既存 `.bak` は保護されます。`.bak` を更新したい場合は、自分で `<file>.bak` を削除して
 から再実行してください。
 
-> **CLAUDE.md は別経路**: `CLAUDE.md` は `backup_claude_md_once` で初回バックアップ（once-only）
-> を作ったあと、本体は **常に template 由来内容で配置**されます（既存と同一なら `SKIP`）。
-> `.claude/agents/` / `.claude/rules/` のハイブリッド safe-overwrite とは違い、`CLAUDE.md` 本体
-> 自体に対する `--force` のような上書き抑止はありません（カスタム編集は `.bak` のみで保護）。
-> これは従来の `install.sh` 挙動（無条件で template を配置）との後方互換性を維持するためです。
+> **CLAUDE.md は別経路**: `CLAUDE.md` は #87 以降 **`.org` 並置方式**で扱われます。
+> `--force` なしでは既存 `CLAUDE.md` を据え置き、template を `CLAUDE.md.org` として
+> 並置します。`--force` 指定時のみ従来の上書き挙動（`.bak` once-only 退避＋ template
+> で上書き）に切り替わります。詳細は本節先頭の「`CLAUDE.md` の `.org` 並置 (#87)」を
+> 参照してください。
 
 #### `--dry-run` モード
 
@@ -243,12 +281,20 @@ IDD_CLAUDE_SKIP_LABELS=true ./install.sh --repo /path/to/your-project
 
 ```text
 $ ./install.sh --repo /path/to/your-project --dry-run
-[DRY-RUN] BACKUP    /path/to/your-project/CLAUDE.md → CLAUDE.md.bak
-[DRY-RUN] OVERWRITE /path/to/your-project/CLAUDE.md
+[DRY-RUN] SKIP      /path/to/your-project/CLAUDE.md (existing kept, template placed as CLAUDE.md.org)
+[DRY-RUN] NEW       /path/to/your-project/CLAUDE.md.org
 [DRY-RUN] NEW       /path/to/your-project/.claude/agents/reviewer.md
 [DRY-RUN] SKIP      /path/to/your-project/.claude/agents/developer.md (identical to template)
 [DRY-RUN] BACKUP    /path/to/your-project/.claude/rules/ears-format.md → ears-format.md.bak (custom edits detected)
 [DRY-RUN] OVERWRITE /path/to/your-project/.claude/rules/ears-format.md
+```
+
+`--force` を付けると CLAUDE.md は従来挙動（`.bak` 退避 + 上書き）に戻ります:
+
+```text
+$ ./install.sh --repo /path/to/your-project --dry-run --force
+[DRY-RUN] BACKUP    /path/to/your-project/CLAUDE.md → CLAUDE.md.bak
+[DRY-RUN] OVERWRITE /path/to/your-project/CLAUDE.md (--force)
 ```
 
 | Prefix | 意味 |
