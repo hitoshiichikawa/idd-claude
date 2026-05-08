@@ -273,8 +273,8 @@ flock -n 200 || {
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 cd "$REPO_DIR"
 git fetch origin --prune
-git checkout main
-git pull --ff-only origin main
+git checkout "$BASE_BRANCH"
+git pull --ff-only origin "$BASE_BRANCH"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Quota-Aware Watcher Helpers (#66)
@@ -649,7 +649,7 @@ mq_handle_conflict() {
   comment_body=$(cat <<EOF
 ## 🔀 自動マージ前 conflict 検知 (Phase A)
 
-approve 済みの本 PR について、watcher が main との merge 試行で **conflict** を検知しました。
+approve 済みの本 PR について、watcher が \`${MERGE_QUEUE_BASE_BRANCH}\` との merge 試行で **conflict** を検知しました。
 \`needs-rebase\` ラベルを付与しています。
 
 ### 推奨アクション
@@ -686,7 +686,7 @@ EOF
 }
 
 # MERGEABLE PR を最新の base に自動 rebase して force-with-lease push する。
-# 失敗したら needs-rebase に格下げする。サブシェルで実行し、trap で必ず main に戻す。
+# 失敗したら needs-rebase に格下げする。サブシェルで実行し、trap で必ず base branch に戻す。
 # 戻り値: 0=rebase+push 成功, 1=conflict 経由 needs-rebase 化, 2=その他失敗（push 失敗等）
 mq_try_rebase_pr() {
   local pr_number="$1"
@@ -696,7 +696,7 @@ mq_try_rebase_pr() {
 
   (
     set +e
-    # サブシェル終了時は必ず元の main checkout に戻す（NFR 2.2）
+    # サブシェル終了時は必ず元の base branch checkout に戻す（NFR 2.2）
     # shellcheck disable=SC2064
     trap "git rebase --abort >/dev/null 2>&1; git checkout '${MERGE_QUEUE_BASE_BRANCH}' >/dev/null 2>&1" EXIT
 
@@ -728,7 +728,7 @@ mq_try_rebase_pr() {
     exit 0
   )
   local rc=$?
-  # サブシェル外でも安全側に倒して main に戻す（AC 3.6 / NFR 2.2）
+  # サブシェル外でも安全側に倒して base branch に戻す（AC 3.6 / NFR 2.2）
   git checkout "$MERGE_QUEUE_BASE_BRANCH" >/dev/null 2>&1 || true
 
   case $rc in
@@ -850,7 +850,7 @@ process_merge_queue() {
         fi
         ;;
       MERGEABLE)
-        # base ブランチが対象 main 以外なら自動 rebase の対象外（安全側）
+        # PR の base ref が対象 base ブランチ以外なら自動 rebase の対象外（安全側）
         if [ "$base_ref" != "$MERGE_QUEUE_BASE_BRANCH" ]; then
           mq_log "PR #${pr_number}: base=${base_ref} は ${MERGE_QUEUE_BASE_BRANCH} 以外、自動 rebase スキップ"
           skipped=$((skipped + 1))
@@ -880,7 +880,7 @@ process_merge_queue() {
   # AC 6.3: サマリ行
   mq_log "サマリ: rebase+push=${rebased}, conflict=${conflicted}, skip=${skipped}, fail=${failed}, overflow=${skipped_overflow}"
 
-  # AC 3.6 / NFR 2.2: 念のため最終確認で main checkout に戻す
+  # AC 3.6 / NFR 2.2: 念のため最終確認で base branch checkout に戻す
   git checkout "$MERGE_QUEUE_BASE_BRANCH" >/dev/null 2>&1 || true
 }
 
@@ -1818,12 +1818,12 @@ pi_run_iteration() {
 
   pi_log "PR #${pr_number}: kind=${kind} round=${next_round}/${PR_ITERATION_MAX_ROUNDS} 着手 (${pr_url})"
 
-  # サブシェル + trap で必ず main に戻す（AC 8.3）
+  # サブシェル + trap で必ず base branch に戻す（AC 8.3）
   local rc=0
   (
     set +e
     # shellcheck disable=SC2064
-    trap "git checkout 'main' >/dev/null 2>&1" EXIT
+    trap "git checkout '${BASE_BRANCH}' >/dev/null 2>&1" EXIT
 
     # head branch を fresh に checkout（origin の最新状態に追従、AC 4.4）
     if ! timeout "$PR_ITERATION_GIT_TIMEOUT" git fetch origin "$head_ref" >/dev/null 2>&1; then
@@ -1861,8 +1861,8 @@ pi_run_iteration() {
     exit 0
   )
   rc=$?
-  # 保険: 呼び出し元でも main に戻す
-  git checkout main >/dev/null 2>&1 || true
+  # 保険: 呼び出し元でも base branch に戻す
+  git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
 
   if [ $rc -eq 0 ]; then
     # AC 6.2 (#26) / #35 AC 3.1 / 3.2: kind に応じたラベル遷移
@@ -1983,15 +1983,15 @@ process_pr_iteration() {
       3)  skip=$((skip + 1)) ;;       # #35: kind=none / ambiguous は skip としてカウント
       *)  fail=$((fail + 1)) ;;
     esac
-    # 各 PR 処理後に保険で main に戻す
-    git checkout main >/dev/null 2>&1 || true
+    # 各 PR 処理後に保険で base branch に戻す
+    git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
   done <<< "$pr_iter"
 
   # #35 NFR 3.1 / 3.2: サマリにも design / impl 内訳を出して grep 集計可能にする
   pi_log "サマリ: success=${success}, fail=${fail}, skip=${skip}, escalated=${escalated}, overflow=${skipped_overflow} (design=${design_count}, impl=${impl_count})"
 
-  # 念のため最終確認で main に戻す
-  git checkout main >/dev/null 2>&1 || true
+  # 念のため最終確認で base branch に戻す
+  git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -3611,8 +3611,9 @@ _parallel_validate_slots() {
 #
 # 設計判断:
 #   - slot worktree は `git worktree add --detach` で detached HEAD として作成する
-#     （Slot Runner が `git checkout -B <branch> main` で新規 branch に切り替える際、
-#     他 slot の worktree が同じ local branch を保持していてもブロックされないため）
+#     （Slot Runner が `git checkout -B <branch> $BASE_BRANCH` で新規 branch に
+#     切り替える際、他 slot の worktree が同じ local branch を保持していても
+#     ブロックされないため）
 #   - `git worktree list --porcelain` で冪等性を担保
 #   - 破損検出時は <slot-N>.broken-<ts> に退避してから再作成
 #   - PARALLEL_SLOTS=1 のときは slot-2 以降の worktree を作らない（呼び出し元で gate）
@@ -3675,21 +3676,23 @@ _worktree_ensure() {
     git -C "$REPO_DIR" worktree prune >/dev/null 2>&1 || true
   fi
 
-  # ケース C: 新規作成（origin/main から detached HEAD として）
-  # detached にする理由: 各 slot が `git checkout -B <branch> main` で新規 branch に
-  # 切り替える際、別 slot worktree が同じ local branch を持っていても弾かれないため。
-  if ! git -C "$REPO_DIR" worktree add --detach "$wt_path" "origin/main" >/dev/null 2>&1; then
+  # ケース C: 新規作成（origin/$BASE_BRANCH から detached HEAD として）
+  # detached にする理由: 各 slot が `git checkout -B <branch> $BASE_BRANCH` で新規
+  # branch に切り替える際、別 slot worktree が同じ local branch を持っていても
+  # 弾かれないため。
+  if ! git -C "$REPO_DIR" worktree add --detach "$wt_path" "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
     dispatcher_warn "slot-${n}: git worktree add に失敗: $wt_path"
     return 1
   fi
-  dispatcher_log "slot-${n}: worktree 作成: $wt_path (detached @ origin/main)"
+  dispatcher_log "slot-${n}: worktree 作成: $wt_path (detached @ origin/${BASE_BRANCH})"
   return 0
 }
 
-# Per-slot worktree を origin/main の最新状態に強制リセットする（Issue 投入時に毎回呼ぶ）。
+# Per-slot worktree を origin/$BASE_BRANCH の最新状態に強制リセットする
+# （Issue 投入時に毎回呼ぶ）。
 # 引数: $1 = worktree 絶対パス
 # 戻り値: 0 = ok / 1 = 失敗
-# 副作用: 当該 worktree が origin/main の最新コミットに head=detached、
+# 副作用: 当該 worktree が origin/$BASE_BRANCH の最新コミットに head=detached、
 #   tracked / untracked / ignored すべて消去される
 #
 # Req 3.4
@@ -3702,8 +3705,8 @@ _worktree_reset() {
   if ! git -C "$wt" fetch origin --prune >/dev/null 2>&1; then
     return 1
   fi
-  # 2. detached HEAD を origin/main に強制移動
-  if ! git -C "$wt" reset --hard origin/main >/dev/null 2>&1; then
+  # 2. detached HEAD を origin/$BASE_BRANCH に強制移動
+  if ! git -C "$wt" reset --hard "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
     return 1
   fi
   # 3. untracked + ignored を消去（前回 Issue の build artifact / node_modules を残さない）
@@ -3994,7 +3997,7 @@ _resume_detect_existing_branch() {
 }
 
 # `impl-resume` モードの branch 初期化を opt-in flag によって 2 戦略のいずれかに
-# ディスパッチする。既存の `git checkout -B "$BRANCH" "origin/main"` +
+# ディスパッチする。既存の `git checkout -B "$BRANCH" "origin/$BASE_BRANCH"` +
 # `git push -u origin "$BRANCH" --force-with-lease` シーケンスを内包する。
 #
 # 入力（環境変数経由）:
@@ -4014,9 +4017,9 @@ _resume_detect_existing_branch() {
 # Req 1.1, 1.2, 2.1, 2.2, 2.3, 2.5, 4.4, NFR 1.3, NFR 2.1
 #
 # 戦略:
-#   PRESERVE=false（既定）→ 既存挙動: checkout -B BRANCH origin/main + force-with-lease push
+#   PRESERVE=false（既定）→ 既存挙動: checkout -B BRANCH origin/$BASE_BRANCH + force-with-lease push
 #   PRESERVE=true + branch 存在 → checkout -B BRANCH origin/BRANCH + fast-forward push
-#   PRESERVE=true + branch 不在 → checkout -B BRANCH origin/main + fast-forward push
+#   PRESERVE=true + branch 不在 → checkout -B BRANCH origin/$BASE_BRANCH + fast-forward push
 #
 # 注意: opt-in パスの fast-forward push と non-ff 検出ロジックは task 3.1 / 3.2 で
 # `_resume_push` / `_resume_mark_nonff_failed` 関数に切り出す（PR 履歴上の独立性確保のため、
@@ -4028,8 +4031,9 @@ _resume_branch_init() {
 
   if [ "$preserve" != "true" ]; then
     # ── 既定パス: 本機能導入前と完全に等価な挙動 ──
-    # worktree は detached HEAD で起動するため -B で新規 branch 作成（local main を持たない）
-    if ! git checkout -B "$BRANCH" "origin/main"; then
+    # worktree は detached HEAD で起動するため -B で新規 branch 作成
+    # （local $BASE_BRANCH を持たない）
+    if ! git checkout -B "$BRANCH" "origin/${BASE_BRANCH}"; then
       slot_warn "branch 作成に失敗: $BRANCH"
       _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
       return 1
@@ -4044,7 +4048,8 @@ _resume_branch_init() {
   fi
 
   # ── opt-in パス: PRESERVE=true ──
-  # origin に branch が存在するか判定。存在すればそこから resume、不在なら origin/main 起点。
+  # origin に branch が存在するか判定。存在すればそこから resume、不在なら
+  # origin/$BASE_BRANCH 起点。
   local origin_sha=""
   if _resume_detect_existing_branch "$BRANCH"; then
     if ! git checkout -B "$BRANCH" "origin/$BRANCH"; then
@@ -4055,12 +4060,12 @@ _resume_branch_init() {
     origin_sha=$(git rev-parse --short=7 "origin/$BRANCH" 2>/dev/null || echo "unknown")
     slot_log "resume-mode=existing-branch branch=$BRANCH origin_sha=$origin_sha"
   else
-    if ! git checkout -B "$BRANCH" "origin/main"; then
+    if ! git checkout -B "$BRANCH" "origin/${BASE_BRANCH}"; then
       slot_warn "branch 作成に失敗: $BRANCH"
       _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
       return 1
     fi
-    slot_log "resume-mode=fresh-from-main branch=$BRANCH"
+    slot_log "resume-mode=fresh-from-base branch=$BRANCH base=$BASE_BRANCH"
   fi
 
   # opt-in パスの push は fast-forward 制約付き（_resume_push に委譲）。
@@ -4249,13 +4254,13 @@ _slot_run_issue() {
   # 既存 cron 起動文字列を変更する必要はない。
   REPO_DIR="$WT"
 
-  # ── Worktree を origin/main 最新へ強制リセット ──
+  # ── Worktree を origin/$BASE_BRANCH 最新へ強制リセット ──
   if ! _worktree_reset "$WT"; then
     slot_warn "worktree reset に失敗 (path=$WT)"
-    _slot_mark_failed "worktree-reset" "Slot ${IDD_SLOT_NUMBER} の worktree を origin/main にリセットできませんでした。"
+    _slot_mark_failed "worktree-reset" "Slot ${IDD_SLOT_NUMBER} の worktree を origin/${BASE_BRANCH} にリセットできませんでした。"
     return 1
   fi
-  slot_log "worktree reset OK (origin/main 最新化 + clean -fdx)"
+  slot_log "worktree reset OK (origin/${BASE_BRANCH} 最新化 + clean -fdx)"
 
   # ── SLOT_INIT_HOOK 起動（reset 後・claude 起動前に 1 度だけ）──
   if ! _hook_invoke "$IDD_SLOT_NUMBER" "$WT"; then
@@ -4452,8 +4457,9 @@ _slot_run_issue() {
       return 1
     fi
   else
-    # worktree は detached HEAD で起動するため -B で新規 branch 作成（local main を持たない）
-    if ! git checkout -B "$BRANCH" "origin/main"; then
+    # worktree は detached HEAD で起動するため -B で新規 branch 作成
+    # （local $BASE_BRANCH を持たない）
+    if ! git checkout -B "$BRANCH" "origin/${BASE_BRANCH}"; then
       slot_warn "branch 作成に失敗: $BRANCH"
       _slot_mark_failed "branch-checkout" "ブランチ \`$BRANCH\` の作成に失敗しました。"
       return 1
