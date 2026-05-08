@@ -31,7 +31,7 @@
   - _Requirements: 1.5, 4.1, 4.3, 5.4, NFR 1.1_
   - _Depends: 1.1_
 
-- [ ] 2. Agent prompt template 一般化（C2 採用方式: heredoc=変数展開、template=一般語化 + 補足注記）
+- [x] 2. Agent prompt template 一般化（C2 採用方式: heredoc=変数展開、template=一般語化 + 補足注記）
 - [x] 2.1 `repo-template/.claude/agents/project-manager.md` の base 指定文言を更新 (P)
   - L26 / L165 の `- base: \`main\`` → `- base: \`<BASE_BRANCH>\`（idd-claude が解決した base ブランチ。watcher / Actions のいずれの経路でもオーケストレーターが env から渡す。未指定時の既定は \`main\`）`
   - L246 の `- \`main\` への直接 push` → `- base ブランチ（既定 \`main\`）への直接 push`
@@ -46,7 +46,7 @@
   - _Requirements: 4.1, 4.3, 4.4_
   - _Boundary: reviewer.md_
 
-- [ ] 2.3 `repo-template/.claude/agents/developer.md` の base 参照と禁止事項を更新 (P)
+- [x] 2.3 `repo-template/.claude/agents/developer.md` の base 参照と禁止事項を更新 (P)
   - L17-18 の「main に載っている前提」→「base ブランチ（idd-claude が解決した `<BASE_BRANCH>`、既定 `main`）に merge 済み前提」に一般化
   - L80 の `git diff main..HEAD -- <変更ファイル>` → `git diff <BASE_BRANCH>..HEAD -- <変更ファイル>`、補足注記で `<BASE_BRANCH>` が env 解決値であることを 1 行追加
   - L98 の `git log --oneline main..HEAD` → `git log --oneline <BASE_BRANCH>..HEAD`
