@@ -32,7 +32,7 @@
   - _Depends: 1.1_
 
 - [ ] 2. Agent prompt template 一般化（C2 採用方式: heredoc=変数展開、template=一般語化 + 補足注記）
-- [ ] 2.1 `repo-template/.claude/agents/project-manager.md` の base 指定文言を更新 (P)
+- [x] 2.1 `repo-template/.claude/agents/project-manager.md` の base 指定文言を更新 (P)
   - L26 / L165 の `- base: \`main\`` → `- base: \`<BASE_BRANCH>\`（idd-claude が解決した base ブランチ。watcher / Actions のいずれの経路でもオーケストレーターが env から渡す。未指定時の既定は \`main\`）`
   - L246 の `- \`main\` への直接 push` → `- base ブランチ（既定 \`main\`）への直接 push`
   - 文意が任意の base branch（main / develop / その他）で整合することを目視確認（Req 4.4）
