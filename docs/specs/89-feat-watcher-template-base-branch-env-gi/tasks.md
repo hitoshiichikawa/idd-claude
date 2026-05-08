@@ -55,7 +55,7 @@
   - _Boundary: developer.md_
 
 - [ ] 3. Workflow YAML（C3 採用方式: `vars.IDD_CLAUDE_BASE_BRANCH || 'main'`）
-- [ ] 3.1 `repo-template/.github/workflows/issue-to-pr.yml` に `env.BASE_BRANCH` を導入し全 step を動的化
+- [x] 3.1 `repo-template/.github/workflows/issue-to-pr.yml` に `env.BASE_BRANCH` を導入し全 step を動的化
   - `jobs.claude-team-dev` 直下に `env: BASE_BRANCH: ${{ vars.IDD_CLAUDE_BASE_BRANCH || 'main' }}` を新設
   - `Checkout main` step の `ref: main` を `ref: ${{ env.BASE_BRANCH }}` に変更（step 名も `Checkout base branch` 等に変更）
   - `Create working branch from main` step は内部で `git checkout -B "$BRANCH"` を行うが、現状 `main` から派生していないため変更不要 → ただし step 名を `Create working branch from base` に変更
