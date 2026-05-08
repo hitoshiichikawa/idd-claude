@@ -54,7 +54,7 @@
   - _Requirements: 4.1, 4.3, 4.4, 5.4_
   - _Boundary: developer.md_
 
-- [ ] 3. Workflow YAML（C3 採用方式: `vars.IDD_CLAUDE_BASE_BRANCH || 'main'`）
+- [x] 3. Workflow YAML（C3 採用方式: `vars.IDD_CLAUDE_BASE_BRANCH || 'main'`）
 - [x] 3.1 `repo-template/.github/workflows/issue-to-pr.yml` に `env.BASE_BRANCH` を導入し全 step を動的化
   - `jobs.claude-team-dev` 直下に `env: BASE_BRANCH: ${{ vars.IDD_CLAUDE_BASE_BRANCH || 'main' }}` を新設
   - `Checkout main` step の `ref: main` を `ref: ${{ env.BASE_BRANCH }}` に変更（step 名も `Checkout base branch` 等に変更）
@@ -64,7 +64,7 @@
   - 変更後 `actionlint` でクリーン
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 4.1, NFR 1.1_
 
-- [ ] 3.2 root `.github/workflows/issue-to-pr.yml` を 3.1 と同じ内容で更新
+- [x] 3.2 root `.github/workflows/issue-to-pr.yml` を 3.1 と同じ内容で更新
   - 内容は repo-template 版と完全一致（self-hosting 用と consumer 配布用は同じ workflow を保つ）
   - `actionlint` でクリーン
   - _Requirements: 3.1, 3.2, 3.3, 3.4, NFR 1.1_
