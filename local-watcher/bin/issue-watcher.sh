@@ -67,6 +67,13 @@ LABEL_NEEDS_REBASE="needs-rebase"
 LABEL_NEEDS_ITERATION="needs-iteration"
 LABEL_NEEDS_QUOTA_WAIT="needs-quota-wait"
 
+# ─── Base branch 設定 (#89) ───
+# watcher 経路（local cron）と Actions 経路の base branch を 1 つの env で切り替える
+# ための単一の真実源。未設定時は "main" を採用し、本機能導入前と完全に等価な挙動を維持
+# する（Req 1.2, 7.2, NFR 1.1）。gitflow 運用（develop 起点）には cron / launchd 側で
+# `BASE_BRANCH=develop` を渡す。詳細は README の「ブランチ運用と BASE_BRANCH」節を参照。
+BASE_BRANCH="${BASE_BRANCH:-main}"
+
 # ─── Phase A: Merge Queue Processor 設定 ───
 # 既存運用への影響を避けるため、初回導入は opt-in（デフォルト false）。
 # 有効化するには cron / launchd 側で MERGE_QUEUE_ENABLED=true を渡す。
@@ -75,8 +82,11 @@ MERGE_QUEUE_ENABLED="${MERGE_QUEUE_ENABLED:-false}"
 MERGE_QUEUE_MAX_PRS="${MERGE_QUEUE_MAX_PRS:-5}"
 # git 操作の個別タイムアウト（秒）。watcher の最短実行間隔（既定 2 分）の半分以内を目安。
 MERGE_QUEUE_GIT_TIMEOUT="${MERGE_QUEUE_GIT_TIMEOUT:-60}"
-# main ブランチ名（基本は "main"。レガシー repo で master の場合のみ上書き）。
-MERGE_QUEUE_BASE_BRANCH="${MERGE_QUEUE_BASE_BRANCH:-main}"
+# Merge Queue が rebase / merge 試行する base branch 名。env var 名は後方互換のため
+# 変更しない（NFR 1.2 / Req 2.4）。未設定時は BASE_BRANCH の連鎖 default を採用する
+# （Req 2.1, 2.2, 2.3）。明示設定すれば BASE_BRANCH と異なる base を merge queue だけに
+# 適用できる（基本は "main"。レガシー repo で master の場合等）。
+MERGE_QUEUE_BASE_BRANCH="${MERGE_QUEUE_BASE_BRANCH:-${BASE_BRANCH}}"
 # head branch prefix: 自動 rebase を許可する head ref のプレフィックス。
 # idd-claude が作成する PR は `claude/issue-N-*` パターン。人間が書いた PR を
 # 巻き込まないよう、デフォルトで `claude/` 始まりだけを対象にする。
@@ -243,6 +253,11 @@ if [ "$PR_ITERATION_ENABLED" = "true" ] \
 fi
 
 mkdir -p "$LOG_DIR"
+
+# 解決済み base branch を起動時 log に出力（Req 1.7 / NFR 4.1）。
+# 運用者が cron mailer / log で `base-branch=...` を grep できるよう、
+# 既定値（main）でも明示的に出力する。
+echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 多重起動防止
