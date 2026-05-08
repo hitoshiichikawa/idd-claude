@@ -39,7 +39,7 @@
   - _Requirements: 4.1, 4.2, 4.4_
   - _Boundary: project-manager.md_
 
-- [ ] 2.2 `repo-template/.claude/agents/reviewer.md` の diff/log 参照を更新 (P)
+- [x] 2.2 `repo-template/.claude/agents/reviewer.md` の diff/log 参照を更新 (P)
   - L40 / L63 / L68 / L98 / L99 / L121 / L235 の `git diff main..HEAD` / `git log --oneline main..HEAD` / `Compared to: main..HEAD` / 「main path に注入」表現を `<BASE_BRANCH>..HEAD` 形式に変更
   - 「`<BASE_BRANCH>` は idd-claude が解決した base ブランチ。未指定時の既定は `main`」の補足注記を冒頭付近の入力契約節（L82-94 周辺）に 1 か所追加
   - 「flag 分岐なしで直接 main path に注入」のような **比喩的な main**（base branch を指していない）は「直接 base path に注入」または「直接実行パスに注入」と一般化（誤読回避）
