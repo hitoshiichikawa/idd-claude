@@ -12,7 +12,7 @@
   - design.md の Resolution Truth Table の 5 ケースが解決値で再現されることを mental check
   - _Requirements: 1.2, 1.7, 2.1, 2.2, 2.3, 2.4, 5.3, 7.2, NFR 1.2, NFR 4.1_
 
-- [ ] 1.2 git 操作（G1-G4）の `main` リテラルを `$BASE_BRANCH` 参照化
+- [x] 1.2 git 操作（G1-G4）の `main` リテラルを `$BASE_BRANCH` 参照化
   - L261-262 の `git checkout main` / `git pull --ff-only origin main` を `"$BASE_BRANCH"` に置換（G1）
   - L3666 worktree add の `origin/main`、L3691 worktree reset の `origin/main`、関連 log 文面 L3670 / L4243 を `origin/$BASE_BRANCH` に置換（G2）
   - L4017 / L4043 / L4441 の `git checkout -B "$BRANCH" "origin/main"` を `origin/$BASE_BRANCH` に置換（G3）
