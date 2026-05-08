@@ -70,7 +70,7 @@
   - _Requirements: 3.1, 3.2, 3.3, 3.4, NFR 1.1_
   - _Depends: 3.1_
 
-- [ ] 4. ドキュメント整備（C4 - migration note + 文言一般化）
+- [x] 4. ドキュメント整備（C4 - migration note + 文言一般化）
 - [x] 4.1 `repo-template/CLAUDE.md` と root `CLAUDE.md` の特定 branch 名依存文言を一般化 (P)
   - root `CLAUDE.md` L111: `- \`main\` への直接 push` → `- base ブランチ（既定 \`main\`、`BASE_BRANCH` 設定によっては \`develop\` 等）への直接 push`
   - `repo-template/CLAUDE.md` L112: 同上の文言で更新
@@ -79,7 +79,7 @@
   - _Requirements: 6.4_
   - _Boundary: root-CLAUDE.md, repo-template-CLAUDE.md_
 
-- [ ] 4.2 `README.md` に「ブランチ運用と `BASE_BRANCH`」節を新設し、migration note / 環境変数表追記 / dogfood 手順を追加
+- [x] 4.2 `README.md` に「ブランチ運用と `BASE_BRANCH`」節を新設し、migration note / 環境変数表追記 / dogfood 手順を追加
   - 既存 `## セットアップ` 節と既存 `## 環境変数` 系セクションの間に新節を挿入
   - 含める項目（design.md の C4 README Migration Note 節を参照）:
     - `BASE_BRANCH` の役割（base branch の単一切替点）と既定値（`main`）
