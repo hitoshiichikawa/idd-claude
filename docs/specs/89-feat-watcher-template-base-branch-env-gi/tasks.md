@@ -71,7 +71,7 @@
   - _Depends: 3.1_
 
 - [ ] 4. ドキュメント整備（C4 - migration note + 文言一般化）
-- [ ] 4.1 `repo-template/CLAUDE.md` と root `CLAUDE.md` の特定 branch 名依存文言を一般化 (P)
+- [x] 4.1 `repo-template/CLAUDE.md` と root `CLAUDE.md` の特定 branch 名依存文言を一般化 (P)
   - root `CLAUDE.md` L111: `- \`main\` への直接 push` → `- base ブランチ（既定 \`main\`、`BASE_BRANCH` 設定によっては \`develop\` 等）への直接 push`
   - `repo-template/CLAUDE.md` L112: 同上の文言で更新
   - `repo-template/CLAUDE.md` L135 の `origin/main 起点で fresh init + force-push` を `origin/<BASE_BRANCH>（既定 main）起点で fresh init + force-push` に変更
