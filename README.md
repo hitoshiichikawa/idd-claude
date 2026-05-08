@@ -543,10 +543,11 @@ Settings → Secrets and variables → Actions → **Variables** タブ → "New
 | 名前 | 値 | 意味 |
 |---|---|---|
 | `IDD_CLAUDE_USE_ACTIONS` | `true` | ワークフロー発火を許可 |
+| `IDD_CLAUDE_BASE_BRANCH` | `develop` 等 | base ブランチを切替（未設定時は `main`、詳細は後述「ブランチ運用と `BASE_BRANCH`」節） |
 
-この変数が未設定（または `true` 以外）だと、Issue イベントでワークフローの job が `if:`
-条件でスキップされるため何も走りません。ローカル watcher と Actions の二重起動を防ぐ保険にも
-なっています。
+`IDD_CLAUDE_USE_ACTIONS` が未設定（または `true` 以外）だと、Issue イベントでワークフローの
+job が `if:` 条件でスキップされるため何も走りません。ローカル watcher と Actions の二重起動を
+防ぐ保険にもなっています。
 
 #### 2. Secrets に認証情報を追加
 
@@ -556,6 +557,99 @@ Settings → Secrets and variables → Actions → **Secrets** タブ
 - または `CLAUDE_CODE_OAUTH_TOKEN`（`claude setup-token` で発行）
 
 `.github/workflows/issue-to-pr.yml` は両方に対応する形でコメントアウトを切り替えるだけで使えます。
+
+---
+
+## ブランチ運用と `BASE_BRANCH`
+
+idd-claude は **base branch を表す `BASE_BRANCH` env var**（Actions 経路では repository
+variable `IDD_CLAUDE_BASE_BRANCH`）で base を切り替える単一の真実源を持ちます。`develop`
+起点（gitflow）など `main` 以外の base に対しても auto-dev フローを完走させられます。
+
+### 基本
+
+- **既定値**: `main`（`BASE_BRANCH` 未設定時は本機能導入前と完全に同一の挙動）
+- **対象**: watcher 経路（local cron）と GitHub Actions 経路の双方
+- **影響範囲**: 新規ブランチ派生 / per-slot worktree 最新化 / Reviewer に渡す diff / PR base
+  指定 / agent prompt 文面のすべてが解決値を参照する
+
+### 設定方法
+
+#### Local watcher（cron / launchd）
+
+cron entry に `BASE_BRANCH=develop` を追加します（`REPO` / `REPO_DIR` と同じ env 渡し方）。
+
+```cron
+*/2 * * * * REPO=owner/myrepo REPO_DIR=$HOME/work/myrepo BASE_BRANCH=develop $HOME/bin/issue-watcher.sh
+```
+
+watcher は次サイクル（次 cron tick）で env を読み直すため、明示的な再起動は不要です。
+起動時 log の 1 行目に `base-branch=develop merge-queue-base=develop` が出ることで設定値を
+確認できます。
+
+launchd（macOS）の場合は `EnvironmentVariables` に `BASE_BRANCH` キーを追加してください。
+
+#### GitHub Actions
+
+Settings → Secrets and variables → Actions → **Variables** タブ → "New repository variable"
+で `IDD_CLAUDE_BASE_BRANCH=develop` を追加します。`IDD_CLAUDE_USE_ACTIONS` opt-in gate は
+別変数なので、本変数の追加では opt-in 状態は変わりません。
+
+### gitflow 移行手順（既存 `main` 運用 → `develop` 起点）
+
+1. **`develop` ブランチを作成・push**（手動・1 度だけ）
+   ```bash
+   git checkout main && git pull
+   git checkout -b develop
+   git push -u origin develop
+   ```
+2. **cron に `BASE_BRANCH=develop` を追加**（`crontab -e` で env 行を編集）
+3. **watcher の再起動は不要** — 次 tick で env を読み直す
+4. **dogfood test issue で動作確認**（後述「dogfood 確認手順」）
+
+`setup.sh` への自動化は本 PR の対象外です（次 Issue 化候補。手動手順で十分カバーできるため）。
+
+### `BASE_BRANCH` と `MERGE_QUEUE_BASE_BRANCH` の関係
+
+`MERGE_QUEUE_BASE_BRANCH` は Phase A Merge Queue Processor が rebase / merge 試行する base
+branch を表す既存 env です。idd-claude は両者を **連鎖 default** で結合します。
+
+| `BASE_BRANCH` | `MERGE_QUEUE_BASE_BRANCH` | 解決後の base | 解決後の merge queue base |
+|---|---|---|---|
+| 未設定 | 未設定 | `main` | `main` |
+| `develop` | 未設定 | `develop` | `develop` |
+| 未設定 | `master` | `main` | `master` |
+| `develop` | `master` | `develop` | `master` |
+| `develop` | `develop` | `develop` | `develop` |
+
+**つまり通常は `BASE_BRANCH` だけ設定すれば merge queue も同じ base を使います**。merge
+queue だけ別 base にしたい超レアケース（main → develop の merge を別ジョブで自動化したい等）
+だけ `MERGE_QUEUE_BASE_BRANCH` を明示してください。
+
+### dogfood 確認手順（self-hosting で `develop` 運用に切り替えた後）
+
+1. test issue（軽微な docs 変更でよい）を立てる: 例 `chore: tweak readme typo`
+2. `auto-dev` ラベルを付与
+3. 次 cron tick（既定 2 分）以内に watcher が pickup → Triage → impl モードに進む
+4. 設計 PR / 実装 PR が **`develop` を base に作成** されることを GitHub UI で観測
+5. PR 本文の「自動 Triage 結果」「進捗確認」セクションに `develop` 起点の commit が並ぶ
+6. watcher log を `tail -f $HOME/.issue-watcher/logs/<repo-slug>/dispatcher.log` で観測し、
+   `base-branch=develop` がサイクル開始時に出ているか確認
+
+### 訳語選定
+
+prompt / template / docs では以下の用語が同義で使われます:
+
+- **「base ブランチ」** / **「base branch」** — 一般語（読者が任意の branch 名を当てはめて読める）
+- **`<BASE_BRANCH>`** — 技術参照表記（実際の env 解決値）
+- **`${BASE_BRANCH}`** — bash 変数参照（watcher heredoc 内）
+- **`${{ env.BASE_BRANCH }}`** — GitHub Actions YAML 内の参照
+
+### 既 installed consumer repo の保護
+
+- `BASE_BRANCH` を設定していないリポジトリは、本機能導入前と完全に同一の挙動を継続します
+- `install.sh` 再実行時、template 配布物のデフォルトは引き続き `main` 相当
+- consumer repo に対して `BASE_BRANCH` 設定を強制することはありません（任意）
 
 ---
 
