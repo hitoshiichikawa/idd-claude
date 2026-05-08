@@ -4,7 +4,7 @@
 > design.md の File Structure Plan / Components and Interfaces を必ず参照のこと。
 
 - [ ] 1. Watcher core: `BASE_BRANCH` 解決と全 git 操作の抽象化
-- [ ] 1.1 Config ブロックに `BASE_BRANCH` を導入し、`MERGE_QUEUE_BASE_BRANCH` を連鎖 default 化、起動時に解決値を log 出力
+- [x] 1.1 Config ブロックに `BASE_BRANCH` を導入し、`MERGE_QUEUE_BASE_BRANCH` を連鎖 default 化、起動時に解決値を log 出力
   - `local-watcher/bin/issue-watcher.sh` L78 直前に `BASE_BRANCH="${BASE_BRANCH:-main}"` を新設
   - 既存 `MERGE_QUEUE_BASE_BRANCH="${MERGE_QUEUE_BASE_BRANCH:-main}"` を `MERGE_QUEUE_BASE_BRANCH="${MERGE_QUEUE_BASE_BRANCH:-${BASE_BRANCH}}"` に変更
   - `mkdir -p "$LOG_DIR"` 直後（L246 付近）に解決値 log（`base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH}`）を 1 行追加
