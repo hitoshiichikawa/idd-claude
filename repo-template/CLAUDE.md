@@ -109,7 +109,7 @@
 
 ## 禁止事項
 
-- `main` ブランチへの直接 push
+- base ブランチ（既定 `main`、`BASE_BRANCH` 設定によっては `develop` 等）への直接 push
 - `.env` や実値を含む Secrets のコミット
 - 外部サービス呼び出し時に API Key を埋め込むこと（環境変数化を徹底）
 - 公開リポジトリ上の第三者コードを、ライセンス確認なしにコピペすること
@@ -132,7 +132,7 @@
   - idd-claude 側で `IMPL_RESUME_PRESERVE_COMMITS=true` を有効化したリポジトリの場合、`impl-resume` モードは既存 origin branch の commit を温存したまま resume する。Developer は `git reset` / `git rebase` / branch 切替を行わず、未完了タスクの先頭から続行すること
   - 同条件下で `IMPL_RESUME_PROGRESS_TRACKING=true`（既定）が有効なら、Developer は各タスク完了ごとに `tasks.md` の `- [ ]` → `- [x]` 行内編集を行い、`docs(tasks): mark <task-id> as done` で **専用 commit** を積む。タスク本文 / `_Requirements:_` / `_Boundary:_` / `_Depends:_` / 順序は変更しない
   - 詳細規約は `.claude/agents/developer.md` の「impl-resume / tasks.md 進捗追跡規約」節を参照
-  - opt-in 機能 OFF / 無宣言の場合は本ルールは適用されない（既定挙動: `origin/main` 起点で fresh init + force-push）
+  - opt-in 機能 OFF / 無宣言の場合は本ルールは適用されない（既定挙動: `origin/<BASE_BRANCH>` 起点で fresh init + force-push、`<BASE_BRANCH>` 未指定時は `main`）
 - Developer は **実装 PR** で `design.md` / `tasks.md` / `requirements.md` を書き換えない（設計 PR で人間レビュー済みのため）。矛盾は PR 本文「確認事項」で指摘する
 - **PR Iteration（`needs-iteration` ラベル）の責務境界**:
   - **設計 PR (`claude/issue-<N>-design-<slug>`)** で `needs-iteration` が付いた場合、watcher が次サイクルで Architect 役割の iteration を起動する。`docs/specs/<N>-<slug>/` 配下（`requirements.md` / `design.md` / `tasks.md`）の **書き換えは許容** され、成功時 `awaiting-design-review` に遷移する

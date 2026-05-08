@@ -108,7 +108,7 @@
 
 ## 禁止事項
 
-- `main` への直接 push
+- base ブランチ（既定 `main`、`BASE_BRANCH` 設定によっては `develop` 等）への直接 push
 - `.env` / Secrets 実値のコミット、スクリプト内 API Key ハードコード
 - **後方互換性を壊す変更を無告知で入れる**（既存 env var 名変更 / cron 登録文字列の変更 / ラベル名変更 / exit code 意味変更）。破る場合は README に migration note を書き、必要なら deprecation 期間を設ける
 - **sudo を必要とする手順の追加**（idd-claude はユーザースコープ前提。`install.sh` / `setup.sh` の root 実行検知を外さない）
