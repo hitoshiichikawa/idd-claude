@@ -94,8 +94,8 @@
   - _Boundary: README.md_
   - _Depends: 1.1_
 
-- [ ] 5. dogfood 検証手順の記載と self-review
-- [ ] 5.1 PR 本文「Test plan」に手動スモークテスト結果を記録、impl-notes.md に env 一覧を残す
+- [x] 5. dogfood 検証手順の記載と self-review
+- [x] 5.1 PR 本文「Test plan」に手動スモークテスト結果を記録、impl-notes.md に env 一覧を残す
   - design.md「Testing Strategy」の Static Analysis（shellcheck / actionlint / grep）の実行結果を impl-notes.md に列挙
   - Manual Smoke Tests の 4 項目（後方互換 / 新挙動 / 連鎖 default / Actions 経路）の実行結果を impl-notes.md に列挙
   - dogfood E2E の Phase 1（merge 直後の cron 継続性）は merge 後の人間観測に委ねる旨を impl-notes.md に明記
