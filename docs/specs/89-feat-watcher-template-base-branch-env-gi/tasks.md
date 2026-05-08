@@ -3,7 +3,7 @@
 > 各タスクは 1 commit 単位で独立完了可能な粒度。`(P)` 付きタスクは並列実行可能（境界を `_Boundary:_` で明示）。
 > design.md の File Structure Plan / Components and Interfaces を必ず参照のこと。
 
-- [ ] 1. Watcher core: `BASE_BRANCH` 解決と全 git 操作の抽象化
+- [x] 1. Watcher core: `BASE_BRANCH` 解決と全 git 操作の抽象化
 - [x] 1.1 Config ブロックに `BASE_BRANCH` を導入し、`MERGE_QUEUE_BASE_BRANCH` を連鎖 default 化、起動時に解決値を log 出力
   - `local-watcher/bin/issue-watcher.sh` L78 直前に `BASE_BRANCH="${BASE_BRANCH:-main}"` を新設
   - 既存 `MERGE_QUEUE_BASE_BRANCH="${MERGE_QUEUE_BASE_BRANCH:-main}"` を `MERGE_QUEUE_BASE_BRANCH="${MERGE_QUEUE_BASE_BRANCH:-${BASE_BRANCH}}"` に変更
@@ -22,7 +22,7 @@
   - 各 commit 後に `shellcheck` を流して警告ゼロを維持
   - _Requirements: 1.1, 1.3, 1.4, 1.6, 5.2, 5.4, NFR 1.1, NFR 4.2_
 
-- [ ] 1.3 Stage A/A'/B/C prompt heredoc の `main` リテラルを `${BASE_BRANCH}` 展開化（G5/G6/G7）
+- [x] 1.3 Stage A/A'/B/C prompt heredoc の `main` リテラルを `${BASE_BRANCH}` 展開化（G5/G6/G7）
   - L2570 / L2631 / L2634 / L2657 / L2666 / L2716 / L2731 / L2733 / L2766 / L2795 / L2830 / L4488 / L4497 の `main` を `${BASE_BRANCH}` または `${BASE_BRANCH}..HEAD` に置換
   - quoted heredoc（`<<'EOF'`）が混じっている箇所が無いか grep で再確認、混入していたら通常 heredoc に変更してから変数展開する（既存コードでは `'EOF'` 使用箇所が限定的なので原則そのまま展開可）
   - PjM への注入文 L2795 `直近の main 上の merge commit から git log --oneline --merges で探す` を `直近の ${BASE_BRANCH} 上の…` に変更
