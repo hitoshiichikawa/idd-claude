@@ -1668,10 +1668,10 @@ pi_build_iteration_prompt() {
     fi
   fi
 
-  # PR diff（base..head）
-  local pr_diff="(diff の取得に失敗)"
-  pr_diff=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
-    gh pr diff "$pr_number" --repo "$REPO" 2>/dev/null || echo "(diff の取得に失敗)")
+  # PR diff は prompt に inline で埋め込まない（Issue #97: 大差分時の `Argument list
+  # too long` 回避のため、`PI_PR_DIFF` 環境変数も廃止。Iteration サブエージェントが
+  # template の指示に従い、自身で `gh pr diff <N> --repo <REPO>` および
+  # `git diff <base>..<head> -- <path>` を Bash ツールで実行して取得する設計に切り替えた）
 
   # AC 3.1: 最新 review の line コメントを取得（reviews 配列の最後の要素 = 時系列で最新）
   local line_comments_json="[]"
@@ -1695,9 +1695,11 @@ pi_build_iteration_prompt() {
 
   # template に変数を注入する。
   # 単一行値（PR 番号 / タイトル / URL 等）は awk -v で渡し、行内の {{KEY}} を文字列置換。
-  # 複数行値（LINE_COMMENTS_JSON / GENERAL_COMMENTS_JSON / PR_DIFF / REQUIREMENTS_MD）は
-  # awk -v では改行を扱えないため、export 経由で ENVIRON[] から取得し、
-  # 「行全体が {{KEY}} のみ」のテンプレ行をブロックごと置換する（template はその前提で書かれている）。
+  # 複数行値（LINE_COMMENTS_JSON / GENERAL_COMMENTS_JSON / REQUIREMENTS_MD）は awk -v で
+  # 改行を扱えないため、export 経由で ENVIRON[] から取得し、「行全体が {{KEY}} のみ」の
+  # テンプレ行をブロックごと置換する（template はその前提で書かれている）。
+  # NOTE (#97): PR diff は MAX_ARG_STRLEN (131,072 B) 超過で execve() が E2BIG を返す
+  # 事案を避けるため env 経由でも渡さない。Iteration サブエージェントが Bash で取得する。
   if [ ! -f "$tmpl_path" ]; then
     pi_warn "template not found: $tmpl_path"
     return 1
@@ -1706,7 +1708,6 @@ pi_build_iteration_prompt() {
   # 改行入り値を子プロセスに渡すため export
   export PI_LINE_JSON="$line_comments_json"
   export PI_GENERAL_JSON="$general_comments_json"
-  export PI_PR_DIFF="$pr_diff"
   export PI_REQS_MD="$requirements_md"
 
   awk \
@@ -1733,7 +1734,6 @@ pi_build_iteration_prompt() {
       # 行全体が複数行プレースホルダの場合は ENVIRON 経由で展開
       if ($0 == "{{LINE_COMMENTS_JSON}}")    { print ENVIRON["PI_LINE_JSON"]; next }
       if ($0 == "{{GENERAL_COMMENTS_JSON}}") { print ENVIRON["PI_GENERAL_JSON"]; next }
-      if ($0 == "{{PR_DIFF}}")               { print ENVIRON["PI_PR_DIFF"]; next }
       if ($0 == "{{REQUIREMENTS_MD}}")       { print ENVIRON["PI_REQS_MD"]; next }
       line = $0
       line = repl(line, "{{REPO}}", repo)
@@ -1751,7 +1751,7 @@ pi_build_iteration_prompt() {
     ' "$tmpl_path"
   local awk_rc=$?
 
-  unset PI_LINE_JSON PI_GENERAL_JSON PI_PR_DIFF PI_REQS_MD
+  unset PI_LINE_JSON PI_GENERAL_JSON PI_REQS_MD
   return $awk_rc
 }
 
