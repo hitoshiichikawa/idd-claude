@@ -23,6 +23,44 @@
 
 ---
 
+## 言語方針（思考言語と出力言語）
+
+idd-claude self-hosting 上で稼働するすべての Claude エージェント（PM / Architect / Developer /
+Reviewer / PjM）は、以下の方針で **内部思考言語と出力言語を使い分ける**こと。reasoning トークン
+消費を抑制しつつ、運用者・レビュワーの可読性を維持するための規約です。
+
+### 基本原則
+
+- **内部思考（reasoning / chain-of-thought / 内部スクラッチパッド）は英語ベース**で行う
+  （英語の方が同等内容を表現するのに必要なトークン数が少ないため）
+- **ユーザーが直接読むアウトプットは日本語ベース**で出力する（運用者の可読性優先）
+- 言及されていない種別は **既定で日本語ベース**を選択する（fallback ルール）
+
+### 種別ごとの言語選択
+
+| 種別 | 言語 | 補足 |
+|---|---|---|
+| LLM の内部 reasoning / scratchpad | **英語** | ユーザーに見えない領域。トークン効率優先 |
+| GitHub Issue / PR の本文・コメント・レビューコメント | **日本語** | 運用者・レビュワー向け |
+| `docs/specs/<番号>-<slug>/` 配下の markdown（`requirements.md` / `design.md` / `tasks.md` / `impl-notes.md` / `review-notes.md`） | **日本語** | 成果物の本文 |
+| EARS トリガーキーワード（`When` / `If` / `While` / `Where` / `shall`） | **英語固定** | `.claude/rules/ears-format.md` の規約に従う。可変部のみ日本語可 |
+| Conventional Commits プレフィックス（`feat` / `fix` / `docs` / `refactor` / `chore` / `test`） | **英語固定** | prefix と scope は ASCII |
+| ブランチ名（`claude/issue-<番号>-<slug>`） | **英語固定** | slug は ASCII（lowercase ハイフン区切り） |
+| 識別子・コマンド名・ファイルパス・env var 名・ラベル名 | **英語固定** | コード／運用と整合させる |
+| コミットメッセージ本文（prefix 後の説明部分） | **日本語ベース** | 既存 git log 慣習に準拠（混在許容、技術用語の英語そのまま記述は可） |
+| PR タイトル | **日本語ベース** | prefix（`feat(scope):` 等）は英語固定、説明部分は日本語 |
+| bash スクリプトのログ出力（`echo` 文字列等） | **混在許容** | 既存実装に準拠。新規追加分は日本語ベースを推奨するが、既存実装の書き換えは本方針の対象外 |
+| `.claude/agents/*.md` のエージェント定義本文 | **日本語** | 人間運用者向けの指示書きであり、エージェント自身の出力ではない |
+
+### 既存規約との整合
+
+- EARS の英語固定トリガーキーワードは本方針の例外規定に含まれる（reasoning 中もそのまま英語表記を保持）
+- Conventional Commits / ブランチ命名規約 / 識別子は英語固定。日本語化しない
+- 本方針と `.claude/rules/*.md` の他ルールに矛盾が生じた場合、エージェントは独自解釈で確定せず
+  PM / 人間にエスカレーションする
+
+---
+
 ## 技術スタック
 
 - **スクリプト**: bash 4+ (Linux / macOS / WSL)
