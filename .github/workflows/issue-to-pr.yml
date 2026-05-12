@@ -188,6 +188,18 @@ jobs:
             ## 作業ディレクトリ
             `${{ steps.detect.outputs.spec_dir_rel }}/`
 
+            ## PR の base ブランチ（必ず明示）
+            解決済み base ブランチ: `${{ env.BASE_BRANCH }}`
+
+            PjM サブエージェントは `gh pr create` 実行時に **必ず `--base ${{ env.BASE_BRANCH }}`** を
+            明示してください（GitHub のデフォルト base に依存しないこと）。これは本 workflow run の
+            `IDD_CLAUDE_BASE_BRANCH` repository variable から解決した実値であり、プレースホルダ
+            ではありません。PR 作成後は `gh pr view <PR> --json baseRefName --jq '.baseRefName'` で
+            取得した値が `${{ env.BASE_BRANCH }}` と一致することを検証し、結果を PR 本文の
+            「確認事項」または Issue コメントに 1 行記載してください。不一致時は
+            `gh pr edit <PR> --base ${{ env.BASE_BRANCH }}` で修正するか、修正不能なら失敗扱いと
+            して Issue に状況を報告してください。
+
             ## 進め方
             1. **developer** サブエージェント
                - 入力: `${{ steps.detect.outputs.spec_dir_rel }}/requirements.md` / `design.md` / `tasks.md`
@@ -197,11 +209,14 @@ jobs:
                - 実装ノートを `${{ steps.detect.outputs.spec_dir_rel }}/impl-notes.md` に保存
             2. **project-manager** サブエージェントを **implementation モード** で起動
                - title: `feat(#${{ github.event.issue.number }}): <要約>`
+               - **base: `${{ env.BASE_BRANCH }}`** （`gh pr create --base ${{ env.BASE_BRANCH }}` を明示すること）
                - PR 本文に対応する設計 PR 番号を記載（`git log --oneline --merges` で直近の merge commit を探す）
                - Issue ラベル: `claude-picked-up` → `ready-for-review`
 
             ## 制約
             - `${{ env.BASE_BRANCH }}` に直接 push しないこと
+            - **`gh pr create` の `--base` を省略しないこと**（GitHub default に依存すると本リポジトリの
+              `IDD_CLAUDE_BASE_BRANCH` 設定と乖離する事故が起きる。Issue #96）
             - 既存のテストを壊さないこと
             - 不明点は推測せず PR 本文の「確認事項」に列挙
 
@@ -235,6 +250,19 @@ jobs:
             ## 作業ディレクトリ
             `${{ steps.detect.outputs.spec_dir_rel }}/`
 
+            ## PR の base ブランチ（必ず明示）
+            解決済み base ブランチ: `${{ env.BASE_BRANCH }}`
+
+            PjM サブエージェント（design-review / implementation の双方のモード）は
+            `gh pr create` 実行時に **必ず `--base ${{ env.BASE_BRANCH }}`** を明示してください
+            （GitHub のデフォルト base に依存しないこと）。これは本 workflow run の
+            `IDD_CLAUDE_BASE_BRANCH` repository variable から解決した実値であり、プレースホルダ
+            ではありません。PR 作成後は `gh pr view <PR> --json baseRefName --jq '.baseRefName'` で
+            取得した値が `${{ env.BASE_BRANCH }}` と一致することを検証し、結果を PR 本文の
+            「確認事項」または Issue コメントに 1 行記載してください。不一致時は
+            `gh pr edit <PR> --base ${{ env.BASE_BRANCH }}` で修正するか、修正不能なら失敗扱いと
+            して Issue に状況を報告してください。
+
             ## 進め方
 
             ### Step 1. product-manager サブエージェント（必須）
@@ -255,6 +283,7 @@ jobs:
                 - `${{ steps.detect.outputs.spec_dir_rel }}/tasks.md`
               - **project-manager** サブエージェントを **design-review モード** で起動:
                 - title: `spec(#${{ github.event.issue.number }}): <要約>`
+                - **base: `${{ env.BASE_BRANCH }}`** （`gh pr create --base ${{ env.BASE_BRANCH }}` を明示すること）
                 - 設計 PR（実装コードなし）を作成
                 - Issue ラベル: `claude-picked-up` → `awaiting-design-review`
                 - Issue にコメントで「merge 後にラベル `awaiting-design-review` を外すと、
@@ -267,11 +296,14 @@ jobs:
                 - 実装ノートを `${{ steps.detect.outputs.spec_dir_rel }}/impl-notes.md` に保存
               - **project-manager** サブエージェントを **implementation モード** で起動:
                 - title: `feat(#${{ github.event.issue.number }}): <要約>`
+                - **base: `${{ env.BASE_BRANCH }}`** （`gh pr create --base ${{ env.BASE_BRANCH }}` を明示すること）
                 - 実装 PR を作成（関連 PR は「なし」）
                 - Issue ラベル: `claude-picked-up` → `ready-for-review`
 
             ## 制約
             - `${{ env.BASE_BRANCH }}` に直接 push しないこと
+            - **`gh pr create` の `--base` を省略しないこと**（GitHub default に依存すると本リポジトリの
+              `IDD_CLAUDE_BASE_BRANCH` 設定と乖離する事故が起きる。Issue #96）
             - 既存のテストを壊さないこと
             - 不明点は推測せず PR 本文の「確認事項」に列挙
 
