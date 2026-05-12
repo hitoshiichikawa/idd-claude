@@ -15,8 +15,12 @@
 # プレースホルダ（issue-watcher.sh の awk 置換で展開される。impl 用と互換）:
 #   {{PR_NUMBER}}, {{PR_TITLE}}, {{PR_URL}}, {{HEAD_REF}}, {{BASE_REF}},
 #   {{ROUND}}, {{MAX_ROUNDS}}, {{ISSUE_NUMBER}}, {{SPEC_DIR}},
-#   {{LINE_COMMENTS_JSON}}, {{GENERAL_COMMENTS_JSON}}, {{PR_DIFF}},
+#   {{LINE_COMMENTS_JSON}}, {{GENERAL_COMMENTS_JSON}},
 #   {{REQUIREMENTS_MD}}, {{REPO}}
+#
+# NOTE (#97): PR diff の inline 埋め込みは廃止しました（MAX_ARG_STRLEN = 131,072 B
+# 超過時に execve() が E2BIG を返す問題を回避するため）。Iteration サブエージェントは
+# 本 prompt の「現在の diff の取得」節の指示に従って自身で取得してください。
 # =============================================================================
 あなたは idd-claude の **PR Iteration Mode (design)** で起動された Architect エージェントです。
 以下の **設計 PR** のレビューコメントに 1 round で対応し、必要なら spec 群（requirements /
@@ -66,11 +70,28 @@ mention の有無に関係なく、本節に含まれるコメントは（人間
 {{GENERAL_COMMENTS_JSON}}
 ```
 
-## 現在の diff（base..head）
+## 現在の diff の取得（Iteration サブエージェントが Bash で実行）
 
-```diff
-{{PR_DIFF}}
-```
+prompt には差分本文を埋め込みません（Issue #97: 大差分時の `Argument list too long`
+回避のため）。head branch は watcher が既に checkout 済みなので、着手直後に **Bash
+ツールで** 以下を実行し、全体把握 → 必要箇所のファイル単位詳細の順で差分を取得して
+ください（設計 PR では `{{SPEC_DIR}}` 配下が中心、それ以外は scope 違反の確認用途）:
+
+1. 全体把握（変更ファイル一覧と統計）:
+   ```bash
+   git diff --stat {{BASE_REF}}..{{HEAD_REF}}
+   git log --oneline {{BASE_REF}}..{{HEAD_REF}}
+   ```
+2. ファイル単位の詳細差分（必要に応じて変更ファイルごとに実行、`{{SPEC_DIR}}` 配下を優先）:
+   ```bash
+   git diff {{BASE_REF}}..{{HEAD_REF}} -- <path>
+   ```
+3. ローカル ref が無い場合や PR API 経由で取得したい場合は `gh` を使う:
+   ```bash
+   gh pr diff {{PR_NUMBER}} --repo {{REPO}}
+   ```
+4. 差分が空または取得できなかった場合は、line コメント本文と一般コメント本文、および
+   `requirements.md` の AC を頼りに判断する（fallback メッセージは prompt に含めない）。
 
 ## requirements.md（関連 Issue がある場合のみ）
 
