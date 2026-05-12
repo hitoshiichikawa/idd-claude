@@ -651,6 +651,21 @@ prompt / template / docs では以下の用語が同義で使われます:
 - `install.sh` 再実行時、template 配布物のデフォルトは引き続き `main` 相当
 - consumer repo に対して `BASE_BRANCH` 設定を強制することはありません（任意）
 
+### PR base の明示と検証（Issue #96）
+
+`BASE_BRANCH=develop` 等を設定したリポジトリで PR が誤って `main` を base に作成される事故を
+防ぐため、idd-claude は PjM サブエージェント起動プロンプトに「解決済み base ブランチの **実値**」
+を埋め込み、`gh pr create --base <resolved-base>` の明示を必須とします。
+
+- **Stage C プロンプト** / **design-review プロンプト** / **GitHub Actions workflow prompt** の
+  すべてに「PR の base ブランチ（必ず明示）」セクションが含まれ、当該サイクルの解決済み
+  `BASE_BRANCH` 値がリテラル文字列として記載されます
+- PjM サブエージェントは PR 作成後に `gh pr view <PR> --json baseRefName` で実際の `baseRefName`
+  を取得し、解決済み base 値と一致するか検証します。不一致なら `gh pr edit --base` で修正、
+  修正不能なら `claude-failed` を付与して人間にエスカレートします
+- `BASE_BRANCH` を未設定（既定 `main`）のままにしているリポジトリでは、PR は引き続き `main` を
+  base に作成されます（後方互換、Req 4.1）
+
 ---
 
 ## 使い方
