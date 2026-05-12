@@ -2552,6 +2552,23 @@ rv_dev_log() {
 # 入力は環境変数（NUMBER / TITLE / URL / BODY / BRANCH / SPEC_DIR_REL /
 # MODE / ARCHITECT_REASON）と関数引数。stdout に prompt 文字列を出力する。
 
+# ─── _assert_base_branch_resolved ───
+#
+# Issue #96 Req 1.5: PR 作成系プロンプト（Stage C / design-review）を組み立てる直前に
+# 解決済み `BASE_BRANCH` の実値が空文字でないことを検証する防御的ガード。
+# 通常パスでは起動直後の `BASE_BRANCH="${BASE_BRANCH:-main}"` で必ず非空になるため
+# 発火しないが、コード変更で誤って空文字を導入した場合に PR 作成段階で爆破するためのもの。
+#
+# 失敗時の挙動: stderr にエラー出力し、戻り値 1 を返す。呼び出し側（pipeline / design 分岐）が
+# `_slot_mark_failed` で `claude-failed` ラベルを付与して人間にエスカレーションする。
+_assert_base_branch_resolved() {
+  if [ -z "${BASE_BRANCH:-}" ]; then
+    echo "Error: BASE_BRANCH が空または未定義です。PR 作成プロンプトを組み立てられません（Issue #96 Req 1.5）" >&2
+    return 1
+  fi
+  return 0
+}
+
 # Stage A: PM + Developer（impl では PM 起動、impl-resume では Developer のみ）
 # 既存 DEV_PROMPT の STEPS から「PjM 起動」を除外したもの。
 build_dev_prompt_a() {
@@ -2812,6 +2829,12 @@ EOF
 # Stage C (PjM): 既存 DEV_PROMPT の PjM 起動部分のみを抜き出し。
 # Reviewer の approve を受けた後、project-manager サブエージェントが PR を作成する。
 # PR 本文の構造は本機能導入前と等価（要件 6.5）。
+#
+# Issue #96: PjM への PR 作成指示に、解決済み BASE_BRANCH の **実値** を `--base` 引数として
+# 明示する肯定的な指示を含める（Req 1.1, 2.1, 2.2）。プレースホルダ `<BASE_BRANCH>` ではなく、
+# 当該サイクルで watcher が解決した BASE_BRANCH 値そのもの（`${BASE_BRANCH}` を heredoc で
+# 展開済みの文字列）を埋め込む。空値ガード（Req 1.5）は呼び出し元 `_assert_base_branch_resolved`
+# で行う。
 build_dev_prompt_c() {
   local mode="$1"
   local design_pr_note=""
@@ -2837,6 +2860,18 @@ ${BRANCH}（実装 commit が積まれた状態。push 済み）
 ## 作業ディレクトリ
 ${SPEC_DIR_REL}/
 
+## PR の base ブランチ（必ず明示）
+解決済み base ブランチ: \`${BASE_BRANCH}\`
+
+PjM サブエージェントは \`gh pr create\` 実行時に **必ず \`--base ${BASE_BRANCH}\`** を
+明示してください（GitHub のデフォルト base に依存しないこと）。これは本サイクル開始時に
+watcher が \`BASE_BRANCH\` env から解決した実値であり、プレースホルダではありません。
+PR 作成後は \`gh pr view <PR> --json baseRefName --jq '.baseRefName'\` で取得した値が
+\`${BASE_BRANCH}\` と一致することを検証し、結果（一致 / 不一致 / 修正実施の有無）を
+PR 本文の「確認事項」または Issue コメントに 1 行記載してください。不一致時は
+\`gh pr edit <PR> --base ${BASE_BRANCH}\` で修正するか、修正不能なら PR 作成失敗扱いとして
+Issue に状況を報告してください。
+
 ## 進め方
 
 1. \`${SPEC_DIR_REL}/review-notes.md\` を **本ブランチに git add / git commit** してから push する
@@ -2844,6 +2879,7 @@ ${SPEC_DIR_REL}/
    - 既に commit 済みなら skip
 2. project-manager サブエージェントを **implementation モード** で起動
    - title: \`feat(#${NUMBER}): <1 行サマリ>\`
+   - **base: \`${BASE_BRANCH}\`** （\`gh pr create --base ${BASE_BRANCH}\` を明示すること）
    - PR 本文は project-manager.md の「実装 PR 本文テンプレート」に従う
 ${design_pr_note}
    - PR 本文の「確認事項」セクションに、必要なら review-notes.md の参照リンクを 1 行記載
@@ -2852,6 +2888,8 @@ ${design_pr_note}
 
 ## 制約
 - ${BASE_BRANCH} に直接 push しないこと
+- **\`gh pr create\` の \`--base\` を省略しないこと**（GitHub default に依存すると本リポジトリの
+  \`BASE_BRANCH\` 設定と乖離する事故が起きる。Issue #96）
 - Reviewer の approve 判定を覆さないこと（PR 本文に判定結果を逐語転載しない。review-notes.md の
   参照に留める）
 - 仕様変更や追加実装はしないこと（PjM はコードを変更しない）
@@ -3303,6 +3341,12 @@ run_impl_pipeline() {
 
   # ── Stage C: PjM (PR 作成) ──
   echo "--- Stage C 実行（PjM / PR 作成）---" >> "$LOG"
+  # Issue #96 Req 1.5: PR 作成段階に進む前に BASE_BRANCH 実値が空でないことを検証する
+  if ! _assert_base_branch_resolved; then
+    echo "❌ #$NUMBER: Stage C 中断（BASE_BRANCH 未解決）→ claude-failed" | tee -a "$LOG"
+    mark_issue_failed "stageC-base-branch" "解決済み BASE_BRANCH が空文字または未定義のため Stage C を中断しました（Issue #96 Req 1.5）。"
+    return 1
+  fi
   prompt_c=$(build_dev_prompt_c "$MODE")
   # Issue #66: Quota-Aware Watcher 経由で claude を起動
   local _qa_reset_file_c _qa_rc_c=0 _qa_ts_c
@@ -4482,6 +4526,12 @@ _slot_run_issue() {
 
   # ── モード別ディスパッチ ──
   if [ "$MODE" = "design" ]; then
+    # Issue #96 Req 1.5: 設計 PR 作成段階に進む前に BASE_BRANCH 実値が空でないことを検証する
+    if ! _assert_base_branch_resolved; then
+      echo "❌ #$NUMBER: design 中断（BASE_BRANCH 未解決）→ claude-failed" | tee -a "$LOG"
+      _slot_mark_failed "design-base-branch" "解決済み BASE_BRANCH が空文字または未定義のため設計フェーズを中断しました（Issue #96 Req 1.5）。"
+      return 1
+    fi
     local FLOW_LABEL STEPS DEV_PROMPT
     FLOW_LABEL="PM → Architect → PjM（設計 PR 作成ゲート）"
     STEPS=$(cat <<EOF
@@ -4495,6 +4545,7 @@ _slot_run_issue() {
 3. project-manager サブエージェントを **design-review モード** で起動
    - 成果物は ${SPEC_DIR_REL}/ 配下の requirements / design / tasks のみ（実装コードは含めない）
    - title: \`spec(#${NUMBER}): <1 行サマリ>\`
+   - **base: \`${BASE_BRANCH}\`** （\`gh pr create --base ${BASE_BRANCH}\` を必ず明示すること。GitHub のデフォルト base に依存しない）
    - Issue ラベル: claude-claimed → awaiting-design-review に付け替え
    - Issue にコメントで設計 PR リンクと案内を投稿
 
@@ -4520,11 +4571,25 @@ ${BRANCH}（${BASE_BRANCH} から派生・push 済み・現在チェックアウ
 ## 作業ディレクトリ
 ${SPEC_DIR_REL}/
 
+## PR の base ブランチ（必ず明示）
+解決済み base ブランチ: \`${BASE_BRANCH}\`
+
+PjM サブエージェント（design-review モード）は \`gh pr create\` 実行時に
+**必ず \`--base ${BASE_BRANCH}\`** を明示してください（GitHub のデフォルト base に依存しないこと）。
+これは本サイクル開始時に watcher が \`BASE_BRANCH\` env から解決した実値であり、プレースホルダ
+ではありません。PR 作成後は \`gh pr view <PR> --json baseRefName --jq '.baseRefName'\` で
+取得した値が \`${BASE_BRANCH}\` と一致することを検証し、結果（一致 / 不一致 / 修正実施の有無）を
+PR 本文の「確認事項」または Issue コメントに 1 行記載してください。不一致時は
+\`gh pr edit <PR> --base ${BASE_BRANCH}\` で修正するか、修正不能なら PR 作成失敗扱いとして
+Issue に状況を報告してください。
+
 ## 進め方
 ${STEPS}
 
 ## 制約
 - ${BASE_BRANCH} に直接 push しないこと
+- **\`gh pr create\` の \`--base\` を省略しないこと**（GitHub default に依存すると本リポジトリの
+  \`BASE_BRANCH\` 設定と乖離する事故が起きる。Issue #96）
 - 既存のテストを壊さないこと
 - 不明点は推測せず、PR 本文の「確認事項」セクションに列挙すること
 EOF
