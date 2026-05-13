@@ -70,7 +70,8 @@ bash .github/scripts/idd-claude-labels.sh
 
 冪等なので何度実行しても安全です（既存ラベルはスキップ）。
 作成されるラベル: `auto-dev` / `needs-decisions` / `awaiting-design-review` / `claude-claimed` /
-`claude-picked-up` / `ready-for-review` / `claude-failed` / `skip-triage` / `needs-rebase` / `needs-iteration`
+`claude-picked-up` / `ready-for-review` / `claude-failed` / `skip-triage` / `needs-rebase` / `needs-iteration` /
+`needs-quota-wait` / `staged-for-release`
 
 ---
 
