@@ -85,6 +85,20 @@ idd-claude/
 - `jq` のインストール
 - Node.js 18 以上
 - Claude Code CLI のインストール（`npm install -g @anthropic-ai/claude-code`）
+  - **最低バージョン要件**: 基本動作は **v2.0.0 以上**、PM / Architect の self-review-gate で
+    `/goal` 自動ループ運用（[`.claude/rules/requirements-review-gate.md`](repo-template/.claude/rules/requirements-review-gate.md)
+    および [`.claude/rules/design-review-gate.md`](repo-template/.claude/rules/design-review-gate.md)
+    の「`/goal` による自動ループ運用」節）を利用する場合は **v2.1.139 以上**が必要です
+  - v2.1.139 未満の環境では `/goal` 節は自動的にスキップされ、従来どおりの「Mechanical Checks
+    → 判断レビュー → 最大 2 パス」手順がそのまま適用されます（後方互換）。バージョンは
+    `claude --version` で確認できます
+
+> **migration note**: 既存ユーザに対する破壊的変更はありません。本変更で
+> `.claude/rules/requirements-review-gate.md` および `.claude/rules/design-review-gate.md` に
+> 追加された「`/goal` による自動ループ運用」節は、従来の「最大 2 パス」表現を **撤廃せず
+> 併記** する方針で記述されており、`/goal` 利用時のターン上限としても引き続き機能します。
+> Claude Code v2.1.139 未満の環境では `/goal` 節のみがスキップされ、従来の手動 2 パス運用が
+> そのまま継続します。
 
 ### Local watcher 方式
 
@@ -2529,10 +2543,14 @@ docs/specs/<N>-<slug>/
 | ルール | 参照元 | 役割 |
 |---|---|---|
 | `ears-format.md` | PM | AC を EARS 5 パターン（Event / State / Unwanted / Optional / Ubiquitous）で記述 |
-| `requirements-review-gate.md` | PM | requirements.md ドラフトの自己レビュー（Mechanical + 判断、最大 2 パス） |
+| `requirements-review-gate.md` | PM | requirements.md ドラフトの自己レビュー（Mechanical + 判断、最大 2 パス。Claude Code v2.1.139+ では Mechanical Checks を `/goal` 自動ループで収束させる運用ノート付き） |
 | `design-principles.md` | Architect | design.md の必須セクションと詳細度の方針 |
-| `design-review-gate.md` | Architect | design.md の自己レビュー（Requirements Traceability / File Structure Plan 充填 / orphan 検出） |
+| `design-review-gate.md` | Architect | design.md の自己レビュー（Requirements Traceability / File Structure Plan 充填 / orphan 検出。Claude Code v2.1.139+ では同 Mechanical Checks を `/goal` 自動ループで収束させる運用ノート付き） |
 | `tasks-generation.md` | Architect / Developer | tasks.md の numeric 階層 ID とアノテーション（`_Requirements:_` / `_Boundary:_` / `_Depends:_` / `(P)`） |
+
+> `/goal` 運用ノートは Claude Code v2.1.139 以降でのみ有効です。v2.1.139 未満では当該節を
+> スキップし、従来の「最大 2 パス」手動運用がそのまま適用されます（[前提条件 / 共通](#共通)
+> の最低バージョン要件を参照）。
 
 ### cc-sdd との関係
 
