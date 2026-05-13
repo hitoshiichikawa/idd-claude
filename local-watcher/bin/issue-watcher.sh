@@ -66,6 +66,7 @@ LABEL_SKIP_TRIAGE="skip-triage"
 LABEL_NEEDS_REBASE="needs-rebase"
 LABEL_NEEDS_ITERATION="needs-iteration"
 LABEL_NEEDS_QUOTA_WAIT="needs-quota-wait"
+LABEL_STAGED_FOR_RELEASE="staged-for-release"
 
 # ─── Base branch 設定 (#89) ───
 # watcher 経路（local cron）と Actions 経路の base branch を 1 つの env で切り替える
@@ -4713,12 +4714,16 @@ _dispatcher_run() {
   # 付与されているケースを除外する（人為ミスでの impl-resume 起動 → 既存 PR 破壊事故防止）。
   # Issue #66 Req 3.5 / 3.6: quota wait 中の Issue は再 claim しないよう
   # `needs-quota-wait` を除外条件に追加。既存除外条件の意味・順序は変更しない。
+  # Issue #100 Req 2.1: multi-branch 運用で develop に merge 済み・main 到達待ちの
+  # Issue（`staged-for-release` 付与）を Triage / Dispatcher / PR Iteration が誤って
+  # 再 pickup しないよう除外する。single-branch 運用では本ラベルは付与されない想定なので
+  # 影響なし（NFR 1.2: 既存除外条件の意味・順序は変更しない）。
   local issues
   issues=$(gh issue list \
     --repo "$REPO" \
     --label "$LABEL_TRIGGER" \
     --state open \
-    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\"" \
+    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_STAGED_FOR_RELEASE\"" \
     --json number,title,body,url,labels \
     --limit 5)
 
