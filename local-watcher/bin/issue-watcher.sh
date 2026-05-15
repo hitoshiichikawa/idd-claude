@@ -3161,6 +3161,135 @@ run_reviewer_stage() {
   esac
 }
 
+# ─── Stage 完了直後の push 状態 verify ヘルパー (Issue #106) ───
+#
+# Stage A / A' / B 完了直後に「ローカル commit が origin に到達しているか」を verify し、
+# 未 push を検出したら自動 push を 1 回だけリトライする。リトライ成功時は WARN ログ +
+# Issue コメントで観測可能性を維持し、リトライ失敗時は mark_issue_failed 経路で
+# claude-failed 化する。
+#
+# 引数:
+#   $1 = stage 識別子（mark_issue_failed に渡す identifier。例: stageA-push-missing
+#        / stageA-prime-push-missing / stageB-push-missing。NFR 2.1 / Req 4.4 と整合）
+#   $2 = 対象 branch（典型的には $BRANCH）
+#   $3 = stage label（ログ可読性のための短い文字列。例: "Stage A" / "Stage A'" / "Stage B"）
+#
+# 戻り値:
+#   0 = ahead == 0（通常成功 / Req 1.3, 2.3, 5.1）、または自動 push リトライ成功
+#       （Req 4.2, 4.3）
+#   1 = 自動 push リトライ失敗 → mark_issue_failed 既発射、呼び出し側は伝搬 return 1 する
+#       （Req 4.4, 4.5）
+#
+# 副作用:
+#   - $LOG に検出経路 / ahead 数 / リトライ結果を WARN 行で記録（NFR 2.1, Req 1.2, 2.2, 3.2）
+#   - リトライ成功時に gh issue comment で復旧通知を投稿（Req 4.3, NFR 2.2）
+#   - リトライ失敗時に mark_issue_failed "$stage_id" で claude-failed 化（Req 4.4, NFR 2.3）
+#
+# 設計判断:
+#   - `git rev-list --count @{u}..HEAD` で ahead 数を測る。本関数は cwd が slot worktree
+#     ($REPO_DIR が指す path) であることを前提とする（_slot_run_issue が cd 済）。
+#   - timeout は 30 秒上限（NFR 1.2）。本体 git クエリと push リトライそれぞれに timeout を
+#     かける。`command -v timeout` で GNU coreutils の有無を判定し、無い環境
+#     （BSD / macOS 標準）では timeout なしで実行する（既存 cron 互換性のため）。
+#   - 結果不確定（git rev-list が timeout / 失敗）は「未 push と同等扱い」で安全側に倒す
+#     （Req 1.4）。リトライを試み、失敗なら claude-failed 化する。
+#   - push オプションは plain `git push origin <branch>` の fast-forward のみ。
+#     `--force-with-lease` 等の force 系は **使わない**（既稼働 cron 環境で意図せぬ
+#     history 書き換えを防止するため。Open Question 3 の design 確定）。
+#   - Stage B の review-notes.md 識別ログ粒度（Req 3.4）は呼び出し側で stage label を
+#     "Stage B" と明示し、本関数のログ行に stage label を含めることで観測可能性を担保。
+verify_pushed_or_retry() {
+  local stage_id="$1"
+  local branch="$2"
+  local stage_label="$3"
+
+  # ── ahead 数を測定（安全側ロジック付き）──
+  # 結果が空 / 取得失敗時は ahead=unknown とし、安全側で push リトライへ進む（Req 1.4）。
+  local ahead_count="" rev_rc=0
+  local _git_timeout=()
+  if command -v timeout >/dev/null 2>&1; then
+    _git_timeout=(timeout 30)
+  fi
+  ahead_count=$("${_git_timeout[@]}" git rev-list --count "@{u}..HEAD" 2>/dev/null) || rev_rc=$?
+  # 数値以外（空文字 / エラー）は unknown 扱い
+  if ! [[ "$ahead_count" =~ ^[0-9]+$ ]]; then
+    ahead_count="unknown"
+  fi
+
+  # ── 通常成功ケース: ahead == 0（Req 1.3 / 2.3 / 3.3 / 5.1）──
+  if [ "$ahead_count" = "0" ]; then
+    return 0
+  fi
+
+  # ── ahead > 0 または unknown: WARN ログ → 自動 push リトライ 1 回（Req 4.1, 4.6）──
+  qa_warn "${stage_label} push-state verify: ahead=${ahead_count} (rev_rc=${rev_rc}) issue=#${NUMBER:-?} branch=${branch} stage_id=${stage_id}"
+  echo "[$(date '+%F %T')] ${stage_label} ahead=${ahead_count} detected → auto-push retry 1/1 (Req 4.1, Issue #106)" >> "$LOG"
+
+  local push_rc=0
+  local push_stderr_tmp
+  push_stderr_tmp=$(mktemp -t verify-push-XXXXXX.err 2>/dev/null || echo "")
+  if [ -n "$push_stderr_tmp" ]; then
+    "${_git_timeout[@]}" git push origin "$branch" 2>"$push_stderr_tmp" || push_rc=$?
+  else
+    "${_git_timeout[@]}" git push origin "$branch" || push_rc=$?
+  fi
+
+  if [ "$push_rc" -eq 0 ]; then
+    # ── リトライ成功（Req 4.2, 4.3）──
+    qa_warn "${stage_label} auto-push retry SUCCESS: ahead=${ahead_count} issue=#${NUMBER:-?} branch=${branch} stage_id=${stage_id}"
+    echo "[$(date '+%F %T')] ${stage_label} 自動 push リトライ成功 ahead=${ahead_count} → 継続" >> "$LOG"
+
+    # Issue コメント投稿（NFR 2.2: Issue 番号 / stage 識別子 / branch / commit 数を含める）
+    local comment_body
+    comment_body="⚠️ Issue #${NUMBER:-?} の ${stage_label} 完了直後に未 push commit を検出し、自動 push リトライで復旧しました。
+
+- 対象 stage : \`${stage_id}\`
+- 対象 branch: \`${branch}\`
+- 復旧 commit 数: ${ahead_count}
+
+サブエージェント（Developer / Reviewer）の push 漏れ等が根本原因の可能性があります。詳細は watcher ログ \`${LOG}\` を確認してください。"
+    gh issue comment "${NUMBER}" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1 || true
+
+    if [ -n "$push_stderr_tmp" ]; then rm -f "$push_stderr_tmp" 2>/dev/null || true; fi
+    return 0
+  fi
+
+  # ── リトライ失敗（Req 4.4, 4.5, NFR 2.3）──
+  local push_stderr_tail=""
+  if [ -n "$push_stderr_tmp" ] && [ -f "$push_stderr_tmp" ]; then
+    push_stderr_tail=$(tail -c 1500 "$push_stderr_tmp" 2>/dev/null || true)
+  fi
+  qa_warn "${stage_label} auto-push retry FAILED: ahead=${ahead_count} push_rc=${push_rc} issue=#${NUMBER:-?} branch=${branch} stage_id=${stage_id} stderr_tail='${push_stderr_tail//$'\n'/ }'"
+  echo "[$(date '+%F %T')] ${stage_label} 自動 push リトライ失敗 push_rc=${push_rc} → claude-failed (stage_id=${stage_id})" >> "$LOG"
+
+  local fail_body
+  fail_body="${stage_label} 完了直後に未 push commit（ahead=${ahead_count}）を検出し、自動 push リトライを 1 回試みましたが失敗しました（push exit code: ${push_rc}）。
+
+- 対象 stage : \`${stage_id}\`
+- 対象 branch: \`${branch}\`
+- 未 push commit 数: ${ahead_count}
+
+### 次の手順
+
+1. ローカルで \`git fetch origin\` 後、当該 worktree の HEAD と origin/${branch} の差分を確認
+2. 必要に応じ手動で \`git push origin ${branch}\` を実行
+3. 問題が解消したら \`claude-failed\` ラベルを外して再 pickup させる"
+  if [ -n "$push_stderr_tail" ]; then
+    fail_body="${fail_body}
+
+### git push stderr (tail)
+
+\`\`\`
+${push_stderr_tail}
+\`\`\`"
+  fi
+
+  if [ -n "$push_stderr_tmp" ]; then rm -f "$push_stderr_tmp" 2>/dev/null || true; fi
+
+  mark_issue_failed "$stage_id" "$fail_body"
+  return 1
+}
+
 # ─── failure 共通遷移ヘルパー ───
 #
 # Stage 失敗時の claude-failed 遷移を一元化。引数で原因種別と Issue コメント追加情報を受け取る。
@@ -3282,6 +3411,14 @@ run_impl_pipeline() {
           >> "$LOG" 2>&1 || _qa_rc_a=$?
       case "$_qa_rc_a" in
         0)
+          # Issue #106 Req 1: Stage A 成功宣言の前にローカル HEAD が origin に到達しているか
+          # verify する。ahead == 0 なら従来どおり成功メッセージ（Req 1.3 / 5.1）、
+          # ahead > 0 なら自動 push リトライ 1 回。リトライ失敗時は claude-failed 化済で
+          # return 1 を伝搬する（Req 1.4, 4.4, 4.5）。
+          rm -f "$_qa_reset_file_a"
+          if ! verify_pushed_or_retry "stageA-push-missing" "$BRANCH" "Stage A"; then
+            return 1
+          fi
           echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
           ;;
         99)
@@ -3299,7 +3436,6 @@ run_impl_pipeline() {
           return 1
           ;;
       esac
-      rm -f "$_qa_reset_file_a"
       ;;
     B|C)
       sc_log "Stage A をスキップ（START_STAGE=$START_STAGE / 既存 impl-notes.md を再利用）" >> "$LOG"
@@ -3314,6 +3450,12 @@ run_impl_pipeline() {
       run_reviewer_stage 1 || rev_rc=$?
       case $rev_rc in
         0)
+          # Issue #106 Req 3: Stage B (Reviewer round=1 approve) 完了直後に push 状態 verify。
+          # review-notes.md が Reviewer によって commit されているが未 push のケースを検出する
+          # （Req 3.4 review-notes.md 識別ログ粒度は stage label "Stage B (round=1 approve)" で表現）。
+          if ! verify_pushed_or_retry "stageB-push-missing" "$BRANCH" "Stage B (round=1 approve)"; then
+            return 1
+          fi
           echo "✅ #$NUMBER: Reviewer round=1 approve" | tee -a "$LOG"
           ;;
         99)
@@ -3323,6 +3465,12 @@ run_impl_pipeline() {
           return 0
           ;;
         1)
+          # Issue #106 Req 3: Stage B (Reviewer round=1 reject) 完了直後にも push 状態 verify。
+          # 「reject だが review-notes.md 未 push」状態で Stage A' を起動すると Stage A' 側の
+          # build_dev_prompt_redo が origin の古い review-notes.md を参照する事故を防ぐ。
+          if ! verify_pushed_or_retry "stageB-push-missing" "$BRANCH" "Stage B (round=1 reject)"; then
+            return 1
+          fi
           echo "🔁 #$NUMBER: Reviewer round=1 reject → Developer 再実行" | tee -a "$LOG"
           rv_dev_log "redo by reviewer reject (round=1)" >> "$LOG"
 
@@ -3344,6 +3492,12 @@ run_impl_pipeline() {
               >> "$LOG" 2>&1 || _qa_rc_aredo=$?
           case "$_qa_rc_aredo" in
             0)
+              # Issue #106 Req 2: Stage A' 成功宣言の前にローカル HEAD が origin に到達して
+              # いるか verify する（Req 2.1〜2.3, 4.1〜4.5）。
+              rm -f "$_qa_reset_file_aredo"
+              if ! verify_pushed_or_retry "stageA-prime-push-missing" "$BRANCH" "Stage A'"; then
+                return 1
+              fi
               echo "✅ #$NUMBER: Stage A' 完了" | tee -a "$LOG"
               ;;
             99)
@@ -3361,13 +3515,16 @@ run_impl_pipeline() {
               return 1
               ;;
           esac
-          rm -f "$_qa_reset_file_aredo"
 
           # ── Stage B (round=2): Reviewer 最終回 ──
           rev_rc=0
           run_reviewer_stage 2 || rev_rc=$?
           case $rev_rc in
             0)
+              # Issue #106 Req 3: Stage B (Reviewer round=2 approve) 完了直後の push 状態 verify。
+              if ! verify_pushed_or_retry "stageB-push-missing" "$BRANCH" "Stage B (round=2 approve)"; then
+                return 1
+              fi
               echo "✅ #$NUMBER: Reviewer round=2 approve" | tee -a "$LOG"
               ;;
             99)
@@ -3377,6 +3534,12 @@ run_impl_pipeline() {
               return 0
               ;;
             1)
+              # Issue #106 Req 3.1: Stage B 完了は reject / approve いずれも verify 対象。
+              # 本ケース（round=2 reject）はいずれにせよ reviewer-reject2 で claude-failed に
+              # 確定するため、verify 自体は best-effort で実行し失敗してもより情報量の多い
+              # reviewer-reject2 経路を優先する。ahead > 0 検出時の WARN ログ / 自動 push 復旧
+              # コメントは verify_pushed_or_retry 内で出力済（観測可能性は維持）。
+              verify_pushed_or_retry "stageB-push-missing" "$BRANCH" "Stage B (round=2 reject)" || true
               # 2 回目 reject → claude-failed + Issue コメントに reject 理由 / 対象 ID を含める
               echo "❌ #$NUMBER: Reviewer round=2 reject → claude-failed" | tee -a "$LOG"
               local parsed2 cat2 tgt2
