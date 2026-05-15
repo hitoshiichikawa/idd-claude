@@ -324,16 +324,34 @@ qa_format_iso8601() {
   printf '%s' "$epoch"
 }
 
-# stdin の stream-json（1 行 1 JSON）を fold し、`type=="rate_limit_event"` かつ
-# `status=="exceeded"` の最新 reset epoch を stdout に出力する（Req 2.1, 2.2, 2.3,
-# 2.4, 2.5, 2.6）。
+# stdin の stream-json（1 行 1 JSON）を fold し、quota 枯渇イベントを検出して
+# `<detection_path>\t<reset_epoch>` 形式の TSV を 1 検出 1 行で stdout に出力する
+# （Req 1.1〜1.4, 2.1〜2.2, 3.1〜3.4, 5.1〜5.4 / Issue #66 Req 2.x との後方互換）。
 #
-# - 解析失敗（非 JSON / schema 違い）の行は無視して継続（Req 2.5）
-# - allowed のみは無視（Req 2.6）
-# - 同一 stream に複数 exceeded があれば最終行（最新）の epoch のみ stdout（Req 2.4）
-# - reset 時刻フィールド名は claude CLI のスキーマ揺れを考慮して
-#   `.resetsAt` / `.reset_at` / `.resets_at` の順に試す
-# - 値が ISO 8601 文字列の場合は `fromdateiso8601` で epoch 化、数値はそのまま採用
+# 検出経路（detection_path フィールド値）:
+#   - `rate_limit_event_v2`  : 現行 Claude CLI スキーマ
+#                              `type==rate_limit_event` かつ
+#                              `rate_limit_info.status == "rejected"`
+#                              （Issue #104 Bug 1 / Req 1.1）
+#   - `rate_limit_event_v1`  : 旧スキーマ
+#                              `type==rate_limit_event` かつ `status == "exceeded"`
+#                              （Req 2.1 / Issue #66 互換維持）
+#   - `synthetic_429_result` : quota 枯渇直撃時の synthetic result 行
+#                              `type==result` かつ `is_error == true` かつ
+#                              `api_error_status == 429`
+#                              （Issue #104 Bug 2 / Req 3.1）
+#
+# Reset 時刻フィールド探索順（現行 / 旧スキーマ揺れと synthetic 429 同居を許容）:
+#   1) .rate_limit_info.resetsAt / .resets_at / .reset_at  （現行スキーマ ネスト位置 / Req 1.3）
+#   2) .resetsAt / .reset_at / .resets_at                  （旧スキーマ top-level / Req 2.2）
+#   値の型が数値ならそのまま epoch、ISO 8601 文字列なら `fromdateiso8601` で epoch 化。
+#   いずれも取得できなければ空（呼び出し側で reset 欠落 fallback / Req 1.4, 3.2）。
+#
+# 出力契約:
+#   - 1 検出 1 行: `<detection_path>\t<epoch_or_empty>`
+#   - 解析失敗（非 JSON / schema 違い）の行は無視して継続（Req 2.5 / Issue #66）
+#   - allowed のみ / 通常 result（is_error:false）は無視（Req 3.4）
+#   - 同一 stream に複数検出があっても全件出力（呼び出し側で `tail -1` 等を選択）
 #
 # 実装メモ: jq は default だと stdin を "concatenated JSON" として一括 parse する
 # ため、無効な 1 行があると stream 全体が fatal で止まる。stream を停止させない
@@ -341,20 +359,54 @@ qa_format_iso8601() {
 # `try fromjson catch null` で個別 parse する。
 qa_detect_rate_limit() {
   jq -R -r '
+    # 入力 1 行を JSON object に折りたたむ。fromjson 失敗 / 非 object は捨てる。
     . as $line
     | (try ($line | fromjson) catch null)
-    | select(type == "object")
-    | select(.type? == "rate_limit_event")
-    | select(.status? == "exceeded")
-    | (.resetsAt // .reset_at // .resets_at // empty)
+    | select(type == "object") as $j
+
+    # detection_path を 3 経路で識別（先頭で優先度を決定し、最初に match した
+    # 経路を採用）。マッチしなければ empty で当該行を捨てる。
     | (
-        if type == "number" then (. | floor)
-        elif type == "string" then
-          (try (. | fromdateiso8601) catch (try (. | tonumber) catch empty))
-        else empty end
-      )
-  ' 2>/dev/null \
-    | tail -1
+        if ($j.type? == "rate_limit_event")
+           and (($j.rate_limit_info? // {}).status? == "rejected") then
+          "rate_limit_event_v2"
+        elif ($j.type? == "rate_limit_event")
+             and ($j.status? == "exceeded") then
+          "rate_limit_event_v1"
+        elif ($j.type? == "result")
+             and ($j.is_error? == true)
+             and ($j.api_error_status? == 429) then
+          "synthetic_429_result"
+        else
+          empty
+        end
+      ) as $path
+
+    # reset epoch 候補値: 現行スキーマ ネスト → 旧スキーマ top-level の順で探索。
+    # 値が無ければ null を bind（empty を bind すると jq 仕様により当該行が消える）。
+    | (
+        ($j.rate_limit_info? // {})
+        | (.resetsAt // .resets_at // .reset_at // null)
+      ) as $nested
+    | (
+        $j
+        | (.resetsAt // .reset_at // .resets_at // null)
+      ) as $top
+    | (if $nested != null then $nested else $top end) as $raw
+
+    # epoch 化: number はそのまま floor、string は ISO 8601 → epoch、それ以外は空。
+    | (
+        if $raw == null then ""
+        elif ($raw | type) == "number" then ($raw | floor | tostring)
+        elif ($raw | type) == "string" then
+          (try ($raw | fromdateiso8601 | tostring)
+            catch (try ($raw | tonumber | floor | tostring) catch ""))
+        else "" end
+      ) as $epoch_str
+
+    # 出力: <detection_path>\t<epoch_or_empty>
+    | "\($path)\t\($epoch_str)"
+  ' 2>/dev/null
 }
 
 # 既存 6 stage の claude 呼び出しを横断ラップする Stage Wrapper（Req 1.1, 1.2,
@@ -386,26 +438,53 @@ qa_run_claude_stage() {
 
   # opt-in: stream-json を tee で 2 系統に分岐
   #   系統 1: 既存 $LOG への append（観測ログを破壊しない）
-  #   系統 2: qa_detect_rate_limit への pipe → reset epoch を $reset_file に書き出し
+  #   系統 2: qa_detect_rate_limit への pipe → 検出 TSV を中間ファイルに書き出し
   : > "$reset_file"
+  local detect_file="${reset_file}.detect"
+  : > "$detect_file"
   qa_log "stage start label=$stage_label"
 
-  # set -e / pipefail 配下で個別の非 0 exit を握り潰すため、|| true で確実に到達
-  # PIPESTATUS で claude 本体（pipeline 先頭）の exit code を後段で取り出す。
-  "$@" 2>&1 | tee -a "$LOG" | qa_detect_rate_limit > "$reset_file" || true
-  local claude_rc="${PIPESTATUS[0]:-0}"
+  # set -e / pipefail 配下で個別の非 0 exit を握り潰すため、PIPESTATUS を即座に
+  # 配列コピーしてから判断する。`|| true` は PIPESTATUS を 0 で上書きしてしまう
+  # ため使えない（Issue #104 で発覚 / 既存 Issue #66 実装の latent bug 修正）。
+  # set +e/-e で囲って pipefail 起因の即時 exit を一時的に抑止し、
+  # PIPESTATUS[0] = claude 本体 exit code を確実に取り出す。
+  local claude_rc=0
+  set +e
+  "$@" 2>&1 | tee -a "$LOG" | qa_detect_rate_limit > "$detect_file"
+  local _qa_pipestatus=("${PIPESTATUS[@]}")
+  set -e
+  claude_rc="${_qa_pipestatus[0]:-0}"
 
-  if [ -s "$reset_file" ]; then
-    local _epoch
-    _epoch=$(tr -d '[:space:]' < "$reset_file")
-    if [[ "$_epoch" =~ ^[0-9]+$ ]]; then
-      qa_log "stage detected exceeded label=$stage_label reset_epoch=$_epoch"
+  # 検出 TSV を解釈する。
+  # 優先順位:
+  #   1) epoch を持つ検出のうち最新行を採用 → exit 99 経路（reset 永続化に必要）
+  #   2) 1 が無く epoch なし検出のみある場合 → 既存フロー fallback + warn
+  #      （quota 枯渇は事実だが reset 不明では Resume Processor が機能しないため、
+  #      claude_rc を透過。Stage C は別途 PR 実在 verify で虚偽成功を防ぐ /
+  #      Req 1.4 / Req 3.2 / Issue #66 後方互換）
+  #   3) 検出ゼロ → claude_rc 透過
+  if [ -s "$detect_file" ]; then
+    local _epoch_line _path _epoch
+    _epoch_line=$(awk -F '\t' 'NF >= 2 && $2 ~ /^[0-9]+$/ { last = $0 } END { print last }' "$detect_file")
+    if [ -n "$_epoch_line" ]; then
+      _path="${_epoch_line%%$'\t'*}"
+      _epoch="${_epoch_line#*$'\t'}"
+      _epoch=$(printf '%s' "$_epoch" | tr -d '[:space:]')
+      printf '%s\n' "$_epoch" > "$reset_file"
+      qa_log "stage detected exceeded label=$stage_label path=${_path} reset_epoch=$_epoch"
+      rm -f "$detect_file"
       return 99
     fi
-    # 非数値だった場合は検出失敗扱い → 既存フローに委譲（Req 2.5）
-    qa_warn "stage detected non-numeric reset value label=$stage_label value=$_epoch (既存フローに委譲)"
+
+    # epoch 付き検出ゼロだが、検出経路だけは観測できたケース
+    local _last_line
+    _last_line=$(tail -1 "$detect_file")
+    _path="${_last_line%%$'\t'*}"
+    qa_warn "stage detected without reset label=$stage_label path=${_path} (既存フローに委譲 / claude_rc=$claude_rc)"
     : > "$reset_file"
   fi
+  rm -f "$detect_file"
   return "$claude_rc"
 }
 
@@ -3364,9 +3443,24 @@ run_impl_pipeline() {
       >> "$LOG" 2>&1 || _qa_rc_c=$?
   case "$_qa_rc_c" in
     0)
-      echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み" | tee -a "$LOG"
+      # Issue #104 Bug 3 / Req 4.1〜4.4: claude RC=0 + quota 検出なし時点では
+      # 「PR が実際に作成されたか」が未確認。PjM サブエージェントが 1 turn で
+      # 空転終了しても claude RC=0 を返すため、PR 実在を gh で verify する。
       rm -f "$_qa_reset_file_c"
-      return 0
+      local _stagec_pr_url _stagec_verify_rc=0
+      _stagec_pr_url=$(gh pr view --repo "$REPO" --head "$BRANCH" \
+                          --json url --jq '.url' 2>/dev/null) || _stagec_verify_rc=$?
+      if [ "$_stagec_verify_rc" -eq 0 ] && [ -n "$_stagec_pr_url" ]; then
+        # Req 4.3: PR 実在確認できた場合は従来どおり成功
+        echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み (${_stagec_pr_url})" | tee -a "$LOG"
+        return 0
+      fi
+      # Req 4.2 / 4.4: PR 不在または gh 失敗は安全側に倒し claude-failed 化
+      # （NFR 2.2: 人間が原因を特定できる粒度のログを残す）
+      echo "❌ #$NUMBER: Stage C 完了報告だが対応 PR 不在 → claude-failed (branch=$BRANCH verify_rc=$_stagec_verify_rc)" | tee -a "$LOG"
+      qa_warn "stageC PR verify failed issue=#$NUMBER branch=$BRANCH verify_rc=$_stagec_verify_rc pr_url='${_stagec_pr_url:-(empty)}'"
+      mark_issue_failed "stageC-pr-missing" "Stage C の Claude 実行は return code 0 で終了しましたが、対応する impl PR が GitHub 側に検出できませんでした（branch=\`$BRANCH\`）。PjM サブエージェントが 1 turn で空転終了した可能性 / GitHub API 一時障害の可能性のいずれかです。\`$LOG\` を確認してください。"
+      return 1
       ;;
     99)
       local _qa_epoch_c
