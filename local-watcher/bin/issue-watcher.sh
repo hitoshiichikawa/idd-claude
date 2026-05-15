@@ -3290,6 +3290,105 @@ ${push_stderr_tail}
   return 1
 }
 
+# ─── Stage C 完了直後の PR 実在 verify ヘルパー (Issue #108) ───
+#
+# Stage C の Claude 実行が return code 0 で終了した直後に、対象 branch を head と
+# する impl PR が GitHub 側で参照可能か `gh pr view --head` で verify する。GitHub の
+# eventual consistency により PR 作成直後数十秒は当該クエリが空応答を返すケースが
+# 観測されているため、最大 4 回までリトライ可能とし、整合性遅延に起因する
+# false negative を吸収する。
+#
+# 引数:
+#   $1 = 対象 branch（典型的には $BRANCH）
+#   $2 = Issue 番号（ログ識別用。典型的には $NUMBER）
+#
+# 戻り値:
+#   0 = いずれかの試行で PR URL が取得できた（PR URL を stdout に出力）
+#   1 = 4 回すべて空応答 / 非 0 / タイムアウトで PR URL を取得できなかった
+#
+# 副作用:
+#   - 各試行の結果（成功 / 空応答 / 非 0 / タイムアウト）を `$LOG` に記録（NFR 2.1）
+#   - 1 回目即時成功時は追加ログを出さない（Req 4.1 / NFR 1.1: 通常成功ケースの
+#     外形挙動を本変更前と同一に保つ）
+#
+# 設計判断:
+#   - 試行回数 4 / 待機 (0, 5, 10, 20) 秒 / 1 試行 timeout 15 秒（Req 1.4 / 1.5 / 1.6 /
+#     NFR 1.2 / 1.3）。リトライ系列全体で最大 35 + 15*4 = 95 秒となるが、典型
+#     ケースでは timeout 上限に到達せず数秒〜十数秒で完了する。Req 1.4 で合計
+#     待機時間を 35 秒以内に収める制約は「待機（sleep）の合計」を指し、個々の
+#     試行の RTT は別枠とする（Issue #108 本文の整理に準拠）。
+#   - 待機は `${STAGEC_VERIFY_SLEEP_CMD:-sleep}` 経由で実行する。テストで `:` 等の
+#     no-op コマンドを注入することで実時間待機なしに retry 系列を再現できる
+#     （Req 5.6）。env var 名は内部 fixture 用で、本番運用での override は想定しない
+#     （CLAUDE.md の env var 後方互換性方針には抵触しない / Req 4.2）。
+#   - `command -v timeout` で timeout コマンドの存在を確認し、無い環境では timeout
+#     なしで gh を実行する（既存 verify_pushed_or_retry と同方針 / 既存 cron
+#     互換性のため）。
+#   - 成功時の "Stage C 完了 / PR 作成済み" 相当ログは呼び出し側に残し、本関数は
+#     PR URL の取得と試行ログのみに責務を絞る。これにより Req 4.1 の「1 回目で
+#     PR が確認できたとき本変更前と同じ成功ログ」を呼び出し側 echo で保証する。
+verify_stagec_pr_or_retry() {
+  local branch="$1"
+  local issue_number="$2"
+
+  # 試行間 sleep の注入点（テスト時に `:` 等で no-op 化できる / Req 5.6）
+  local _sleep_cmd="${STAGEC_VERIFY_SLEEP_CMD:-sleep}"
+
+  # timeout コマンドの有無で gh 呼び出しを切り替える（既存 verify_pushed_or_retry と同方針）
+  local _gh_timeout=()
+  if command -v timeout >/dev/null 2>&1; then
+    _gh_timeout=(timeout 15)
+  fi
+
+  # 待機スケジュール（即時 / 5 秒 / 10 秒 / 20 秒。合計 35 秒 / Req 1.4）
+  local _delays=(0 5 10 20)
+  local _max_attempts=4
+
+  local attempt=1
+  local pr_url="" rc=0
+  while [ "$attempt" -le "$_max_attempts" ]; do
+    local _delay="${_delays[$((attempt - 1))]}"
+    if [ "$_delay" -gt 0 ]; then
+      "$_sleep_cmd" "$_delay"
+    fi
+
+    pr_url=""
+    rc=0
+    pr_url=$("${_gh_timeout[@]}" gh pr view --repo "$REPO" --head "$branch" \
+              --json url --jq '.url' 2>/dev/null) || rc=$?
+
+    if [ "$rc" -eq 0 ] && [ -n "$pr_url" ]; then
+      # 1 回目以降の試行回数判定: N >= 2 の場合のみ「リトライで成功」ログを残す
+      # （Req 3.2 / Req 4.1 NFR 1.1 を満たすため 1 回目は無 log で本変更前と外形互換）
+      if [ "$attempt" -gt 1 ]; then
+        echo "[$(date '+%F %T')] stageC PR verify SUCCESS attempt=${attempt}/${_max_attempts} issue=#${issue_number} branch=${branch} pr_url=${pr_url}" >> "$LOG"
+      fi
+      printf '%s\n' "$pr_url"
+      return 0
+    fi
+
+    # 失敗種別を分類してログに残す（NFR 2.1: 試行結果を事後識別可能にする）
+    local outcome=""
+    if [ "$rc" -eq 124 ]; then
+      outcome="timeout"
+    elif [ "$rc" -ne 0 ]; then
+      outcome="exit=${rc}"
+    else
+      outcome="empty"
+    fi
+    # 2 回目以降の試行については Req 3.1 で進捗を 1 行で残すことを要求。
+    # 1 回目の失敗も Req 3.3「全リトライ失敗で claude-failed 化」の事後原因特定の
+    # ため記録しておく（最終失敗時にまとめて参照できるよう attempt=1 から残す）。
+    echo "[$(date '+%F %T')] stageC PR verify attempt=${attempt}/${_max_attempts} outcome=${outcome} issue=#${issue_number} branch=${branch}" >> "$LOG"
+
+    attempt=$((attempt + 1))
+  done
+
+  # 全試行失敗（Req 2.1 / 3.3）— 呼び出し側で mark_issue_failed する
+  echo "[$(date '+%F %T')] stageC PR verify FAILED after ${_max_attempts} attempts issue=#${issue_number} branch=${branch} last_rc=${rc} last_pr_url='${pr_url:-(empty)}'" >> "$LOG"
+  return 1
+}
+
 # ─── failure 共通遷移ヘルパー ───
 #
 # Stage 失敗時の claude-failed 遷移を一元化。引数で原因種別と Issue コメント追加情報を受け取る。
@@ -3609,20 +3708,22 @@ run_impl_pipeline() {
       # Issue #104 Bug 3 / Req 4.1〜4.4: claude RC=0 + quota 検出なし時点では
       # 「PR が実際に作成されたか」が未確認。PjM サブエージェントが 1 turn で
       # 空転終了しても claude RC=0 を返すため、PR 実在を gh で verify する。
+      # Issue #108: GitHub の eventual consistency による false negative を吸収する
+      # ため、verify_stagec_pr_or_retry で最大 4 回までリトライする。1 回目で成功
+      # する通常ケースの外形挙動は本変更前と同一（Req 4.1 / NFR 1.1）。
       rm -f "$_qa_reset_file_c"
       local _stagec_pr_url _stagec_verify_rc=0
-      _stagec_pr_url=$(gh pr view --repo "$REPO" --head "$BRANCH" \
-                          --json url --jq '.url' 2>/dev/null) || _stagec_verify_rc=$?
+      _stagec_pr_url=$(verify_stagec_pr_or_retry "$BRANCH" "$NUMBER") || _stagec_verify_rc=$?
       if [ "$_stagec_verify_rc" -eq 0 ] && [ -n "$_stagec_pr_url" ]; then
-        # Req 4.3: PR 実在確認できた場合は従来どおり成功
+        # Req 4.3 / Issue #108 Req 3.4: PR 実在確認できた場合は従来どおり成功ログ
         echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み (${_stagec_pr_url})" | tee -a "$LOG"
         return 0
       fi
-      # Req 4.2 / 4.4: PR 不在または gh 失敗は安全側に倒し claude-failed 化
-      # （NFR 2.2: 人間が原因を特定できる粒度のログを残す）
-      echo "❌ #$NUMBER: Stage C 完了報告だが対応 PR 不在 → claude-failed (branch=$BRANCH verify_rc=$_stagec_verify_rc)" | tee -a "$LOG"
-      qa_warn "stageC PR verify failed issue=#$NUMBER branch=$BRANCH verify_rc=$_stagec_verify_rc pr_url='${_stagec_pr_url:-(empty)}'"
-      mark_issue_failed "stageC-pr-missing" "Stage C の Claude 実行は return code 0 で終了しましたが、対応する impl PR が GitHub 側に検出できませんでした（branch=\`$BRANCH\`）。PjM サブエージェントが 1 turn で空転終了した可能性 / GitHub API 一時障害の可能性のいずれかです。\`$LOG\` を確認してください。"
+      # Req 4.2 / 4.4 / Issue #108 Req 2.1: 4 回リトライしても PR 不在の場合は
+      # 安全側に倒し claude-failed 化（NFR 2.2: 人間が原因を特定できる粒度のログを残す）
+      echo "❌ #$NUMBER: Stage C 完了報告だが対応 PR 不在 → claude-failed (branch=$BRANCH verify_rc=$_stagec_verify_rc, 4 回リトライ後)" | tee -a "$LOG"
+      qa_warn "stageC PR verify failed after retry issue=#$NUMBER branch=$BRANCH verify_rc=$_stagec_verify_rc pr_url='${_stagec_pr_url:-(empty)}'"
+      mark_issue_failed "stageC-pr-missing" "Stage C の Claude 実行は return code 0 で終了しましたが、対応する impl PR が GitHub 側に検出できませんでした（branch=\`$BRANCH\`、4 回リトライ後）。PjM サブエージェントが 1 turn で空転終了した可能性 / GitHub API 一時障害の可能性のいずれかです。\`$LOG\` を確認してください。"
       return 1
       ;;
     99)

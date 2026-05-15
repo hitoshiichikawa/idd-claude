@@ -38,7 +38,24 @@ if ! grep -q "stageC-pr-missing" "$WATCHER_SH"; then
   echo "ERROR: issue-watcher.sh に stageC-pr-missing ハンドラが見つからない" >&2
   exit 2
 fi
-if ! grep -q "gh pr view --repo \"\$REPO\" --head \"\$BRANCH\"" "$WATCHER_SH"; then
+# Issue #108: 元々の inline `gh pr view --repo "$REPO" --head "$BRANCH"` 呼び出しは
+# verify_stagec_pr_or_retry ヘルパーに置き換えられた。サニティチェックは
+# (a) 新ヘルパー関数定義と (b) Stage C 完了時の呼び出し配線、(c) ヘルパー内部の
+# gh pr view --head 呼び出し（PR URL 取得ロジック）が残っていることを確認する。
+if ! grep -q "verify_stagec_pr_or_retry()" "$WATCHER_SH"; then
+  echo "ERROR: issue-watcher.sh に verify_stagec_pr_or_retry 定義が見つからない (Issue #108)" >&2
+  exit 2
+fi
+# 単一引用符内の \$ は文字列リテラル "$BRANCH" / "$NUMBER" を grep するためのもので、
+# 展開抑止が意図的（shellcheck SC2016 は false positive のため抑止）。
+# shellcheck disable=SC2016
+if ! grep -q 'verify_stagec_pr_or_retry "\$BRANCH" "\$NUMBER"' "$WATCHER_SH"; then
+  echo "ERROR: issue-watcher.sh に verify_stagec_pr_or_retry の呼び出し配線が見つからない (Issue #108)" >&2
+  exit 2
+fi
+# 同上（"$REPO" / "$branch" の文字列リテラルを grep する）
+# shellcheck disable=SC2016
+if ! grep -q 'gh pr view --repo "\$REPO" --head "\$branch"' "$WATCHER_SH"; then
   echo "ERROR: issue-watcher.sh に PR 実在 verify (gh pr view --head) が見つからない" >&2
   exit 2
 fi
