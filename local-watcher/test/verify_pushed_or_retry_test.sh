@@ -79,7 +79,12 @@ fi
 
 # ─── 一時環境（bare repo + work repo）構築ヘルパ ───
 TMPROOT=$(mktemp -d)
-trap 'rm -rf "$TMPROOT"' EXIT
+# 0700 / 0000 にした権限を戻してから rm -rf する（chmod 000 した refs が残ると rm に失敗するため）
+cleanup() {
+  chmod -R u+rwX "$TMPROOT" 2>/dev/null || true
+  rm -rf "$TMPROOT" 2>/dev/null || true
+}
+trap cleanup EXIT
 
 # fake gh: 引数を $LAST_GH_ARGS / $LAST_GH_COMMENT_BODY に保存し、stdout を捨てる
 LAST_GH_ARGS=""
