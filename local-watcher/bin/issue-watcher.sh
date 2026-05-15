@@ -3290,40 +3290,52 @@ ${push_stderr_tail}
   return 1
 }
 
-# ─── Stage C 完了直後の PR 実在 verify ヘルパー (Issue #108) ───
+# ─── Stage C 完了直後の PR 実在 verify ヘルパー (Issue #108 / #110) ───
 #
 # Stage C の Claude 実行が return code 0 で終了した直後に、対象 branch を head と
 # する impl PR が GitHub 側で参照可能か `gh pr view --head` で verify する。GitHub の
 # eventual consistency により PR 作成直後数十秒は当該クエリが空応答を返すケースが
-# 観測されているため、最大 4 回までリトライ可能とし、整合性遅延に起因する
-# false negative を吸収する。
+# 観測されているため、主経路は最大 6 回までリトライ可能とし、整合性遅延に起因する
+# false negative を吸収する。さらに主経路が全試行で空応答 / 失敗で終わった場合は、
+# 主経路と独立な edge cache 経路である List Pulls API（`gh api repos/.../pulls?head=...`）
+# に対して 1 度だけ fallback 探索を試みる（Issue #110: KeyNest #32 で観測された
+# 73 秒経過後の主経路空応答に対する救済路）。
 #
 # 引数:
 #   $1 = 対象 branch（典型的には $BRANCH）
 #   $2 = Issue 番号（ログ識別用。典型的には $NUMBER）
 #
 # 戻り値:
-#   0 = いずれかの試行で PR URL が取得できた（PR URL を stdout に出力）
-#   1 = 4 回すべて空応答 / 非 0 / タイムアウトで PR URL を取得できなかった
+#   0 = 主経路 / 代替経路のいずれかで PR URL が取得できた（PR URL を stdout に出力）
+#   1 = 主経路全試行 + 代替経路の 1 ターンを全て使い切っても PR URL を取得できなかった
 #
 # 副作用:
-#   - 各試行の結果（成功 / 空応答 / 非 0 / タイムアウト）を `$LOG` に記録（NFR 2.1）
-#   - 1 回目即時成功時は追加ログを出さない（Req 4.1 / NFR 1.1: 通常成功ケースの
+#   - 各主経路試行の結果（成功 / 空応答 / 非 0 / タイムアウト）を `$LOG` に記録（NFR 2.1）
+#   - 代替経路の呼び出し開始・結果を `$LOG` に記録（Req 3.3 / 3.4 / NFR 2.2）
+#   - 1 回目即時成功時は追加ログを出さない（Req 4.1 / 4.6 / NFR 1.1: 通常成功ケースの
 #     外形挙動を本変更前と同一に保つ）
 #
 # 設計判断:
-#   - 試行回数 4 / 待機 (0, 5, 10, 20) 秒 / 1 試行 timeout 15 秒（Req 1.4 / 1.5 / 1.6 /
-#     NFR 1.2 / 1.3）。リトライ系列全体で最大 35 + 15*4 = 95 秒となるが、典型
-#     ケースでは timeout 上限に到達せず数秒〜十数秒で完了する。Req 1.4 で合計
-#     待機時間を 35 秒以内に収める制約は「待機（sleep）の合計」を指し、個々の
-#     試行の RTT は別枠とする（Issue #108 本文の整理に準拠）。
+#   - 主経路試行回数 6 / 待機 (0, 5, 10, 20, 40, 60) 秒 / 1 試行 timeout 15 秒
+#     （Req 1.1 / 1.2 / 1.3 / 1.6 / NFR 1.2 / 1.3）。sleep 合計 135 秒で 73 秒の edge
+#     cache lag を余裕を持って吸収できる。
 #   - 待機は `${STAGEC_VERIFY_SLEEP_CMD:-sleep}` 経由で実行する。テストで `:` 等の
 #     no-op コマンドを注入することで実時間待機なしに retry 系列を再現できる
-#     （Req 5.6）。env var 名は内部 fixture 用で、本番運用での override は想定しない
-#     （CLAUDE.md の env var 後方互換性方針には抵触しない / Req 4.2）。
+#     （Req 5.8）。env var 名は Issue #108 の既存 fixture と互換。
+#   - 主経路リトライ系列は `${STAGEC_VERIFY_DELAYS:-}` （スペース区切り秒数）と
+#     `${STAGEC_VERIFY_MAX_ATTEMPTS:-}` で override 可能（Req 4.7 / NFR 3.4）。
+#     未指定時のデフォルトで Req 1.1 / 1.2 / NFR 1.2 を満たす。既存 env var 名
+#     （REPO / REPO_DIR / LOG / TRIAGE_MODEL / DEV_MODEL / STAGEC_VERIFY_SLEEP_CMD 等）
+#     とは衝突しない新規 env var を採用している。
 #   - `command -v timeout` で timeout コマンドの存在を確認し、無い環境では timeout
 #     なしで gh を実行する（既存 verify_pushed_or_retry と同方針 / 既存 cron
-#     互換性のため）。
+#     互換性のため）。1 試行・代替経路ともに `${STAGEC_VERIFY_TIMEOUT_SECS:-15}` 秒
+#     上限（Req 1.6 / 2.5 / NFR 1.3 / 1.4）。
+#   - 代替経路は List Pulls API を直接叩く `gh api repos/{owner}/{repo}/pulls?head={owner}:BRANCH&state=open`
+#     パターン。`{owner}` は `$REPO`（owner/repo 形式）から prefix を抽出。
+#     edge cache の独立性を期待する経路設計のため、代替経路自体のリトライは
+#     行わない（Req 2.6）。
+#   - 主経路のいずれかで PR が見つかった場合、代替経路は呼び出さない（Req 2.7）。
 #   - 成功時の "Stage C 完了 / PR 作成済み" 相当ログは呼び出し側に残し、本関数は
 #     PR URL の取得と試行ログのみに責務を絞る。これにより Req 4.1 の「1 回目で
 #     PR が確認できたとき本変更前と同じ成功ログ」を呼び出し側 echo で保証する。
@@ -3331,23 +3343,34 @@ verify_stagec_pr_or_retry() {
   local branch="$1"
   local issue_number="$2"
 
-  # 試行間 sleep の注入点（テスト時に `:` 等で no-op 化できる / Req 5.6）
+  # 試行間 sleep の注入点（テスト時に `:` 等で no-op 化できる / Req 5.8）
   local _sleep_cmd="${STAGEC_VERIFY_SLEEP_CMD:-sleep}"
+
+  # 1 試行 / 代替経路あたりの timeout 上限秒数（Req 1.6 / 2.5 / NFR 1.3 / 1.4）
+  local _timeout_secs="${STAGEC_VERIFY_TIMEOUT_SECS:-15}"
 
   # timeout コマンドの有無で gh 呼び出しを切り替える（既存 verify_pushed_or_retry と同方針）
   local _gh_timeout=()
   if command -v timeout >/dev/null 2>&1; then
-    _gh_timeout=(timeout 15)
+    _gh_timeout=(timeout "$_timeout_secs")
   fi
 
-  # 待機スケジュール（即時 / 5 秒 / 10 秒 / 20 秒。合計 35 秒 / Req 1.4）
-  local _delays=(0 5 10 20)
-  local _max_attempts=4
+  # 待機スケジュール（即時 / 5 / 10 / 20 / 40 / 60 秒。sleep 合計 135 秒 / Req 1.1 / NFR 1.2）
+  # STAGEC_VERIFY_DELAYS env で override 可能（Req 4.7 / NFR 3.4）
+  local _delays=()
+  if [ -n "${STAGEC_VERIFY_DELAYS:-}" ]; then
+    # shellcheck disable=SC2206  # 意図的に空白で word split する
+    _delays=(${STAGEC_VERIFY_DELAYS})
+  else
+    _delays=(0 5 10 20 40 60)
+  fi
+  local _max_attempts="${STAGEC_VERIFY_MAX_ATTEMPTS:-${#_delays[@]}}"
 
   local attempt=1
   local pr_url="" rc=0
+  local last_outcome="empty"
   while [ "$attempt" -le "$_max_attempts" ]; do
-    local _delay="${_delays[$((attempt - 1))]}"
+    local _delay="${_delays[$((attempt - 1))]:-0}"
     if [ "$_delay" -gt 0 ]; then
       "$_sleep_cmd" "$_delay"
     fi
@@ -3359,7 +3382,7 @@ verify_stagec_pr_or_retry() {
 
     if [ "$rc" -eq 0 ] && [ -n "$pr_url" ]; then
       # 1 回目以降の試行回数判定: N >= 2 の場合のみ「リトライで成功」ログを残す
-      # （Req 3.2 / Req 4.1 NFR 1.1 を満たすため 1 回目は無 log で本変更前と外形互換）
+      # （Req 3.2 / Req 4.1 / 4.6 / NFR 1.1 を満たすため 1 回目は無 log で本変更前と外形互換）
       if [ "$attempt" -gt 1 ]; then
         echo "[$(date '+%F %T')] stageC PR verify SUCCESS attempt=${attempt}/${_max_attempts} issue=#${issue_number} branch=${branch} pr_url=${pr_url}" >> "$LOG"
       fi
@@ -3376,16 +3399,40 @@ verify_stagec_pr_or_retry() {
     else
       outcome="empty"
     fi
-    # 2 回目以降の試行については Req 3.1 で進捗を 1 行で残すことを要求。
-    # 1 回目の失敗も Req 3.3「全リトライ失敗で claude-failed 化」の事後原因特定の
-    # ため記録しておく（最終失敗時にまとめて参照できるよう attempt=1 から残す）。
+    last_outcome="$outcome"
+    # Req 3.1: 2 回目以降の進捗を 1 行で残す。1 回目失敗も Req 3.5「全失敗時の原因
+    # 特定」のため残しておく（最終失敗時にまとめて参照できるよう attempt=1 から記録）
     echo "[$(date '+%F %T')] stageC PR verify attempt=${attempt}/${_max_attempts} outcome=${outcome} issue=#${issue_number} branch=${branch}" >> "$LOG"
 
     attempt=$((attempt + 1))
   done
 
-  # 全試行失敗（Req 2.1 / 3.3）— 呼び出し側で mark_issue_failed する
-  echo "[$(date '+%F %T')] stageC PR verify FAILED after ${_max_attempts} attempts issue=#${issue_number} branch=${branch} last_rc=${rc} last_pr_url='${pr_url:-(empty)}'" >> "$LOG"
+  # ─── 主経路全試行失敗 → 代替経路（List Pulls API）への 1 ターン fallback ───
+  # Req 2.1 / 2.6: 代替経路は主経路と独立に 1 回だけ呼び出す（リトライしない）。
+  # Req 2.5 / NFR 1.4: 代替経路にも timeout 上限を適用する。
+  local _owner="${REPO%%/*}"
+  echo "[$(date '+%F %T')] stageC PR verify fallback start (List Pulls API) issue=#${issue_number} branch=${branch} owner=${_owner}" >> "$LOG"
+  local _fb_url="" _fb_rc=0 _fb_outcome=""
+  _fb_url=$("${_gh_timeout[@]}" gh api "repos/${REPO}/pulls?head=${_owner}:${branch}&state=open" \
+            --jq '.[0].html_url // empty' 2>/dev/null) || _fb_rc=$?
+  if [ "$_fb_rc" -eq 0 ] && [ -n "$_fb_url" ]; then
+    # Req 2.2 / 3.4: 代替経路で救済（主経路全失敗 / 代替経路で成功）
+    echo "[$(date '+%F %T')] stageC PR verify fallback SUCCESS rescued issue=#${issue_number} branch=${branch} pr_url=${_fb_url} primary_attempts=${_max_attempts}" >> "$LOG"
+    printf '%s\n' "$_fb_url"
+    return 0
+  fi
+  # Req 2.3 / 2.4 / NFR 2.2: 代替経路の結果分類（empty / timeout / exit=N / 認証失敗等）を残す
+  if [ "$_fb_rc" -eq 124 ]; then
+    _fb_outcome="timeout"
+  elif [ "$_fb_rc" -ne 0 ]; then
+    _fb_outcome="exit=${_fb_rc}"
+  else
+    _fb_outcome="empty"
+  fi
+  echo "[$(date '+%F %T')] stageC PR verify fallback FAILED outcome=${_fb_outcome} issue=#${issue_number} branch=${branch}" >> "$LOG"
+
+  # Req 3.5: 主経路試行回数 / 最終 primary 失敗要因 / 代替経路最終結果を 1 行で残す
+  echo "[$(date '+%F %T')] stageC PR verify FAILED after ${_max_attempts} attempts + fallback issue=#${issue_number} branch=${branch} last_primary_outcome=${last_outcome} fallback_outcome=${_fb_outcome}" >> "$LOG"
   return 1
 }
 
@@ -3709,21 +3756,26 @@ run_impl_pipeline() {
       # 「PR が実際に作成されたか」が未確認。PjM サブエージェントが 1 turn で
       # 空転終了しても claude RC=0 を返すため、PR 実在を gh で verify する。
       # Issue #108: GitHub の eventual consistency による false negative を吸収する
-      # ため、verify_stagec_pr_or_retry で最大 4 回までリトライする。1 回目で成功
-      # する通常ケースの外形挙動は本変更前と同一（Req 4.1 / NFR 1.1）。
+      # ため、verify_stagec_pr_or_retry で主経路リトライを実施。
+      # Issue #110: 73 秒以上の edge cache lag を観測した実例（KeyNest #32）への
+      # 対応として主経路を 6 回 / 合計 135 秒に延長し、最終 attempt 後に List Pulls
+      # API への独立 fallback を 1 ターン追加。1 回目で成功する通常ケースの外形
+      # 挙動は本変更前と同一（Req 4.1 / 4.6 / NFR 1.1）。
       rm -f "$_qa_reset_file_c"
       local _stagec_pr_url _stagec_verify_rc=0
       _stagec_pr_url=$(verify_stagec_pr_or_retry "$BRANCH" "$NUMBER") || _stagec_verify_rc=$?
       if [ "$_stagec_verify_rc" -eq 0 ] && [ -n "$_stagec_pr_url" ]; then
-        # Req 4.3 / Issue #108 Req 3.4: PR 実在確認できた場合は従来どおり成功ログ
+        # Req 4.3 / Issue #108 Req 3.4 / Issue #110 Req 3.6: 主経路 1 回目即時成功
+        # でも代替経路救済でも、呼び出し側の成功ログは共通（外形互換）
         echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み (${_stagec_pr_url})" | tee -a "$LOG"
         return 0
       fi
-      # Req 4.2 / 4.4 / Issue #108 Req 2.1: 4 回リトライしても PR 不在の場合は
+      # Req 4.2 / 4.4 / Issue #108 Req 2.1 / Issue #110 Req 2.3 / 2.4:
+      # 主経路リトライ + 代替経路 1 ターンを使い切っても PR 不在の場合は
       # 安全側に倒し claude-failed 化（NFR 2.2: 人間が原因を特定できる粒度のログを残す）
-      echo "❌ #$NUMBER: Stage C 完了報告だが対応 PR 不在 → claude-failed (branch=$BRANCH verify_rc=$_stagec_verify_rc, 4 回リトライ後)" | tee -a "$LOG"
-      qa_warn "stageC PR verify failed after retry issue=#$NUMBER branch=$BRANCH verify_rc=$_stagec_verify_rc pr_url='${_stagec_pr_url:-(empty)}'"
-      mark_issue_failed "stageC-pr-missing" "Stage C の Claude 実行は return code 0 で終了しましたが、対応する impl PR が GitHub 側に検出できませんでした（branch=\`$BRANCH\`、4 回リトライ後）。PjM サブエージェントが 1 turn で空転終了した可能性 / GitHub API 一時障害の可能性のいずれかです。\`$LOG\` を確認してください。"
+      echo "❌ #$NUMBER: Stage C 完了報告だが対応 PR 不在 → claude-failed (branch=$BRANCH verify_rc=$_stagec_verify_rc, 主経路リトライ + 代替 API 経路 fallback 後)" | tee -a "$LOG"
+      qa_warn "stageC PR verify failed after retry+fallback issue=#$NUMBER branch=$BRANCH verify_rc=$_stagec_verify_rc pr_url='${_stagec_pr_url:-(empty)}'"
+      mark_issue_failed "stageC-pr-missing" "Stage C の Claude 実行は return code 0 で終了しましたが、対応する impl PR が GitHub 側に検出できませんでした（branch=\`$BRANCH\`、主経路リトライ + 代替 API 経路 fallback 後）。PjM サブエージェントが 1 turn で空転終了した可能性 / GitHub API 一時障害の可能性のいずれかです。\`$LOG\` を確認してください。"
       return 1
       ;;
     99)
