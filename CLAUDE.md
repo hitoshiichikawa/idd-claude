@@ -151,7 +151,7 @@ Reviewer / PjM）は、以下の方針で **内部思考言語と出力言語を
 - **後方互換性を壊す変更を無告知で入れる**（既存 env var 名変更 / cron 登録文字列の変更 / ラベル名変更 / exit code 意味変更）。破る場合は README に migration note を書き、必要なら deprecation 期間を設ける
 - **sudo を必要とする手順の追加**（idd-claude はユーザースコープ前提。`install.sh` / `setup.sh` の root 実行検知を外さない）
 - モデル ID のハードコード（env default で override 可能にする。`TRIAGE_MODEL` / `DEV_MODEL` 参照）
-- **opt-in gate なしで新しい外部サービス呼び出しを有効化**（`.github/workflows/issue-to-pr.yml` が `IDD_CLAUDE_USE_ACTIONS=true` で opt-in になっている設計を踏襲）
+- **opt-in gate なしで新しい外部サービス呼び出しを有効化**（`.github/workflows/issue-to-pr.yml` が `IDD_CLAUDE_USE_ACTIONS=true` で opt-in になっている設計を踏襲）。**注**: #112 で実施した「既に main で稼働しデフォルト false で配置された機能」のデフォルト反転（`MERGE_QUEUE_ENABLED` 等 8 種）は本禁止事項の対象外。新規外部サービス呼び出しの追加ではなく、既存機能のデフォルト値変更であるため。詳細は README の「オプション機能一覧」節の migration note を参照
 - `repo-template/**` の破壊的変更を、既 installed の consumer repo への影響評価なしに入れる
 - テストをコメントアウトして PR を出す（scope 外に分離する場合は Issue を切る）
 
