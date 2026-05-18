@@ -83,14 +83,14 @@ main に載っている）前提です。矛盾や実装上の問題に気づい
 
 `opt-out` および無宣言の場合、上記の追加フローは **適用しない**（Req 3.4 / NFR 1.1）。
 
-## impl-resume / tasks.md 進捗追跡規約（Issue #67 / opt-in）
+## impl-resume / tasks.md 進捗追跡規約（Issue #67 / #112 以降デフォルト有効）
 
 `local-watcher/bin/issue-watcher.sh` の Stage A prompt が以下のいずれかに該当する追加
 セクションを末尾に注入する場合があります。注入の有無は env 値で gate されており、
-opt-in が無効なら本節は **適用しない**:
+`IMPL_RESUME_PRESERVE_COMMITS=false` を明示した watcher 環境では本節は **適用しない**:
 
-- `### 既存 commit からの resume`（`IMPL_RESUME_PRESERVE_COMMITS=true` でかつ既存 origin
-  branch から resume した場合）
+- `### 既存 commit からの resume`（`IMPL_RESUME_PRESERVE_COMMITS=true`（#112 以降の既定）
+  でかつ既存 origin branch から resume した場合）
 - `### tasks.md 進捗追跡（IMPL_RESUME_PROGRESS_TRACKING=true|false）`
 
 該当セクションが prompt に含まれる場合、Developer は以下の規約を守ること:
@@ -114,9 +114,10 @@ opt-in が無効なら本節は **適用しない**:
   に更新する。deferrable 子タスク `- [ ]*` は未完了でも親完了に含めて良い
 - **hidden marker は使わない**（設計論点 2: `- [x]` の markdown checkbox のみで進捗を表現）
 
-opt-in 機能 OFF（`IMPL_RESUME_PRESERVE_COMMITS=false` または未設定）の場合、本節は適用
-されない。watcher は注入セクション自体を出力しないため、Developer は通常通り tasks.md
-の番号順で消化する。
+本機能 OFF（`IMPL_RESUME_PRESERVE_COMMITS=false` を明示）の場合、本節は適用されない。
+watcher は注入セクション自体を出力しないため、Developer は通常通り tasks.md の番号順で
+消化する。**#112 以降、未設定（unset）は `true` 既定として扱われるため、明示的な
+`=false` 指定がない限り本節は適用される**。
 
 # テスト作成ルール
 
