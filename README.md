@@ -593,6 +593,48 @@ launchctl load  ~/Library/LaunchAgents/com.local.issue-watcher-repo-b.plist
 - **GitHub API のレート制限も共有**（`gh auth` のトークン単位）: 通常は Issue ポーリング程度では問題ないが、repo が 10+ になるなら別トークン検討
 - **個別停止**: launchd は `launchctl unload <plist>` で、cron は該当行をコメントアウトするだけで個別に止められる
 
+##### 複数リポ運用時の cron.log grep 例
+
+複数の repo が `$HOME/.issue-watcher/cron.log` を共有しているとき、watcher の
+processor 系ログ行（`pr-iteration:` / `merge-queue:` / `merge-queue-recheck:` /
+`design-review-release:` / `quota-aware:`）には repo 識別子 `[<REPO>]` が
+時刻 prefix の直後に挿入されます（Issue #119 で導入）。これにより、特定 repo の
+サイクル全体や、全 repo 横断の失敗イベントだけを grep で抽出できます。
+
+ログ行の構造（例）:
+
+```
+[2026-05-20 12:00:00] [owner/repo-a] pr-iteration: サイクル開始 ...
+[2026-05-20 12:00:01] [owner/repo-a] merge-queue: 対象 PR=2 件
+[2026-05-20 12:00:02] [owner/repo-a] watcher: [owner/repo-a] dirty working tree blocks BASE_BRANCH checkout
+```
+
+代表的な grep 例:
+
+```bash
+# 1. 特定 repo（owner/repo-a）のサイクルだけ抽出（pr-iteration / merge-queue / merge-queue-recheck /
+#    design-review-release / quota-aware / 後述の watcher 構造化エラーを横断的に取得）
+grep '\[owner/repo-a\]' $HOME/.issue-watcher/cron.log
+
+# 2. 全 repo を通じて pr-iteration の失敗・skip 系イベント（WARN/ERROR/skip）を抽出
+grep -E 'pr-iteration: (WARN|ERROR|skip)' $HOME/.issue-watcher/cron.log
+
+# 3. cycle 冒頭 checkout 失敗イベント（dirty working tree による中断）を抽出
+#    Issue #119 で導入された構造化ログ。後続 4 行（current_branch / dirty_files /
+#    head / action）も連続行として隣接する。
+grep 'watcher: \[.*\] dirty working tree blocks BASE_BRANCH checkout' $HOME/.issue-watcher/cron.log
+#    あるいは 4 行サマリも含めて見たい場合は `-A 4`:
+grep -A 4 'watcher: \[.*\] dirty working tree blocks BASE_BRANCH checkout' $HOME/.issue-watcher/cron.log
+
+# 4. 特定 repo の checkout 失敗だけに絞る
+grep 'watcher: \[owner/repo-a\] dirty working tree' $HOME/.issue-watcher/cron.log
+```
+
+> `$REPO_DIR` 直下に dirty な変更が放置されていると、cycle 冒頭の
+> `git checkout $BASE_BRANCH` が失敗して processor ステージに到達しないまま
+> exit 1 で抜けます。上記 `3.` の grep でこの状況を検知できます。auto-recover
+> （自動 commit & push）は別 Issue で扱う方針です。
+
 ### Step 3-B. GitHub Actions をセットアップ（代替）
 
 ワークフローファイル `.github/workflows/issue-to-pr.yml` は **デフォルトで無効**です。
