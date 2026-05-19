@@ -189,6 +189,55 @@ IDD_CLAUDE_SKIP_LABELS=true ./install.sh --repo /path/to/your-project
 実行してください。自動実行が成功している場合、手動 step を改めて実行する必要はありません
 （再実行しても既存ラベルが保護されるため、害はありません）。
 
+#### fork / mirror clone から導入するときの注意（履歴持ち込み警告 #115）
+
+GitHub の fork や `git push --mirror` で別 repo の履歴ごと持ち込んだリポジトリに
+`install.sh --repo` を流すと、引き継がれた古い `docs/specs/<番号>-<slug>/` ディレクトリや
+`claude/issue-<番号>-*` ブランチが **新しい Issue 番号と衝突して watcher が誤った spec を
+resume 対象に選ぶ**事故が発生し得ます。これを未然に防ぐため、`install.sh` は配置完了直後に
+3 種類の検出を行い、該当があれば警告を表示します（**install 自体は止めません。exit 0 で
+完走します**）。
+
+| カテゴリ | 検出対象 |
+|---|---|
+| `[docs-specs]` | `docs/specs/<数字>-*/` 形式のディレクトリが 1 件以上存在する |
+| `[claude-branches]` | `origin` リモートに `claude/issue-<数字>-(design\|impl)-*` ブランチが 1 件以上存在する |
+| `[orphan-branches]` | 上記ブランチの `<数字>` の **過半数**が対象 repo の現存 Issue 番号（open + closed）と一致しない（fork/mirror 由来の可能性が高い） |
+
+- **fail-soft**: `git ls-remote` / `gh issue list` が失敗（origin 未設定 / ネットワーク不通 /
+  `gh` 未認証 / private repo で権限なし等）した場合、検出処理だけを skip して install 全体は
+  exit 0 で完走します。`origin` remote が未設定のクリーンな新規 repo では skip 理由も含めて
+  本機能由来の出力は **0 件**（false positive ゼロ保証）
+- **`--dry-run` 対応**: 検出処理自体は dry-run でも実施され、警告行は `[DRY-RUN] WARNING:`
+  プレフィックスで出力されます
+- **`--local` 単独時は走りません**: 対象リポジトリ配置がない場合は検出処理も発生しません
+- **D-1 と D-2 / D-3 は独立**: `gh` 未認証で D-3 が skip されても、D-1 / D-2 は機能します
+
+警告が出た場合の推奨対応（クリーンアップ手順）:
+
+```bash
+# 1. 古い docs/specs/ を一覧（先頭が数字 - のディレクトリ）
+ls -d docs/specs/[0-9]*-*/
+
+# 2. 不要なものを削除（対応 Issue が無いことを `gh issue view <番号>` 等で確認してから）
+rm -rf docs/specs/<番号>-<slug>/
+
+# 3. 古い claude/issue-* ブランチを一覧
+git ls-remote --heads origin 'claude/issue-*'
+
+# 4. 不要な remote ブランチを削除
+git push origin --delete claude/issue-<番号>-<slug>
+
+# 5. ローカル追跡ブランチもまとめて掃除（任意）
+git remote prune origin
+```
+
+**警告を無視した場合の影響**: install 自体は正常完了します。ただし watcher を起動すると、
+古い `docs/specs/` を新規 Issue の resume 対象として誤検出したり、古い `claude/issue-*`
+ブランチに対して force push / `--rebase` をかけて fork 元の作業を破壊する可能性があります。
+fork から始める場合は本機能の警告を確認してからクリーンアップを行い、その後 cron / watcher を
+有効化してください（QUICK-HOWTO.md の「fork / mirror clone から導入するときの注意」節も参照）。
+
 環境変数で挙動を調整できます（特定タグの検証や fork からのインストール向け）:
 
 | 変数 | デフォルト | 用途 |

@@ -698,6 +698,388 @@ setup_repo_labels() {
   return 0
 }
 
+# ─────────────────────────────────────────────────────────────
+# 履歴持ち込み（inherited specs / claude branches）検出（Issue #115）
+#   fork や `git push --mirror` で履歴を持ち込んだ repo に install すると、
+#   引き継がれた古い `docs/specs/<N>-*/` ディレクトリや `claude/issue-<N>-*`
+#   ブランチが新しい Issue 番号と衝突して watcher が誤動作することがある。
+#   配置完了直後にその兆候を検出してユーザーに警告する。
+#
+#   設計判断（Developer 確定）:
+#   - 例示件数: 各カテゴリ先頭 3 件まで、超過分は `(+N more)` で件数を示す
+#   - D-3 の Issue 母集合: open + closed（`gh issue list --state all`）
+#   - すべて fail-soft。検出処理失敗時は skip 理由を 1 行 stderr に残して継続
+#   - `--local` 単独時は呼ばれない（呼び出し側 if $INSTALL_REPO ブロック内で起動）
+# ─────────────────────────────────────────────────────────────
+
+# INHERITED_WARNED_PREVIOUSLY
+#   warn_inherited が 1 度でも発火したかを記録するグローバル。
+#   検出ブロックの末尾「無視しても install は完了している」案内を 1 度だけ
+#   出すために使う。
+INHERITED_WARNED_PREVIOUSLY=false
+
+# inherited_prefix
+#   警告行のプレフィックスを `--dry-run` の値で切り替えて返す（Req 4.2 / 4.3）。
+inherited_prefix() {
+  if [ "$DRY_RUN" = "true" ]; then
+    printf '[DRY-RUN] WARNING:'
+  else
+    printf '[INSTALL] WARNING:'
+  fi
+}
+
+# inherited_skip_log <reason>
+#   検出処理が skip された理由を 1 行 stderr に残す（Req 3.4 / NFR 2.1）。
+#   grep 可能な書式: `[INSTALL] INFO: [inherited] <reason>`。
+inherited_skip_log() {
+  local reason="$1"
+  local prefix
+  if [ "$DRY_RUN" = "true" ]; then
+    prefix="[DRY-RUN]"
+  else
+    prefix="[INSTALL]"
+  fi
+  echo "$prefix INFO: [inherited] $reason" >&2
+}
+
+# warn_inherited <category> <message...>
+#   警告本文を stderr に出力し、INHERITED_WARNED_PREVIOUSLY を立てる。
+#   category は `docs-specs` / `claude-branches` / `orphan-branches` 等。
+warn_inherited() {
+  local category="$1"
+  shift
+  local prefix
+  prefix="$(inherited_prefix)"
+  echo "$prefix [$category] $*" >&2
+  INHERITED_WARNED_PREVIOUSLY=true
+}
+
+# detect_inherited_specs <target-repo-dir>
+#   `docs/specs/<N>-*/` 形式（先頭が数字 + ハイフン）のディレクトリを検出して
+#   警告する（Req 1.1, 2.2）。母集合 0 件なら何もしない（Req 2.1）。
+detect_inherited_specs() {
+  local repo_path="$1"
+  local specs_dir="$repo_path/docs/specs"
+
+  if [ ! -d "$specs_dir" ]; then
+    return 0
+  fi
+
+  # nullglob を一時的に有効化（マッチ 0 件で空配列扱い）
+  local prev_nullglob
+  if shopt -q nullglob; then
+    prev_nullglob=on
+  else
+    prev_nullglob=off
+  fi
+  shopt -s nullglob
+
+  local entries=( "$specs_dir"/[0-9]*-* )
+  local matched=()
+  local entry name
+  for entry in "${entries[@]}"; do
+    if [ -d "$entry" ]; then
+      name="$(basename "$entry")"
+      # 念のため `<数字>-<...>` パターンを正規表現で再確認（false positive 防止）
+      if printf '%s' "$name" | grep -Eq '^[0-9]+-'; then
+        matched+=( "$name" )
+      fi
+    fi
+  done
+
+  if [ "$prev_nullglob" = "off" ]; then
+    shopt -u nullglob
+  fi
+
+  local count=${#matched[@]}
+  if [ "$count" -eq 0 ]; then
+    return 0
+  fi
+
+  warn_inherited "docs-specs" \
+    "inherited な docs/specs/ ディレクトリが ${count} 件検出されました。fork/mirror clone で履歴を持ち込んだ場合、watcher が古い spec を resume 対象に選ぶ事故が起きる可能性があります。"
+
+  # 先頭 3 件を提示（Req 5.2、Developer 確定）
+  local i=0
+  local shown=0
+  local prefix
+  prefix="$(inherited_prefix)"
+  for name in "${matched[@]}"; do
+    if [ "$shown" -ge 3 ]; then
+      break
+    fi
+    echo "$prefix [docs-specs]   - docs/specs/$name/" >&2
+    shown=$((shown + 1))
+    i=$((i + 1))
+  done
+  if [ "$count" -gt 3 ]; then
+    echo "$prefix [docs-specs]   (+$((count - 3)) more)" >&2
+  fi
+}
+
+# _list_claude_issue_branches <target-repo-dir>
+#   対象 repo の origin 上の `claude/issue-<N>-*` ブランチ名を 1 行 1 件で stdout に返す。
+#   exit code:
+#     0   : 取得成功（0 件含む）
+#     10  : origin remote が存在しない（clean repo / local-only。skip ログは出さない）
+#     1+  : git ls-remote の失敗（到達不能 / 認証エラー等。skip ログ対象）
+_list_claude_issue_branches() {
+  local repo_path="$1"
+
+  # origin remote 存在チェック（Req 2.3）
+  #   - 未設定の場合は固有 exit code 10 を返し、呼び出し側で「clean repo」と区別する
+  #   - Req 8.3（clean 新規 repo の出力差分ゼロ）を満たすため skip ログは出さない
+  if ! git -C "$repo_path" remote get-url origin >/dev/null 2>&1; then
+    return 10
+  fi
+
+  # ls-remote で origin 側の claude/issue-* ブランチ一覧を取得
+  #   - timeout を付けて 10 秒以内に終わるよう保護（NFR 1.1 / 1.2）。
+  #     timeout コマンドが無い環境では普通に実行する（fail-soft）。
+  local raw=""
+  local rc=0
+  if command -v timeout >/dev/null 2>&1; then
+    if ! raw=$(timeout 10 git -C "$repo_path" ls-remote --heads origin 'claude/issue-*' 2>/dev/null); then
+      rc=$?
+      return "$rc"
+    fi
+  else
+    if ! raw=$(git -C "$repo_path" ls-remote --heads origin 'claude/issue-*' 2>/dev/null); then
+      rc=$?
+      return "$rc"
+    fi
+  fi
+
+  # `<sha>\trefs/heads/<branch>` から branch 名のみ抽出
+  printf '%s\n' "$raw" \
+    | awk '{ print $2 }' \
+    | sed -E 's#^refs/heads/##' \
+    | grep -E '^claude/issue-[0-9]+-(design|impl)-' \
+    || true
+}
+
+# INHERITED_BRANCHES
+#   detect_inherited_claude_branches が検出したブランチ名を改行区切りで格納する
+#   グローバル変数。command substitution subshell を避けて呼び出し元から
+#   参照できるようにするため使う（INHERITED_WARNED_PREVIOUSLY を親シェルで
+#   立てるため）。
+INHERITED_BRANCHES=""
+
+# detect_inherited_claude_branches <target-repo-dir>
+#   `claude/issue-<N>-(design|impl)-*` 形式のブランチを origin に対して検出して
+#   警告する（Req 1.2, 2.3）。母集合 0 件なら何もしない（Req 2.1）。
+#   検出に失敗（到達不能 / 認証エラー等）した場合は skip 理由を 1 行残して継続
+#   （Req 3.2, 3.4）。origin remote が未設定（clean repo / local-only）の場合は
+#   skip ログ自体も出さず無音で抜ける（Req 8.3）。
+#
+#   副作用: グローバル変数 INHERITED_BRANCHES に検出結果を格納する
+#           （後続の D-3 で再利用。subshell 化を避けるためグローバル経由）
+#   exit:   0=成功（0 件含む） / 1=取得失敗で skip
+detect_inherited_claude_branches() {
+  local repo_path="$1"
+  INHERITED_BRANCHES=""
+
+  local branches=""
+  local rc=0
+  branches=$(_list_claude_issue_branches "$repo_path") || rc=$?
+  if [ "$rc" -eq 10 ]; then
+    # origin 未設定: clean / local-only repo として無音で抜ける（Req 8.3）
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    inherited_skip_log "git ls-remote が失敗しました（rc=$rc, 到達不能 / 認証エラーの可能性）。D-2 / D-3 の検出を skip します"
+    return 1
+  fi
+
+  # 空行を除去して件数を数える
+  local cleaned=""
+  cleaned=$(printf '%s\n' "$branches" | sed '/^$/d')
+
+  if [ -z "$cleaned" ]; then
+    # 0 件: D-2 / D-3 ともに警告対象なし。stdout には何も出さず exit 0。
+    return 0
+  fi
+
+  local count
+  count=$(printf '%s\n' "$cleaned" | wc -l | tr -d ' ')
+
+  warn_inherited "claude-branches" \
+    "inherited な claude/issue-* ブランチが ${count} 件検出されました。fork/mirror clone で履歴を持ち込んだ場合、watcher が古いブランチを resume 対象に選ぶ事故が起きる可能性があります。"
+
+  # 先頭 3 件を提示
+  local prefix
+  prefix="$(inherited_prefix)"
+  local shown=0
+  local branch
+  while IFS= read -r branch; do
+    if [ -z "$branch" ]; then
+      continue
+    fi
+    if [ "$shown" -ge 3 ]; then
+      break
+    fi
+    echo "$prefix [claude-branches]   - $branch" >&2
+    shown=$((shown + 1))
+  done <<< "$cleaned"
+
+  if [ "$count" -gt 3 ]; then
+    echo "$prefix [claude-branches]   (+$((count - 3)) more)" >&2
+  fi
+
+  # 後続の D-3 で再利用するためグローバル変数に格納する
+  INHERITED_BRANCHES="$cleaned"
+  return 0
+}
+
+# detect_orphan_claude_branches <target-repo-dir> <branches-stdin>
+#   detect_inherited_claude_branches の検出結果（stdin で受ける）から `<N>` を
+#   抽出し、現存 Issue 番号集合（open + closed）と突合する。
+#   過半数（> 50%）が現存 Issue に無ければ orphan として警告（Req 1.3, 2.3）。
+#   GitHub Issue 一覧取得が失敗した場合は本判定のみを skip し、install 全体は継続（Req 3.3）。
+detect_orphan_claude_branches() {
+  local repo_path="$1"
+  local branches_input="$2"  # 改行区切りのブランチ名
+
+  if [ -z "$branches_input" ]; then
+    return 0
+  fi
+
+  # ブランチ名から <N> を抽出（重複排除）
+  local issue_nums=""
+  issue_nums=$(printf '%s\n' "$branches_input" \
+    | sed -nE 's#^claude/issue-([0-9]+)-.*#\1#p' \
+    | sort -u)
+
+  if [ -z "$issue_nums" ]; then
+    return 0
+  fi
+
+  local total
+  total=$(printf '%s\n' "$issue_nums" | wc -l | tr -d ' ')
+
+  # gh が無い / 未認証なら D-3 のみ skip（D-1, D-2 は影響しない / Req 3.3）
+  if ! command -v gh >/dev/null 2>&1; then
+    inherited_skip_log "gh CLI が見つからず D-3（Issue 番号突合）を skip します"
+    return 0
+  fi
+  if ! gh auth status >/dev/null 2>&1; then
+    inherited_skip_log "gh CLI が未認証のため D-3（Issue 番号突合）を skip します"
+    return 0
+  fi
+
+  # repo slug の解決（既存 helper を再利用、fail-soft）
+  local repo_slug=""
+  if ! repo_slug=$(resolve_repo_slug "$repo_path"); then
+    repo_slug=""
+  fi
+  if [ -z "$repo_slug" ]; then
+    inherited_skip_log "owner/repo を解決できず D-3（Issue 番号突合）を skip します"
+    return 0
+  fi
+
+  # 現存 Issue 一覧を取得（open + closed、Developer 確定）
+  #   - 最大 1000 件を取得（NFR 1.1 を満たすため十分大きいが上限を切る）
+  #   - timeout を 10 秒で打ち切る（NFR 1.1 / 1.2）
+  local existing_nums=""
+  local rc=0
+  local cmd_prefix=""
+  if command -v timeout >/dev/null 2>&1; then
+    cmd_prefix="timeout 10"
+  fi
+  # `$cmd_prefix` を意図的に分割展開して `timeout 10 gh ...` の 2 トークンとして
+  # 渡したいため SC2086 を disable する。空文字列の場合は単に `gh ...` になる。
+  # shellcheck disable=SC2086
+  if ! existing_nums=$($cmd_prefix gh issue list --repo "$repo_slug" --state all --limit 1000 --json number --jq '.[].number' 2>/dev/null); then
+    rc=$?
+    inherited_skip_log "gh issue list 失敗（rc=$rc）。D-3（Issue 番号突合）を skip します"
+    return 0
+  fi
+
+  # 一致しない件数をカウント
+  local n
+  local missing=0
+  local missing_examples=()
+  while IFS= read -r n; do
+    if [ -z "$n" ]; then
+      continue
+    fi
+    if printf '%s\n' "$existing_nums" | grep -Fxq -- "$n"; then
+      :
+    else
+      missing=$((missing + 1))
+      if [ "${#missing_examples[@]}" -lt 3 ]; then
+        missing_examples+=( "$n" )
+      fi
+    fi
+  done <<< "$issue_nums"
+
+  # 過半数（> 50%）が現存しなければ警告（Req 1.3）
+  #   total * 2 > total + missing*2 すなわち missing*2 > total を整数演算で判定
+  if [ "$missing" -gt 0 ] && [ $((missing * 2)) -gt "$total" ]; then
+    warn_inherited "orphan-branches" \
+      "claude/issue-* ブランチの過半数（${missing}/${total}）が対象 repo の現存 Issue 番号に存在しません。fork/mirror clone 由来の可能性が高いです。"
+    local prefix
+    prefix="$(inherited_prefix)"
+    local ex
+    local shown=0
+    for ex in "${missing_examples[@]}"; do
+      if [ "$shown" -ge 3 ]; then
+        break
+      fi
+      echo "$prefix [orphan-branches]   - Issue #$ex（現存しない）" >&2
+      shown=$((shown + 1))
+    done
+    if [ "$missing" -gt 3 ]; then
+      echo "$prefix [orphan-branches]   (+$((missing - 3)) more)" >&2
+    fi
+  fi
+}
+
+# print_inherited_footer
+#   検出ブロックで 1 件以上警告が出ていた場合のみ、末尾に
+#   「無視しても install は完了している」旨と README / QUICK-HOWTO 参照を 1 度だけ出す。
+print_inherited_footer() {
+  if [ "$INHERITED_WARNED_PREVIOUSLY" != "true" ]; then
+    return 0
+  fi
+  local prefix
+  prefix="$(inherited_prefix)"
+  cat >&2 <<INHERITED_FOOTER
+$prefix ─────────────────────────────────────────────────────
+$prefix この警告を無視しても install 自体は正常完了しています（exit 0）。
+$prefix 推奨対応:
+$prefix   - 古い docs/specs/<N>-*/ ディレクトリを確認し、不要なら削除してください
+$prefix   - 古い claude/issue-* ブランチを git push origin --delete <branch> で削除してください
+$prefix 詳細手順: README.md / QUICK-HOWTO.md の「fork / mirror clone から導入するときの注意」節
+$prefix ─────────────────────────────────────────────────────
+INHERITED_FOOTER
+}
+
+# detect_inherited_artifacts <target-repo-dir>
+#   検出 3 関数を順に呼び出すエントリポイント。
+#   - D-1（docs/specs/）と D-2 / D-3（claude branches）は独立に判定する
+#   - D-2 失敗時は D-3 も skip（D-2 のブランチ一覧が D-3 の入力になるため）
+#   - すべて警告が無ければ stdout/stderr に何も出さない（false positive ゼロ）
+detect_inherited_artifacts() {
+  local repo_path="$1"
+
+  # D-1: docs/specs/<N>-*/
+  detect_inherited_specs "$repo_path"
+
+  # D-2: origin の claude/issue-* ブランチ
+  #   - 取得成功時に branches をグローバル変数 INHERITED_BRANCHES に格納し、D-3 で再利用
+  #   - 取得失敗時は D-2 関数内で skip ログを出し、D-3 も skip する
+  #   - command substitution の subshell を避けてグローバル経由で渡すことで、
+  #     INHERITED_WARNED_PREVIOUSLY を親シェル側で正しく立てる
+  if detect_inherited_claude_branches "$repo_path"; then
+    # D-3: 現存 Issue 番号集合と突合（INHERITED_BRANCHES が空なら早期 return される）
+    detect_orphan_claude_branches "$repo_path" "$INHERITED_BRANCHES"
+  fi
+
+  # 警告が 1 件でも出ていれば末尾フッターを 1 度だけ出す
+  print_inherited_footer
+}
+
 # 対話モード（引数なし）
 if ! $INSTALL_LOCAL && ! $INSTALL_REPO; then
   echo "=== idd-claude install ==="
@@ -812,6 +1194,13 @@ CLAUDE_MD_ORG_HINT
   #     失敗しないようにする
   #   - fail-soft: 失敗・skip しても install 全体は exit 0 で完走する
   setup_repo_labels "$REPO_PATH"
+
+  # 履歴持ち込みの検出と警告（Issue #115）
+  #   - 配置完了直後に、fork/mirror clone 由来の古い docs/specs/ や
+  #     claude/issue-* ブランチを検出してユーザーに警告する
+  #   - fail-soft: 検出処理が失敗しても install 全体は exit 0 で完走する
+  #   - clean な新規 repo では何も出力しない（false positive ゼロ保証）
+  detect_inherited_artifacts "$REPO_PATH"
 fi
 
 # ─────────────────────────────────────────────────────────────
