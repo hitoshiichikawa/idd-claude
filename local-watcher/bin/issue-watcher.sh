@@ -1863,6 +1863,104 @@ pi_build_iteration_prompt() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_detect_quota_soft_fail: stream-json から Claude Max 5h quota の警告閾値到達を検知
+#   入力: stdin に Claude `--output-format stream-json` の出力（1 行 1 JSON）
+#   出力: stdout に検出 1 件 1 行（タブ区切り）。検出無しなら無出力。
+#         形式: <detection_path>\t<surpassed_threshold>
+#           detection_path: 現状 `rate_limit_warning` 固定
+#           surpassed_threshold: 検出時の surpassedThreshold 値（小数文字列）
+#   返り値: 0 固定（解析失敗行・非該当行は無視して継続。`qa_detect_rate_limit` と同じ
+#           resilience 設計 / Req 5.4 互換）
+#
+#   検出条件 (#118 Req 1.1):
+#     - `type == "rate_limit_event"` かつ
+#     - `status == "allowed_warning"`（top-level）または
+#       `rate_limit_info.status == "allowed_warning"`（ネスト位置）かつ
+#     - `surpassedThreshold >= 0.9`（top-level の `surpassedThreshold` または
+#       `rate_limit_info.surpassedThreshold` のどちらかが 0.9 以上）
+#
+#   この関数は `QUOTA_AWARE_ENABLED` 設定とは独立に呼ばれる（Req 5.1）。
+#   `qa_detect_rate_limit` とは独立した関数として配置（Req 5.3: dispatcher 連携なし）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_detect_quota_soft_fail() {
+  jq -R -r '
+    . as $line
+    | (try ($line | fromjson) catch null)
+    | select(type == "object") as $j
+
+    # status を top-level / ネスト位置の両方で探索
+    | (
+        ($j.status? // ($j.rate_limit_info? // {}).status? // "")
+      ) as $status
+
+    # surpassedThreshold を top-level / ネスト位置の両方で探索
+    | (
+        ($j.surpassedThreshold? // ($j.rate_limit_info? // {}).surpassedThreshold? // null)
+      ) as $threshold
+
+    # type == "rate_limit_event" かつ status == "allowed_warning" かつ
+    # threshold が数値かつ >= 0.9 のときのみ出力
+    | select(
+        $j.type? == "rate_limit_event"
+        and $status == "allowed_warning"
+        and ($threshold | type) == "number"
+        and $threshold >= 0.9
+      )
+
+    | "rate_limit_warning\t\($threshold)"
+  ' 2>/dev/null
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_branch_is_claude_pr_head: branch 名が auto-commit 許可規約に一致するか判定
+#   入力: $1 = branch 名
+#   返り値: 0 = 一致（`claude/issue-<N>-<slug>` 形式）/ 1 = 不一致
+#
+#   人間の branch に対する誤 auto-commit 防止のガード（#118 Req 3.2 / 3.4）。
+#   現状は `^claude/issue-[0-9]+-` で固定（Out of Scope: branch 命名規約拡張）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_branch_is_claude_pr_head() {
+  local branch="${1:-}"
+  [[ "$branch" =~ ^claude/issue-[0-9]+- ]]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_auto_commit_and_push: 指定 branch に対して未コミット差分を `git add -A` →
+#   `git commit -m "$msg"` → `git push origin <branch>` で退避する
+#   入力: $1 = commit message（1 行目）。本文 + Co-Authored-By を関数側で付与する。
+#         $2 = branch 名（push 先 / safety 用に呼び出し時点の current branch と一致前提）
+#   返り値: 0 = 成功 / 1 = 失敗（add / commit / push のいずれか）
+#
+#   設計判断:
+#     - `git add -A` で削除も含む全変更を取り込む（中途終了時の意図不明差分を漏らさない）。
+#     - commit には `Co-Authored-By: Claude <noreply@anthropic.com>` を含める
+#       （#118 Req 1.3 / 2.3 / 3.3 で固定）。
+#     - push は plain `git push origin <branch>`（force 系を使わない）。push 失敗は
+#       上位で WARN 扱い（Req 1.5 / 2.4 / 3.5）。
+#     - 呼び出し前に `pi_branch_is_claude_pr_head` でガードする責務は呼び出し元。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_auto_commit_and_push() {
+  local msg="$1"
+  local branch="$2"
+  local full_msg
+  full_msg=$(printf '%s\n\nCo-Authored-By: Claude <noreply@anthropic.com>\n' "$msg")
+
+  if ! timeout "$PR_ITERATION_GIT_TIMEOUT" git add -A >/dev/null 2>&1; then
+    pi_warn "auto-commit: git add -A に失敗 (branch=${branch})"
+    return 1
+  fi
+  if ! timeout "$PR_ITERATION_GIT_TIMEOUT" git commit -m "$full_msg" >/dev/null 2>&1; then
+    pi_warn "auto-commit: git commit に失敗 (branch=${branch})"
+    return 1
+  fi
+  if ! timeout "$PR_ITERATION_GIT_TIMEOUT" git push origin "$branch" >/dev/null 2>&1; then
+    pi_warn "auto-commit: git push origin ${branch} に失敗"
+    return 1
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_run_iteration: 1 PR 分の iteration を実行（fresh context Claude 起動）
 #   入力: $1=pr_json
 #   戻り値: 0=success(commit+push or reply-only), 1=failure, 2=escalated(round上限到達),
@@ -1925,6 +2023,19 @@ pi_run_iteration() {
 
   pi_log "PR #${pr_number}: kind=${kind} round=${next_round}/${PR_ITERATION_MAX_ROUNDS} 着手 (${pr_url})"
 
+  # #118 Req 1.1 / 2.1: soft-fail 検知用 / 自動回復結果のサブシェル <-> 親 通信用に
+  # tmpfile を 2 つ用意する。
+  #   - $pi_soft_fail_file : 検出 1 件 1 行（`pi_detect_quota_soft_fail` の出力）
+  #   - $pi_recover_file   : サブシェル終端で書き出す自動回復結果の 1 行。
+  #                          書式: `<kind>:<result>` 例: `soft-fail-commit:ok`,
+  #                                `post-round-commit:ok`, `post-round-commit:fail`,
+  #                                `none:` （回復不要 / dirty なし）
+  local pi_soft_fail_file pi_recover_file
+  pi_soft_fail_file=$(mktemp -t "pi-softfail-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
+  pi_recover_file=$(mktemp -t "pi-recover-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
+  : > "$pi_soft_fail_file"
+  : > "$pi_recover_file"
+
   # サブシェル + trap で必ず base branch に戻す（AC 8.3）
   local rc=0
   (
@@ -1953,23 +2064,142 @@ pi_run_iteration() {
     # NFR 1.1: --max-turns で turn 数上限
     local pi_log_file
     pi_log_file="$LOG_DIR/pr-iteration-${kind}-${pr_number}-round${next_round}-$(date +%Y%m%d-%H%M%S).log"
-    if ! claude \
+
+    # #118 Req 1.1 / 5.1: claude の stream-json 出力を tee で 2 系統に分岐。
+    #   - 系統 1: 既存通り $pi_log_file へ append（観測ログを壊さない / NFR 1.2）。
+    #   - 系統 2: pi_detect_quota_soft_fail で `allowed_warning` イベントを検出し
+    #            $pi_soft_fail_file に書き出す。QUOTA_AWARE_ENABLED とは独立に動作する
+    #            （Req 5.1）。
+    # set -e / pipefail 配下で `tee` や `jq` の非 0 exit を握り潰さないよう、
+    # PIPESTATUS を即座にコピーしてから claude 本体の exit code を取り出す。
+    local claude_rc=0
+    set +e
+    claude \
         --print "$prompt" \
         --model "$PR_ITERATION_DEV_MODEL" \
         --permission-mode bypassPermissions \
         --max-turns "$PR_ITERATION_MAX_TURNS" \
         --output-format stream-json \
         --verbose \
-        >> "$pi_log_file" 2>&1; then
+        2>&1 \
+      | tee -a "$pi_log_file" \
+      | pi_detect_quota_soft_fail \
+      > "$pi_soft_fail_file"
+    local _pi_pipestatus=("${PIPESTATUS[@]}")
+    set -e
+    claude_rc="${_pi_pipestatus[0]:-0}"
+
+    if [ "$claude_rc" -ne 0 ]; then
       pi_warn "PR #${pr_number}: kind=${kind} Claude 実行が失敗 (log: ${pi_log_file})"
+      # claude 失敗時も round 中に部分編集が残っている可能性があるため、後段の自動回復に
+      # 続ける。検出 file の有無にかかわらず post-round-recover 経路で dirty を退避する。
+    else
+      pi_log "PR #${pr_number}: kind=${kind} Claude 実行完了 (log: ${pi_log_file})"
+    fi
+
+    # #118 Req 1.2 / 2.1 / 2.2: round 終了時点の dirty 判定と自動回復。
+    # 設計判断:
+    #   - 「soft-fail を検出 かつ 差分あり」「soft-fail なし かつ 差分あり」「差分なし」の 3 系統。
+    #   - soft-fail 検出が優先（Req 2.5）。
+    #   - branch ガードは pi_branch_is_claude_pr_head で実施（人間 branch には auto-commit しない）。
+    local current_branch
+    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    local soft_fail_observed=false
+    if [ -s "$pi_soft_fail_file" ]; then
+      soft_fail_observed=true
+    fi
+    local has_dirty=false
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+      has_dirty=true
+    fi
+
+    # branch ガード（Req 3.2 / 3.4 の round-内版）: 想定外 branch に居る場合は
+    # auto-commit せず WARN（claude 失敗時の subshell 早期 exit や fetch/checkout 失敗で
+    # current_branch が head_ref と乖離するシナリオを安全側に倒す）。
+    if [ "$has_dirty" = "true" ] && ! pi_branch_is_claude_pr_head "$current_branch"; then
+      pi_warn "PR #${pr_number}: kind=${kind} round=${next_round} 想定外 branch '${current_branch}' に dirty 検出 (auto-commit 抑止)"
+      printf '%s' "post-round-commit:fail" > "$pi_recover_file"
+      if [ "$claude_rc" -ne 0 ]; then
+        exit 1
+      fi
+      # claude 成功なのに branch 不一致は構造上ほぼ起きない（防御的）。後続で finalize しないよう fail を返す。
       exit 1
     fi
-    pi_log "PR #${pr_number}: kind=${kind} Claude 実行完了 (log: ${pi_log_file})"
-    exit 0
+
+    local recover_status="none:"
+    if [ "$has_dirty" = "true" ]; then
+      if [ "$soft_fail_observed" = "true" ]; then
+        # Req 1.2 / 1.3 / 2.5: soft-fail 時の commit message
+        if pi_auto_commit_and_push \
+            "docs(specs): partial round-${next_round} output before quota cutoff (auto-recovered)" \
+            "$current_branch"; then
+          recover_status="soft-fail-commit:ok"
+        else
+          recover_status="soft-fail-commit:fail"
+        fi
+      else
+        # Req 2.2 / 2.3: 通常 dirty 時の commit message
+        if pi_auto_commit_and_push \
+            "docs(specs): recover uncommitted round-${next_round} output (auto)" \
+            "$current_branch"; then
+          recover_status="post-round-commit:ok"
+        else
+          recover_status="post-round-commit:fail"
+        fi
+      fi
+    elif [ "$soft_fail_observed" = "true" ]; then
+      # 差分は無いが soft-fail を観測した（差分前に round が打ち切られた稀ケース）
+      recover_status="soft-fail-commit:ok"
+    fi
+    printf '%s' "$recover_status" > "$pi_recover_file"
+
+    # claude 自体の rc を引き継ぐ（失敗は呼び出し元で WARN + needs-iteration 残置に倒れる）
+    exit "$claude_rc"
   )
   rc=$?
   # 保険: 呼び出し元でも base branch に戻す
   git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
+
+  # #118 Req 1.1 / 4.1 / 4.2: 自動回復結果を読み取ってログ + 後続挙動を分岐
+  local recover_status="none:"
+  if [ -s "$pi_recover_file" ]; then
+    recover_status=$(cat "$pi_recover_file")
+  fi
+  local soft_fail_summary=""
+  if [ -s "$pi_soft_fail_file" ]; then
+    # 検出が複数行ある場合は最後の値を採用（最新 utilization）。tab 区切り 2 列目。
+    soft_fail_summary=$(awk -F '\t' 'NF >= 2 { last = $2 } END { print last }' "$pi_soft_fail_file")
+  fi
+  rm -f "$pi_soft_fail_file" "$pi_recover_file"
+
+  case "$recover_status" in
+    soft-fail-commit:ok)
+      # Req 1.1 / 1.2 / 1.4 / 4.1: soft-fail 検出 + auto-commit 成功 → needs-iteration 据え置き
+      pi_log "PR #${pr_number}: kind=${kind} round=${next_round} quota-soft-fail utilization=${soft_fail_summary} action=auto-commit+keep-label"
+      return 1
+      ;;
+    soft-fail-commit:fail)
+      # Req 1.5: auto-commit / push 失敗 → WARN + needs-iteration 据え置き
+      pi_warn "PR #${pr_number}: kind=${kind} round=${next_round} quota-soft-fail utilization=${soft_fail_summary} action=auto-commit-failed (needs-iteration を残置)"
+      return 1
+      ;;
+    post-round-commit:ok)
+      # Req 2.1 / 2.2 / 4.2: 通常 dirty + auto-commit 成功 → 通常 finalize に進む
+      pi_log "PR #${pr_number}: kind=${kind} round=${next_round} post-round-recover branch=${head_ref} action=success"
+      ;;
+    post-round-commit:fail)
+      # Req 2.4 / 4.3: auto-commit / push 失敗 → WARN + 終了
+      pi_warn "PR #${pr_number}: kind=${kind} round=${next_round} post-round-recover branch=${head_ref} action=fail"
+      return 1
+      ;;
+    none:|"")
+      : # 回復不要（dirty なし）
+      ;;
+    *)
+      pi_warn "PR #${pr_number}: kind=${kind} 未知の recover_status='${recover_status}' (needs-iteration を残置)"
+      return 1
+      ;;
+  esac
 
   if [ $rc -eq 0 ]; then
     # AC 6.2 (#26) / #35 AC 3.1 / 3.2: kind に応じたラベル遷移
@@ -2011,9 +2241,42 @@ process_pr_iteration() {
   fi
 
   # NFR 2.3 / AC 8.5: dirty working tree 検知
+  # #118 Req 3.1〜3.5: 前 cycle で round が途中終了して dirty を残した場合、
+  # current branch が `claude/issue-<N>-<slug>` 命名規約に合致するときは auto-commit /
+  # push で clean state に戻し、Processor の本処理を継続する。合致しない branch では
+  # ERROR + skip（既存挙動と同じ安全側）。QUOTA_AWARE_ENABLED とは独立（Req 5.2）。
   if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-    pi_error "dirty working tree を検出しました。PR Iteration Processor をスキップします。"
-    return 0
+    local _pi_pre_branch _pi_dirty_paths _pi_pre_issue
+    _pi_pre_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
+    # dirty 一覧は `git status --porcelain` の `XY path` 列を末尾だけ取り出し、コンマ区切り化
+    _pi_dirty_paths=$(git status --porcelain 2>/dev/null | awk '{
+      $1=""; sub(/^ /, ""); printf "%s%s", (NR>1?",":""), $0
+    }')
+    # branch 名から PR 番号を派生（Req 4.2: PR 番号 / branch / 種別 / 結果 を出力）
+    _pi_pre_issue=$(echo "$_pi_pre_branch" | grep -oE 'issue-[0-9]+' | head -1 | grep -oE '[0-9]+' || true)
+    # Req 3.1: branch 名と dirty パス一覧をログに記録（recover/skip 双方の経路で出力）
+    pi_log "pre-cycle dirty 検出 issue=#${_pi_pre_issue:-?} branch=${_pi_pre_branch} paths=${_pi_dirty_paths}"
+
+    if pi_branch_is_claude_pr_head "$_pi_pre_branch"; then
+      # Req 3.2 / 3.3: 規約一致 branch に対して auto-commit / push して継続
+      if pi_auto_commit_and_push \
+          "docs(specs): recover pre-cycle dirty state on ${_pi_pre_branch} (auto)" \
+          "$_pi_pre_branch"; then
+        # 本処理は BASE_BRANCH で動かすため、回復後に BASE_BRANCH に戻す。
+        # `set -e` 配下なので checkout 失敗時は次の git ops で検出され ERROR に倒れる。
+        git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
+        # Req 4.2: PR 番号 / branch / 種別 / 結果 を 1 行で出力
+        pi_log "pre-cycle-recover issue=#${_pi_pre_issue:-?} branch=${_pi_pre_branch} action=success"
+      else
+        # Req 3.5: 自動回復失敗は ERROR + skip（次サイクルで再評価）
+        pi_error "pre-cycle-recover issue=#${_pi_pre_issue:-?} branch=${_pi_pre_branch} action=fail (PR Iteration Processor をスキップします)"
+        return 0
+      fi
+    else
+      # Req 3.4: claude/issue-<N>-<slug> 規約外の branch では auto-commit せず skip
+      pi_error "dirty working tree を検出しました（branch=${_pi_pre_branch} は claude/issue-<N>-<slug> 規約外）。PR Iteration Processor をスキップします。"
+      return 0
+    fi
   fi
 
   pi_log "サイクル開始 (max_prs=${PR_ITERATION_MAX_PRS}, max_rounds=${PR_ITERATION_MAX_ROUNDS}, model=${PR_ITERATION_DEV_MODEL}, design_enabled=${PR_ITERATION_DESIGN_ENABLED}, timeout=${PR_ITERATION_GIT_TIMEOUT}s)"
