@@ -4693,6 +4693,180 @@ $stderr_tail
   return 0
 }
 
+# ─── スラグ正規化と Stage Checkpoint Resume スラグ照合ガード (Issue #114) ───
+#
+# fork / mirror clone で Issue 番号が衝突したとき、無関係な過去 Issue の
+# `docs/specs/<N>-*/` や `claude/issue-<N>-impl-*` ブランチを誤って resume しないよう、
+# Issue タイトル由来の expected-slug と既存成果物の found-slug を照合する。
+#
+# 共通関数:
+#   - `_normalize_slug`                       : Issue タイトル → 正規化済みスラグ（Req 5.1, 5.2）
+#   - `_stage_checkpoint_assert_slug_match`   : spec dir 検出時のスラグ照合（Req 1, 3）
+#   - `_resume_branch_assert_slug_match`      : origin impl ブランチ resume 時の照合（Req 2, 3）
+#
+# いずれも mismatch 検出時は `claude-claimed` を取り除き `needs-decisions` を付与し、
+# Issue コメントを 1 件投稿してから非 0 を返す（呼び出し元は skip して次 Issue へ進む）。
+
+# Issue タイトルを「lowercase 化 / `a-z0-9` 以外をハイフン 1 個へ縮約 /
+# 先頭 40 文字へ切り詰め / 末尾ハイフン除去」の順で正規化する純粋関数（Req 5.1）。
+# 引数: $1 = タイトル（または任意の文字列）
+# stdout: 正規化済みスラグ。空入力なら空文字。
+# 戻り値: 常に 0
+#
+# 既存 spec dir 不在パスでの SLUG 導出と同じ規則を共通化する（Req 5.2, 5.3）。
+# 既存挙動と等価: `echo "$TITLE" | tr '[:upper:]' '[:lower:]' \
+#                  | sed -E 's/[^a-z0-9]+/-/g' | cut -c1-40 | sed -E 's/-+$//'`
+_normalize_slug() {
+  local raw="${1:-}"
+  if [ -z "$raw" ]; then
+    echo ""
+    return 0
+  fi
+  echo "$raw" | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g' | cut -c1-40 | sed -E 's/-+$//'
+}
+
+# スラグ不一致を検出したとき、`claude-claimed` を除去して `needs-decisions` を付与し、
+# Issue コメントを 1 件投稿する共通エスカレーション。Req 3.1, 3.2, 3.3, 3.4。
+# 引数:
+#   $1 = 種別ラベル（"spec-dir" | "resume-branch"）
+#   $2 = expected-slug
+#   $3 = found-slug
+#   $4 = 検出された対象（spec dir path or branch name）
+# 戻り値: 常に 0
+# 副作用:
+#   - gh issue edit / gh issue comment（失敗時は || true で吸収。skip 経路を阻まない）
+#   - slot_log にイベント記録
+_slug_mismatch_escalate() {
+  local kind="$1"
+  local expected="$2"
+  local found="$3"
+  local target="$4"
+
+  local body
+  body="🛑 自動処理を中止しました（スラグ照合不一致）。
+
+- 種別: ${kind}
+- 対象 Issue: #${NUMBER:-?}
+- expected-slug（Issue タイトル由来）: \`${expected}\`
+- found-slug（既存成果物由来）: \`${found}\`
+- 検出対象: \`${target}\`
+
+fork / mirror clone 由来の Issue 番号衝突により、無関係な過去 Issue の
+\`docs/specs/<N>-*/\` または \`claude/issue-<N>-impl-*\` ブランチを誤って resume
+する事故を避けるため、当該 Issue の Stage Checkpoint Resume を中止しました。
+
+### 次の手順
+
+1. 検出対象 \`${target}\` が本 Issue (#${NUMBER:-?}) の成果物か確認してください
+2. 無関係なら退避（rename / 削除）、対象なら手動で命名を揃えてください
+3. 確認後、本 Issue から \`needs-decisions\` ラベルを外してください（次サイクルで再 pickup）"
+
+  gh issue edit "$NUMBER" --repo "$REPO" \
+    --remove-label "$LABEL_CLAIMED" \
+    --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1 || true
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+  slot_log "slug-mismatch escalated: kind=$kind issue=#${NUMBER:-?} expected=$expected found=$found target=$target"
+  return 0
+}
+
+# `docs/specs/<N>-*/` 検出時のスラグ照合（Req 1.2, 1.3, 1.4, 1.5）。
+# 引数:
+#   $1 = expected_slug（_normalize_slug の結果）
+#   $2 = 検出された spec dir のパス（basename を見て slug を抽出）
+# 戻り値:
+#   0 = match（呼び出し元は従来どおり resume を継続）
+#   1 = mismatch（呼び出し元はその Issue を skip する。escalate 済）
+# 副作用:
+#   - LOG に `stage-checkpoint: slug-match|slug-mismatch ...` を 1 行記録（Req 4.1, 4.2, NFR 3.1, 3.2）
+#   - mismatch 時は `_slug_mismatch_escalate` が gh issue edit + comment を発射
+_stage_checkpoint_assert_slug_match() {
+  local expected="$1"
+  local spec_dir="$2"
+  local base found
+  base=$(basename "$spec_dir")
+  # `<N>-` プレフィックスを剥がして found-slug を取り出す。NUMBER が空のときは
+  # NFR 2.1（異常系の安全側挙動）に従い mismatch 扱いに倒す。
+  if [ -z "${NUMBER:-}" ]; then
+    found=""
+  else
+    found="${base#"${NUMBER}-"}"
+    # `<N>-` で始まらなかった場合は basename 全体を found とみなす（防御的）
+    if [ "$found" = "$base" ]; then
+      found=""
+    fi
+  fi
+
+  if [ -n "$expected" ] && [ "$expected" = "$found" ]; then
+    echo "stage-checkpoint: slug-match issue=#${NUMBER:-?} expected=${expected} found=${found}" | tee -a "$LOG"
+    return 0
+  fi
+
+  echo "stage-checkpoint: slug-mismatch issue=#${NUMBER:-?} expected=${expected} found=${found}" | tee -a "$LOG"
+  _slug_mismatch_escalate "spec-dir" "$expected" "$found" "$spec_dir"
+  return 1
+}
+
+# origin の `claude/issue-<N>-impl-*` ブランチを resume 候補として検出した際に
+# 行うスラグ照合（Req 2.1, 2.2, 2.3）。origin の全 impl-* ブランチを ls-remote で
+# 列挙し、expected-slug と一致するブランチが 1 つでも見つかれば match、見つからず
+# かつ何らかの impl-* ブランチが存在すれば mismatch として escalate する。
+# 引数:
+#   $1 = expected_slug
+# 戻り値:
+#   0 = match もしくは候補ブランチ自体が origin に存在しない（resume 対象外）
+#   1 = mismatch（呼び出し元は impl-resume を中止して非 0 を返す）
+# 副作用:
+#   - LOG に `resume-branch: slug-match|slug-mismatch ...` を 1 行記録（Req 4.3）
+#   - mismatch 時は `_slug_mismatch_escalate` が gh issue edit + comment を発射
+#
+# 失敗時の安全側挙動（NFR 2.1）: ls-remote 自体が失敗（ネットワーク不調・タイムアウト）
+# したときは「候補なし」として呼び出し元へ 0 を返す。後続の `_resume_detect_existing_branch`
+# も同様にネットワーク失敗を不在扱いするため整合する。
+_resume_branch_assert_slug_match() {
+  local expected="$1"
+  if [ -z "${NUMBER:-}" ]; then
+    # NFR 2.1: 異常系。expected が決まらない場合は match 扱いで呼び出し元へ委ねる
+    return 0
+  fi
+
+  local prefix="claude/issue-${NUMBER}-impl-"
+  local remote_refs
+  if ! remote_refs=$(timeout 30 git ls-remote --heads origin "refs/heads/${prefix}*" 2>/dev/null); then
+    # ネットワーク失敗等は不在扱い（既存 _resume_detect_existing_branch と同じ姿勢）
+    return 0
+  fi
+  if [ -z "$remote_refs" ]; then
+    return 0
+  fi
+
+  local found_slug match_found="false"
+  local first_found=""
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    # 形式: "<sha>\trefs/heads/claude/issue-<N>-impl-<slug>"
+    local ref="${line##*$'\t'}"
+    local branch="${ref#refs/heads/}"
+    found_slug="${branch#"${prefix}"}"
+    if [ -z "$first_found" ]; then
+      first_found="$found_slug"
+    fi
+    if [ "$found_slug" = "$expected" ]; then
+      match_found="true"
+      break
+    fi
+  done <<< "$remote_refs"
+
+  if [ "$match_found" = "true" ]; then
+    echo "resume-branch: slug-match issue=#${NUMBER:-?} expected=${expected} found=${expected}" | tee -a "$LOG"
+    return 0
+  fi
+
+  echo "resume-branch: slug-mismatch issue=#${NUMBER:-?} expected=${expected} found=${first_found}" | tee -a "$LOG"
+  _slug_mismatch_escalate "resume-branch" "$expected" "$first_found" "${prefix}${first_found}"
+  return 1
+}
+
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
 # サブシェル `( _slot_run_issue n issue_json ) &` から呼び出される前提。
 #
@@ -4777,16 +4951,60 @@ _slot_run_issue() {
   echo "=== Processing #$NUMBER: $TITLE (slot-${IDD_SLOT_NUMBER}) ===" | tee -a "$LOG"
 
   # ── 既存 spec ディレクトリの検出（設計 PR merge 済みか）と slug 決定 ──
-  local EXISTING_SPEC_DIR
-  EXISTING_SPEC_DIR=$(ls -d "$WT/docs/specs/${NUMBER}-"* 2>/dev/null | head -1 || true)
+  # Issue #114: expected-slug を Issue タイトルから先に決定し、既存 `docs/specs/<N>-*/`
+  # のスラグ部と照合する。不一致時は fork / mirror clone 由来の番号衝突と判断し、
+  # 当該 Issue を skip して人間判断に委ねる（Req 1.1〜1.6, Req 3 一式）。
+  local EXPECTED_SLUG
+  EXPECTED_SLUG=$(_normalize_slug "$TITLE")
+
+  # `docs/specs/<N>-*/` を全件列挙（Req 1.5: 複数存在ケースも全件チェック対象）
+  local SPEC_CANDIDATES=()
+  local _spec_glob
+  for _spec_glob in "$WT/docs/specs/${NUMBER}-"*; do
+    [ -d "$_spec_glob" ] || continue
+    SPEC_CANDIDATES+=("$_spec_glob")
+  done
+
+  local EXISTING_SPEC_DIR=""
   local HAS_EXISTING_SPEC=false
-  if [ -n "$EXISTING_SPEC_DIR" ] && [ -f "$EXISTING_SPEC_DIR/requirements.md" ]; then
-    HAS_EXISTING_SPEC=true
-    SLUG=$(basename "$EXISTING_SPEC_DIR" | sed "s/^${NUMBER}-//")
-    echo "📂 既存 spec 検出: $EXISTING_SPEC_DIR (slug=$SLUG)" | tee -a "$LOG"
+  if [ "${#SPEC_CANDIDATES[@]}" -gt 0 ]; then
+    # Req 1.2, 1.3: 各候補のスラグを expected と比較。一致しかつ requirements.md がある
+    # ものを採用する。複数一致は通常起こらないが、起きた場合は先頭採用（後方互換）。
+    local _cand _cand_slug _matched_dir=""
+    for _cand in "${SPEC_CANDIDATES[@]}"; do
+      _cand_slug=$(basename "$_cand" | sed "s/^${NUMBER}-//")
+      if [ "$_cand_slug" = "$EXPECTED_SLUG" ] && [ -f "$_cand/requirements.md" ]; then
+        _matched_dir="$_cand"
+        break
+      fi
+    done
+
+    if [ -n "$_matched_dir" ]; then
+      # Req 1.3: 一致 → 従来どおり impl-resume を継続。LOG にスラグ照合 pass を記録（Req 4.1）
+      HAS_EXISTING_SPEC=true
+      EXISTING_SPEC_DIR="$_matched_dir"
+      if ! _stage_checkpoint_assert_slug_match "$EXPECTED_SLUG" "$_matched_dir"; then
+        return 1
+      fi
+      SLUG=$(basename "$EXISTING_SPEC_DIR" | sed "s/^${NUMBER}-//")
+      echo "📂 既存 spec 検出: $EXISTING_SPEC_DIR (slug=$SLUG)" | tee -a "$LOG"
+    else
+      # Req 1.4, 1.5: docs/specs/<N>-* は存在するが expected-slug と一致するものがない
+      # → 先頭候補を mismatch 対象として LOG/escalate し、当該 Issue を skip する。
+      local _first="${SPEC_CANDIDATES[0]}"
+      if ! _stage_checkpoint_assert_slug_match "$EXPECTED_SLUG" "$_first"; then
+        return 1
+      fi
+      # 防御: _stage_checkpoint_assert_slug_match が 0 を返した（一致した）場合の
+      # フォールバック（実装上は到達しないが silent fail を作らないため）
+      HAS_EXISTING_SPEC=true
+      EXISTING_SPEC_DIR="$_first"
+      SLUG=$(basename "$EXISTING_SPEC_DIR" | sed "s/^${NUMBER}-//")
+    fi
   else
-    SLUG=$(echo "$TITLE" | tr '[:upper:]' '[:lower:]' \
-          | sed -E 's/[^a-z0-9]+/-/g' | cut -c1-40 | sed -E 's/-+$//')
+    # Req 1.6: `docs/specs/<N>-*/` が存在しないとき → 本要件のスラグ照合は発火させず
+    # 従来どおり Issue タイトル由来の新規スラグを採用する（NFR 1.3）
+    SLUG="$EXPECTED_SLUG"
   fi
   SPEC_DIR_REL="docs/specs/${NUMBER}-${SLUG}"
 
@@ -4952,6 +5170,14 @@ _slot_run_issue() {
   # `IMPL_RESUME_PRESERVE_COMMITS` を見て legacy / preserve 戦略にディスパッチし、
   # 失敗時は `_slot_mark_failed` 既に発射済の状態で非 0 を返す。
   if [ "$MODE" = "impl-resume" ]; then
+    # Issue #114 Req 2: origin の `claude/issue-<N>-impl-*` ブランチを resume 候補として
+    # 検出するとき、ブランチ名のスラグ部と expected-slug を照合する。不一致時は
+    # `_slug_mismatch_escalate` 経由で `needs-decisions` に倒し、本 Issue を skip する。
+    # spec dir 経路で expected と一致した SLUG が確定済なので、ここで照合する expected は
+    # `$SLUG` と同値（_normalize_slug の冪等性により）。
+    if ! _resume_branch_assert_slug_match "$SLUG"; then
+      return 1
+    fi
     if ! _resume_branch_init; then
       return 1
     fi
