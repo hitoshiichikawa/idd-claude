@@ -5,8 +5,8 @@
 ファイル群を触るため `(P)` で並列実行可能。タスク 3〜5 は `process_promote_pipeline()` の
 内部状態（promote 集合 / Issue ループ）を共有するため直列にする。
 
-- [ ] 1. ラベルセットアップスクリプトに `st-failed` を追加
-- [ ] 1.1 `repo-template/.github/scripts/idd-claude-labels.sh` と `.github/scripts/idd-claude-labels.sh` の `LABELS=(...)` 配列に `st-failed` を追加する (P)
+- [x] 1. ラベルセットアップスクリプトに `st-failed` を追加
+- [x] 1.1 `repo-template/.github/scripts/idd-claude-labels.sh` と `.github/scripts/idd-claude-labels.sh` の `LABELS=(...)` 配列に `st-failed` を追加する (P)
   - 両ファイルに同一行 `"st-failed|d73a4a|【Issue 用】 ST failure 検知後 revert 済み（Phase B Promote Pipeline が付与）"` を追記
   - 既存 12 ラベルの定義（名前・色・description）は変更しない（NFR 1.3 / Req 4.2）
   - `gh label create --force` 再実行で冪等になることを確認（既存ループに変更不要 / Req 4.1.4）
