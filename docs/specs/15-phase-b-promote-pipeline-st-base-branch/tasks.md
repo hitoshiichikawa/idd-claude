@@ -66,7 +66,7 @@
   - すべての分岐で「Issue 番号 / ST 状態 / 実施アクション」を 1 行ログに出力（Req 5.1.2）
   - _Requirements: 2.2, 2.3, 3.2, 5.1_
 
-- [ ] 5. Promote 実行（B3: fast-forward push + PROMOTE_MODE 分岐 + 失敗通知）
+- [x] 5. Promote 実行（B3: fast-forward push + PROMOTE_MODE 分岐 + 失敗通知）
 - [x] 5.1 `pp_do_promote_if_eligible()` と `pp_match_cron()` を実装し、PROMOTE_MODE 3 モードを分岐する
   - `PROMOTE_MODE=continuous`: promote 集合が 1 件以上なら即時 `pp_do_promote` 呼び出し（Req 3.2.3）
   - `PROMOTE_MODE=batched`: `pp_match_cron "$PROMOTE_CRON"` が真のときだけ `pp_do_promote`、`PROMOTE_CRON` 未設定 / 不正なら WARN + 当該サイクル no-op（Req 3.2.4, 3.2.6）
@@ -82,7 +82,7 @@
   - 失敗時: `pp_warn` に `promote-failed` 識別語を含めて出力（NFR 4.1）、ラベル状態は変更しない（Req 3.1.3）
   - すべての git 操作を `timeout "$PROMOTE_GIT_TIMEOUT"` で wrap（NFR 3.2 / NFR 5.1）
   - _Requirements: 3.1, NFR 2.1, NFR 2.2, NFR 3.2, NFR 4.1, NFR 5.1_
-- [ ] 5.3 `pp_notify_promote_failure()` と `pp_summary()` を実装し、ログ識別語と Issue コメント通知を仕上げる
+- [x] 5.3 `pp_notify_promote_failure()` と `pp_summary()` を実装し、ログ識別語と Issue コメント通知を仕上げる
   - `pp_notify_promote_failure`: `PROMOTE_FAIL_NOTIFY_ISSUE` が `^[0-9]+$` にマッチする数値のとき `gh issue comment "$PROMOTE_FAIL_NOTIFY_ISSUE" --repo "$REPO" --body "..."` で 1 件投稿（Req 3.3.2）、それ以外は log のみ（Req 3.3.3）
   - `pp_summary`: サイクル終了時に `[$REPO] promote-pipeline: サマリ: st-success-promoted=X, st-failure-reverted=Y, pending-skip=Z, promote-failed=W, fail=V` を 1 行で出力（Req 5.1.3）
   - 各 git / gh 操作の stderr / stdout 分離を NFR 4.2 に合わせて維持（`pp_log` → stdout、`pp_warn` / `pp_error` → `>&2`）
