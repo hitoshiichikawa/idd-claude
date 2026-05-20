@@ -116,8 +116,30 @@ PR_ITERATION_DEV_MODEL="${PR_ITERATION_DEV_MODEL:-claude-opus-4-7}"
 PR_ITERATION_MAX_TURNS="${PR_ITERATION_MAX_TURNS:-60}"
 # 1 サイクルで処理する PR 数の上限（残りは次回サイクルに持ち越し、AC 1.6 / NFR 1.2）。
 PR_ITERATION_MAX_PRS="${PR_ITERATION_MAX_PRS:-3}"
+# Issue #122: 旧 PR_ITERATION_MAX_ROUNDS が「明示的に設定されているか」を defaulting
+# 前に確認しておき、後段の pi_resolve_max_rounds で「kind 固有 env も旧 env も全部
+# 未設定」（Req 1.4）と「旧 env のみ設定」（Req 1.3）を区別できるようにする。
+# `[ "${VAR+x}" = "x" ]` で「未設定 vs 空文字列」を識別する標準イディオム。
+if [ "${PR_ITERATION_MAX_ROUNDS+x}" = "x" ]; then
+  PR_ITERATION_MAX_ROUNDS_LEGACY_SET="true"
+else
+  PR_ITERATION_MAX_ROUNDS_LEGACY_SET="false"
+fi
 # 1 PR あたりの累計 iteration 上限。到達時は claude-failed に昇格（AC 7.2）。
+# Issue #122 で kind 別の上限 env (PR_ITERATION_MAX_ROUNDS_IMPL /
+# PR_ITERATION_MAX_ROUNDS_DESIGN) を導入したため、本変数は両 kind 共通の fallback
+# として温存する（NFR 1.1）。kind 別の値が未設定の場合のみ参照される。
 PR_ITERATION_MAX_ROUNDS="${PR_ITERATION_MAX_ROUNDS:-3}"
+# Issue #122: kind 別の round 上限。値 `0` は「round 数超過のみによる escalate を
+# 行わない」（無制限）を意味する sentinel（Req 2.1 / 2.3）。未設定なら旧
+# PR_ITERATION_MAX_ROUNDS を fallback として使い、それも未設定なら impl=3 / design=0
+# を適用する（Req 1.3 / 1.4）。解決は pi_resolve_max_rounds で行う。
+PR_ITERATION_MAX_ROUNDS_IMPL="${PR_ITERATION_MAX_ROUNDS_IMPL:-}"
+PR_ITERATION_MAX_ROUNDS_DESIGN="${PR_ITERATION_MAX_ROUNDS_DESIGN:-}"
+# Issue #122: no-progress ループ検知の連続上限（Req 3.4）。round 終了時に head branch
+# への新規 commit が観測されなかった round が連続して本値以上に達したら、kind に
+# 依らず claude-failed に escalate する（Req 3.3 / 3.6）。
+PR_ITERATION_NO_PROGRESS_LIMIT="${PR_ITERATION_NO_PROGRESS_LIMIT:-3}"
 # 自動 iteration を許可する head ref のプレフィックス正規表現（impl PR 用）。
 # 既定値は #35 で `^claude/` から `^claude/issue-[0-9]+-impl-` に厳格化された。
 # 旧 `^claude/` 挙動に戻したい場合は cron / launchd 側で本変数を override すること
@@ -1231,6 +1253,62 @@ pi_fetch_candidate_prs() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_resolve_max_rounds: kind に対応する round 上限を解決する（Issue #122 Req 1）
+#   入力: $1 = kind ("impl" / "design")
+#   出力: stdout に 0 以上の整数（`0` は無制限の sentinel / Req 2）
+#   返り値: 0=成功 / 1=未知 kind
+#
+#   優先順序（Req 1.1〜1.4）:
+#     1. kind 固有 env（PR_ITERATION_MAX_ROUNDS_IMPL / PR_ITERATION_MAX_ROUNDS_DESIGN）が
+#        非空ならその値を採用
+#     2. 旧 PR_ITERATION_MAX_ROUNDS が設定されていれば両 kind の fallback として採用
+#     3. いずれも未設定なら impl=3, design=0 を適用
+#
+#   設計判断:
+#     - 値の妥当性（非負整数）は呼び出し元で `[ "$v" -ge "..." ]` 形式の比較に
+#       入ってくる時点で bash の算術評価で検出されるため、ここでは defensive に
+#       数値化のみ実施し、不正値（負・非数値）は受信時点で 0 にフォールバックさせない
+#       （運用者の typo を握り潰さない方針 / 設計判断）。代わりに呼び出し元で
+#       通常通り比較が落ちる挙動に任せる。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_resolve_max_rounds() {
+  local kind="$1"
+  local kind_specific=""
+  local default_value=""
+  case "$kind" in
+    impl)
+      kind_specific="${PR_ITERATION_MAX_ROUNDS_IMPL:-}"
+      default_value="3"
+      ;;
+    design)
+      kind_specific="${PR_ITERATION_MAX_ROUNDS_DESIGN:-}"
+      default_value="0"
+      ;;
+    *)
+      pi_warn "pi_resolve_max_rounds: 未知の kind=${kind}"
+      return 1
+      ;;
+  esac
+
+  # Req 1.1 / 1.2: kind 固有 env が非空ならその値を採用
+  if [ -n "$kind_specific" ]; then
+    echo "$kind_specific"
+    return 0
+  fi
+  # Req 1.3: 旧 PR_ITERATION_MAX_ROUNDS が「明示設定されている」場合は fallback として
+  # 採用。冒頭で "${...:-3}" 展開されるため変数自体には常に値が入るが、設定有無は
+  # PR_ITERATION_MAX_ROUNDS_LEGACY_SET フラグで判別する。明示設定されていれば旧運用
+  # （impl/design 共通 3 round 制限）と互換になるよう、design 側にも同値を適用する。
+  if [ "${PR_ITERATION_MAX_ROUNDS_LEGACY_SET:-false}" = "true" ]; then
+    echo "${PR_ITERATION_MAX_ROUNDS}"
+    return 0
+  fi
+  # Req 1.4: 全未設定なら kind ごとの default を返す（impl=3, design=0）
+  echo "$default_value"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_read_round_counter: PR body から hidden marker の round 数を取得
 #   入力: $1=pr_number
 #   出力: stdout に round 数（marker 無しなら 0）
@@ -1253,6 +1331,32 @@ pi_read_round_counter() {
     | grep -oE '[0-9]+$' \
     | tail -1)
   echo "${round:-0}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_read_no_progress_streak: PR body から hidden marker の no-progress 連続カウンタを取得
+#   入力: $1=pr_body (gh pr view --json body --jq '.body // ""' で取得済みの文字列)
+#   出力: stdout に整数（key 不在 / marker 不在なら "0"）
+#   返り値: 0 固定
+#   Issue #122 Req 3.6 / 4.2 / 4.4 / 4.5
+#
+#   marker 形式: <!-- idd-claude:pr-iteration round=N last-run=ISO8601 no-progress-streak=K -->
+#   既存 marker（no-progress-streak キー無し）の場合は "0" を返す（Req 4.2 / 4.4 後方互換）。
+#   複数 marker がある場合は末尾を採用（既存 pi_read_round_counter / pi_read_last_run と整合）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_read_no_progress_streak() {
+  local pr_body="${1-}"
+  if [ -z "$pr_body" ]; then
+    echo "0"
+    return 0
+  fi
+  local streak
+  streak=$(echo "$pr_body" \
+    | grep -oE 'idd-claude:pr-iteration [^>]*no-progress-streak=[0-9]+' \
+    | grep -oE 'no-progress-streak=[0-9]+' \
+    | grep -oE '[0-9]+$' \
+    | tail -1)
+  echo "${streak:-0}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1473,9 +1577,23 @@ pi_collect_general_comments() {
 #   AC 6.1, 7.1
 #   戻り値: 0=成功, 1=失敗（呼び出し元で iteration を中断）
 # ─────────────────────────────────────────────────────────────────────────────
-pi_post_processing_marker() {
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_write_marker: PR body の hidden marker を round + last-run + no-progress-streak
+#   の 3 フィールド形式で書き換える（Issue #122 Req 4.1 / 4.3 / 4.5）。
+#   入力: $1=pr_number, $2=round, $3=no_progress_streak
+#   戻り値: 0=成功, 1=失敗（呼び出し元で WARN + 据え置き、Req 5.4）
+#
+#   設計判断:
+#     - marker prefix `<!-- idd-claude:pr-iteration ` と既存キー名 `round` / `last-run`
+#       は変更しない（Req 4.3 / NFR 1.2）。`no-progress-streak=K` を末尾に追加。
+#     - 既存 marker の置換 sed は `last-run=[^>]*` で末尾 `-->` 直前まで全部食うため、
+#       旧フォーマット（no-progress-streak 無し）も同じ正規表現で吸収できる（Req 4.4）。
+#     - 副作用なし（PR body 書き込み 1 回のみ。コメント投稿は呼び出し元で別途実施）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_write_marker() {
   local pr_number="$1"
-  local new_round="$2"
+  local round="$2"
+  local streak="$3"
   local now
   now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
@@ -1486,10 +1604,12 @@ pi_post_processing_marker() {
     return 1
   fi
 
-  local marker="<!-- idd-claude:pr-iteration round=${new_round} last-run=${now} -->"
+  local marker="<!-- idd-claude:pr-iteration round=${round} last-run=${now} no-progress-streak=${streak} -->"
   local new_body
   if echo "$body" | grep -qE 'idd-claude:pr-iteration round=[0-9]+'; then
-    # 既存 marker を最新 marker で置換（複数あった場合も全部 1 つに集約）
+    # 既存 marker を最新 marker で置換（複数あった場合も全部 1 つに集約）。
+    # `last-run=[^>]*` は末尾 `-->` 直前まで貪欲に食うため、no-progress-streak 有無の
+    # どちらの旧 marker も同じ regex で置換できる（Req 4.4）。
     new_body=$(echo "$body" | sed -E "s|<!-- idd-claude:pr-iteration round=[0-9]+ last-run=[^>]*-->|${marker}|g")
   else
     # 末尾に追記（前置の改行で見やすく）
@@ -1503,17 +1623,65 @@ ${marker}"
     pi_warn "PR #${pr_number}: PR body の hidden marker 更新に失敗"
     return 1
   fi
+  return 0
+}
 
-  # AC 6.1: 着手表明コメント
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_post_processing_comment: round 着手表明コメントを投稿する（marker 書き込みなし）
+#   入力: $1=pr_number, $2=new_round, $3=max_rounds (表示用、`0`=無制限表記)
+#   戻り値: 0 固定（コメント投稿失敗は WARN のみ。ラベル誤遷移リスクが無いため
+#           round 全体を失敗扱いにはしない / NFR 1.1 既存挙動踏襲）
+#   Issue #122 Req 1.6 / 2.4
+#
+#   設計判断:
+#     - 既存 pi_post_processing_marker は「marker 書き込み + コメント投稿」の合成だったが、
+#       #122 で「失敗 round では marker を据え置く」（Req 5）が必要になったため、
+#       marker 書き込みは round 終了時に成功 path でのみ行うよう分離した。
+#     - コメントは round 開始時の人間向け視認用なので、claude 実行前に投稿する
+#       （既存挙動 NFR 1.1 と等価）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_post_processing_comment() {
+  local pr_number="$1"
+  local new_round="$2"
+  local max_rounds="${3:-$PR_ITERATION_MAX_ROUNDS}"
+
+  local max_display
+  if [ "$max_rounds" = "0" ]; then
+    max_display="無制限"
+  else
+    max_display="$max_rounds"
+  fi
   local processing_msg
   processing_msg=$(printf '%s\n%s' \
-    ":robot: PR Iteration Processor が処理を開始しました (round ${new_round}/${PR_ITERATION_MAX_ROUNDS})。" \
+    ":robot: PR Iteration Processor が処理を開始しました (round ${new_round}/${max_display})。" \
     "<!-- idd-claude:pr-iteration-processing round=${new_round} -->")
   if ! timeout "$PR_ITERATION_GIT_TIMEOUT" \
       gh pr comment "$pr_number" --repo "$REPO" --body "$processing_msg" >/dev/null 2>&1; then
-    # コメント投稿失敗はラベル誤遷移のリスクがないため WARN のみ（marker は付いた）
-    pi_warn "PR #${pr_number}: 着手表明コメントの投稿に失敗（marker は更新済み）"
+    pi_warn "PR #${pr_number}: 着手表明コメントの投稿に失敗"
   fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_post_processing_marker: PR body に hidden marker を書き込み + 着手表明コメント投稿
+#   （Issue #26 / #35 で導入された合成関数。互換性のため温存するが、Issue #122 以降の
+#   pi_run_iteration は pi_write_marker / pi_post_processing_comment を直接呼ぶ。
+#   外部から本関数を呼んでいる箇所が無いことを確認済み 2026-05 時点）
+#   入力: $1=pr_number, $2=new_round, $3=streak (省略時 0 / 後方互換)
+#         $4=max_rounds (表示用、省略時 PR_ITERATION_MAX_ROUNDS / 後方互換)
+#   AC 6.1, 7.1 / Issue #122 Req 4.1 / 6.1
+#   戻り値: 0=成功, 1=失敗（呼び出し元で iteration を中断）
+# ─────────────────────────────────────────────────────────────────────────────
+pi_post_processing_marker() {
+  local pr_number="$1"
+  local new_round="$2"
+  local streak="${3:-0}"
+  local max_rounds="${4:-$PR_ITERATION_MAX_ROUNDS}"
+
+  if ! pi_write_marker "$pr_number" "$new_round" "$streak"; then
+    return 1
+  fi
+  pi_post_processing_comment "$pr_number" "$new_round" "$max_rounds"
   return 0
 }
 
@@ -1706,13 +1874,18 @@ EOF
 
 # ─────────────────────────────────────────────────────────────────────────────
 # pi_escalate_to_failed: 上限到達時の claude-failed 昇格 + エスカレコメント
-#   入力: $1=pr_number, $2=round, $3=max_rounds
-#   AC 7.2, 7.3
+#   入力: $1=pr_number, $2=round, $3=max_rounds, $4=reason (任意, 既定 "max-rounds")
+#         $5=streak (任意, reason=no-progress のとき表示する連続カウンタ値)
+#   AC 7.2, 7.3 / Issue #122 Req 3.5
+#
+#   reason: "max-rounds"（既定）または "no-progress"。コメント本文と理由表示を切り替える。
 # ─────────────────────────────────────────────────────────────────────────────
 pi_escalate_to_failed() {
   local pr_number="$1"
   local round="$2"
   local max_rounds="$3"
+  local reason="${4:-max-rounds}"
+  local streak="${5:-0}"
 
   if ! timeout "$PR_ITERATION_GIT_TIMEOUT" gh pr edit "$pr_number" --repo "$REPO" \
       --remove-label "$LABEL_NEEDS_ITERATION" \
@@ -1722,10 +1895,45 @@ pi_escalate_to_failed() {
   fi
 
   local escalation_body
-  escalation_body=$(cat <<EOF
+  if [ "$reason" = "no-progress" ]; then
+    # Issue #122 Req 3.5: no-progress 連続上限到達時の専用本文
+    local no_progress_limit="${PR_ITERATION_NO_PROGRESS_LIMIT:-3}"
+    escalation_body=$(cat <<EOF
+## :rotating_light: PR Iteration no-progress 上限到達 (#122 no-progress loop guard)
+
+本 PR は **no-progress 連続 ${streak} round** に達しました（上限
+\`PR_ITERATION_NO_PROGRESS_LIMIT=${no_progress_limit}\`）。head branch への新規 commit が
+${streak} round 連続で観測されなかったため、コスト暴走と無限ループを防ぐために
+\`needs-iteration\` ラベルを除去し、\`claude-failed\` ラベルに付け替えています。
+
+### これまでの状況
+
+- 累計 iteration: ${round} round
+- no-progress 連続: ${streak} round
+- no-progress 上限値: ${no_progress_limit} round
+- 進捗 commit が連続して無いため自動 iteration を停止
+
+### 次に人間が取るべきアクション
+
+1. これまでのレビューコメントと自動修正履歴を読み、Claude が「対応不要」と
+   判断していたのか、対応に失敗していたのかを確認する
+2. 必要に応じて手動で修正 commit を積む
+3. 自動 iteration を再開したい場合:
+   - PR 本文の \`<!-- idd-claude:pr-iteration round=N ... -->\` 行を **手動で削除**（カウンタリセット）
+   - \`claude-failed\` ラベルを除去
+   - \`needs-iteration\` ラベルを付け直す
+4. これ以上自動 iteration を行わない場合は \`claude-failed\` を残したまま手動レビューに移行
+
+---
+
+_本コメントは PR Iteration Processor (#122 no-progress loop guard) が自動投稿しました。_
+EOF
+)
+  else
+    escalation_body=$(cat <<EOF
 ## :rotating_light: PR Iteration 上限到達 (#26 PR Iteration Processor)
 
-本 PR の累計自動 iteration 回数が上限 (\`PR_ITERATION_MAX_ROUNDS=${max_rounds}\`) に達しました。
+本 PR の累計自動 iteration 回数が上限 (\`max_rounds=${max_rounds}\`) に達しました。
 \`needs-iteration\` ラベルを除去し、\`claude-failed\` ラベルに付け替えています。
 
 ### これまでの状況
@@ -1749,6 +1957,7 @@ pi_escalate_to_failed() {
 _本コメントは PR Iteration Processor (#26) が自動投稿しました。_
 EOF
 )
+  fi
   # Issue #65 Req 3.1/3.2/3.3/3.4: 手動復旧手順を末尾に append。
   # pi_escalate_to_failed は PR Iteration（needs-iteration ラベル付き PR）からの遷移
   # であり、文脈上 PR が必ず存在するため pr_present="yes" を渡す。
@@ -1774,6 +1983,13 @@ pi_build_iteration_prompt() {
   local round="$3"
   # #35: template path を呼び出し元から渡す。省略時は impl 用 template を使う（後方互換）。
   local tmpl_path="${4:-$ITERATION_TEMPLATE}"
+  # Issue #122 Req 1.6: kind 別に解決した round 上限を template の {{MAX_ROUNDS}} に
+  # 反映する。省略時は旧 PR_ITERATION_MAX_ROUNDS を使う（後方互換）。`0` は無制限の
+  # sentinel として template に文字列 `0` を渡す。template 側で表示時にどう翻訳するかは
+  # template の責務（既存 template は `{{MAX_ROUNDS}}` をそのまま表示するため、`0` の
+  # ときの「無制限」表記は本関数では行わず、prompt 上の数値として `0` を保持する。
+  # 着手表明コメント側では `0`→`無制限` 表示に翻訳する: pi_post_processing_marker 参照）。
+  local max_rounds_param="${5:-$PR_ITERATION_MAX_ROUNDS}"
 
   local pr_title pr_url head_ref base_ref pr_body
   pr_title=$(echo "$pr_json" | jq -r '.title // ""')
@@ -1856,7 +2072,7 @@ pi_build_iteration_prompt() {
     -v head_ref="$head_ref" \
     -v base_ref="$base_ref" \
     -v round="$round" \
-    -v max_rounds="$PR_ITERATION_MAX_ROUNDS" \
+    -v max_rounds="$max_rounds_param" \
     -v issue_number="${issue_number:-(none)}" \
     -v spec_dir="${spec_dir:-(none)}" \
     '
@@ -2034,25 +2250,48 @@ pi_run_iteration() {
     return 1
   fi
 
-  local round
-  round=$(pi_read_round_counter "$pr_number")
+  # Issue #122 Req 1: kind に応じて round 上限を解決（旧 PR_ITERATION_MAX_ROUNDS は
+  # 両 kind 共通の fallback）。`0` は無制限の sentinel（Req 2.1〜2.4）。
+  local max_rounds
+  max_rounds=$(pi_resolve_max_rounds "$kind")
+  local max_display
+  if [ "$max_rounds" = "0" ]; then
+    max_display="無制限"
+  else
+    max_display="$max_rounds"
+  fi
 
-  # AC 7.2 (#26): 上限到達なら escalate（kind 共通、#35 AC 3.4 / 6.5）
-  if [ "$round" -ge "$PR_ITERATION_MAX_ROUNDS" ]; then
-    pi_log "PR #${pr_number}: kind=${kind} round=${round} >= max=${PR_ITERATION_MAX_ROUNDS}, claude-failed に昇格"
-    pi_escalate_to_failed "$pr_number" "$round" "$PR_ITERATION_MAX_ROUNDS" || true
+  # Issue #122 Req 3 / 4: PR body から round と no-progress 連続カウンタの両方を抽出。
+  # body 取得は pi_read_round_counter で 1 回、pi_read_no_progress_streak は同じ
+  # body をローカル抽出するため二重 fetch を避けて pr_body を共有取得する。
+  local pr_body_for_marker
+  pr_body_for_marker=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
+    gh pr view "$pr_number" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null || echo "")
+  local round
+  round=$(echo "$pr_body_for_marker" \
+    | grep -oE 'idd-claude:pr-iteration round=[0-9]+' \
+    | grep -oE '[0-9]+$' \
+    | tail -1)
+  round="${round:-0}"
+  local prev_streak
+  prev_streak=$(pi_read_no_progress_streak "$pr_body_for_marker")
+
+  # Issue #122 Req 2.1 / 2.3: max_rounds=0 は「round 数超過のみによる escalate を行わない」
+  # （AC 2.1: design / AC 2.3: impl）。max_rounds>0 のときは round >= max で escalate。
+  if [ "$max_rounds" != "0" ] && [ "$round" -ge "$max_rounds" ]; then
+    # Issue #122 Req 6.4: PR 番号 / kind / round / max / 原因を 1 行に整形
+    pi_log "PR #${pr_number}: kind=${kind} round=${round} max=${max_rounds} reason=max-rounds escalate"
+    pi_escalate_to_failed "$pr_number" "$round" "$max_rounds" "max-rounds" || true
     return 2
   fi
 
   local next_round=$((round + 1))
 
-  # AC 6.1: 着手表明（marker 更新 + コメント、kind 非依存、#35 AC 6.1 / 6.5）
-  if ! pi_post_processing_marker "$pr_number" "$next_round"; then
-    pi_warn "PR #${pr_number}: kind=${kind} 着手表明に失敗、iteration 中止"
-    return 1
-  fi
+  # Issue #122 Req 4 / 5: marker は round 終了時の成功 path でのみ書き込む。
+  # 着手表明コメントは round 開始時に投稿（人間向け視認用、既存挙動 NFR 1.1）。
+  pi_post_processing_comment "$pr_number" "$next_round" "$max_rounds"
 
-  pi_log "PR #${pr_number}: kind=${kind} round=${next_round}/${PR_ITERATION_MAX_ROUNDS} 着手 (${pr_url})"
+  pi_log "PR #${pr_number}: kind=${kind} round=${next_round}/${max_display} 着手 (${pr_url})"
 
   # #118 Req 1.1 / 2.1: soft-fail 検知用 / 自動回復結果のサブシェル <-> 親 通信用に
   # tmpfile を 2 つ用意する。
@@ -2061,11 +2300,15 @@ pi_run_iteration() {
   #                          書式: `<kind>:<result>` 例: `soft-fail-commit:ok`,
   #                                `post-round-commit:ok`, `post-round-commit:fail`,
   #                                `none:` （回復不要 / dirty なし）
-  local pi_soft_fail_file pi_recover_file
+  # Issue #122 Req 3: subshell <-> 親 で SHA 比較用に before/after の 2 行も tmpfile に書き出す。
+  #   - $pi_sha_file : 1 行目=before_sha, 2 行目=after_sha
+  local pi_soft_fail_file pi_recover_file pi_sha_file
   pi_soft_fail_file=$(mktemp -t "pi-softfail-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
   pi_recover_file=$(mktemp -t "pi-recover-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
+  pi_sha_file=$(mktemp -t "pi-sha-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
   : > "$pi_soft_fail_file"
   : > "$pi_recover_file"
+  : > "$pi_sha_file"
 
   # サブシェル + trap で必ず base branch に戻す（AC 8.3）
   local rc=0
@@ -2084,9 +2327,15 @@ pi_run_iteration() {
       exit 1
     fi
 
-    # prompt を生成（#35: kind に応じた template path を渡す）
+    # Issue #122 Req 3.1 / 3.2: round 開始時の HEAD を記録。round 終了時に同じ branch の
+    # HEAD と比較して「新規 commit が push されたか」を判定する。
+    local before_sha
+    before_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
+    printf '%s\n' "$before_sha" > "$pi_sha_file"
+
+    # prompt を生成（#35: kind に応じた template path を渡す / #122: kind 別 max_rounds を渡す）
     local prompt
-    if ! prompt=$(pi_build_iteration_prompt "$pr_number" "$pr_json" "$next_round" "$tmpl_path"); then
+    if ! prompt=$(pi_build_iteration_prompt "$pr_number" "$pr_json" "$next_round" "$tmpl_path" "$max_rounds"); then
       pi_warn "PR #${pr_number}: prompt 組み立てに失敗"
       exit 1
     fi
@@ -2184,6 +2433,13 @@ pi_run_iteration() {
     fi
     printf '%s' "$recover_status" > "$pi_recover_file"
 
+    # Issue #122 Req 3.1 / 3.2: 自動回復まで含む round 終了時点の HEAD を記録。
+    # before_sha と異なれば新規 commit が push された（reply-only 経路で claude 自身が
+    # commit+push した場合、または pi_auto_commit_and_push で auto-commit した場合の両方をカバー）。
+    local after_sha
+    after_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
+    printf '%s\n%s\n' "$before_sha" "$after_sha" > "$pi_sha_file"
+
     # claude 自体の rc を引き継ぐ（失敗は呼び出し元で WARN + needs-iteration 残置に倒れる）
     exit "$claude_rc"
   )
@@ -2201,25 +2457,37 @@ pi_run_iteration() {
     # 検出が複数行ある場合は最後の値を採用（最新 utilization）。tab 区切り 2 列目。
     soft_fail_summary=$(awk -F '\t' 'NF >= 2 { last = $2 } END { print last }' "$pi_soft_fail_file")
   fi
-  rm -f "$pi_soft_fail_file" "$pi_recover_file"
+  # Issue #122 Req 3.1 / 3.2: SHA 比較で「新規 commit が push されたか」判定
+  local before_sha="" after_sha=""
+  if [ -s "$pi_sha_file" ]; then
+    before_sha=$(sed -n '1p' "$pi_sha_file")
+    after_sha=$(sed -n '2p' "$pi_sha_file")
+  fi
+  rm -f "$pi_soft_fail_file" "$pi_recover_file" "$pi_sha_file"
 
+  # Issue #122 Req 5: 失敗扱い（quota soft-fail / claude crash / post-round-commit fail）の
+  # round では marker を据え置く（round counter / no-progress streak いずれも増減させない）。
+  # 成功 path（recover_status=post-round-commit:ok or none:）のみ marker を更新する。
   case "$recover_status" in
     soft-fail-commit:ok)
-      # Req 1.1 / 1.2 / 1.4 / 4.1: soft-fail 検出 + auto-commit 成功 → needs-iteration 据え置き
+      # Req 1.1 / 1.2 / 1.4 / 4.1 (#118): soft-fail 検出 + auto-commit 成功 → needs-iteration 据え置き
+      # Issue #122 Req 5.1 / 5.2: marker 更新せず prev_round / prev_streak のまま温存
       pi_log "PR #${pr_number}: kind=${kind} round=${next_round} quota-soft-fail utilization=${soft_fail_summary} action=auto-commit+keep-label"
       return 1
       ;;
     soft-fail-commit:fail)
-      # Req 1.5: auto-commit / push 失敗 → WARN + needs-iteration 据え置き
+      # Req 1.5 (#118): auto-commit / push 失敗 → WARN + needs-iteration 据え置き
+      # Issue #122 Req 5.1 / 5.2: 同上、marker 据え置き
       pi_warn "PR #${pr_number}: kind=${kind} round=${next_round} quota-soft-fail utilization=${soft_fail_summary} action=auto-commit-failed (needs-iteration を残置)"
       return 1
       ;;
     post-round-commit:ok)
-      # Req 2.1 / 2.2 / 4.2: 通常 dirty + auto-commit 成功 → 通常 finalize に進む
+      # Req 2.1 / 2.2 / 4.2 (#118): 通常 dirty + auto-commit 成功 → 通常 finalize に進む
       pi_log "PR #${pr_number}: kind=${kind} round=${next_round} post-round-recover branch=${head_ref} action=success"
       ;;
     post-round-commit:fail)
-      # Req 2.4 / 4.3: auto-commit / push 失敗 → WARN + 終了
+      # Req 2.4 / 4.3 (#118): auto-commit / push 失敗 → WARN + 終了
+      # Issue #122 Req 5.3: marker 据え置き（counter / streak を加算しない）
       pi_warn "PR #${pr_number}: kind=${kind} round=${next_round} post-round-recover branch=${head_ref} action=fail"
       return 1
       ;;
@@ -2233,6 +2501,40 @@ pi_run_iteration() {
   esac
 
   if [ $rc -eq 0 ]; then
+    # Issue #122 Req 3.1 / 3.2: SHA 比較で「新規 commit が push されたか」判定。
+    # before_sha と after_sha が異なれば新規 commit あり（claude 自身による commit+push、
+    # または pi_auto_commit_and_push 経由の auto-commit、いずれもカバー）。
+    local commit_pushed=false
+    if [ -n "$before_sha" ] && [ -n "$after_sha" ] && [ "$before_sha" != "$after_sha" ]; then
+      commit_pushed=true
+    fi
+    # Issue #122 Req 3.1 / 3.2: no-progress 連続カウンタの更新
+    local new_streak
+    if [ "$commit_pushed" = "true" ]; then
+      new_streak=0
+    else
+      new_streak=$((prev_streak + 1))
+    fi
+
+    # Issue #122 Req 6.2: round 終了時点で no-progress 連続カウンタが加算されたら
+    # PR 番号 / kind / 加算後の連続カウンタ / 上限値を 1 行ログに記録
+    if [ "$commit_pushed" = "false" ]; then
+      pi_log "PR #${pr_number}: kind=${kind} round=${next_round} no-progress-streak=${new_streak} limit=${PR_ITERATION_NO_PROGRESS_LIMIT}"
+    fi
+
+    # Issue #122 Req 5.4 / Req 4.1: marker 書き込み。失敗は Req 5.4 の通り ERROR + 据え置き
+    if ! pi_write_marker "$pr_number" "$next_round" "$new_streak"; then
+      pi_error "PR #${pr_number}: kind=${kind} round=${next_round} marker 書き込みに失敗 (needs-iteration を残置)"
+      return 1
+    fi
+
+    # Issue #122 Req 3.3 / 6.3: no-progress 連続カウンタが上限以上に達したら escalate
+    if [ "$new_streak" -ge "$PR_ITERATION_NO_PROGRESS_LIMIT" ]; then
+      pi_log "PR #${pr_number}: kind=${kind} round=${next_round} no-progress-streak=${new_streak} reason=no-progress escalate"
+      pi_escalate_to_failed "$pr_number" "$next_round" "$max_rounds" "no-progress" "$new_streak" || true
+      return 2
+    fi
+
     # AC 6.2 (#26) / #35 AC 3.1 / 3.2: kind に応じたラベル遷移
     local finalize_ok=false
     case "$kind" in
@@ -2256,6 +2558,9 @@ pi_run_iteration() {
     return 1
   else
     # AC 6.3 (#26) / #35 AC 3.3: 失敗 → needs-iteration を残し WARN
+    # Issue #122 Req 5.3: claude CLI が非 0 終了した round では marker 据え置き
+    # （上記 case で recover_status が none: / post-round-commit:ok のときのみここに来るが、
+    # rc != 0 の場合は claude が失敗しているので marker は触らない）
     pi_log "PR #${pr_number}: kind=${kind} round=${next_round} action=fail (needs-iteration を残置)"
     return 1
   fi
@@ -2310,7 +2615,12 @@ process_pr_iteration() {
     fi
   fi
 
-  pi_log "サイクル開始 (max_prs=${PR_ITERATION_MAX_PRS}, max_rounds=${PR_ITERATION_MAX_ROUNDS}, model=${PR_ITERATION_DEV_MODEL}, design_enabled=${PR_ITERATION_DESIGN_ENABLED}, timeout=${PR_ITERATION_GIT_TIMEOUT}s)"
+  # Issue #122 Req 6.1 / NFR 3.1: kind 別 round 上限の解決値と no-progress 上限を
+  # 1 行サマリログで出力（grep 'max_rounds_impl=' で機械抽出可能）。
+  local _resolved_max_impl _resolved_max_design
+  _resolved_max_impl=$(pi_resolve_max_rounds "impl")
+  _resolved_max_design=$(pi_resolve_max_rounds "design")
+  pi_log "サイクル開始 (max_prs=${PR_ITERATION_MAX_PRS}, max_rounds_impl=${_resolved_max_impl}, max_rounds_design=${_resolved_max_design}, no_progress_limit=${PR_ITERATION_NO_PROGRESS_LIMIT}, model=${PR_ITERATION_DEV_MODEL}, design_enabled=${PR_ITERATION_DESIGN_ENABLED}, timeout=${PR_ITERATION_GIT_TIMEOUT}s)"
 
   local prs_json
   prs_json=$(pi_fetch_candidate_prs)
