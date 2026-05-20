@@ -1796,6 +1796,91 @@ pp_do_promote_if_eligible() {
   esac
 }
 
+# pp_do_promote: `BASE_BRANCH` HEAD を `PROMOTION_TARGET_BRANCH` に fast-forward
+# push する（NFR 2.1, NFR 2.2）。サブシェル内で `trap` を仕掛けて操作終了時に
+# `BASE_BRANCH` checkout 状態へ復帰する（NFR 2.3 / Req 3.1.4）。
+#
+# fast-forward 不可（`PROMOTION_TARGET_BRANCH` 側が `BASE_BRANCH` の祖先でない）と
+# 判定した場合は push を中止し、`promote-failed` 識別語を含む WARN を出す
+# （Req 3.1.2, 3.1.3, NFR 4.1）。Issue 側のラベル状態は変更しない。
+#
+# 戻り値: 0 = promote 成功 / 1 = promote 失敗（呼び出し元は集計のみ）
+pp_do_promote() {
+  local rc=0
+  (
+    set +e
+    trap 'git checkout "'"$BASE_BRANCH"'" >/dev/null 2>&1' EXIT
+    # Req 3.1.1 準備: 最新の PROMOTION_TARGET_BRANCH を fetch
+    if ! timeout "$PROMOTE_GIT_TIMEOUT" \
+        git fetch origin "$PROMOTION_TARGET_BRANCH" >/dev/null 2>&1; then
+      pp_warn "promote-failed: fetch '$PROMOTION_TARGET_BRANCH' に失敗"
+      pp_notify_promote_failure "fetch failed"
+      exit 1
+    fi
+    # AC 3.1.2: PROMOTION_TARGET_BRANCH が BASE_BRANCH の祖先か確認。
+    # 祖先でない場合 fast-forward 不可 → 中止 + WARN（Req 3.1.3）
+    if ! git merge-base --is-ancestor \
+        "origin/$PROMOTION_TARGET_BRANCH" "origin/$BASE_BRANCH" 2>/dev/null; then
+      pp_warn "promote-failed: '$PROMOTION_TARGET_BRANCH' が '$BASE_BRANCH' の祖先でないため fast-forward 不可"
+      pp_notify_promote_failure "non-fast-forward"
+      exit 1
+    fi
+    # NFR 2.1 / 2.2: fast-forward 限定 push（--force 系オプションを付けず
+    # 自然な ff push）。non-fast-forward は git server が reject する
+    if ! timeout "$PROMOTE_GIT_TIMEOUT" \
+        git push origin \
+          "refs/remotes/origin/${BASE_BRANCH}:refs/heads/${PROMOTION_TARGET_BRANCH}" \
+          >/dev/null 2>&1; then
+      pp_warn "promote-failed: fast-forward push に失敗"
+      pp_notify_promote_failure "ff-push failed"
+      exit 1
+    fi
+    pp_log "promote-success: '$BASE_BRANCH' -> '$PROMOTION_TARGET_BRANCH' fast-forward OK (candidates=${#PROMOTE_CANDIDATES[@]})"
+    exit 0
+  ) || rc=$?
+  # 親シェル側カウンタを更新（サブシェル内で変更したカウンタは失われるため）
+  if [ "$rc" -eq 0 ]; then
+    PP_PROMOTE_SUCCESS_COUNT=$((PP_PROMOTE_SUCCESS_COUNT + 1))
+  else
+    PP_PROMOTE_FAILED_COUNT=$((PP_PROMOTE_FAILED_COUNT + 1))
+  fi
+  return "$rc"
+}
+
+# pp_notify_promote_failure: promote 失敗時の通知。`PROMOTE_FAIL_NOTIFY_ISSUE` が
+# 数値で指定されていれば該当 Issue に 1 件コメント投稿、未設定 / 不正値なら log のみ
+# （Req 3.3.2, 3.3.3）。
+pp_notify_promote_failure() {
+  local reason="$1"
+  # AC 3.3.3: 未設定 / 不正値（数値以外）は log のみ
+  if [ -z "$PROMOTE_FAIL_NOTIFY_ISSUE" ] \
+     || ! [[ "$PROMOTE_FAIL_NOTIFY_ISSUE" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  # AC 3.3.2: 1 件のコメント投稿（失敗してもサイクルは継続）
+  local body
+  body=$(cat <<EOF
+## ⚠️ Phase B Promote Pipeline: promote 失敗
+
+\`${BASE_BRANCH}\` -> \`${PROMOTION_TARGET_BRANCH}\` への fast-forward 昇格に失敗しました。
+
+- reason: \`${reason}\`
+- base: \`${BASE_BRANCH}\`
+- target: \`${PROMOTION_TARGET_BRANCH}\`
+
+watcher サイクルは継続しています。手動確認をお願いします。
+
+---
+
+_本コメントは Phase B Promote Pipeline Processor が自動投稿しました。_
+EOF
+)
+  timeout "$PROMOTE_GIT_TIMEOUT" \
+    gh issue comment "$PROMOTE_FAIL_NOTIFY_ISSUE" --repo "$REPO" \
+      --body "$body" >/dev/null 2>&1 \
+    || pp_warn "PROMOTE_FAIL_NOTIFY_ISSUE=#${PROMOTE_FAIL_NOTIFY_ISSUE} へのコメント投稿に失敗"
+}
+
 # process_promote_pipeline: Promote Pipeline Processor のエントリポイント。
 #
 # 引数: なし（env var で全制御）
@@ -1857,8 +1942,15 @@ process_promote_pipeline() {
       || pp_warn "issue=#${issue_number} 想定外のエラー → 後続 Issue は継続"
   done <<< "$target_issues"
 
-  # promote 実行 / サマリ出力は後続タスク 5.x で追加。本段階では per-Issue 集計を log。
+  # per-Issue 集計を log（途中状態の可観測性）
   pp_log "per-Issue サマリ: success=${PP_ST_SUCCESS_COUNT}, failure=${PP_ST_FAILURE_COUNT}, pending=${PP_ST_PENDING_COUNT}, missing=${PP_ST_MISSING_COUNT}, fail=${PP_FAIL_COUNT}, promote-queued=${#PROMOTE_CANDIDATES[@]}"
+
+  # AC 3.1, 3.2: promote 候補集合を PROMOTE_MODE に応じて昇格実行。
+  # 集計用カウンタは pp_do_promote / pp_do_promote_if_eligible 内部で更新する。
+  PP_PROMOTE_SUCCESS_COUNT=0
+  PP_PROMOTE_FAILED_COUNT=0
+  # NFR 3.1: 失敗時も後続処理を止めないため `|| true` で吸収
+  pp_do_promote_if_eligible || true
 }
 
 # AC 1.1: Phase A 本体の直後に Promote Pipeline Processor を 1 回起動。
