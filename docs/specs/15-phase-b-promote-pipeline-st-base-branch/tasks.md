@@ -67,7 +67,7 @@
   - _Requirements: 2.2, 2.3, 3.2, 5.1_
 
 - [ ] 5. Promote 実行（B3: fast-forward push + PROMOTE_MODE 分岐 + 失敗通知）
-- [ ] 5.1 `pp_do_promote_if_eligible()` と `pp_match_cron()` を実装し、PROMOTE_MODE 3 モードを分岐する
+- [x] 5.1 `pp_do_promote_if_eligible()` と `pp_match_cron()` を実装し、PROMOTE_MODE 3 モードを分岐する
   - `PROMOTE_MODE=continuous`: promote 集合が 1 件以上なら即時 `pp_do_promote` 呼び出し（Req 3.2.3）
   - `PROMOTE_MODE=batched`: `pp_match_cron "$PROMOTE_CRON"` が真のときだけ `pp_do_promote`、`PROMOTE_CRON` 未設定 / 不正なら WARN + 当該サイクル no-op（Req 3.2.4, 3.2.6）
   - `PROMOTE_MODE=on-demand` / 未設定 / 不正値: 何もしない + log 出力（Req 3.2.2, 3.2.5）
