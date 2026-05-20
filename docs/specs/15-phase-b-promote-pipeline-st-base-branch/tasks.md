@@ -24,7 +24,7 @@
   - _Requirements: 1.1, 1.2, NFR 1.1, NFR 1.2_
 
 - [ ] 3. Promote Pipeline Processor 本体と staged-for-release 自動付与（B1: gate + 自動付与）
-- [ ] 3.1 `process_promote_pipeline()` のエントリポイント、ロガー、3 重 gate（opt-in / 2-branch model / dirty tree）を実装する
+- [x] 3.1 `process_promote_pipeline()` のエントリポイント、ロガー、3 重 gate（opt-in / 2-branch model / dirty tree）を実装する
   - 専用ロガー `pp_log` / `pp_warn` / `pp_error` を Phase A `mq_log` と同一書式（`[YYYY-MM-DD HH:MM:SS] [$REPO] promote-pipeline:` prefix）で定義
   - `pp_resolve_target_branch()` を実装し、`BASE_BRANCH == PROMOTION_TARGET_BRANCH` の no-op 終了（Req 1.1.3）と `git ls-remote --exit-code --heads origin "$PROMOTION_TARGET_BRANCH"` による存在検証（Req 1.2.2）を行う
   - `process_promote_pipeline()` の最初に `[ "$PROMOTE_PIPELINE_ENABLED" = "true" ] || return 0`、続けて dirty tree gate（NFR 2.3）を配置
