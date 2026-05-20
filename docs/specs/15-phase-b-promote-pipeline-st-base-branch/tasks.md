@@ -50,7 +50,7 @@
   - `ST_CHECK_RUN_NAME` 未設定なら `skip-warn` を返し、呼び出し元で WARN ログを出させる（Req 2.2.3）
   - すべての gh / git 操作を `timeout "$PROMOTE_GIT_TIMEOUT"` で wrap（NFR 3.2）
   - _Requirements: 2.2_
-- [ ] 4.2 `pp_handle_st_failure()` + `pp_do_revert()` を実装し、ST failure 時の revert + Issue 操作 + fail-continue を実現する
+- [x] 4.2 `pp_handle_st_failure()` + `pp_do_revert()` を実装し、ST failure 時の revert + Issue 操作 + fail-continue を実現する
   - `pp_do_revert()`: サブシェル内で `trap` を仕掛けて `BASE_BRANCH` への safe checkout 復帰を保証、`git checkout "$BASE_BRANCH"` → `git pull --ff-only` → `git revert -m 1 --no-edit "$merge_sha"` → `git push --force-with-lease origin "$BASE_BRANCH"` の順で実行（NFR 2.1）
   - `git push --force-with-lease` 失敗（リモート先行）→ exit 1（呼び出し元で WARN + `st-failed` 付与保留 / Req 2.4.6）
   - `git revert` 自体の失敗 → exit 2（呼び出し元で WARN + 当該 Issue スキップ）
