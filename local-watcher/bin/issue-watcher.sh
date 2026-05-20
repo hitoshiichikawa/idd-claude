@@ -1655,6 +1655,147 @@ pp_process_one_issue() {
   return 0
 }
 
+# pp_match_cron_field: 1 つの cron フィールド（分 / 時 / 日 / 月 / 曜日）を
+# 現在値とマッチングする。標準 cron のサブパターン:
+#   *           （任意の値にマッチ）
+#   */N         （N で割り切れる値にマッチ）
+#   A-B         （A 以上 B 以下にマッチ）
+#   A,B,C       （いずれかの値にマッチ）
+#   <整数>      （厳密一致）
+#
+# 入力: $1 = cron フィールド文字列, $2 = 現在値（整数）
+# 戻り値: 0 = match / 1 = no match or 不正
+pp_match_cron_field() {
+  local field="$1"
+  local value="$2"
+  [ -n "$field" ] || return 1
+  # 数値以外の現在値はマッチ不能
+  [[ "$value" =~ ^[0-9]+$ ]] || return 1
+  # `*` は全てにマッチ
+  if [ "$field" = "*" ]; then
+    return 0
+  fi
+  # `*/N` ステップ
+  if [[ "$field" =~ ^\*/([0-9]+)$ ]]; then
+    local step="${BASH_REMATCH[1]}"
+    [ "$step" -gt 0 ] || return 1
+    if [ $((10#$value % step)) -eq 0 ]; then
+      return 0
+    fi
+    return 1
+  fi
+  # カンマ区切りリスト
+  if [[ "$field" == *,* ]]; then
+    local subfield
+    IFS=',' read -ra _PP_CRON_PARTS <<< "$field"
+    for subfield in "${_PP_CRON_PARTS[@]}"; do
+      if pp_match_cron_field "$subfield" "$value"; then
+        return 0
+      fi
+    done
+    return 1
+  fi
+  # `A-B` レンジ
+  if [[ "$field" =~ ^([0-9]+)-([0-9]+)$ ]]; then
+    local lo="${BASH_REMATCH[1]}"
+    local hi="${BASH_REMATCH[2]}"
+    if [ "$((10#$value))" -ge "$lo" ] && [ "$((10#$value))" -le "$hi" ]; then
+      return 0
+    fi
+    return 1
+  fi
+  # 単一整数
+  if [[ "$field" =~ ^[0-9]+$ ]]; then
+    if [ "$((10#$value))" -eq "$((10#$field))" ]; then
+      return 0
+    fi
+    return 1
+  fi
+  return 1
+}
+
+# pp_match_cron: 標準 cron 5 フィールド式（分 時 日 月 曜日）を現在時刻と比較する。
+# `date '+%M %H %d %m %u'` で取得した現在時刻と、cron 各フィールドを `pp_match_cron_field`
+# でマッチング。全フィールド一致なら 0、いずれか不一致 / 不正な書式なら 1 を返す。
+#
+# 入力: $1 = cron 式（5 フィールドのみ。`@daily` 等の特殊文字列は非対応）
+# 戻り値: 0 = 現在時刻が cron 式に一致 / 1 = 不一致 or 不正な書式
+# Requirements: 3.2.4, 3.2.6
+pp_match_cron() {
+  local cron="$1"
+  [ -n "$cron" ] || return 1
+  # 5 フィールドに分解
+  local -a fields
+  # shellcheck disable=SC2206 # 意図的に IFS=space で分割
+  fields=( $cron )
+  if [ "${#fields[@]}" -ne 5 ]; then
+    return 1
+  fi
+  local now_min now_hour now_day now_mon now_dow
+  now_min=$(date '+%M')
+  now_hour=$(date '+%H')
+  now_day=$(date '+%d')
+  now_mon=$(date '+%m')
+  now_dow=$(date '+%u')   # 1=Mon, 7=Sun（cron では 0/7 が Sun のため両対応が望ましい）
+  pp_match_cron_field "${fields[0]}" "$now_min"  || return 1
+  pp_match_cron_field "${fields[1]}" "$now_hour" || return 1
+  pp_match_cron_field "${fields[2]}" "$now_day"  || return 1
+  pp_match_cron_field "${fields[3]}" "$now_mon"  || return 1
+  # 曜日: cron では 0=Sun, 1=Mon..6=Sat。`date +%u` は 1=Mon..7=Sun のため、
+  # まず %u で比較し、cron 0 表記は %u=7（日曜）に丸めて再比較する
+  if ! pp_match_cron_field "${fields[4]}" "$now_dow"; then
+    if [ "$now_dow" = "7" ] && pp_match_cron_field "${fields[4]}" "0"; then
+      :
+    else
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# pp_do_promote_if_eligible: `PROMOTE_MODE` 3 モード（continuous / batched /
+# on-demand）の dispatcher。実際の fast-forward push 本体 `pp_do_promote`
+# は本関数から呼び出される（task 5.2 で実装）。
+#
+# Requirements: 3.2.2, 3.2.3, 3.2.4, 3.2.5, 3.2.6
+pp_do_promote_if_eligible() {
+  case "$PROMOTE_MODE" in
+    continuous)
+      # AC 3.2.3: 即時 promote。promote 候補が 0 件なら何もしない
+      if [ "${#PROMOTE_CANDIDATES[@]}" -gt 0 ]; then
+        pp_do_promote
+      else
+        pp_log "mode=continuous promote 候補 0 件 → 本サイクルは promote なし"
+      fi
+      ;;
+    batched)
+      # AC 3.2.4 / 3.2.6: PROMOTE_CRON 一致時のみ実行
+      if [ -z "$PROMOTE_CRON" ]; then
+        pp_warn "mode=batched PROMOTE_CRON 未設定 → 本サイクルは promote なし"
+        return 0
+      fi
+      if pp_match_cron "$PROMOTE_CRON"; then
+        if [ "${#PROMOTE_CANDIDATES[@]}" -gt 0 ]; then
+          pp_do_promote
+        else
+          pp_log "mode=batched cron 一致だが promote 候補 0 件 → 本サイクルは promote なし"
+        fi
+      else
+        # AC 3.2.6: cron 不一致 / 不正な式は本サイクル no-op + WARN
+        pp_log "mode=batched PROMOTE_CRON='${PROMOTE_CRON}' 現在時刻と不一致 → 本サイクルは promote なし"
+      fi
+      ;;
+    on-demand)
+      # AC 3.2.5: 人間トリガー待ち。何もしない + log
+      pp_log "mode=on-demand 人間トリガーを待つ → promote は実行しない"
+      ;;
+    *)
+      # AC 3.2.2: 不正値も on-demand にフォールバック
+      pp_warn "mode='${PROMOTE_MODE}' は未知の値 → on-demand にフォールバック（promote 実行しない）"
+      ;;
+  esac
+}
+
 # process_promote_pipeline: Promote Pipeline Processor のエントリポイント。
 #
 # 引数: なし（env var で全制御）
