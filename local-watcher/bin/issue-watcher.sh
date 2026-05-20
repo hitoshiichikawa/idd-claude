@@ -1440,6 +1440,142 @@ pp_get_st_state() {
   esac
 }
 
+# pp_resolve_st_log_url: ST check-run の details_url を解決する（取得失敗時は空文字列）。
+# 入力: $1 = Issue 番号, $2 = merge commit SHA
+# 出力（stdout）: details_url または空文字列
+pp_resolve_st_log_url() {
+  local merge_sha="$2"
+  [ -n "$ST_CHECK_RUN_NAME" ] || { echo ""; return 0; }
+  [ -n "$merge_sha" ] || { echo ""; return 0; }
+  local check_runs_json
+  if ! check_runs_json=$(timeout "$PROMOTE_GIT_TIMEOUT" \
+      gh api "repos/$REPO/commits/$merge_sha/check-runs" \
+        --jq '.check_runs' 2>/dev/null); then
+    echo ""
+    return 0
+  fi
+  echo "$check_runs_json" | jq -r --arg n "$ST_CHECK_RUN_NAME" \
+    '[.[] | select(.name == $n)]
+      | sort_by(.completed_at // .started_at // "")
+      | last
+      | (.details_url // .html_url // "")' 2>/dev/null \
+    || echo ""
+}
+
+# pp_do_revert: `BASE_BRANCH` 上で merge commit を `git revert -m 1` して
+# `--force-with-lease` で push する（NFR 2.1）。サブシェル内で `trap` を仕掛けて
+# `BASE_BRANCH` checkout 状態への復帰を保証する（NFR 2.3）。
+#
+# 入力: $1 = revert 対象の merge commit SHA
+# 戻り値:
+#   0 = revert + push 成功
+#   1 = push 失敗（リモート先行等）。呼び出し元で st-failed 付与を保留（Req 2.4.6）
+#   2 = revert 自体が失敗 / checkout / pull 失敗
+pp_do_revert() {
+  local merge_sha="$1"
+  (
+    set +e
+    # 復帰用 trap: revert を中断したら `git revert --abort` し、$BASE_BRANCH に戻る
+    trap 'git revert --abort >/dev/null 2>&1; git checkout "'"$BASE_BRANCH"'" >/dev/null 2>&1' EXIT
+    if ! timeout "$PROMOTE_GIT_TIMEOUT" \
+        git checkout "$BASE_BRANCH" >/dev/null 2>&1; then
+      exit 2
+    fi
+    if ! timeout "$PROMOTE_GIT_TIMEOUT" \
+        git pull --ff-only origin "$BASE_BRANCH" >/dev/null 2>&1; then
+      exit 2
+    fi
+    if ! timeout "$PROMOTE_GIT_TIMEOUT" \
+        git revert -m 1 --no-edit "$merge_sha" >/dev/null 2>&1; then
+      exit 2
+    fi
+    # NFR 2.1: --force-with-lease のみ。--force 単独は使用しない
+    if ! timeout "$PROMOTE_GIT_TIMEOUT" \
+        git push --force-with-lease origin "$BASE_BRANCH" >/dev/null 2>&1; then
+      exit 1
+    fi
+    exit 0
+  )
+}
+
+# pp_handle_st_failure: ST failure と判定された Issue について、対応する merge
+# commit を revert + push、Issue reopen、`st-failed` 付与、ST log URL を含む
+# 1 件のコメント投稿を実施する（Req 2.4）。fail-continue を維持し、1 件失敗しても
+# 他 Issue の処理は継続する（NFR 3.1）。
+#
+# 入力: $1 = Issue 番号
+# 戻り値: 0 = 全操作成功 / 1 = いずれかが失敗（呼び出し元でカウンタにのみ反映）
+pp_handle_st_failure() {
+  local issue_number="$1"
+  local merge_sha st_log_url
+  if ! merge_sha=$(pp_resolve_merge_sha "$issue_number"); then
+    pp_warn "issue=#${issue_number} merge SHA 解決失敗 → ST failure 処理を見送り action=skip"
+    return 1
+  fi
+  # AC 2.4.2: revert commit を作成して push。push 失敗 → st-failed 付与を保留
+  local revert_rc=0
+  pp_do_revert "$merge_sha" || revert_rc=$?
+  case "$revert_rc" in
+    0)
+      :
+      ;;
+    1)
+      # AC 2.4.6: push 失敗（リモート先行等）→ st-failed 保留 + WARN
+      pp_warn "issue=#${issue_number} revert push 失敗（リモート先行等）→ st-failed 付与を保留 action=skip merge_sha=${merge_sha:0:7}"
+      return 1
+      ;;
+    *)
+      pp_warn "issue=#${issue_number} revert 自体に失敗（既に revert 済み等）→ ST failure 処理を見送り action=skip merge_sha=${merge_sha:0:7}"
+      return 1
+      ;;
+  esac
+  # AC 2.4.1 + 2.4.4: st-failed 付与 + staged-for-release 除去を 1 call に集約
+  if ! timeout "$PROMOTE_GIT_TIMEOUT" \
+      gh issue edit "$issue_number" --repo "$REPO" \
+        --add-label "$LABEL_ST_FAILED" \
+        --remove-label "$LABEL_STAGED_FOR_RELEASE" >/dev/null 2>&1; then
+    pp_warn "issue=#${issue_number} ラベル付与/除去に失敗（revert は実施済み） action=label-fail"
+    # ラベル操作の失敗は致命的でないため、reopen / comment は継続する
+  fi
+  # AC 2.4.3: Issue reopen
+  if ! timeout "$PROMOTE_GIT_TIMEOUT" \
+      gh issue reopen "$issue_number" --repo "$REPO" >/dev/null 2>&1; then
+    # 既に open の場合や API エラーでも次の comment を試みる
+    pp_warn "issue=#${issue_number} Issue reopen に失敗（既に open の可能性あり、comment 投稿は継続）"
+  fi
+  # AC 2.4.3: ST log URL を含む 1 件のステータスコメントを投稿
+  st_log_url=$(pp_resolve_st_log_url "$issue_number" "$merge_sha")
+  local comment_body
+  comment_body=$(cat <<EOF
+## 🔁 ST failure 自動 revert (Phase B Promote Pipeline)
+
+\`${BASE_BRANCH}\` に merge された変更について、ST check-run **\`${ST_CHECK_RUN_NAME}\`** が
+**failure** と判定されたため、watcher が \`git revert -m 1\` で自動 revert しました。
+
+### Revert 対象 merge commit
+
+- SHA (short): \`${merge_sha:0:7}\`
+- ST log URL: ${st_log_url:-_(取得失敗)_}
+
+### 推奨アクション
+
+- ST failure の原因を確認し、修正用 PR を本 Issue にリンクして作成してください
+- 本 Issue は \`st-failed\` ラベル付きで自動 reopen されています
+
+---
+
+_本コメントは Phase B Promote Pipeline Processor が自動投稿しました。_
+EOF
+)
+  if ! timeout "$PROMOTE_GIT_TIMEOUT" \
+      gh issue comment "$issue_number" --repo "$REPO" \
+        --body "$comment_body" >/dev/null 2>&1; then
+    pp_warn "issue=#${issue_number} ステータスコメント投稿に失敗（revert / label / reopen は実施済み）"
+  fi
+  pp_log "issue=#${issue_number} ST=failure action=revert+label-add+label-remove+reopen+comment merge_sha=${merge_sha:0:7} label=${LABEL_ST_FAILED}"
+  return 0
+}
+
 # process_promote_pipeline: Promote Pipeline Processor のエントリポイント。
 #
 # 引数: なし（env var で全制御）
