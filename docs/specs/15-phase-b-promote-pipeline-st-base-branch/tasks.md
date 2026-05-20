@@ -14,8 +14,8 @@
   - _Requirements: 4.1, 4.2, NFR 1.3_
   - _Boundary: Labels Setup Script_
 
-- [ ] 2. `local-watcher/bin/issue-watcher.sh` Config ブロックに Phase B env var を追加
-- [ ] 2.1 6 つの新 env var を Config ブロックに宣言し、opt-in semantics で正規化する
+- [x] 2. `local-watcher/bin/issue-watcher.sh` Config ブロックに Phase B env var を追加
+- [x] 2.1 6 つの新 env var を Config ブロックに宣言し、opt-in semantics で正規化する
   - 追加対象: `PROMOTE_PIPELINE_ENABLED`（既定 `false`）/ `PROMOTION_TARGET_BRANCH`（既定 `main`）/ `ST_CHECK_RUN_NAME`（既定空）/ `PROMOTE_MODE`（既定 `on-demand`）/ `PROMOTE_CRON`（既定空）/ `PROMOTE_FAIL_NOTIFY_ISSUE`（既定空）/ `PROMOTE_GIT_TIMEOUT`（既定は `${MERGE_QUEUE_GIT_TIMEOUT:-60}` を流用）
   - `LABEL_ST_FAILED="st-failed"` 定数を `LABEL_STAGED_FOR_RELEASE` の直後に宣言
   - `PROMOTE_PIPELINE_ENABLED` は `=true` を明示した場合のみ有効として正規化する（#112 で反転した既存「デフォルト有効化フラグ」ループには加えない）
