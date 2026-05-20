@@ -73,7 +73,7 @@
   - `PROMOTE_MODE=on-demand` / 未設定 / 不正値: 何もしない + log 出力（Req 3.2.2, 3.2.5）
   - `pp_match_cron()`: 標準 5 フィールド cron 式（`分 時 日 月 曜日`）を `date '+%M %H %d %m %u'` の現在時刻と比較。`*` / `*/N` / `A,B,C` / `A-B` / 整数の各サブパターンを bash で実装、不正値は `return 1`
   - _Requirements: 3.2, 5.1_
-- [ ] 5.2 `pp_do_promote()` で `BASE_BRANCH` → `PROMOTION_TARGET_BRANCH` の fast-forward push を実行する
+- [x] 5.2 `pp_do_promote()` で `BASE_BRANCH` → `PROMOTION_TARGET_BRANCH` の fast-forward push を実行する
   - サブシェル内で `trap` を仕掛けて `BASE_BRANCH` checkout 復帰を保証（NFR 2.3 / Req 3.1.4）
   - `git fetch origin "$PROMOTION_TARGET_BRANCH"` 実行
   - `git merge-base --is-ancestor "origin/$PROMOTION_TARGET_BRANCH" "origin/$BASE_BRANCH"` で fast-forward 可否を確認（祖先関係でなければ中止 / Req 3.1.2）
