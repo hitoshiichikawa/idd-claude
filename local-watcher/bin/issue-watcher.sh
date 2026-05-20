@@ -1881,6 +1881,13 @@ EOF
     || pp_warn "PROMOTE_FAIL_NOTIFY_ISSUE=#${PROMOTE_FAIL_NOTIFY_ISSUE} へのコメント投稿に失敗"
 }
 
+# pp_summary: サイクル終了時のサマリログを 1 行で出力する。grep 集計用に
+# `[$REPO] promote-pipeline: サマリ:` prefix と `key=value` 形式で出力する
+# （Req 5.1.3, 5.1.5, NFR 4.1）。
+pp_summary() {
+  pp_log "サマリ: st-success-promoted=${PP_ST_SUCCESS_COUNT}, st-failure-reverted=${PP_ST_FAILURE_COUNT}, pending-skip=${PP_ST_PENDING_COUNT}, missing-skip=${PP_ST_MISSING_COUNT}, promote-success=${PP_PROMOTE_SUCCESS_COUNT}, promote-failed=${PP_PROMOTE_FAILED_COUNT}, fail=${PP_FAIL_COUNT}"
+}
+
 # process_promote_pipeline: Promote Pipeline Processor のエントリポイント。
 #
 # 引数: なし（env var で全制御）
@@ -1942,15 +1949,15 @@ process_promote_pipeline() {
       || pp_warn "issue=#${issue_number} 想定外のエラー → 後続 Issue は継続"
   done <<< "$target_issues"
 
-  # per-Issue 集計を log（途中状態の可観測性）
-  pp_log "per-Issue サマリ: success=${PP_ST_SUCCESS_COUNT}, failure=${PP_ST_FAILURE_COUNT}, pending=${PP_ST_PENDING_COUNT}, missing=${PP_ST_MISSING_COUNT}, fail=${PP_FAIL_COUNT}, promote-queued=${#PROMOTE_CANDIDATES[@]}"
-
   # AC 3.1, 3.2: promote 候補集合を PROMOTE_MODE に応じて昇格実行。
   # 集計用カウンタは pp_do_promote / pp_do_promote_if_eligible 内部で更新する。
   PP_PROMOTE_SUCCESS_COUNT=0
   PP_PROMOTE_FAILED_COUNT=0
   # NFR 3.1: 失敗時も後続処理を止めないため `|| true` で吸収
   pp_do_promote_if_eligible || true
+
+  # AC 5.1.3: サイクル終了時のサマリログを 1 行で出力
+  pp_summary
 }
 
 # AC 1.1: Phase A 本体の直後に Promote Pipeline Processor を 1 回起動。
