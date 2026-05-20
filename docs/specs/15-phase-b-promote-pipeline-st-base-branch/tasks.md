@@ -23,14 +23,14 @@
   - 配置位置: 既存 `BASE_BRANCH` 設定ブロックの直後、Phase A `Merge Queue Processor` 設定の直前を推奨
   - _Requirements: 1.1, 1.2, NFR 1.1, NFR 1.2_
 
-- [ ] 3. Promote Pipeline Processor 本体と staged-for-release 自動付与（B1: gate + 自動付与）
+- [x] 3. Promote Pipeline Processor 本体と staged-for-release 自動付与（B1: gate + 自動付与）
 - [x] 3.1 `process_promote_pipeline()` のエントリポイント、ロガー、3 重 gate（opt-in / 2-branch model / dirty tree）を実装する
   - 専用ロガー `pp_log` / `pp_warn` / `pp_error` を Phase A `mq_log` と同一書式（`[YYYY-MM-DD HH:MM:SS] [$REPO] promote-pipeline:` prefix）で定義
   - `pp_resolve_target_branch()` を実装し、`BASE_BRANCH == PROMOTION_TARGET_BRANCH` の no-op 終了（Req 1.1.3）と `git ls-remote --exit-code --heads origin "$PROMOTION_TARGET_BRANCH"` による存在検証（Req 1.2.2）を行う
   - `process_promote_pipeline()` の最初に `[ "$PROMOTE_PIPELINE_ENABLED" = "true" ] || return 0`、続けて dirty tree gate（NFR 2.3）を配置
   - Phase A 本体（`process_merge_queue`）の直後（issue-watcher.sh の `process_merge_queue || ...` の次の行）に `process_promote_pipeline || pp_warn "..."` を 1 行追加
   - _Requirements: 1.1, 1.2, NFR 1.1, NFR 2.3_
-- [ ] 3.2 `pp_collect_merged_issues()` で `BASE_BRANCH` に merge 済みの PR からリンク Issue を抽出し、未付与の Issue に `staged-for-release` を自動付与する
+- [x] 3.2 `pp_collect_merged_issues()` で `BASE_BRANCH` に merge 済みの PR からリンク Issue を抽出し、未付与の Issue に `staged-for-release` を自動付与する
   - `gh pr list --state merged --base "$BASE_BRANCH" --limit 50 --json number,body,closingIssuesReferences,headRepositoryOwner` で対象 PR を取得
   - fork PR を除外（`headRepositoryOwner.login != REPO owner` の PR は除外、NFR 2.4）
   - 各 PR の `closingIssuesReferences` から Issue 番号を抽出（`Closes #N` 形式を GitHub が解決済みの値を利用）
