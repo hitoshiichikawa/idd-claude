@@ -1576,6 +1576,85 @@ EOF
   return 0
 }
 
+# pp_handle_st_success: ST success と判定された Issue から `staged-for-release`
+# ラベルを除去し、promote 候補集合（PROMOTE_CANDIDATES）に追加する。
+# `PROMOTE_MODE=on-demand` の場合はラベル除去 / 集合追加とも行わず、人間トリガー
+# を待つ（Req 3.2.5）。
+#
+# 入力: $1 = Issue 番号
+# 戻り値: 0 = 成功 / 1 = 失敗（fail-continue で呼び出し側がカウントのみ実施）
+# Requirements: 2.3, 3.2
+pp_handle_st_success() {
+  local issue_number="$1"
+  # AC 3.2.5: on-demand モードはラベルを除去せず、PROMOTE_CANDIDATES にも入れない
+  if [ "$PROMOTE_MODE" = "on-demand" ]; then
+    pp_log "issue=#${issue_number} ST=success mode=on-demand action=hold-label-await-human-trigger"
+    return 0
+  fi
+  # AC 2.3.1: staged-for-release ラベルを除去
+  if ! timeout "$PROMOTE_GIT_TIMEOUT" \
+      gh issue edit "$issue_number" --repo "$REPO" \
+        --remove-label "$LABEL_STAGED_FOR_RELEASE" >/dev/null 2>&1; then
+    pp_warn "issue=#${issue_number} ST=success staged-for-release 除去に失敗（後続 Issue は継続）"
+    return 1
+  fi
+  # AC 2.3.2: promote 候補集合に追加
+  PROMOTE_CANDIDATES+=("$issue_number")
+  pp_log "issue=#${issue_number} ST=success action=label-remove+promote-queued label=${LABEL_STAGED_FOR_RELEASE}"
+  return 0
+}
+
+# pp_process_one_issue: 1 件の Issue について ST 状態を取得し、状態別の
+# アクション（success / failure / pending / missing / skip-warn）を実施する。
+# 1 件の失敗が他 Issue 処理を止めないように戻り値で集計用カウンタにのみ反映
+# する（NFR 3.1 fail-continue）。
+#
+# 入力: $1 = Issue 番号
+# 副作用（成功時のみ加算する集計用変数、呼び出し側スコープで参照）:
+#   PP_ST_SUCCESS_COUNT / PP_ST_FAILURE_COUNT / PP_ST_PENDING_COUNT /
+#   PP_ST_MISSING_COUNT / PP_FAIL_COUNT
+pp_process_one_issue() {
+  local issue_number="$1"
+  local st_state
+  st_state=$(pp_get_st_state "$issue_number")
+  case "$st_state" in
+    success)
+      if pp_handle_st_success "$issue_number"; then
+        PP_ST_SUCCESS_COUNT=$((PP_ST_SUCCESS_COUNT + 1))
+      else
+        PP_FAIL_COUNT=$((PP_FAIL_COUNT + 1))
+      fi
+      ;;
+    failure)
+      if pp_handle_st_failure "$issue_number"; then
+        PP_ST_FAILURE_COUNT=$((PP_ST_FAILURE_COUNT + 1))
+      else
+        PP_FAIL_COUNT=$((PP_FAIL_COUNT + 1))
+      fi
+      ;;
+    pending)
+      # AC 2.2.4: 未完了は次サイクルに持ち越す（ラベル変更なし）
+      pp_log "issue=#${issue_number} ST=pending action=skip-next-cycle"
+      PP_ST_PENDING_COUNT=$((PP_ST_PENDING_COUNT + 1))
+      ;;
+    missing)
+      # AC 2.2.5: ST check-run が存在しない → WARN + 状態変更なし
+      pp_warn "issue=#${issue_number} ST=missing action=skip（check-run 不在 or merge SHA 未解決）"
+      PP_ST_MISSING_COUNT=$((PP_ST_MISSING_COUNT + 1))
+      ;;
+    skip-warn)
+      # AC 2.2.3: ST_CHECK_RUN_NAME 未設定 → WARN + 当該サイクル no-op
+      pp_warn "issue=#${issue_number} ST_CHECK_RUN_NAME 未設定 → ST 連動停止 action=skip"
+      PP_ST_MISSING_COUNT=$((PP_ST_MISSING_COUNT + 1))
+      ;;
+    *)
+      pp_warn "issue=#${issue_number} 未知の ST 状態 '${st_state}' action=skip"
+      PP_FAIL_COUNT=$((PP_FAIL_COUNT + 1))
+      ;;
+  esac
+  return 0
+}
+
 # process_promote_pipeline: Promote Pipeline Processor のエントリポイント。
 #
 # 引数: なし（env var で全制御）
@@ -1615,11 +1694,30 @@ process_promote_pipeline() {
     return 0
   fi
 
-  # 以降のステップ（ST 判定 / revert / promote / サマリ）は後続タスクで追加する。
-  # 本段階では収集された Issue 数を log に残す。
+  # ST 判定対象 Issue 数を log に出力
   local target_count
   target_count=$(echo "$target_issues" | grep -c '^[0-9]' || true)
-  pp_log "ST 判定対象: ${target_count} 件の Issue を検出（ST polling / revert / promote は tasks 4.x-5.x で追加）"
+  pp_log "ST 判定対象: ${target_count} 件の Issue を検出"
+
+  # 集計用カウンタと promote 候補集合を初期化（per-cycle 状態）
+  PROMOTE_CANDIDATES=()
+  PP_ST_SUCCESS_COUNT=0
+  PP_ST_FAILURE_COUNT=0
+  PP_ST_PENDING_COUNT=0
+  PP_ST_MISSING_COUNT=0
+  PP_FAIL_COUNT=0
+
+  # AC 2.2〜2.4: 各 Issue について ST 状態取得 + アクション実施。
+  # NFR 3.1: 1 件の失敗が他 Issue 処理を止めないよう `|| true` で吸収。
+  local issue_number
+  while IFS= read -r issue_number; do
+    [ -n "$issue_number" ] || continue
+    pp_process_one_issue "$issue_number" \
+      || pp_warn "issue=#${issue_number} 想定外のエラー → 後続 Issue は継続"
+  done <<< "$target_issues"
+
+  # promote 実行 / サマリ出力は後続タスク 5.x で追加。本段階では per-Issue 集計を log。
+  pp_log "per-Issue サマリ: success=${PP_ST_SUCCESS_COUNT}, failure=${PP_ST_FAILURE_COUNT}, pending=${PP_ST_PENDING_COUNT}, missing=${PP_ST_MISSING_COUNT}, fail=${PP_FAIL_COUNT}, promote-queued=${#PROMOTE_CANDIDATES[@]}"
 }
 
 # AC 1.1: Phase A 本体の直後に Promote Pipeline Processor を 1 回起動。
