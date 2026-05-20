@@ -1252,6 +1252,86 @@ pp_resolve_target_branch() {
   return 0
 }
 
+# pp_issue_has_label: Issue が指定ラベルを持つか確認するヘルパー。
+# 戻り値: 0 = 持つ / 1 = 持たない or 取得失敗
+pp_issue_has_label() {
+  local issue_number="$1"
+  local label="$2"
+  local labels_json
+  if ! labels_json=$(timeout "$PROMOTE_GIT_TIMEOUT" \
+      gh issue view "$issue_number" --repo "$REPO" --json labels 2>/dev/null); then
+    return 1
+  fi
+  echo "$labels_json" | jq -e --arg l "$label" \
+    '.labels // [] | map(.name) | index($l)' >/dev/null 2>&1
+}
+
+# pp_collect_merged_issues: Phase A 直後の状態で「`BASE_BRANCH` に merge 済みかつ
+# `Closes #N` でリンクされている Issue」を抽出し、未付与の Issue には
+# `staged-for-release` を自動付与する。fork PR は除外する（NFR 2.4）。
+# 自動付与と人間付与の source 区別は行わない（Req 2.1.2、同一ラベル共有）。
+#
+# stdout: 現時点で `staged-for-release` を持つ全 open Issue の番号を 1 行 1 件で出力
+#         （次のステップで ST 判定する対象集合になる）
+# Requirements: 2.1, NFR 2.4, NFR 5.2
+pp_collect_merged_issues() {
+  local repo_owner="${REPO%%/*}"
+  local recent_merged_prs_json
+  # 1. is:merged base:$BASE_BRANCH の直近 PR を取得（最新 50 件、Req 5.2 範囲）
+  if ! recent_merged_prs_json=$(timeout "$PROMOTE_GIT_TIMEOUT" gh pr list \
+      --repo "$REPO" \
+      --state merged \
+      --base "$BASE_BRANCH" \
+      --json number,headRepositoryOwner,closingIssuesReferences \
+      --limit 50 2>/dev/null); then
+    pp_warn "merged PR の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
+    return 0
+  fi
+
+  # 2. fork PR を除外（NFR 2.4）し、closingIssuesReferences から Issue 番号を抽出
+  local linked_issues
+  linked_issues=$(echo "$recent_merged_prs_json" | jq -r \
+    --arg owner "$repo_owner" \
+    '[.[]
+      | select((.headRepositoryOwner.login // "") == $owner)
+      | (.closingIssuesReferences // [])[]
+      | .number
+    ] | unique | .[]')
+
+  # 3. 各 Issue について `staged-for-release` ラベルの有無を確認し、
+  #    未付与なら自動付与する（重複付与は抑止 / Req 2.1.1, 2.1.3）
+  local added=0
+  local skipped=0
+  if [ -n "$linked_issues" ]; then
+    while IFS= read -r issue_number; do
+      [ -n "$issue_number" ] || continue
+      if pp_issue_has_label "$issue_number" "$LABEL_STAGED_FOR_RELEASE"; then
+        # AC 2.1.3: 既付与なら API 再送しない
+        skipped=$((skipped + 1))
+        continue
+      fi
+      # AC 2.1.1: 未付与に対して自動付与
+      if timeout "$PROMOTE_GIT_TIMEOUT" \
+          gh issue edit "$issue_number" --repo "$REPO" \
+            --add-label "$LABEL_STAGED_FOR_RELEASE" >/dev/null 2>&1; then
+        pp_log "issue=#${issue_number} action=label-add label=${LABEL_STAGED_FOR_RELEASE} source=auto"
+        added=$((added + 1))
+      else
+        pp_warn "issue=#${issue_number} staged-for-release 自動付与に失敗（後続 Issue は継続）"
+      fi
+    done <<< "$linked_issues"
+  fi
+
+  pp_log "auto-label サマリ: staged-for-release-added=${added}, already-labeled-skipped=${skipped}"
+
+  # 4. 全 staged-for-release 付き open Issue の番号を stdout に出力（自動 + 人間
+  #    付与の両方を含む / Req 2.1.2）。後続 ST 判定の対象集合になる。
+  timeout "$PROMOTE_GIT_TIMEOUT" gh issue list --repo "$REPO" \
+    --label "$LABEL_STAGED_FOR_RELEASE" --state open \
+    --json number --limit 100 --jq '.[].number' 2>/dev/null \
+    || pp_warn "staged-for-release 付き Issue 一覧の取得に失敗（per-Issue 処理を見送る）"
+}
+
 # process_promote_pipeline: Promote Pipeline Processor のエントリポイント。
 #
 # 引数: なし（env var で全制御）
@@ -1281,9 +1361,21 @@ process_promote_pipeline() {
     return 0
   fi
 
-  # 以降のステップ（merged Issue 収集 / ST 判定 / revert / promote / サマリ）は
-  # 後続タスクで追加する。本段階では gate のみ通過したことを log に残す。
-  pp_log "gates passed; awaiting ST polling / revert / promote implementation (tasks 3.2-5.x)"
+  # AC 2.1: merge 済み PR からリンク Issue を抽出 → 未付与に staged-for-release を
+  # 自動付与し、ST 判定対象（= 現在 staged-for-release を持つ全 open Issue）を取得。
+  local target_issues
+  target_issues=$(pp_collect_merged_issues || true)
+
+  if [ -z "$target_issues" ]; then
+    pp_log "サマリ: 対象 Issue なし（staged-for-release 付き Issue 0 件）"
+    return 0
+  fi
+
+  # 以降のステップ（ST 判定 / revert / promote / サマリ）は後続タスクで追加する。
+  # 本段階では収集された Issue 数を log に残す。
+  local target_count
+  target_count=$(echo "$target_issues" | grep -c '^[0-9]' || true)
+  pp_log "ST 判定対象: ${target_count} 件の Issue を検出（ST polling / revert / promote は tasks 4.x-5.x で追加）"
 }
 
 # AC 1.1: Phase A 本体の直後に Promote Pipeline Processor を 1 回起動。
