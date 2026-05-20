@@ -88,8 +88,8 @@
   - 各 git / gh 操作の stderr / stdout 分離を NFR 4.2 に合わせて維持（`pp_log` → stdout、`pp_warn` / `pp_error` → `>&2`）
   - _Requirements: 3.3, 5.1, NFR 4.1, NFR 4.2_
 
-- [ ] 6. ドキュメント更新（DoD）
-- [ ] 6.1 README.md / QUICK-HOWTO.md / CLAUDE.md に Phase B の概要・env var 表・ラベル一覧・状態遷移・migration note を追記する (P)
+- [x] 6. ドキュメント更新（DoD）
+- [x] 6.1 README.md / QUICK-HOWTO.md / CLAUDE.md に Phase B の概要・env var 表・ラベル一覧・状態遷移・migration note を追記する (P)
   - **具体的な挿入位置・見出し階層・内容スケルトンは `design.md` の「Documentation Set / README 編集ブループリント」節に従う**（Architect が利用方法と状態遷移の README 反映方法を確定済み）
   - README に Phase B Promote Pipeline **利用方法**セクション（目的・対象・タイミング）を新規 h2 として追加（Req 6.1.1、ブループリント 1）
   - README の環境変数表に `PROMOTE_PIPELINE_ENABLED` / `PROMOTION_TARGET_BRANCH` / `ST_CHECK_RUN_NAME` / `PROMOTE_MODE` / `PROMOTE_CRON` / `PROMOTE_FAIL_NOTIFY_ISSUE` を追加（Req 6.1.2、ブループリント 2）
