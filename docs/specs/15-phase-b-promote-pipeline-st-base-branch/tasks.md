@@ -41,7 +41,7 @@
   - _Requirements: 2.1, NFR 2.4, NFR 5.2_
 
 - [ ] 4. ST polling と revert-and-continue（B2）
-- [ ] 4.1 `pp_get_st_state()` を実装し、Issue 番号から merge SHA を解決して check-run 状態を取得する
+- [x] 4.1 `pp_get_st_state()` を実装し、Issue 番号から merge SHA を解決して check-run 状態を取得する
   - `pp_resolve_merge_sha()` ヘルパで Issue にリンクされた直近の merge commit SHA を取得（GraphQL `issue.timelineItems` 経由 or `gh issue view --json closedByPullRequestsReferences`）
   - `gh api "repos/$REPO/commits/$merge_sha/check-runs" --jq` で check-run 一覧を取得
   - `ST_CHECK_RUN_NAME` と完全一致する check-run を抽出し、`completed_at` が最新のものを採用
