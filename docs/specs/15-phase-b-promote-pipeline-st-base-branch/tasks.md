@@ -40,7 +40,7 @@
   - 関数 stdout に「現時点で `staged-for-release` を持つ全 open Issue の番号」を 1 行 1 件で出力（次のステップで ST 判定する対象集合になる）
   - _Requirements: 2.1, NFR 2.4, NFR 5.2_
 
-- [ ] 4. ST polling と revert-and-continue（B2）
+- [x] 4. ST polling と revert-and-continue（B2）
 - [x] 4.1 `pp_get_st_state()` を実装し、Issue 番号から merge SHA を解決して check-run 状態を取得する
   - `pp_resolve_merge_sha()` ヘルパで Issue にリンクされた直近の merge commit SHA を取得（GraphQL `issue.timelineItems` 経由 or `gh issue view --json closedByPullRequestsReferences`）
   - `gh api "repos/$REPO/commits/$merge_sha/check-runs" --jq` で check-run 一覧を取得
@@ -59,7 +59,7 @@
   - `gh issue comment` で ST log URL を含む 1 件のステータスコメント投稿（Req 2.4.3）。コメント body には revert 済みの merge SHA prefix（7 文字）と ST log URL（`gh run view` 経由 or check-run の `details_url`）を含める
   - 1 件失敗しても他 Issue 処理を継続するため、関数戻り値で集計用カウンタにのみ反映（NFR 3.1, Req 2.4.5）
   - _Requirements: 2.4, NFR 2.1, NFR 3.1_
-- [ ] 4.3 `pp_handle_st_success()` を実装し、success Issue から `staged-for-release` を除去して promote 集合に追加する
+- [x] 4.3 `pp_handle_st_success()` を実装し、success Issue から `staged-for-release` を除去して promote 集合に追加する
   - `PROMOTE_MODE=on-demand` のときはラベルを除去せず、`PROMOTE_CANDIDATES` 集合にも入れない（Req 3.2.5、人間トリガー待ち）
   - それ以外（continuous / batched）は `gh issue edit --remove-label "$LABEL_STAGED_FOR_RELEASE"` 実行 + bash 配列 `PROMOTE_CANDIDATES+=("$issue_number")` に追加（Req 2.3.1, 2.3.2）
   - `pending` / `missing` / `skip-warn` 状態の Issue は何もせず次サイクルに持ち越す（Req 2.2.4, 2.2.5, 2.2.3）
