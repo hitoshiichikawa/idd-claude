@@ -68,6 +68,8 @@ LABEL_NEEDS_REBASE="needs-rebase"
 LABEL_NEEDS_ITERATION="needs-iteration"
 LABEL_NEEDS_QUOTA_WAIT="needs-quota-wait"
 LABEL_STAGED_FOR_RELEASE="staged-for-release"
+# Phase B: ST failure 検知後 revert 済みを示すラベル（Req 4.1）。
+LABEL_ST_FAILED="st-failed"
 
 # ─── Base branch 設定 (#89) ───
 # watcher 経路（local cron）と Actions 経路の base branch を 1 つの env で切り替える
@@ -75,6 +77,30 @@ LABEL_STAGED_FOR_RELEASE="staged-for-release"
 # する（Req 1.2, 7.2, NFR 1.1）。gitflow 運用（develop 起点）には cron / launchd 側で
 # `BASE_BRANCH=develop` を渡す。詳細は README の「ブランチ運用と BASE_BRANCH」節を参照。
 BASE_BRANCH="${BASE_BRANCH:-main}"
+
+# ─── Phase B: Promote Pipeline Processor 設定 (#15) ───
+# 新規 opt-in 機能。既存運用を壊さないため、明示的に `=true` を指定したときだけ
+# Phase B 機能が起動する（Req 1.1.1, NFR 1.1）。`=true` 以外（未設定 / 空 / `false` /
+# `0` / typo 等）はすべて無効として扱う（opt-in 制）。本フラグは新規追加 = opt-in 制で
+# あり、既定 false が要件のため、上記「デフォルト有効化フラグの値正規化」ループには
+# 含めない。
+PROMOTE_PIPELINE_ENABLED="${PROMOTE_PIPELINE_ENABLED:-false}"
+# 昇格先ブランチ。未設定時は既定 `main`（Req 1.2.1）。
+PROMOTION_TARGET_BRANCH="${PROMOTION_TARGET_BRANCH:-main}"
+# ST check-run 名。単一文字列のみ（Req 2.2.2）。未設定時は ST 連動全体を停止 + WARN
+# （Req 2.2.3）。
+ST_CHECK_RUN_NAME="${ST_CHECK_RUN_NAME:-}"
+# 昇格タイミング: continuous / batched / on-demand のいずれか（既定 on-demand /
+# Req 3.2.2）。不正値（未列挙の文字列）は処理側で on-demand にフォールバック。
+PROMOTE_MODE="${PROMOTE_MODE:-on-demand}"
+# batched モードの cron 式（標準 cron 5 フィールド）。未設定 / 不正なら当該サイクル
+# no-op + WARN（Req 3.2.6）。
+PROMOTE_CRON="${PROMOTE_CRON:-}"
+# 昇格失敗時の通知先 Issue 番号（数値）。未設定なら log のみ（Req 3.3.3）。
+PROMOTE_FAIL_NOTIFY_ISSUE="${PROMOTE_FAIL_NOTIFY_ISSUE:-}"
+# git / gh サブプロセスの個別 timeout（NFR 3.2）。Phase A の MERGE_QUEUE_GIT_TIMEOUT を
+# 流用しても良いが、専用 env として分離して Phase B のみ調整できるようにする。
+PROMOTE_GIT_TIMEOUT="${PROMOTE_GIT_TIMEOUT:-${MERGE_QUEUE_GIT_TIMEOUT:-60}}"
 
 # ─── Phase A: Merge Queue Processor 設定 ───
 # 標準機能としてデフォルト有効化（#112）。無効化したい場合は cron / launchd 側で
