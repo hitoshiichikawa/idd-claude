@@ -90,15 +90,17 @@
 
 - [ ] 6. ドキュメント更新（DoD）
 - [ ] 6.1 README.md / QUICK-HOWTO.md / CLAUDE.md に Phase B の概要・env var 表・ラベル一覧・状態遷移・migration note を追記する (P)
-  - README に Phase B Promote Pipeline 概要セクション（目的・対象・タイミング）を追加（Req 6.1.1）
-  - README の環境変数表に `PROMOTE_PIPELINE_ENABLED` / `PROMOTION_TARGET_BRANCH` / `ST_CHECK_RUN_NAME` / `PROMOTE_MODE` / `PROMOTE_CRON` / `PROMOTE_FAIL_NOTIFY_ISSUE` を追加（Req 6.1.2）
-  - README のラベル一覧に `st-failed` の「適用先 = Issue」「付与主 = Phase B Promote Pipeline」「意味 = ST failure 検知後に revert 済み」を追加（Req 6.1.3）
-  - README のラベル状態遷移節に Phase B 補助フロー（`staged-for-release` 自動付与 → ST polling → success/failure 分岐）を追加（Req 6.1.4）
-  - #100 で定義された人間付与の `staged-for-release` 運用と Phase B 自動付与が同一ラベルを共有する旨を README に明記（Req 6.1.5）
-  - Migration Note: `PROMOTE_PIPELINE_ENABLED` 未設定で既存挙動完全保持、既存 env / ラベル / lock / exit code 不変、`BASE_BRANCH` Branch Protection 設定確認の推奨を記載（Req 6.1.6）
-  - QUICK-HOWTO.md の「作成されるラベル」一覧に `st-failed` を追加（Req 6.2.1）
-  - 全ドキュメントで `st-failed` を lowercase / ハイフン区切りで完全一致表記（Req 6.2.2）
-  - CLAUDE.md（本 repo）の「idd-claude 特有の設計上の注意」節に Phase B 機能の留意点（opt-in gate / 2-branch model 前提 / 既存 staged-for-release 共存）を 1 段落追記
+  - **具体的な挿入位置・見出し階層・内容スケルトンは `design.md` の「Documentation Set / README 編集ブループリント」節に従う**（Architect が利用方法と状態遷移の README 反映方法を確定済み）
+  - README に Phase B Promote Pipeline **利用方法**セクション（目的・対象・タイミング）を新規 h2 として追加（Req 6.1.1、ブループリント 1）
+  - README の環境変数表に `PROMOTE_PIPELINE_ENABLED` / `PROMOTION_TARGET_BRANCH` / `ST_CHECK_RUN_NAME` / `PROMOTE_MODE` / `PROMOTE_CRON` / `PROMOTE_FAIL_NOTIFY_ISSUE` を追加（Req 6.1.2、ブループリント 2）
+  - README のラベル一覧に `st-failed` の「適用先 = Issue」「付与主 = Phase B Promote Pipeline」「意味 = ST failure 検知後に revert 済み」を追加（Req 6.1.3、ブループリント 3）
+  - README の**ラベル状態遷移節**に Phase B 補助フロー（`staged-for-release` 自動付与 → ST polling → success/failure 分岐）を、**状態遷移表 + Mermaid 図** の両形式で追加（Req 6.1.4、ブループリント 4）
+  - #100 で定義された人間付与の `staged-for-release` 運用と Phase B 自動付与が同一ラベルを共有する旨を README に明記（Req 6.1.5、ブループリント 5）
+  - Migration Note: `PROMOTE_PIPELINE_ENABLED` 未設定で既存挙動完全保持、既存 env / ラベル / lock / exit code 不変、`BASE_BRANCH` Branch Protection 設定確認の推奨を記載（Req 6.1.6、ブループリント 6）
+  - QUICK-HOWTO.md の「作成されるラベル」一覧に `st-failed` を追加（Req 6.2.1、ブループリント 7）
+  - 全ドキュメントで `st-failed` を lowercase / ハイフン区切りで完全一致表記（Req 6.2.2、ブループリント 7）
+  - CLAUDE.md（本 repo）の「idd-claude 特有の設計上の注意」節に Phase B 機能の留意点（opt-in gate / 2-branch model 前提 / 既存 staged-for-release 共存）を 1 段落追記（ブループリント 7）
+  - 完了基準: `design.md` のブループリント「Acceptance Criteria → README 追記箇所のトレーサビリティ」表の Req 6.1.1〜6.2.2 がすべて README / QUICK-HOWTO / CLAUDE.md のいずれかに反映されていること
   - _Requirements: 6.1, 6.2_
   - _Boundary: Documentation Set_
 

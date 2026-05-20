@@ -220,7 +220,7 @@ docs/specs/
 | `local-watcher/bin/issue-watcher.sh` | 1. Config ブロック（既存 `BASE_BRANCH` 直後）に 6 つの env var 追加: `PROMOTE_PIPELINE_ENABLED` / `PROMOTION_TARGET_BRANCH` / `ST_CHECK_RUN_NAME` / `PROMOTE_MODE` / `PROMOTE_CRON` / `PROMOTE_FAIL_NOTIFY_ISSUE`<br>2. `PROMOTE_PIPELINE_ENABLED` を「`=true` を明示した場合のみ有効、それ以外は無効」の opt-in セマンティクス（既存 `MERGE_QUEUE_ENABLED` の opt-out とは逆）として正規化（Req 1.1, NFR 1.1）<br>3. `process_promote_pipeline()` 関数群（ロガー pp_log/pp_warn/pp_error、サブ関数 pp_resolve_target_branch / pp_get_st_state / pp_handle_st_success / pp_handle_st_failure / pp_do_revert / pp_do_promote / pp_match_cron / pp_notify_promote_failure 等）を追加<br>4. Phase A 本体（`process_merge_queue`）の直後に `process_promote_pipeline \|\| pp_warn "..."` を 1 行追加 | Promote Pipeline Processor / 全サブコンポーネント |
 | `repo-template/.github/scripts/idd-claude-labels.sh` | `LABELS=(...)` 配列に `"st-failed\|d73a4a\|【Issue 用】 ST failure 検知後 revert 済み（Phase B Promote Pipeline が付与）"` を 1 行追加。既存ループが新ラベルも同一処理で作成するため、`st-failed` 追加に伴う冪等性は既存実装に内在（Req 4.1） | Labels Setup Script（consumer 用） |
 | `.github/scripts/idd-claude-labels.sh`（self-hosting） | 同上（Req 4.1.3 で「self-hosting と consumer 配布で同一の名前・色・description」を要求しているため、両ファイルに同一行を追加） | Labels Setup Script（self-hosting 用） |
-| `README.md` | (a) 環境変数表に Phase B env 6 種を追加（既存 `MERGE_QUEUE_*` 表と同じ書式）<br>(b) ラベル一覧表に `st-failed` を追加（「適用先」「付与主」「意味」3 列）<br>(c) Phase B Promote Pipeline 概要セクション（目的・対象・タイミング）<br>(d) ラベル状態遷移節に Phase B 補助フロー（`staged-for-release` 自動付与 → ST polling → revert / promote）を追記<br>(e) Migration Note（`PROMOTE_PIPELINE_ENABLED` 未設定時は既存挙動完全保持） | README 全般 |
+| `README.md` | (a) 環境変数表に Phase B env 6 種を追加（既存 `MERGE_QUEUE_*` 表と同じ書式）<br>(b) ラベル一覧表に `st-failed` を追加（「適用先」「付与主」「意味」3 列）<br>(c) Phase B Promote Pipeline 概要セクション（目的・対象・タイミング）= **利用方法ガイド**<br>(d) ラベル状態遷移節に Phase B 補助フロー（`staged-for-release` 自動付与 → ST polling → revert / promote）を追記（**状態遷移表 + Mermaid 図** の両方を併記）<br>(e) Migration Note（`PROMOTE_PIPELINE_ENABLED` 未設定時は既存挙動完全保持）<br>**具体的な挿入位置と内容スケルトンは「Documentation Set / README 編集ブループリント」節を参照** | README 全般 |
 | `CLAUDE.md`（本 repo） | 「idd-claude 特有の設計上の注意」節に Phase B 関連の留意点 1 行追加（opt-in gate / 2-branch model 前提 / 人間付与 `staged-for-release` との共存） | Project Guide |
 | `repo-template/CLAUDE.md` | 必要に応じて Phase B 機能の説明を追加（consumer 向けには「opt-in 制」と明記。Feature Flag Protocol 節とは別の文脈） | Consumer Project Guide |
 | `QUICK-HOWTO.md` | 「作成されるラベル」一覧に `st-failed` を追加（Req 6.2.1, 6.2.2） | Quick HOWTO |
@@ -689,7 +689,7 @@ LABELS=(
 
 | Field | Detail |
 |-------|--------|
-| Intent | Phase B の opt-in 環境変数・ラベル一覧・状態遷移・後方互換性方針を operator が README から読み取れるようにする |
+| Intent | Phase B の opt-in 環境変数・**利用方法**（operator が opt-in 後にどう振る舞うか）・**ラベル状態遷移**（自動付与 → ST polling → success/failure 分岐）・後方互換性方針を operator が README から読み取れるようにする |
 | Requirements | 6.1, 6.2 |
 
 **Responsibilities & Constraints**
@@ -698,8 +698,171 @@ LABELS=(
 - `st-failed` を全ドキュメントで lowercase / ハイフン区切りで完全一致表記する（Req 6.2.2）
 - 既存 `staged-for-release`（#100）と Phase B 自動付与の `staged-for-release` が同一ラベルを
   共有する旨を README に明記する（Req 6.1.5）
+- 「README を最新化する」の具体内容は次節「README 編集ブループリント」に確定形で書き出す
+  （Architect レビュー時点で抽象表現 "README を更新する" のままにせず、Developer が迷わず
+  追記できる粒度まで落とす）
 
 **Contracts**: Service [ ] / API [ ] / Event [ ] / Batch [ ] / State [ ]
+
+##### README 編集ブループリント
+
+Developer が `README.md` を編集するときの具体的な追加・修正位置と内容スケルトンを以下に
+示す。本ブループリントは Req 6.1 の AC を 1 対 1 で満たすための骨子であり、文言は実装時に
+既存スタイル（敬体／表 / 箇条書きの混在パターン）と整合させて微調整して構わない。
+
+###### 1. 概要（目的・対象・タイミング）セクション追加 — Req 6.1.1
+
+挿入位置: README.md 既存「Merge Queue Processor (Phase A)」セクションの直後 / 新規 h2 として。
+
+```markdown
+## Promote Pipeline Processor (Phase B)
+
+multi-branch（例: `BASE_BRANCH=develop` / リリースブランチ=`main`）運用のリポジトリで、
+Phase A により `BASE_BRANCH` に merge された変更を System Test（ST）結果に応じて
+リリースブランチへ自動昇格、または revert する Processor です。**`PROMOTE_PIPELINE_ENABLED=true`
+を明示したリポジトリでのみ起動**し、未設定 / `false` のリポジトリは導入前と完全に同一の挙動です。
+
+### 目的
+- approved PR の `BASE_BRANCH` merge 後 → `staged-for-release` 自動付与
+- `staged-for-release` 付き Issue の ST check-run を watcher サイクル内でポーリング
+- ST success → ラベル除去 + 昇格対象集合へ（PROMOTE_MODE に応じて昇格タイミング制御）
+- ST failure → `git revert -m 1` + Issue reopen + `st-failed` 付与（fail-continue）
+
+### 対象
+- `BASE_BRANCH != PROMOTION_TARGET_BRANCH` の 2-branch model リポジトリのみ
+- single-branch（`BASE_BRANCH` 未設定 = `main` のみ）リポジトリでは no-op
+
+### タイミング
+- watcher サイクル冒頭、Phase A `process_merge_queue` の直後
+- 1 サイクル = `BASE_BRANCH` への自動付与 → ST 判定 → revert / promote の一括処理
+```
+
+###### 2. 環境変数表追記 — Req 6.1.2
+
+挿入位置: README.md 既存「Phase A 環境変数」表のすぐ下、新規小見出し「Phase B 環境変数」として。
+
+```markdown
+### Phase B 環境変数
+
+| 変数 | デフォルト | 用途 |
+|---|---|---|
+| `PROMOTE_PIPELINE_ENABLED` | `false` | Phase B 全体の opt-in gate。`=true` 明示時のみ起動 |
+| `PROMOTION_TARGET_BRANCH` | `main` | 昇格先ブランチ。`BASE_BRANCH` と等しいなら no-op |
+| `ST_CHECK_RUN_NAME` | `""` | ST check-run 名（単一文字列）。未設定なら ST 連動停止 + WARN |
+| `PROMOTE_MODE` | `on-demand` | `continuous` / `batched` / `on-demand` のいずれか |
+| `PROMOTE_CRON` | `""` | `PROMOTE_MODE=batched` のときの標準 5 フィールド cron 式 |
+| `PROMOTE_FAIL_NOTIFY_ISSUE` | `""` | promote 失敗時の通知先 Issue 番号 |
+```
+
+###### 3. ラベル一覧表に `st-failed` を追加 — Req 6.1.3
+
+挿入位置: README.md 既存ラベル一覧表（`needs-rebase` / `staged-for-release` の直後）。
+
+```markdown
+| `st-failed` | 赤系 (`d73a4a`) | ST failure 検知後に revert 済み（Phase B Promote Pipeline が付与）。Issue に適用 |
+```
+
+加えて既存ラベル一括作成スクリプト例ブロックにも `st-failed` 行を追加:
+
+```bash
+gh label create st-failed --repo owner/repo --color d73a4a --description "ST failure 検知後 revert 済み（Phase B Promote Pipeline が付与）"
+```
+
+###### 4. ラベル状態遷移節への Phase B 補助フロー追記 — Req 6.1.4 / 6.1.5
+
+挿入位置: README.md 既存「ラベル状態遷移まとめ」セクション内、Phase A `needs-rebase` 状態遷移
+の直下に「Phase B 補助フロー」サブセクションとして追加する。
+
+```markdown
+### Phase B: Promote Pipeline 補助フロー（`PROMOTE_PIPELINE_ENABLED=true` 時のみ）
+
+`BASE_BRANCH` への merge 後、以下の状態遷移を Promote Pipeline Processor が自動で進めます。
+**`PROMOTE_PIPELINE_ENABLED=true` を明示していないリポジトリでは本フローは起動しません**
+（既存挙動完全保持）。
+
+| 前ラベル | トリガー | 後ラベル | 副作用 |
+|---|---|---|---|
+| なし | Phase A の `BASE_BRANCH` merge | + `staged-for-release` | 自動付与（人間付与 #100 と同一ラベルを共有） |
+| + `staged-for-release`（既付与） | 自動付与 attempt | 変更なし | 重複付与抑止 |
+| + `staged-for-release` | ST = success（PROMOTE_MODE != on-demand） | − `staged-for-release` | promote 候補集合へ |
+| + `staged-for-release` | ST = success（PROMOTE_MODE = on-demand） | 変更なし | 人間トリガー待ち |
+| + `staged-for-release` | ST = failure | − `staged-for-release` + `st-failed` | revert commit を push、Issue を reopen + コメント |
+| + `staged-for-release` | ST = pending/in_progress | 変更なし | 次サイクルへ持ち越し |
+| + `staged-for-release` | ST_CHECK_RUN_NAME 未設定 / check-run 不在 | 変更なし | WARN ログのみ |
+```
+
+加えて、状態遷移の俯瞰用に Mermaid 図を併記する（design.md 内の状態遷移図と同一の出力を
+README にも転載）:
+
+```markdown
+```mermaid
+stateDiagram-v2
+    [*] --> Approved
+    Approved --> Merged: Phase A が BASE_BRANCH に merge
+    Merged --> Staged: Phase B が staged-for-release を自動付与
+    Staged --> Promoted: ST=success → label 除去 + fast-forward push
+    Staged --> Reverted: ST=failure → revert -m 1 + Issue reopen + st-failed
+    Staged --> [*]: ST=pending → 次サイクル持ち越し
+    Promoted --> [*]
+    Reverted --> [*]
+```
+```
+
+###### 5. 既存 `staged-for-release` 人間付与運用との共存メモ — Req 6.1.5
+
+挿入位置: 上記 4 のラベル状態遷移節の末尾に補足段落として追加。
+
+```markdown
+**既存 `staged-for-release`（#100）との共存**: 運用者が手で付与した `staged-for-release`
+ラベルと、Phase B が自動付与した `staged-for-release` ラベルは**同一ラベル**を共有します。
+Phase B 有効化前から手動で `staged-for-release` を付与していた Issue は、有効化後の最初の
+サイクルから自動的に ST polling 対象に組み込まれます（source の区別は行わない設計）。
+手動運用を維持したい場合は `ST_CHECK_RUN_NAME` を未設定のままにすれば、自動付与
+（Req 2.1）は発生しますが ST 判定は行われず、ラベル除去・revert・promote のいずれも起きません。
+```
+
+###### 6. Migration Note 追記 — Req 6.1.6
+
+挿入位置: README.md 既存「Migration Note（既存ユーザー向け）」セクション末尾に
+「Phase B Promote Pipeline 導入時の注意」サブセクションとして追加。
+
+```markdown
+### Phase B Promote Pipeline 導入時の注意
+
+- **既定挙動の保持**: `PROMOTE_PIPELINE_ENABLED` を設定しない／`=true` 以外の値にしたリポジトリは、
+  既存 env var の意味・既存ラベル契約・既存 lock ファイルパス・既存ログ出力先・既存 exit code を
+  含めて Phase B 導入前と完全に同一の挙動を継続します
+- **2-branch model 限定**: `BASE_BRANCH == PROMOTION_TARGET_BRANCH` の single-branch リポジトリでは
+  no-op として終了します（誤起動防止）
+- **Branch Protection 確認**: revert commit を `BASE_BRANCH` に直接 push するため、Branch Protection
+  ルール（PR 必須等）が設定されている場合は admin bypass / 適切な PAT の用意が必要になる場合があります
+- **既存 `staged-for-release`（#100）との互換性**: 手動付与と自動付与で同一ラベルを共有します。
+  source 区別を必要とする運用は本フェーズの対象外です
+- **Force push の不使用**: revert は `--force-with-lease`、promote は fast-forward のみ。
+  `--force` 単独は一切使用しません
+```
+
+###### 7. QUICK-HOWTO.md / CLAUDE.md 同期 — Req 6.2.1 / 6.2.2
+
+- `QUICK-HOWTO.md` の「作成されるラベル」一覧に `st-failed` 行を追加（README と同一の
+  名前・色・description）
+- 本 repo の `CLAUDE.md` 「idd-claude 特有の設計上の注意」節に「Phase B Promote Pipeline は
+  opt-in gate / 2-branch model 前提 / 既存 `staged-for-release` と同一ラベルを共有」を 1 段落で追記
+- いずれのドキュメントでもラベル名 `st-failed` は lowercase / ハイフン区切りで完全一致表記
+  （grep 全件一致を担保 / Req 6.2.2）
+
+##### Acceptance Criteria → README 追記箇所のトレーサビリティ
+
+| Requirement | README 追記箇所（本ブループリント節） |
+|---|---|
+| 6.1.1 | 「1. 概要セクション」 |
+| 6.1.2 | 「2. 環境変数表追記」 |
+| 6.1.3 | 「3. ラベル一覧表に `st-failed` を追加」 |
+| 6.1.4 | 「4. ラベル状態遷移節への Phase B 補助フロー追記」 |
+| 6.1.5 | 「4」の表 + 「5. 既存 `staged-for-release` 人間付与運用との共存メモ」 |
+| 6.1.6 | 「6. Migration Note 追記」 |
+| 6.2.1 | 「7. QUICK-HOWTO.md / CLAUDE.md 同期」 |
+| 6.2.2 | 「7」末尾の完全一致表記の注 |
 
 ## Data Models
 
