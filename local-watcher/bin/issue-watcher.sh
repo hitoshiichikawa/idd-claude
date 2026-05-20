@@ -1332,6 +1332,114 @@ pp_collect_merged_issues() {
     || pp_warn "staged-for-release 付き Issue 一覧の取得に失敗（per-Issue 処理を見送る）"
 }
 
+# pp_resolve_merge_sha: Issue にリンクされた直近の merge commit SHA を解決する。
+# GitHub の `gh issue view --json closedByPullRequestsReferences` で Issue を閉じた
+# PR を取得し、各 PR の mergeCommit.oid を最新（updatedAt 降順）から拾う。
+#
+# 入力: $1 = Issue 番号
+# 出力（stdout）: merge commit SHA（解決できた場合）
+# 戻り値: 0 = 解決成功 / 1 = 失敗（Issue が PR 経由で閉じられていない・取得失敗等）
+pp_resolve_merge_sha() {
+  local issue_number="$1"
+  local pr_list_json
+  if ! pr_list_json=$(timeout "$PROMOTE_GIT_TIMEOUT" \
+      gh issue view "$issue_number" --repo "$REPO" \
+        --json closedByPullRequestsReferences 2>/dev/null); then
+    return 1
+  fi
+  # PR ごとに mergeCommit.oid を取得（必要に応じて gh pr view で補完）
+  local pr_numbers
+  pr_numbers=$(echo "$pr_list_json" | jq -r \
+    '[.closedByPullRequestsReferences // [] | .[]
+      | select(.state == "MERGED")
+      | .number] | sort | reverse | .[]' 2>/dev/null) || return 1
+  [ -n "$pr_numbers" ] || return 1
+  local pr_number merge_sha
+  while IFS= read -r pr_number; do
+    [ -n "$pr_number" ] || continue
+    merge_sha=$(timeout "$PROMOTE_GIT_TIMEOUT" \
+      gh pr view "$pr_number" --repo "$REPO" \
+        --json mergeCommit --jq '.mergeCommit.oid // ""' 2>/dev/null) || continue
+    if [ -n "$merge_sha" ] && [ "$merge_sha" != "null" ]; then
+      echo "$merge_sha"
+      return 0
+    fi
+  done <<< "$pr_numbers"
+  return 1
+}
+
+# pp_get_st_state: 1 つの Issue について、リンクされた最新の `BASE_BRANCH` 上
+# merge commit に対する ST check-run の状態を取得する。
+#
+# 入力: $1 = Issue 番号
+# 出力（stdout）: 内部状態 5 種のいずれか
+#   "success"   ST check-run が完了 & conclusion=success
+#   "failure"   ST check-run が完了 & conclusion=failure/cancelled/timed_out/action_required
+#   "pending"   ST check-run が in_progress / queued / pending
+#   "missing"   ST check-run が見つからない or conclusion 不一致
+#   "skip-warn" ST_CHECK_RUN_NAME 未設定（Req 2.2.3）
+# 戻り値: 常に 0（呼び出し元で文字列分岐）
+# Requirements: 2.2
+pp_get_st_state() {
+  local issue_number="$1"
+  # AC 2.2.3: ST_CHECK_RUN_NAME 未設定なら skip-warn（呼び出し元で WARN ログ）
+  if [ -z "$ST_CHECK_RUN_NAME" ]; then
+    echo "skip-warn"
+    return 0
+  fi
+  # AC 2.2.5: Issue にリンクされた merge commit を解決できなければ missing
+  local merge_sha
+  if ! merge_sha=$(pp_resolve_merge_sha "$issue_number"); then
+    echo "missing"
+    return 0
+  fi
+  [ -n "$merge_sha" ] || { echo "missing"; return 0; }
+  # AC 2.2.1: check-runs API で対象 commit に対する check-run 一覧を取得
+  local check_runs_json
+  if ! check_runs_json=$(timeout "$PROMOTE_GIT_TIMEOUT" \
+      gh api "repos/$REPO/commits/$merge_sha/check-runs" \
+        --jq '.check_runs' 2>/dev/null); then
+    echo "missing"
+    return 0
+  fi
+  # AC 2.2.2: ST_CHECK_RUN_NAME と完全一致する check-run を抽出し、最新採用
+  local target
+  target=$(echo "$check_runs_json" | jq -c --arg n "$ST_CHECK_RUN_NAME" \
+    '[.[] | select(.name == $n)]
+      | sort_by(.completed_at // .started_at // "")
+      | last' 2>/dev/null) || target="null"
+  if [ -z "$target" ] || [ "$target" = "null" ]; then
+    echo "missing"
+    return 0
+  fi
+  # AC 2.2.4: status + conclusion で結果判定
+  local status conclusion
+  status=$(echo "$target" | jq -r '.status // ""')
+  conclusion=$(echo "$target" | jq -r '.conclusion // ""')
+  case "$status" in
+    completed)
+      case "$conclusion" in
+        success)
+          echo "success"
+          ;;
+        failure|cancelled|timed_out|action_required)
+          echo "failure"
+          ;;
+        *)
+          # neutral / skipped / stale / unknown は missing 扱い
+          echo "missing"
+          ;;
+      esac
+      ;;
+    queued|in_progress|pending|"")
+      echo "pending"
+      ;;
+    *)
+      echo "pending"
+      ;;
+  esac
+}
+
 # process_promote_pipeline: Promote Pipeline Processor のエントリポイント。
 #
 # 引数: なし（env var で全制御）
