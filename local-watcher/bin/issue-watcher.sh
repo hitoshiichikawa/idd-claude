@@ -2125,6 +2125,157 @@ po_warn() {
   echo "[$(date '+%F %T')] [$REPO] path-overlap: WARN: $*" >&2
 }
 
+# ─── Phase E: Triage Edit-Paths Parser (#18 Req 2.4 / 2.5) ───
+# Triage 結果 JSON から edit_paths 配列を fail-safe に抽出する。
+# - key 不在 / null / 非配列 / 要素に文字列以外混入はすべて空配列にフォールバック
+# - 既存 5 keys 抽出（jq -r '.status' 等）は変更しない（Req 2.5）
+#
+# Args: $1 = Triage 結果 JSON ファイルパス
+# Stdout: JSON 配列文字列（必ず `[...]` 形式、空でも `[]`）
+# Return: 0 always（失敗時は `[]` を返す fail-safe）
+po_parse_triage_edit_paths() {
+  local triage_file="$1"
+  if [ ! -f "$triage_file" ]; then
+    echo '[]'
+    return 0
+  fi
+  # `// []` で key 不在を吸収、`if type=="array" then ... else [] end` で型不正吸収、
+  # `map(select(type=="string"))` で文字列以外を除外。jq 失敗時も `[]` を返す。
+  jq -c '
+    (.edit_paths // [])
+    | if type == "array" then
+        map(select(type == "string"))
+      else
+        []
+      end
+  ' "$triage_file" 2>/dev/null || echo '[]'
+}
+
+# ─── Phase E: Path Overlap Persister (#18 Req 3.1〜3.4 / 12.1) ───
+# Triage で得た edit_paths を Issue 上に sticky comment として保存する。同じ marker
+# (<!-- idd-claude:edit-paths:v1 -->) を持つ既存コメントがあれば PATCH で上書き、
+# 無ければ新規 create する（Req 3.3 重複防止）。
+#
+# 本文形式（人間可読 md リスト + 機械可読 hidden JSON marker の 2 段構成）:
+#
+#   ## Triage edit_paths（Phase E）
+#
+#   本 Issue が編集見込みの top-level path:
+#
+#   - `local-watcher/`
+#   - `README.md`
+#
+#   *(自動生成: Path Overlap Checker。本機能の詳細は README の「Phase E」節を参照)*
+#
+#   <!-- idd-claude:edit-paths:v1 -->
+#   <!-- idd-claude:edit-paths-json:["local-watcher/","README.md"] -->
+#
+# Args: $1 = issue number, $2 = edit_paths JSON 配列文字列
+# Return: 0 = persist OK / 1 = persist 失敗（呼び出し側は warn のみで Triage 全体は成功扱い）
+po_persist_edit_paths() {
+  local issue_number="$1"
+  local edit_paths_json="$2"
+
+  # 本文 md リストを組み立てる（空配列なら "なし" 表示）
+  local list_md
+  list_md=$(echo "$edit_paths_json" | jq -r '
+    if length == 0 then
+      "_(Triage は確信のある edit_paths を推定できませんでした)_"
+    else
+      map("- `" + . + "`") | join("\n")
+    end
+  ' 2>/dev/null || echo '_(edit_paths 抽出失敗)_')
+
+  local marker_v1="<!-- idd-claude:edit-paths:v1 -->"
+  local json_marker
+  # JSON marker を 1 行に整形（jq -c で改行なしの compact 形式）
+  json_marker="<!-- idd-claude:edit-paths-json:${edit_paths_json} -->"
+
+  local body
+  body=$(cat <<EOF
+## Triage edit_paths（Phase E）
+
+本 Issue が編集見込みの top-level path:
+
+${list_md}
+
+*(自動生成: Path Overlap Checker。本機能の詳細は README の「Phase E」節を参照)*
+
+${marker_v1}
+${json_marker}
+EOF
+)
+
+  # 既存 sticky comment を gh API で検索（URL 末尾の `#issuecomment-<numeric-id>` から
+  # REST API id を抽出。`.comments[].id` は GraphQL の base64 id なので使えない）。
+  local comments_json
+  if ! comments_json=$(gh issue view "$issue_number" --repo "$REPO" --json comments 2>/dev/null); then
+    return 1
+  fi
+  local existing_url
+  existing_url=$(echo "$comments_json" | jq -r '
+    (.comments // [])
+    | map(select(.body | contains("<!-- idd-claude:edit-paths:v1 -->")))
+    | .[0].url // ""
+  ' 2>/dev/null || echo "")
+  local existing_comment_id=""
+  if [ -n "$existing_url" ]; then
+    existing_comment_id=$(printf '%s' "$existing_url" \
+      | sed -nE 's/.*#issuecomment-([0-9]+)$/\1/p')
+  fi
+
+  if [ -n "$existing_comment_id" ]; then
+    # 既存 sticky comment を PATCH で上書き（Req 3.3）
+    if ! gh api -X PATCH "/repos/${REPO}/issues/comments/${existing_comment_id}" \
+        -f body="$body" >/dev/null 2>&1; then
+      return 1
+    fi
+  else
+    # 新規作成
+    if ! gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# ─── Phase E: Path Overlap Loader (#18 Req 12.1) ───
+# Issue の sticky comment から edit_paths JSON を読み出す。marker 不在 / API 失敗 /
+# 形式異常はすべて空配列 `[]` を返す fail-safe。
+# 1 candidate あたり gh issue view --json comments を **1 回のみ** 呼ぶ（Req 12.1）。
+#
+# Args: $1 = issue number
+# Stdout: edit_paths JSON 配列文字列（必ず `[...]` 形式、抽出失敗時は `[]`）
+# Return: 0 always
+po_load_edit_paths() {
+  local issue_number="$1"
+  local comments_json
+  if ! comments_json=$(gh issue view "$issue_number" --repo "$REPO" --json comments 2>/dev/null); then
+    echo '[]'
+    return 0
+  fi
+  # 全コメントから marker 行を抽出 → JSON 部を取り出して valid array かチェック
+  local extracted
+  extracted=$(echo "$comments_json" \
+    | jq -r '.comments // [] | map(.body) | .[]' 2>/dev/null \
+    | sed -nE 's/.*<!-- idd-claude:edit-paths-json:(.*) -->.*/\1/p' \
+    | tail -1)
+  if [ -z "$extracted" ]; then
+    echo '[]'
+    return 0
+  fi
+  # extracted が valid な JSON 配列であることを jq で再検証してから返す
+  local validated
+  validated=$(echo "$extracted" | jq -c '
+    if type == "array" then
+      map(select(type == "string"))
+    else
+      []
+    end
+  ' 2>/dev/null || echo '[]')
+  echo "$validated"
+}
+
 # pp_resolve_target_branch: `PROMOTION_TARGET_BRANCH` のリモート存在を検証し、
 # `BASE_BRANCH` と異なることを確認する（Req 1.1.3, 1.2.2）。
 # 戻り値: 0 = 検証 OK / 1 = 中止すべき状態
@@ -7746,6 +7897,21 @@ _slot_run_issue() {
     DECISION_COUNT=$(jq '.decisions | length' "$TRIAGE_FILE")
     NEEDS_ARCHITECT=$(jq -r '.needs_architect // false' "$TRIAGE_FILE")
     ARCHITECT_REASON=$(jq -r '.architect_reason // ""' "$TRIAGE_FILE")
+
+    # ── Phase E: edit_paths 永続化 (#18 Req 3.1〜3.4) ──
+    # PATH_OVERLAP_CHECK=true のときのみ、Triage が返した edit_paths を sticky
+    # comment として Issue に保存し、後続 cron tick で Path Overlap Checker が
+    # 再読できるようにする。persist 失敗は warn のみで、Triage 全体は成功扱い
+    # を維持する（Req 3.4 fail-open）。
+    if [ "$PATH_OVERLAP_CHECK" = "true" ]; then
+      local _po_paths_json
+      _po_paths_json=$(po_parse_triage_edit_paths "$TRIAGE_FILE")
+      if ! po_persist_edit_paths "$NUMBER" "$_po_paths_json"; then
+        po_warn "issue=#${NUMBER} edit_paths sticky comment の保存に失敗（次サイクルで再評価 / Req 3.4 fail-open）"
+      else
+        po_log "issue=#${NUMBER} edit_paths persisted paths=$(echo "$_po_paths_json" | jq -r 'join(",")')"
+      fi
+    fi
 
     if [ "$STATUS" = "needs-decisions" ] && [ "$DECISION_COUNT" -gt 0 ]; then
       local COMMENT
