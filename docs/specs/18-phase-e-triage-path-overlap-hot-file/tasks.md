@@ -32,7 +32,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 8.4_
   - _Boundary: Path Overlap Env Resolver, Path Overlap Logger_
 
-- [ ] 4. Triage Parser + Path Overlap Persister 関数群を実装
+- [x] 4. Triage Parser + Path Overlap Persister 関数群を実装
   - `issue-watcher.sh` に下記関数を追加（既存 `qa_persist_reset_time` / `qa_load_reset_time` の近傍、既存命名規約 `po_*` prefix）:
     - `po_parse_triage_edit_paths $triage_file` — `jq '.edit_paths // [] | if type == "array" then map(select(type == "string")) else [] end'` で fail-safe 抽出
     - `po_persist_edit_paths $issue_number $edit_paths_json` — sticky comment（marker `<!-- idd-claude:edit-paths:v1 -->` + 機械可読 `<!-- idd-claude:edit-paths-json:[...] -->`）の create / update
