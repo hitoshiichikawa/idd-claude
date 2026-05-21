@@ -210,6 +210,28 @@ DRR_GH_TIMEOUT="${DRR_GH_TIMEOUT:-${MERGE_QUEUE_GIT_TIMEOUT:-60}}"
 # （空文字 / `0` / `False` / typo 等）はすべてデフォルト有効として扱われる（Req 2.10）。
 STAGE_CHECKPOINT_ENABLED="${STAGE_CHECKPOINT_ENABLED:-true}"
 
+# ─── Stage A Verify 設定 (#125) ───
+# Stage A（Developer 実装）完了直前に、watcher が `tasks.md` 末尾の build/test/lint
+# コマンド（verify タスク）を REPO_DIR で独立再実行することで、Developer の自己申告
+# のみで build 不通が Stage A を通過するのを防ぐゲート（Req 1, 2 / Issue #125）。
+#
+#   - STAGE_A_VERIFY_ENABLED:  本機能の有効化。既定 true。`=false` 明示時のみ
+#                              opt-out として stage-a-verify ゲートを skip し、本機能
+#                              導入前と user-observable に同一の Stage A 完了判定を
+#                              行う（Req 4.1 / NFR 1.1）。`=false` 以外は典型的な
+#                              「true 既定」として扱う（後述: 既存 _idd_flag ループ
+#                              には敢えて加えず、本機能は専用に `=false` 厳密一致
+#                              でのみ opt-out 判定する。理由は tasks.md L9 の意図的
+#                              切り出し）。
+#   - STAGE_A_VERIFY_TIMEOUT:  verify 再実行の最大経過秒数。既定 600。大規模 repo は
+#                              env で延長可能（NFR 3.3）。
+#   - STAGE_A_VERIFY_COMMAND:  escape hatch。非空ならば tasks.md 解析を bypass して
+#                              本 env 値を最優先で実行コマンドとする（Req 4.4 /
+#                              NFR 2.2）。未対応言語向け。
+STAGE_A_VERIFY_ENABLED="${STAGE_A_VERIFY_ENABLED:-true}"
+STAGE_A_VERIFY_TIMEOUT="${STAGE_A_VERIFY_TIMEOUT:-600}"
+STAGE_A_VERIFY_COMMAND="${STAGE_A_VERIFY_COMMAND:-}"
+
 # LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
 # 環境変数で明示上書きもできる。
 LOG_DIR="${LOG_DIR:-$HOME/.issue-watcher/logs/$REPO_SLUG}"
