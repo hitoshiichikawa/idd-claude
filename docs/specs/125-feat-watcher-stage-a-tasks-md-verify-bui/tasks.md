@@ -59,7 +59,7 @@
   - _Boundary: issue-watcher.sh (stage_a_verify_run / _sav_handle_failure)_
   - _Depends: 1.1, 2.1, 2.3, 2.4_
 
-- [ ] 4. `run_impl_pipeline` への挿入
+- [x] 4. `run_impl_pipeline` への挿入
   - design.md「run_impl_pipeline 挿入ブロック」の擬似コードに従い、Stage A 実行ブロックの直後・Stage B 実行ブロックの直前（現行 L4225 周辺、`case "$START_STAGE" in A) … B|C) … esac` の直後）に挿入する
   - Stage A skipped path（START_STAGE=B|C）でも本ブロックを通すこと（Stage Checkpoint resume との協調、design.md「stage-a-verify と Stage Checkpoint の協調」参照）
   - `stage_a_verify_run` の戻り値 0/1/2 を `run_impl_pipeline` の戻り値 0/1 にマップし、既存 exit code 契約（NFR 1.3）を維持
