@@ -1391,7 +1391,10 @@ ar_run_claude_rebase() {
 #   `MECHANICAL_PATHS` allowlist と照合し `mechanical` / `semantic` を判定。
 #
 #   入力: $1=pr_number, $2=base_ref, $3=head_ref
-#   出力 (stdout 1 行): `mechanical` or `semantic`
+#   出力 (stdout):
+#     1 行目: `mechanical` or `semantic`
+#     2 行目: semantic の場合は最初の unmatched path（取得できれば）。mechanical
+#             では 2 行目を出さない
 #   戻り値: 0=正常、1=`git diff` 失敗（呼び出し側は保守的に `semantic` 扱い）
 #
 #   Req 5.1, 5.2, 5.3, 5.4, 5.5
@@ -1434,10 +1437,9 @@ ar_classify_diff() {
 
   # 各 path について「いずれかの pattern に一致」を確認
   local path matched pattern first_unmatched=""
-  local match_count=0 total_count=0
+  local match_count=0
   while IFS= read -r path; do
     [ -z "$path" ] && continue
-    total_count=$((total_count + 1))
     matched=false
     for pattern in "${patterns[@]}"; do
       # 前後空白除去
@@ -1454,10 +1456,7 @@ ar_classify_diff() {
     done
     if [ "$matched" = "false" ]; then
       # Req 5.3: 1 件でも一致しない → 即 semantic（保守的判定）
-      if [ -z "$first_unmatched" ]; then
-        first_unmatched="$path"
-      fi
-      # ログのため最初の unmatched path を保持し、ループは即抜けで OK
+      first_unmatched="$path"
       break
     fi
     match_count=$((match_count + 1))
@@ -1467,6 +1466,7 @@ ar_classify_diff() {
     # Req 5.5: 判定結果と最初の unmatched path をログに含める
     ar_log "PR #${pr_number}: classification=semantic unmatch=${first_unmatched}"
     echo "semantic"
+    echo "$first_unmatched"
     return 0
   fi
 
@@ -1740,6 +1740,129 @@ EOF
     return 1
   fi
   return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_handle_pr: 1 PR の Phase D 処理を実行
+#   （rebase 試行 → 分類 → mechanical/semantic 後処理 / 失敗時 escalate）
+#
+#   入力: $1 = pr_json（gh pr list の 1 要素 JSON）
+#   戻り値:
+#     0  : mechanical 完了
+#     1  : semantic 完了
+#     2  : failed（claude-failed 付与済み）
+#     10 : skip（rebase 不要 / push 待ち UNKNOWN 等、次サイクルに委ねる）
+#
+#   Req 3.4, 4.4, 4.5, 5.5, 7.6, NFR 2.1, NFR 5.2
+# ─────────────────────────────────────────────────────────────────────────────
+ar_handle_pr() {
+  local pr_json="$1"
+
+  local pr_number head_ref base_ref pr_url pr_title
+  pr_number=$(echo "$pr_json" | jq -r '.number')
+  head_ref=$(echo "$pr_json"  | jq -r '.headRefName')
+  base_ref=$(echo "$pr_json"  | jq -r '.baseRefName')
+  pr_url=$(echo "$pr_json"    | jq -r '.url')
+  pr_title=$(echo "$pr_json"  | jq -r '.title // ""')
+
+  # 1. Claude rebase を試行
+  local rebase_output rebase_rc=0
+  rebase_output=$(ar_run_claude_rebase "$pr_number" "$pr_title" "$pr_url" "$head_ref" "$base_ref") || rebase_rc=$?
+
+  case "$rebase_rc" in
+    0)
+      # 成功（rebase + push 完了）。後続で分類へ進む
+      ;;
+    5)
+      # rebase 不要（既に base が head の祖先）。Re-check が拾うべきケースとして skip
+      ar_log "PR #${pr_number}: rebase 不要（already up-to-date with base, skip）action=skip url=${pr_url}"
+      return 10
+      ;;
+    1)
+      ar_escalate_to_failed "$pr_number" "conflict-unresolved" || true
+      ar_log "PR #${pr_number}: classification=failed reason=conflict-unresolved action=escalate url=${pr_url}"
+      return 2
+      ;;
+    2)
+      ar_escalate_to_failed "$pr_number" "timeout" || true
+      ar_log "PR #${pr_number}: classification=failed reason=timeout action=escalate url=${pr_url}"
+      return 2
+      ;;
+    3)
+      ar_escalate_to_failed "$pr_number" "push-failed" || true
+      ar_log "PR #${pr_number}: classification=failed reason=push-failed action=escalate url=${pr_url}"
+      return 2
+      ;;
+    4)
+      ar_escalate_to_failed "$pr_number" "fetch-failed" || true
+      ar_log "PR #${pr_number}: classification=failed reason=fetch-failed action=escalate url=${pr_url}"
+      return 2
+      ;;
+    *)
+      ar_escalate_to_failed "$pr_number" "conflict-unresolved" || true
+      ar_log "PR #${pr_number}: classification=failed reason=unknown(rc=${rebase_rc}) action=escalate url=${pr_url}"
+      return 2
+      ;;
+  esac
+
+  # 2. 成功した SHA を parse（"<before> <after>" の 1 行）
+  local before_sha after_sha
+  before_sha=$(echo "$rebase_output" | awk '{print $1}')
+  after_sha=$(echo "$rebase_output"  | awk '{print $2}')
+  if [ -z "$before_sha" ] || [ -z "$after_sha" ]; then
+    ar_warn "PR #${pr_number}: rebase 成功だが SHA を parse できず、escalate"
+    ar_escalate_to_failed "$pr_number" "conflict-unresolved" || true
+    return 2
+  fi
+
+  # 3. push 後の head を origin から fetch して classify に使う
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" git fetch origin "$head_ref" "$base_ref" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: rebase 後の git fetch に失敗"
+  fi
+
+  # 4. mechanical / semantic を判定（Req 5.x）
+  local classify_output classification first_unmatched=""
+  classify_output=$(ar_classify_diff "$pr_number" "$base_ref" "$head_ref")
+  classification=$(echo "$classify_output" | sed -n '1p')
+  first_unmatched=$(echo "$classify_output" | sed -n '2p')
+
+  # 5. 分類別の後処理
+  if [ "$classification" = "mechanical" ]; then
+    if ar_apply_mechanical "$pr_number"; then
+      ar_log "PR #${pr_number}: classification=mechanical before=${before_sha} after=${after_sha} action=label-removed url=${pr_url}"
+      return 0
+    else
+      ar_log "PR #${pr_number}: classification=mechanical before=${before_sha} after=${after_sha} action=label-remove-failed url=${pr_url}"
+      # ラベル除去失敗は failed 扱いにしない（次サイクルで再試行可能 / Error Handling 節）
+      return 0
+    fi
+  fi
+
+  # semantic（または `git diff` 失敗時の保守的 semantic）
+  local semantic_rc=0
+  ar_apply_semantic "$pr_number" "$pr_url" "$before_sha" "$after_sha" "$first_unmatched" || semantic_rc=$?
+  case "$semantic_rc" in
+    0)
+      ar_log "PR #${pr_number}: classification=semantic before=${before_sha} after=${after_sha} unmatch=${first_unmatched:-(unknown)} action=dismissed+ready url=${pr_url}"
+      return 1
+      ;;
+    1)
+      # dismissal 失敗 → escalate
+      ar_escalate_to_failed "$pr_number" "dismissal-failed" || true
+      ar_log "PR #${pr_number}: classification=failed reason=dismissal-failed before=${before_sha} after=${after_sha} action=escalate url=${pr_url}"
+      return 2
+      ;;
+    2)
+      # label / comment の部分失敗。dismissal は成功しているので semantic 扱いを維持
+      ar_log "PR #${pr_number}: classification=semantic before=${before_sha} after=${after_sha} action=dismissed+partial-fail url=${pr_url}"
+      return 1
+      ;;
+    *)
+      ar_escalate_to_failed "$pr_number" "dismissal-failed" || true
+      ar_log "PR #${pr_number}: classification=failed reason=unknown-semantic(rc=${semantic_rc}) action=escalate url=${pr_url}"
+      return 2
+      ;;
+  esac
 }
 
 process_auto_rebase() {
