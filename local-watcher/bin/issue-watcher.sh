@@ -1650,6 +1650,98 @@ EOF
   return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_escalate_to_failed: `claude-failed` ラベルを付与し、原因種別と手動復旧手順を
+#   含むコメントを 1 件投稿する。`needs-rebase` ラベルには触らない（Req 8.1）。
+#
+#   入力: $1=pr_number, $2=reason
+#     reason ∈ { "conflict-unresolved", "timeout", "push-failed",
+#                "dismissal-failed", "fetch-failed" }
+#   戻り値: 0=成功、1=失敗（WARN）
+#
+#   Req 4.4, 4.5, 7.6, 8.1, 8.2, 8.3, 8.4
+# ─────────────────────────────────────────────────────────────────────────────
+ar_escalate_to_failed() {
+  local pr_number="$1"
+  local reason="$2"
+
+  local reason_desc recovery
+  case "$reason" in
+    conflict-unresolved)
+      reason_desc="Claude が conflict を解消できませんでした（working tree が dirty 残置、または rebase 自体が走らなかった可能性）"
+      recovery="手動で \`gh pr checkout ${pr_number} && git rebase origin/${BASE_BRANCH}\` を実施し、conflict を解消してから force-with-lease push してください"
+      ;;
+    timeout)
+      reason_desc="Claude rebase が \`${AUTO_REBASE_MAX_TURNS_SEC}\` 秒の timeout を超過しました"
+      recovery="PR 規模が大きい場合は手動 rebase を推奨します。次回サイクルで再試行したい場合は \`claude-failed\` ラベルを手動で外してください"
+      ;;
+    push-failed)
+      reason_desc="rebase は成功しましたが \`git push --force-with-lease\` に失敗しました（リモートが先行している可能性）"
+      recovery="\`gh pr checkout ${pr_number} && git pull --rebase origin ${BASE_BRANCH}\` でリモートを取り込んでから手動 push してください"
+      ;;
+    dismissal-failed)
+      reason_desc="semantic 判定後に approving review の dismissal API が失敗しました"
+      recovery="GitHub の Reviews UI から手動で approve を取り消し、変更内容を再レビューしてください。watcher の token が PR review dismissal 権限を持っているか（admin / maintain ロール相当）も確認してください"
+      ;;
+    fetch-failed)
+      reason_desc="rebase に到達する前に \`git fetch\` / \`git checkout\` が失敗しました"
+      recovery="ネットワーク疎通とリモート ref の存在を確認してください。次回サイクルで自動再試行はしません（\`claude-failed\` 解除が必要）"
+      ;;
+    *)
+      reason_desc="未知の失敗理由: ${reason}"
+      recovery="watcher の log（\`auto-rebase:\` prefix）を確認し、手動で復旧してください"
+      ;;
+  esac
+
+  local label_rc=0
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh pr edit "$pr_number" --repo "$REPO" --add-label "$LABEL_FAILED" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: claude-failed ラベル付与に失敗（理由: ${reason}）"
+    label_rc=1
+  fi
+
+  local comment_body
+  comment_body=$(cat <<EOF
+## Phase D: Claude rebase が失敗しました（人間エスカレーション）
+
+watcher (Phase D Auto Rebase Processor) が本 PR の \`needs-rebase\` 状態に対して
+Claude による rebase を実行しましたが、**失敗した**ためエスカレーションします。
+
+### 失敗種別
+
+\`${reason}\`
+
+### 詳細
+
+${reason_desc}
+
+### 推奨復旧手順
+
+${recovery}
+
+---
+
+_本コメントは Phase D Auto Rebase Processor が自動投稿しました。\`claude-failed\`
+ラベルが付いている間、本機能は同一 PR への rebase 再試行を行いません（Req 8.4）。
+復旧後は \`claude-failed\` ラベルを手動で外してください。_
+
+<!-- idd-claude:auto-rebase pr=${pr_number} reason=${reason} -->
+EOF
+)
+
+  local comment_rc=0
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: claude-failed エスカレーションコメント投稿に失敗"
+    comment_rc=1
+  fi
+
+  if [ "$label_rc" -ne 0 ] || [ "$comment_rc" -ne 0 ]; then
+    return 1
+  fi
+  return 0
+}
+
 process_auto_rebase() {
   # Req 1.1: opt-in gate（未設定 / `off` / 不正値で起動しない）
   if [ "$AUTO_REBASE_MODE" = "off" ]; then
