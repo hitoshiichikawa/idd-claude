@@ -1199,6 +1199,59 @@ ar_fetch_candidates() {
     ]'
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_build_prompt: auto-rebase-prompt.tmpl のプレースホルダ展開
+#   入力: $1=pr_number, $2=pr_title, $3=pr_url, $4=head_ref, $5=base_ref
+#   出力: stdout に展開後の prompt 本文
+#   戻り値: 0=成功、1=template が無い
+#
+#   Req 4.1: Claude rebase 試行に必要な PR コンテキストを 1 round で渡す
+#   既存 pi_build_iteration_prompt の awk 置換方式を踏襲（単一行値のみ扱う）。
+#   複数行値は不要なため、ENVIRON 経由の特殊扱いはしない（template が小さい）。
+# ─────────────────────────────────────────────────────────────────────────────
+ar_build_prompt() {
+  local pr_number="$1"
+  local pr_title="$2"
+  local pr_url="$3"
+  local head_ref="$4"
+  local base_ref="$5"
+
+  if [ ! -f "$AUTO_REBASE_TEMPLATE" ]; then
+    ar_warn "template not found: $AUTO_REBASE_TEMPLATE"
+    return 1
+  fi
+
+  awk \
+    -v repo="$REPO" \
+    -v pr_number="$pr_number" \
+    -v pr_title="$pr_title" \
+    -v pr_url="$pr_url" \
+    -v head_ref="$head_ref" \
+    -v base_ref="$base_ref" \
+    -v base_branch="$BASE_BRANCH" \
+    '
+    function repl(s, key, val,    out, idx) {
+      out = ""
+      while ((idx = index(s, key)) > 0) {
+        out = out substr(s, 1, idx-1) val
+        s = substr(s, idx + length(key))
+      }
+      return out s
+    }
+    {
+      line = $0
+      line = repl(line, "{{REPO}}", repo)
+      line = repl(line, "{{PR_NUMBER}}", pr_number)
+      line = repl(line, "{{PR_TITLE}}", pr_title)
+      line = repl(line, "{{PR_URL}}", pr_url)
+      line = repl(line, "{{HEAD_REF}}", head_ref)
+      line = repl(line, "{{BASE_REF}}", base_ref)
+      line = repl(line, "{{BASE_BRANCH}}", base_branch)
+      print line
+    }
+    ' "$AUTO_REBASE_TEMPLATE"
+}
+
 process_auto_rebase() {
   # Req 1.1: opt-in gate（未設定 / `off` / 不正値で起動しない）
   if [ "$AUTO_REBASE_MODE" = "off" ]; then
