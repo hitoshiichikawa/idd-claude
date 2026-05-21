@@ -182,6 +182,7 @@ Reviewer / PjM）は、以下の方針で **内部思考言語と出力言語を
 - **`idd-claude-labels.sh` のラベルセット**: ラベル追加は OK、既存ラベル削除 / 名前変更は deprecation 期間を経てから
 - **モデル ID デフォルト更新**: 既存ユーザが明示 override している前提で、env default のみ更新
 - **README との二重管理**: 挙動を変えたら必ず README の該当箇所も同じ PR で更新する
+- **Phase B Promote Pipeline (#15)**: `PROMOTE_PIPELINE_ENABLED=true` の **明示的 opt-in 制**で、未設定 / `false` の場合は導入前と完全に同一の挙動を保つ。2-branch model（`BASE_BRANCH != PROMOTION_TARGET_BRANCH`）でのみ起動する。`staged-for-release` ラベルは #100 の人間付与運用と同一ラベルを共有し、source 区別はしない。revert / promote はすべて `--force-with-lease` または fast-forward 限定で `--force`（無条件）は使わない
 
 ---
 
