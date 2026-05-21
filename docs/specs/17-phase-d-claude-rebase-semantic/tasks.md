@@ -106,7 +106,7 @@
 
 ## 4. Orchestration 配線（既存 Phase A 系列との競合排除）
 
-- [ ] 4.1 `process_merge_queue` 呼び出し（L1233）の直後に `process_auto_rebase` を直列配置
+- [x] 4.1 `process_merge_queue` 呼び出し（L1233）の直後に `process_auto_rebase` を直列配置
   - 既存呼び出し行 `process_merge_queue || mq_warn "..."` の**直後**に 1 行追加: `process_auto_rebase || ar_warn "process_auto_rebase が想定外のエラーで終了しました（後続 Issue 処理は継続）"`
   - これにより Re-check（先行）→ Phase A 本体 → Phase D の順序が確定し、Req 3.1〜3.3 が直列順序により構造的に保証される
   - 既存ラベル名（`needs-rebase` / `claude-failed` / `ready-for-review` 等）の名前と意味は変更せず、Phase D は既存定数（`$LABEL_NEEDS_REBASE` / `$LABEL_FAILED` / `$LABEL_READY`）を再利用する（NFR 1.3）
