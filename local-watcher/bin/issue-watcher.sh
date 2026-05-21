@@ -1386,6 +1386,96 @@ ar_run_claude_rebase() {
   return "$rc"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_classify_diff: rebase 後 head と base 間の累積 diff の path 集合を
+#   `MECHANICAL_PATHS` allowlist と照合し `mechanical` / `semantic` を判定。
+#
+#   入力: $1=pr_number, $2=base_ref, $3=head_ref
+#   出力 (stdout 1 行): `mechanical` or `semantic`
+#   戻り値: 0=正常、1=`git diff` 失敗（呼び出し側は保守的に `semantic` 扱い）
+#
+#   Req 5.1, 5.2, 5.3, 5.4, 5.5
+# ─────────────────────────────────────────────────────────────────────────────
+ar_classify_diff() {
+  local pr_number="$1"
+  local base_ref="$2"
+  local head_ref="$3"
+
+  # Req 5.4: MECHANICAL_PATHS が空なら全件 semantic（保守的判定）
+  if [ -z "$MECHANICAL_PATHS" ]; then
+    ar_log "PR #${pr_number}: classification=semantic (MECHANICAL_PATHS 未設定)"
+    echo "semantic"
+    return 0
+  fi
+
+  # 変更 path 一覧を取得（base..head の累積 diff）
+  local diff_range="origin/${base_ref}..origin/${head_ref}"
+  local changed_paths
+  if ! changed_paths=$(timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      git diff --name-only "$diff_range" 2>/dev/null); then
+    # 取得失敗時も保守的に semantic
+    ar_log "PR #${pr_number}: classification=semantic (git diff 失敗)"
+    echo "semantic"
+    return 1
+  fi
+
+  if [ -z "$changed_paths" ]; then
+    # 変更ファイルゼロは想定外（呼び出し側で skip 判定済みだが、念のため semantic に倒す）
+    ar_log "PR #${pr_number}: classification=semantic (変更ファイルなし、保守的扱い)"
+    echo "semantic"
+    return 0
+  fi
+
+  # MECHANICAL_PATHS をカンマ区切りで配列展開
+  local -a patterns=()
+  local IFS=','
+  read -ra patterns <<< "$MECHANICAL_PATHS"
+  IFS=$' \t\n'
+
+  # 各 path について「いずれかの pattern に一致」を確認
+  local path matched pattern first_unmatched=""
+  local match_count=0 total_count=0
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    total_count=$((total_count + 1))
+    matched=false
+    for pattern in "${patterns[@]}"; do
+      # 前後空白除去
+      pattern="${pattern# }"
+      pattern="${pattern% }"
+      [ -z "$pattern" ] && continue
+      # POSIX bash の path matching (`==` + glob)。
+      # 右辺の変数 glob 比較は意図的なので SC2053 を局所無効化。
+      # shellcheck disable=SC2053
+      if [[ "$path" == $pattern ]]; then
+        matched=true
+        break
+      fi
+    done
+    if [ "$matched" = "false" ]; then
+      # Req 5.3: 1 件でも一致しない → 即 semantic（保守的判定）
+      if [ -z "$first_unmatched" ]; then
+        first_unmatched="$path"
+      fi
+      # ログのため最初の unmatched path を保持し、ループは即抜けで OK
+      break
+    fi
+    match_count=$((match_count + 1))
+  done <<< "$changed_paths"
+
+  if [ -n "$first_unmatched" ]; then
+    # Req 5.5: 判定結果と最初の unmatched path をログに含める
+    ar_log "PR #${pr_number}: classification=semantic unmatch=${first_unmatched}"
+    echo "semantic"
+    return 0
+  fi
+
+  # Req 5.2: 全 path 一致 → mechanical
+  ar_log "PR #${pr_number}: classification=mechanical paths=${match_count}"
+  echo "mechanical"
+  return 0
+}
+
 process_auto_rebase() {
   # Req 1.1: opt-in gate（未設定 / `off` / 不正値で起動しない）
   if [ "$AUTO_REBASE_MODE" = "off" ]; then
