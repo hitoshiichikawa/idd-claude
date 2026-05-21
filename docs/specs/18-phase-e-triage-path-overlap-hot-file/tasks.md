@@ -15,7 +15,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.5_
   - _Boundary: Triage Prompt Template_
 
-- [ ] 2. `awaiting-slot` ラベルを `idd-claude-labels.sh` に追加 (P)
+- [x] 2. `awaiting-slot` ラベルを `idd-claude-labels.sh` に追加 (P)
   - `repo-template/.github/scripts/idd-claude-labels.sh` の `LABELS=( ... )` 配列末尾に
     `"awaiting-slot|c5def5|【Issue 用】 hot file 競合予防で同サイクル dispatch を見送り中（Phase E Path Overlap Checker が付与・除去）"` を 1 行追加
   - 既存ラベル 13 行の名前 / 色 / 説明文は変更しない（Req 7.3）
