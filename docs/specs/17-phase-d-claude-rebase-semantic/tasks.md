@@ -38,7 +38,7 @@
   - `auto-rebase-prompt.tmpl` のプレースホルダ（`{{REPO}}` / `{{PR_NUMBER}}` / `{{PR_TITLE}}` / `{{PR_URL}}` / `{{HEAD_REF}}` / `{{BASE_REF}}` / `{{BASE_BRANCH}}`）を awk 置換で展開する関数を実装（既存 `pi_build_iteration_prompt` を参考）
   - _Requirements: 4.1_
 
-- [ ] 2.2 `ar_run_claude_rebase` で Claude CLI 起動 + rollback + `--force-with-lease` push を実装
+- [x] 2.2 `ar_run_claude_rebase` で Claude CLI 起動 + rollback + `--force-with-lease` push を実装
   - `(subshell + trap)` で `git rebase --abort` + `git checkout "$BASE_BRANCH"` を保証（Phase A `mq_try_rebase_pr` 踏襲）
   - `git fetch origin "$head_ref" "$base_ref"` → `git checkout -B "$head_ref" "origin/$head_ref"` → before_sha 取得 → `timeout "$AUTO_REBASE_MAX_TURNS_SEC" claude --print "$prompt" --model "$AUTO_REBASE_MODEL" --permission-mode bypassPermissions --max-turns "$AUTO_REBASE_MAX_TURNS" --output-format stream-json --verbose` → claude 終了後 dirty check → after_sha 取得 → `git push --force-with-lease`
   - 戻り値仕様: `0`=成功、`1`=conflict 未解消（dirty 残置）、`2`=timeout（exit 124）、`3`=push 失敗、`4`=fetch/checkout 失敗、`5`=rebase 不要（skip）
