@@ -96,7 +96,7 @@
   - _Requirements: 3.4, 4.4, 4.5, 5.5, 7.6, NFR 2.1_
   - _Depends: 2.2, 3.1, 3.2, 3.4, 3.5_
 
-- [ ] 3.7 `process_auto_rebase` の本処理ループとサマリ集計を完成させる
+- [x] 3.7 `process_auto_rebase` の本処理ループとサマリ集計を完成させる
   - 1.3 で取得した候補配列を順次 `ar_handle_pr` に渡す
   - 戻り値別カウンタ（mechanical / semantic / failed / skip / overflow）を集計
   - `ar_log "サマリ: mechanical=N, semantic=N, failed=N, skip=N, overflow=N"` を 1 件出力（Req 3.4 / NFR 2.2）
