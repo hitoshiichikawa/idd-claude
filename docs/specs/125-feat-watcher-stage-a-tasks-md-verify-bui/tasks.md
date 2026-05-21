@@ -13,15 +13,15 @@
   - `shellcheck` を流して警告ゼロを維持
   - _Requirements: 4.1, 4.2, 4.3, 4.5, NFR 1.1, NFR 3.3_
 
-- [ ] 2. Stage A Verify Module のヘルパ関数群を実装
-- [ ] 2.1 `sav_log` / `sav_warn` / `sav_error` ロガーを追加 (P)
+- [x] 2. Stage A Verify Module のヘルパ関数群を実装
+- [x] 2.1 `sav_log` / `sav_warn` / `sav_error` ロガーを追加 (P)
   - `Stage Checkpoint Module` ブロック（L2985-L3014 周辺）の直前 or 直後を推奨。既存 `sc_log` と同じファイル位置に並置
   - 行頭 prefix は `[YYYY-MM-DD HH:MM:SS] [$REPO] stage-a-verify:` 固定（Issue #119 規約 / NFR 4.1 / NFR 4.2）
   - warn / error は stderr へ
   - _Requirements: 5.1, 5.2, NFR 4.1, NFR 4.2_
   - _Boundary: issue-watcher.sh (logger 関数群)_
 
-- [ ] 2.2 `stage_a_verify_extract_command` 関数を実装 (P)
+- [x] 2.2 `stage_a_verify_extract_command` 関数を実装 (P)
   - design.md「Components and Interfaces / stage_a_verify_extract_command」の擬似コードに従う
   - 関数内 readonly 配列 `_SAV_KEYWORDS` に design.md で確定したキーワード集合を列挙
   - awk 1 パスで末尾走査し、末尾に最も近い 1 行を stdout に出す（O(N), Req 1.1 / 1.2 / NFR 3.1）
@@ -30,7 +30,7 @@
   - _Requirements: 1.1, 1.2, 1.5, NFR 2.1, NFR 3.1_
   - _Boundary: issue-watcher.sh (stage_a_verify_extract_command)_
 
-- [ ] 2.3 `stage_a_verify_resolve_command` 関数を実装 (P)
+- [x] 2.3 `stage_a_verify_resolve_command` 関数を実装 (P)
   - `STAGE_A_VERIFY_COMMAND` 非空時は最優先で採用（Req 4.4 / NFR 2.2）
   - 空ならば `stage_a_verify_extract_command` を呼ぶ
   - 解決失敗時は exit code 1
@@ -38,7 +38,7 @@
   - _Boundary: issue-watcher.sh (stage_a_verify_resolve_command)_
   - _Depends: 2.2_
 
-- [ ] 2.4 round counter helpers (`_round_path` / `_read_round` / `_bump_round` / `_reset_round`) を実装 (P)
+- [x] 2.4 round counter helpers (`_round_path` / `_read_round` / `_bump_round` / `_reset_round`) を実装 (P)
   - sidecar path は `$REPO_DIR/$SPEC_DIR_REL/.stage-a-verify-round`
   - 不在は round=0、書き込み失敗時は `sav_error` で警告（呼び出し元は差し戻し挙動を強制）
   - 書き込みは `printf '%d\n' "$N" > "$path"`
