@@ -77,7 +77,7 @@
   - _Requirements: 9.1, 9.2, 9.3, 9.4_
   - _Boundary: README Section_
 
-- [ ] 8. 静的検査・スモークテスト・dogfood 手順を実施
+- [x] 8. 静的検査・スモークテスト・dogfood 手順を実施
   - `shellcheck local-watcher/bin/issue-watcher.sh` を実行し warnings ゼロを確認（Req 11.1）
   - `shellcheck repo-template/.github/scripts/idd-claude-labels.sh` を実行し warnings ゼロを確認
   - design.md「Testing Strategy」節の Unit-level Manual Smoke 4 ケース（`po_parse_triage_edit_paths` / `po_compute_overlap` / env normalize / sticky idempotency）を bash `source` で関数を直接呼んで入出力テーブルを検証
