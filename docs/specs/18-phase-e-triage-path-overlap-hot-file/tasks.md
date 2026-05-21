@@ -65,7 +65,7 @@
   - _Boundary: Dispatcher Integration Point, Awaiting Slot Re-evaluator_
   - _Depends: 5_
 
-- [ ] 7. README に Phase E 節を追加 (P)
+- [x] 7. README に Phase E 節を追加 (P)
   - `README.md` の Phase D 節（`## Auto Rebase Processor (Phase D)`）の **後** に新規節
     `## Path Overlap Checker (Phase E)` を追加。サブセクション: 概要 / 環境変数 / in-flight ラベル定義 / 自然解消の流れ / 観測ログ / dogfood 確認手順 / Migration Note（後方互換性）
   - 「オプション機能（標準有効 / 常時有効）一覧」表（既存 Phase B / C / D 行の近傍）に
