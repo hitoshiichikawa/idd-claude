@@ -64,7 +64,7 @@
   - _Requirements: 6.1, 6.2, 6.3, 6.4_
   - _Boundary: ar_apply_mechanical_
 
-- [ ] 3.3 `ar_dismiss_all_approvals` で review dismissal API を実装 (P)
+- [x] 3.3 `ar_dismiss_all_approvals` で review dismissal API を実装 (P)
   - `gh api "/repos/${REPO}/pulls/${pr_number}/reviews"` で全 review を取得
   - jq で `state == "APPROVED"` の id のみ抽出
   - 各 id について `gh api -X PUT "/repos/${REPO}/pulls/${pr_number}/reviews/{id}/dismissals" -f message="Phase D semantic rebase: re-review required"` を順次実行
