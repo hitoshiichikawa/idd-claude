@@ -4,8 +4,8 @@
 > 設計参照: `docs/specs/125-feat-watcher-stage-a-tasks-md-verify-bui/design.md`
 > 既存 watcher との後方互換性（NFR 1.1〜1.3）を維持すること。`STAGE_A_VERIFY_ENABLED=false` 明示時の挙動は本機能導入前と完全一致でなければならない。
 
-- [ ] 1. Config ブロック: 新 env 3 種の追加
-- [ ] 1.1 `local-watcher/bin/issue-watcher.sh` の Config ブロックに `STAGE_A_VERIFY_ENABLED` / `STAGE_A_VERIFY_TIMEOUT` / `STAGE_A_VERIFY_COMMAND` を追加
+- [x] 1. Config ブロック: 新 env 3 種の追加
+- [x] 1.1 `local-watcher/bin/issue-watcher.sh` の Config ブロックに `STAGE_A_VERIFY_ENABLED` / `STAGE_A_VERIFY_TIMEOUT` / `STAGE_A_VERIFY_COMMAND` を追加
   - 既存 `STAGE_CHECKPOINT_ENABLED` ブロック（L179-L185 周辺）の直後に新節「─── Stage A Verify 設定 (#125) ───」を挿入
   - `STAGE_A_VERIFY_ENABLED="${STAGE_A_VERIFY_ENABLED:-true}"` / `STAGE_A_VERIFY_TIMEOUT="${STAGE_A_VERIFY_TIMEOUT:-600}"` / `STAGE_A_VERIFY_COMMAND="${STAGE_A_VERIFY_COMMAND:-}"`
   - L251-L267 の `_idd_flag` ループ（#112 デフォルト有効化フラグの正規化）には **加えない**（本機能は `=false` 厳密一致のみ opt-out とし、他 8 種と同形ではあるが「未設定 vs 空 vs typo を opt-out として扱う」の判別が値検証ロジック上独立する。意図的に既存ループの正規化対象外とする）
