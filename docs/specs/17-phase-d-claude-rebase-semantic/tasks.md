@@ -57,7 +57,7 @@
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5_
   - _Boundary: ar_classify_diff_
 
-- [ ] 3.2 `ar_apply_mechanical` で `needs-rebase` 除去のみを実装 (P)
+- [x] 3.2 `ar_apply_mechanical` で `needs-rebase` 除去のみを実装 (P)
   - `gh pr edit "$pr_number" --repo "$REPO" --remove-label "$LABEL_NEEDS_REBASE"` の単一 API 呼び出し（個別 timeout 付与）
   - approve 維持 / 追加コメント無し（Req 6.1 / 6.3 を構造的に保証）
   - 戻り値: `0`=成功、`1`=API 失敗（呼び出し側で WARN）
