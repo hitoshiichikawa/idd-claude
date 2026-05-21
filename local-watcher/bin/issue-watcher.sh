@@ -2276,6 +2276,189 @@ po_load_edit_paths() {
   echo "$validated"
 }
 
+# ─── Phase E: In-Flight Collector (#18 Req 4.1〜4.4) ───
+# 現サイクルの in-flight Issue（候補自身を除く）を gh で 1 回列挙し、各 Issue の
+# edit_paths の union を JSON 配列で返す。
+#
+# in-flight 判定ラベル（Req 4.1）:
+#   claude-claimed, claude-picked-up, awaiting-design-review, ready-for-review,
+#   needs-iteration, needs-rebase, staged-for-release
+# 除外（Req 4.2）: st-failed, awaiting-slot
+# 候補自身を除外（Req 4.3）、同 repo のみ（Req 4.4: --repo "$REPO" 固定）
+#
+# Args: $1 = candidate issue number
+# Stdout: JSON 配列文字列（重複排除済 / 通常 `[]` 含む）
+# Return: 0 = 列挙 OK / 1 = gh API 失敗（caller は fail-open で empty 扱い + warn）
+po_collect_inflight_issues() {
+  local candidate="$1"
+
+  # 7 ラベルのいずれかを持ち、`st-failed` / `awaiting-slot` を持たない open Issue を
+  # OR 検索で抽出する。`gh issue list --label A --label B` は AND になるため、
+  # `--search 'label:A OR label:B OR ...'` 形式を使う（既存 Phase B / Phase D が同形式
+  # を採用済）。
+  local search_query
+  search_query=$(cat <<EOF
+is:open is:issue (label:"claude-claimed" OR label:"claude-picked-up" OR label:"awaiting-design-review" OR label:"ready-for-review" OR label:"needs-iteration" OR label:"needs-rebase" OR label:"staged-for-release") -label:"st-failed" -label:"awaiting-slot"
+EOF
+)
+  local issues_json
+  if ! issues_json=$(gh issue list --repo "$REPO" \
+      --search "$search_query" \
+      --json number \
+      --limit 50 2>/dev/null); then
+    return 1
+  fi
+
+  # 候補自身を除外（Req 4.3）、各 Issue について po_load_edit_paths を呼んで union 化
+  local accum='[]'
+  local n
+  while IFS= read -r n; do
+    [ -z "$n" ] && continue
+    if [ "$n" = "$candidate" ]; then
+      continue
+    fi
+    local paths
+    paths=$(po_load_edit_paths "$n")
+    # accum := accum + paths（jq で merge → unique）
+    accum=$(jq -nc \
+      --argjson a "$accum" \
+      --argjson b "$paths" \
+      '$a + $b | unique')
+  done < <(echo "$issues_json" | jq -r '.[].number')
+
+  echo "$accum"
+  return 0
+}
+
+# ─── Phase E: Overlap Engine (#18 Req 5.1 / 5.5 / 5.6) ───
+# candidate と in-flight の path 配列の積集合を top-level 粒度で計算する。
+#
+# 正規化規約:
+#   - 先頭 `./` を剥がす
+#   - 連続スラッシュ `/+` を `/` 1 つに圧縮
+#   - スラッシュを含むなら先頭セグメント + `/` を返す（ディレクトリ扱い）
+#   - スラッシュを含まないならそのまま（ルート直下ファイル扱い）
+#
+# 例:
+#   `local-watcher/bin/foo.sh` → `local-watcher/`
+#   `README.md`                → `README.md`
+#   `./docs/specs/18-foo/req.md` → `docs/`
+#
+# candidate が空配列なら常に積集合は空（Req 5.5 候補不在は dispatch 阻止しない）。
+#
+# Args: $1 = candidate edit_paths JSON 配列, $2 = in-flight union JSON 配列
+# Stdout: 交差 JSON 配列（正規化済 top-level key、重複排除済）
+# Return: 0 always
+po_compute_overlap() {
+  local cand_json="$1"
+  local inflight_json="$2"
+  jq -nc \
+    --argjson c "$cand_json" \
+    --argjson f "$inflight_json" '
+    def normalize:
+      sub("^\\./"; "")
+      | gsub("/+"; "/")
+      | if test("/") then
+          (split("/")[0] + "/")
+        else
+          .
+        end;
+    ($c | map(normalize) | unique) as $cn
+    | ($f | map(normalize) | unique) as $fn
+    | $cn | map(select(. as $p | $fn | index($p)))
+  '
+}
+
+# ─── Phase E: Awaiting Slot State Machine — apply (#18 Req 5.2 / 5.3 / 8.2) ───
+# `awaiting-slot` ラベルを付与（冪等）し、説明 sticky comment を post / update する。
+#
+# sticky comment marker: <!-- idd-claude:awaiting-slot:v1 -->
+# 同一 Issue に 1 件のみ。既存 marker 付きコメントがあれば PATCH で上書き、無ければ
+# 新規 create する（cron tick ごとのノイズ累積を抑制）。
+#
+# Args: $1 = candidate issue number, $2 = overlap JSON 配列（path 文字列）
+# Return: 0 = apply OK / 1 = 致命的失敗（呼び出し側 warn）
+po_apply_awaiting_slot() {
+  local issue_number="$1"
+  local overlap_json="$2"
+
+  # ラベル付与（冪等。既付与でも error にならない）
+  if ! gh issue edit "$issue_number" --repo "$REPO" \
+      --add-label "$LABEL_AWAITING_SLOT" >/dev/null 2>&1; then
+    return 1
+  fi
+  po_log "awaiting-slot added candidate=#${issue_number}"
+
+  # sticky comment 本文の組み立て
+  local overlap_md
+  overlap_md=$(echo "$overlap_json" | jq -r '
+    if length == 0 then
+      "_(overlap path が空ですが本コメントが呼ばれました。状態不整合の可能性あり)_"
+    else
+      map("- `" + . + "`") | join("\n")
+    end
+  ' 2>/dev/null || echo '_(overlap 抽出失敗)_')
+
+  local marker="<!-- idd-claude:awaiting-slot:v1 -->"
+  local body
+  body=$(cat <<EOF
+## ⏸️ Dispatch を見送り中（Phase E Path Overlap Checker）
+
+本 Issue が編集見込みの top-level path のうち、以下が現在 in-flight 中の他 Issue と重複しています。
+
+${overlap_md}
+
+先行 Issue の PR が merge されて in-flight 集合から外れた次サイクルで \`awaiting-slot\`
+ラベルが自動除去され、本 Issue は通常 dispatch に戻ります。手動介入は不要です。
+
+詳細は README の「Path Overlap Checker (Phase E)」節を参照してください。
+
+${marker}
+EOF
+)
+
+  # sticky 化: 既存 marker 付きコメントを検索 → あれば PATCH、無ければ新規 create
+  local comments_json
+  if ! comments_json=$(gh issue view "$issue_number" --repo "$REPO" --json comments 2>/dev/null); then
+    # コメント取得失敗時は新規 create を試みる（best-effort）
+    gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+    return 0
+  fi
+  local existing_url
+  existing_url=$(echo "$comments_json" | jq -r '
+    (.comments // [])
+    | map(select(.body | contains("<!-- idd-claude:awaiting-slot:v1 -->")))
+    | .[0].url // ""
+  ' 2>/dev/null || echo "")
+  local existing_comment_id=""
+  if [ -n "$existing_url" ]; then
+    existing_comment_id=$(printf '%s' "$existing_url" \
+      | sed -nE 's/.*#issuecomment-([0-9]+)$/\1/p')
+  fi
+  if [ -n "$existing_comment_id" ]; then
+    gh api -X PATCH "/repos/${REPO}/issues/comments/${existing_comment_id}" \
+      -f body="$body" >/dev/null 2>&1 || true
+  else
+    gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+# ─── Phase E: Awaiting Slot State Machine — clear (#18 Req 6.2 / 6.4 / 8.3) ───
+# `awaiting-slot` ラベルを除去する（冪等）。説明 sticky comment は事後監査用に残置する。
+#
+# Args: $1 = candidate issue number
+# Return: 0 = clear OK / 1 = ラベル除去失敗（呼び出し側 warn → 次サイクルで再試行）
+po_clear_awaiting_slot() {
+  local issue_number="$1"
+  if ! gh issue edit "$issue_number" --repo "$REPO" \
+      --remove-label "$LABEL_AWAITING_SLOT" >/dev/null 2>&1; then
+    return 1
+  fi
+  po_log "awaiting-slot cleared candidate=#${issue_number} (overlap empty)"
+  return 0
+}
+
 # pp_resolve_target_branch: `PROMOTION_TARGET_BRANCH` のリモート存在を検証し、
 # `BASE_BRANCH` と異なることを確認する（Req 1.1.3, 1.2.2）。
 # 戻り値: 0 = 検証 OK / 1 = 中止すべき状態
