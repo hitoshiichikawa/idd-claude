@@ -87,7 +87,7 @@
   - _Requirements: 4.4, 4.5, 7.6, 8.1, 8.2, 8.3_
   - _Boundary: ar_escalate_to_failed_
 
-- [ ] 3.6 `ar_handle_pr` で 1 PR 分の処理フロー（rebase → 分類 → 後処理 / escalate）を統合
+- [x] 3.6 `ar_handle_pr` で 1 PR 分の処理フロー（rebase → 分類 → 後処理 / escalate）を統合
   - `ar_run_claude_rebase` の戻り値に応じて `ar_escalate_to_failed`（種別: conflict-unresolved / timeout / push-failed）に振り分け
   - 成功時は `ar_classify_diff` の結果で `ar_apply_mechanical` / `ar_apply_semantic` に分岐
   - `ar_apply_semantic` 内の dismissal 失敗時は `ar_escalate_to_failed dismissal-failed` を呼ぶ
