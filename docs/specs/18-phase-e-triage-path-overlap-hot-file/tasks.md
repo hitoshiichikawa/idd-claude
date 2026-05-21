@@ -55,7 +55,7 @@
   - _Boundary: In-Flight Collector, Overlap Engine, Awaiting Slot State Machine_
   - _Depends: 3, 4_
 
-- [ ] 6. Dispatcher 統合点 `po_check_dispatch_gate` を実装し `_dispatcher_run` に挿入
+- [x] 6. Dispatcher 統合点 `po_check_dispatch_gate` を実装し `_dispatcher_run` に挿入
   - `issue-watcher.sh` に `po_check_dispatch_gate $issue_number $labels_json` を追加（戻り値 0 = claim 続行 / 1 = dispatch skip）
   - 関数冒頭で `[ "$PATH_OVERLAP_CHECK" = "true" ] || return 0` の早期 return で opt-in gate を成立（Req 1.2 / 1.3）
   - `_dispatcher_run` の candidate ループ内、`check_existing_impl_pr "$issue_number"` 通過直後・`_dispatcher_find_free_slot` 呼び出し前に挿入。skip 時は `continue` でループ次へ
