@@ -2276,9 +2276,27 @@ po_load_edit_paths() {
   echo "$validated"
 }
 
-# ─── Phase E: In-Flight Collector (#18 Req 4.1〜4.4) ───
+# ─── Phase E: In-Flight Collector (#18 Req 4.1〜4.4 / 5.3 / 8.1) ───
 # 現サイクルの in-flight Issue（候補自身を除く）を gh で 1 回列挙し、各 Issue の
-# edit_paths の union を JSON 配列で返す。
+# edit_paths を読み出して **union 配列**と **path → holder Issue 番号配列の map**
+# の両方を含む JSON object を返す。
+#
+# 戻り値の JSON object schema:
+#   {
+#     "union":   ["local-watcher/", "README.md"],         # 正規化前の paths を union
+#     "holders": {                                          # 正規化前の path → holders
+#       "local-watcher/": [39, 40],
+#       "README.md":      [40]
+#     }
+#   }
+#
+# Note: holders map のキーは **正規化前の生 path**（in-flight Issue が persist した
+# まま）。`po_check_dispatch_gate` 側で overlap path（正規化済 top-level）と
+# 突合する際は同じ `normalize` 関数を holders map のキーにも適用してから引く。
+#
+# Req 12.1 補足: API 呼び出し回数は本拡張で増えていない。各 in-flight Issue について
+# `po_load_edit_paths` を 1 回呼ぶのは従来同様で、その戻り値から union と holders map
+# を同時に構築するだけ。candidate 側の `po_load_edit_paths` も 1 回のまま。
 #
 # in-flight 判定ラベル（Req 4.1）:
 #   claude-claimed, claude-picked-up, awaiting-design-review, ready-for-review,
@@ -2287,7 +2305,7 @@ po_load_edit_paths() {
 # 候補自身を除外（Req 4.3）、同 repo のみ（Req 4.4: --repo "$REPO" 固定）
 #
 # Args: $1 = candidate issue number
-# Stdout: JSON 配列文字列（重複排除済 / 通常 `[]` 含む）
+# Stdout: JSON object `{"union": [...], "holders": {path: [issue#, ...]}}`
 # Return: 0 = 列挙 OK / 1 = gh API 失敗（caller は fail-open で empty 扱い + warn）
 po_collect_inflight_issues() {
   local candidate="$1"
@@ -2309,8 +2327,10 @@ EOF
     return 1
   fi
 
-  # 候補自身を除外（Req 4.3）、各 Issue について po_load_edit_paths を呼んで union 化
-  local accum='[]'
+  # 候補自身を除外（Req 4.3）、各 Issue について po_load_edit_paths を呼んで
+  # union（unique 済 path 配列）と holders map（path → [issue#, ...]）を併走更新する。
+  local accum
+  accum='{"union": [], "holders": {}}'
   local n
   while IFS= read -r n; do
     [ -z "$n" ] && continue
@@ -2319,15 +2339,116 @@ EOF
     fi
     local paths
     paths=$(po_load_edit_paths "$n")
-    # accum := accum + paths（jq で merge → unique）
+    # accum := accum + (paths を union に merge / 各 path に対し holders[path] に n を追記)
+    # holders は array で持ち、重複 issue# は jq の unique で抑止する。
     accum=$(jq -nc \
-      --argjson a "$accum" \
-      --argjson b "$paths" \
-      '$a + $b | unique')
+      --argjson acc "$accum" \
+      --argjson paths "$paths" \
+      --argjson holder "$n" '
+      .union as $_ |
+      $acc
+      | .union = (.union + $paths | unique)
+      | reduce $paths[] as $p (
+          .;
+          .holders[$p] = ((.holders[$p] // []) + [$holder] | unique)
+        )
+    ')
   done < <(echo "$issues_json" | jq -r '.[].number')
 
   echo "$accum"
   return 0
+}
+
+# ─── Phase E: Holder Resolver (#18 Req 5.3 / 8.1) ───
+# overlap path（正規化済 top-level）と holders map（正規化前 path → [issue#, ...]）
+# から、各 overlap path に対応する holder Issue 番号配列を解決する。
+#
+# 既存 `po_compute_overlap` の `normalize` 規約（先頭 `./` 剥がし / 連続スラッシュ
+# 圧縮 / top-level セグメント + `/`）を holders map の生キーにも適用してから
+# 突合する。
+#
+# Args: $1 = overlap JSON 配列（正規化済 top-level path 文字列）
+#       $2 = holders map JSON（正規化前 path → [issue#, ...]）
+# Stdout: JSON object `{overlap_path: [issue#, ...], ...}`
+#         （overlap path はすべてキーに登場。holder が見つからない場合は空配列）
+# Return: 0 always
+po_resolve_overlap_holders() {
+  local overlap_json="$1"
+  local holders_json="$2"
+  jq -nc \
+    --argjson overlap "$overlap_json" \
+    --argjson holders "$holders_json" '
+    def normalize:
+      sub("^\\./"; "")
+      | gsub("/+"; "/")
+      | if test("/") then
+          (split("/")[0] + "/")
+        else
+          .
+        end;
+    # holders の生キーを normalize して bucket 化（同一 top-level に複数 raw path が
+    # 寄ってきた場合は holders を merge して unique）
+    ($holders | to_entries
+      | map(.key |= normalize)
+      | group_by(.key)
+      | map({ key: .[0].key, value: (map(.value) | add | unique) })
+      | from_entries
+    ) as $bucket
+    | reduce $overlap[] as $p (
+        {};
+        .[$p] = ($bucket[$p] // [])
+      )
+  '
+}
+
+# ─── Phase E: Holders Log Formatter (#18 Req 8.1) ───
+# overlap-holders map から overlap log line 用の holders フィールド文字列
+# （例: "#39,#40"）を生成する。重複 Issue# は除去、ソートして並び順を安定化。
+#
+# Args: $1 = overlap-holders map JSON（po_resolve_overlap_holders 出力）
+# Stdout: "#<N>,#<M>,..." or "" (holders が 1 件も無い場合)
+# Return: 0 always
+po_format_holders_for_log() {
+  local map_json="$1"
+  echo "$map_json" | jq -r '
+    [.[] | .[]] | unique | sort | map("#" + tostring) | join(",")
+  ' 2>/dev/null || echo ""
+}
+
+# ─── Phase E: Overlap Table Markdown Formatter (#18 Req 5.3) ───
+# overlap-holders map を sticky comment 本文の表形式 markdown に整形する。
+# design.md「Awaiting-Slot Sticky Comment Format」（design.md:855-863）参照。
+#
+# 出力例:
+#   | 重複 path | 保持中の Issue |
+#   |---|---|
+#   | `local-watcher/` | #39, #40 |
+#   | `README.md` | #40 |
+#
+# Args: $1 = overlap-holders map JSON
+# Stdout: markdown 表（先頭の見出し 2 行 + 各 overlap path 1 行）
+# Return: 0 always
+po_format_holders_table_md() {
+  local map_json="$1"
+  {
+    echo '| 重複 path | 保持中の Issue |'
+    echo '|---|---|'
+    echo "$map_json" | jq -r '
+      to_entries
+      | sort_by(.key)
+      | map(
+          "| `" + .key + "` | " +
+          (
+            if (.value | length) == 0 then
+              "_(holder 不明)_"
+            else
+              (.value | unique | sort | map("#" + tostring) | join(", "))
+            end
+          ) + " |"
+        )
+      | .[]
+    ' 2>/dev/null
+  }
 }
 
 # ─── Phase E: Overlap Engine (#18 Req 5.1 / 5.5 / 5.6) ───
@@ -2376,11 +2497,17 @@ po_compute_overlap() {
 # 同一 Issue に 1 件のみ。既存 marker 付きコメントがあれば PATCH で上書き、無ければ
 # 新規 create する（cron tick ごとのノイズ累積を抑制）。
 #
-# Args: $1 = candidate issue number, $2 = overlap JSON 配列（path 文字列）
+# 本文には Req 5.3 が要求する「どの path がどの in-flight Issue に保持されているか」
+# を表形式（design.md「Awaiting-Slot Sticky Comment Format」L855-863 準拠）で表示する。
+#
+# Args: $1 = candidate issue number
+#       $2 = overlap JSON 配列（正規化済 top-level path 文字列、後方互換用）
+#       $3 = overlap-holders map JSON（path → [issue#, ...]、Req 5.3 holder 情報）
 # Return: 0 = apply OK / 1 = 致命的失敗（呼び出し側 warn）
 po_apply_awaiting_slot() {
   local issue_number="$1"
   local overlap_json="$2"
+  local holders_map_json="${3:-}"
 
   # ラベル付与（冪等。既付与でも error にならない）
   if ! gh issue edit "$issue_number" --repo "$REPO" \
@@ -2390,14 +2517,22 @@ po_apply_awaiting_slot() {
   po_log "awaiting-slot added candidate=#${issue_number}"
 
   # sticky comment 本文の組み立て
-  local overlap_md
-  overlap_md=$(echo "$overlap_json" | jq -r '
-    if length == 0 then
-      "_(overlap path が空ですが本コメントが呼ばれました。状態不整合の可能性あり)_"
-    else
-      map("- `" + . + "`") | join("\n")
-    end
-  ' 2>/dev/null || echo '_(overlap 抽出失敗)_')
+  # holders_map_json が与えられた場合は表形式（| 重複 path | 保持中の Issue |）で
+  # 表示する（Req 5.3 + design.md L855-863）。未指定 / 空 map の場合は path のみの
+  # md リストにフォールバック（後方互換）。
+  local overlap_section
+  if [ -n "$holders_map_json" ] && \
+      [ "$(echo "$holders_map_json" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ]; then
+    overlap_section=$(po_format_holders_table_md "$holders_map_json")
+  else
+    overlap_section=$(echo "$overlap_json" | jq -r '
+      if length == 0 then
+        "_(overlap path が空ですが本コメントが呼ばれました。状態不整合の可能性あり)_"
+      else
+        map("- `" + . + "`") | join("\n")
+      end
+    ' 2>/dev/null || echo '_(overlap 抽出失敗)_')
+  fi
 
   local marker="<!-- idd-claude:awaiting-slot:v1 -->"
   local body
@@ -2406,7 +2541,7 @@ po_apply_awaiting_slot() {
 
 本 Issue が編集見込みの top-level path のうち、以下が現在 in-flight 中の他 Issue と重複しています。
 
-${overlap_md}
+${overlap_section}
 
 先行 Issue の PR が merge されて in-flight 集合から外れた次サイクルで \`awaiting-slot\`
 ラベルが自動除去され、本 Issue は通常 dispatch に戻ります。手動介入は不要です。
@@ -2481,12 +2616,16 @@ po_check_dispatch_gate() {
   local cand_paths
   cand_paths=$(po_load_edit_paths "$candidate")
 
-  # in-flight union を取得（Req 4.1〜4.4）。失敗時は fail-open で claim 続行
-  local inflight_paths
-  if ! inflight_paths=$(po_collect_inflight_issues "$candidate"); then
+  # in-flight union + holders map を取得（Req 4.1〜4.4 / 5.3 / 8.1）。
+  # 失敗時は fail-open で claim 続行
+  local inflight_obj
+  if ! inflight_obj=$(po_collect_inflight_issues "$candidate"); then
     po_warn "issue=#${candidate} in-flight 列挙に失敗、本サイクルは overlap 判定を skip して claim 続行"
     return 0
   fi
+  local inflight_paths inflight_holders
+  inflight_paths=$(echo "$inflight_obj" | jq -c '.union // []' 2>/dev/null || echo '[]')
+  inflight_holders=$(echo "$inflight_obj" | jq -c '.holders // {}' 2>/dev/null || echo '{}')
 
   # overlap 計算（Req 5.1 / 5.6）
   local overlap overlap_count
@@ -2500,10 +2639,22 @@ po_check_dispatch_gate() {
         '[.[].name] | index($lbl) // empty' 2>/dev/null || echo "")
 
   if [ "$overlap_count" -gt 0 ]; then
-    # Req 5.2 / 5.3 / 8.1 / 8.2: overlap 検出ログ → awaiting-slot 付与（未付与時のみ）
-    po_log "overlap detected candidate=#${candidate} paths=$(echo "$overlap" | jq -r 'join(",")')"
+    # Req 5.2 / 5.3 / 8.1 / 8.2: overlap 検出ログ（holders を含める）→ awaiting-slot
+    # 付与（未付与時のみ）。holders は overlap path（正規化済 top-level）ごとに
+    # in-flight Issue 番号配列を解決し、log では unique sort で平坦化する。
+    local overlap_holders_map holders_for_log paths_for_log
+    overlap_holders_map=$(po_resolve_overlap_holders "$overlap" "$inflight_holders")
+    holders_for_log=$(po_format_holders_for_log "$overlap_holders_map")
+    paths_for_log=$(echo "$overlap" | jq -r 'join(",")')
+    if [ -n "$holders_for_log" ]; then
+      po_log "overlap detected candidate=#${candidate} paths=${paths_for_log} holders=${holders_for_log}"
+    else
+      # holders が空（in-flight が close 直後 / holder 不明等）でも paths は記録し、
+      # holders=「-」で出力して欠落の事実をログに残す
+      po_log "overlap detected candidate=#${candidate} paths=${paths_for_log} holders=-"
+    fi
     if [ -z "$has_awaiting" ]; then
-      if ! po_apply_awaiting_slot "$candidate" "$overlap"; then
+      if ! po_apply_awaiting_slot "$candidate" "$overlap" "$overlap_holders_map"; then
         po_warn "issue=#${candidate} awaiting-slot 付与 / コメント投稿に失敗（次サイクルで再評価）"
       fi
     fi
