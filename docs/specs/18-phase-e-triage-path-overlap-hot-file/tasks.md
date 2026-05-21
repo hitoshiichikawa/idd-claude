@@ -24,7 +24,7 @@
   - _Requirements: 7.1, 7.2, 7.3_
   - _Boundary: Label Provisioning Script Edit_
 
-- [ ] 3. `issue-watcher.sh` に env 定数とログ関数群を追加
+- [x] 3. `issue-watcher.sh` に env 定数とログ関数群を追加
   - `local-watcher/bin/issue-watcher.sh` の `LABEL_*` 定数ブロック末尾に `LABEL_AWAITING_SLOT="awaiting-slot"` を追加
   - env var ブロック（既存 `STAGE_A_VERIFY_*` 周辺）の後に新規セクション `# ─── Phase E: Path Overlap Checker 設定 (#18) ───` を追加し、`PATH_OVERLAP_CHECK="${PATH_OVERLAP_CHECK:-off}"` を配置
   - `#112` の「デフォルト有効化フラグの値正規化」ループには **追加しない**（opt-in default off のため）
