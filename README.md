@@ -929,6 +929,11 @@ GitHub Issue 一覧画面で `label:staged-for-release` のみを指定すれば
 
 ```
 auto-dev (起票)
+   ↓ Path Overlap Gate (Phase E / PATH_OVERLAP_CHECK=true 時のみ)
+   ├─ overlap 検出 → + awaiting-slot (sticky comment 投稿、当該 tick の claim を skip)
+   │                       ↓ 次 cron tick で再評価
+   │                       ├─ overlap 継続 → awaiting-slot 維持・claim 見送り
+   │                       └─ overlap 解消 → − awaiting-slot → 通常 dispatch に合流
    ↓ Dispatcher claim
 claude-claimed (Triage 実行中)
    ↓ Triage
@@ -950,6 +955,14 @@ claude-claimed (Triage 実行中)
    └─ claude-picked-up (impl ルート)
                 ─→ Stage A → Stage B → ... 同上 ... → ready-for-review / claude-failed
 ```
+
+> **Phase E の `awaiting-slot` がポーリングクエリに現れない理由**: `awaiting-slot` は
+> **次 cron tick で再評価して自動解消する必要がある中間状態**のため、上記ポーリング除外
+> リスト（`-label:claude-claimed` 等）に含めていません。Path Overlap Gate が候補列挙の
+> 段階ではなく **claim 直前** で評価される設計のため、`awaiting-slot` 付き Issue は毎 tick
+> 再度 gate にかかり、in-flight 集合の縮小と同時に `awaiting-slot` 自動除去 → 通常 dispatch
+> に合流します（Req 6.1〜6.4）。`PATH_OVERLAP_CHECK` 未設定環境ではそもそも本 gate が
+> no-op なので、`awaiting-slot` が付くこと自体がありません。
 
 Multi-branch（gitflow 系: `BASE_BRANCH=develop` 等）運用での補助フロー:
 
