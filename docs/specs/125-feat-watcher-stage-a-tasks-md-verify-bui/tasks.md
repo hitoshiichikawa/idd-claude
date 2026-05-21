@@ -91,8 +91,8 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 4.1, 5.5, NFR 6.2_
   - _Boundary: tests/local-watcher/stage-a-verify/smoke.sh_
 
-- [ ] 6. README / ドキュメント整備
-- [ ] 6.1 README.md「オプション機能（標準有効 / 常時有効）一覧」表に `Stage A Verify Gate` 行を追加し、専用節を新設 (P)
+- [x] 6. README / ドキュメント整備
+- [x] 6.1 README.md「オプション機能（標準有効 / 常時有効）一覧」表に `Stage A Verify Gate` 行を追加し、専用節を新設 (P)
   - 既存「デフォルト有効（無効化する場合のみ `=false` 明示）」表（L1020-L1030）の末尾に行を 1 行追加: `**Stage A Verify Gate** (tasks.md 末尾 verify タスクの独立再実行) | STAGE_A_VERIFY_ENABLED | true | [Stage A Verify Gate (#125)](#stage-a-verify-gate-125) | #125`
   - 既存「## Stage Checkpoint (#68)」節（L2461 付近）の直後に「## Stage A Verify Gate (#125)」節を新設
   - 専用節に含める項目: 機能概要 / 状態遷移図（Mermaid）/ env 3 種一覧表 / cron 例（opt-out / escape hatch / timeout 延長）/ 影響範囲と既存挙動との互換性 / 失敗・異常系 / Migration Note / merge 後の再配置注意
