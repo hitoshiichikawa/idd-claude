@@ -1476,6 +1476,30 @@ ar_classify_diff() {
   return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_apply_mechanical: mechanical 判定後の副作用（needs-rebase 除去のみ）を実行。
+#   approve への副作用なし（Req 6.1）、追加コメント投稿なし（Req 6.3）。設計意図は
+#   「lockfile-only 等の機械的 rebase は人間 noise を最小化する」。
+#
+#   入力: $1=pr_number
+#   戻り値: 0=成功、1=label 除去 API 失敗（呼び出し側で WARN）
+#
+#   Req 6.1, 6.2, 6.3, 6.4
+# ─────────────────────────────────────────────────────────────────────────────
+ar_apply_mechanical() {
+  local pr_number="$1"
+
+  # Req 6.2: needs-rebase ラベルを除去（唯一の副作用）。
+  # Phase A と同 timeout を適用。GitHub の `--remove-label` は対象ラベルが
+  # 既に無い場合も成功扱いとなるため、冪等性が保たれる。
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh pr edit "$pr_number" --repo "$REPO" --remove-label "$LABEL_NEEDS_REBASE" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: needs-rebase ラベル除去に失敗"
+    return 1
+  fi
+  return 0
+}
+
 process_auto_rebase() {
   # Req 1.1: opt-in gate（未設定 / `off` / 不正値で起動しない）
   if [ "$AUTO_REBASE_MODE" = "off" ]; then
