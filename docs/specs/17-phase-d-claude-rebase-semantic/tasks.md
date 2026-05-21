@@ -139,7 +139,7 @@
   - _Requirements: 9.1, 9.2, 9.3_
   - _Boundary: README.md_
 
-- [ ] 6.2 `repo-template/CLAUDE.md` の禁止事項 / agent 連携節に Phase D の存在を補足（任意、影響軽微） (P)
+- [x] 6.2 `repo-template/CLAUDE.md` の禁止事項 / agent 連携節に Phase D の存在を補足（任意、影響軽微） (P)
   - 「idd-claude 特有の設計上の注意」節に Phase D Processor の opt-in 制と既存 cron 互換性を 1〜2 行で追記
   - PR Iteration の `claude-failed` 説明と同形式で、Phase D 起点の `claude-failed` 復旧手順への参照を追加
   - _Requirements: 9.1_
