@@ -69,7 +69,7 @@
   - _Depends: 3_
 
 - [ ] 5. fixture テストの追加（抽出関数の回帰検出）
-- [ ] 5.1 `tests/local-watcher/stage-a-verify/fixtures/` を新設し、design.md「Testing Strategy / Unit-level」の 12 fixture を配置 (P)
+- [x] 5.1 `tests/local-watcher/stage-a-verify/fixtures/` を新設し、design.md「Testing Strategy / Unit-level」の 12 fixture を配置 (P)
   - `tasks-gradlew.md` / `tasks-npm.md` / `tasks-cargo.md` / `tasks-go.md` / `tasks-pytest.md` / `tasks-make.md` / `tasks-bundle.md` / `tasks-shellcheck.md` / `tasks-no-verify.md` / `tasks-deferrable.md` / `tasks-mixed.md` / `tasks-empty.md`
   - 各 fixture は実在 tasks.md と同じ書式（markdown bullet + アノテーション）を模す
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, NFR 6.1_
