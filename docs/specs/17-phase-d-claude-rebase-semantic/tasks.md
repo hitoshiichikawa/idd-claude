@@ -34,7 +34,7 @@
 
 ## 2. Claude rebase 試行と rollback
 
-- [ ] 2.1 `ar_build_prompt` で auto-rebase-prompt.tmpl のプレースホルダ展開を実装
+- [x] 2.1 `ar_build_prompt` で auto-rebase-prompt.tmpl のプレースホルダ展開を実装
   - `auto-rebase-prompt.tmpl` のプレースホルダ（`{{REPO}}` / `{{PR_NUMBER}}` / `{{PR_TITLE}}` / `{{PR_URL}}` / `{{HEAD_REF}}` / `{{BASE_REF}}` / `{{BASE_BRANCH}}`）を awk 置換で展開する関数を実装（既存 `pi_build_iteration_prompt` を参考）
   - _Requirements: 4.1_
 
