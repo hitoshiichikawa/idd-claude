@@ -1556,6 +1556,100 @@ ar_dismiss_all_approvals() {
   return "$rc"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_apply_semantic: semantic 判定時の副作用を実行。
+#   1. ar_dismiss_all_approvals で approve を全件 dismiss
+#   2. needs-rebase 除去
+#   3. ready-for-review 付与
+#   4. 説明コメント投稿（rebase 実施 / semantic 判定 / dismissal / 再レビュー誘導）
+#
+#   入力: $1=pr_number, $2=pr_url, $3=before_sha, $4=after_sha,
+#         $5=first_unmatched_path（空可）
+#   戻り値:
+#     0 : 全成功
+#     1 : dismissal 失敗（呼び出し側で escalate `dismissal-failed` 経路）
+#     2 : label / comment 失敗（部分成功、WARN 後 semantic 扱いは継続）
+#
+#   Req 7.1, 7.2, 7.3, 7.4
+# ─────────────────────────────────────────────────────────────────────────────
+ar_apply_semantic() {
+  local pr_number="$1"
+  local pr_url="$2"
+  local before_sha="$3"
+  local after_sha="$4"
+  local first_unmatched="${5:-}"
+
+  # 1. approving review をすべて dismiss
+  if ! ar_dismiss_all_approvals "$pr_number"; then
+    return 1
+  fi
+
+  local partial_fail=0
+
+  # 2. needs-rebase 除去
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh pr edit "$pr_number" --repo "$REPO" --remove-label "$LABEL_NEEDS_REBASE" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: needs-rebase ラベル除去に失敗（semantic 経路）"
+    partial_fail=1
+  fi
+
+  # 3. ready-for-review 付与
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh pr edit "$pr_number" --repo "$REPO" --add-label "$LABEL_READY" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: ready-for-review ラベル付与に失敗"
+    partial_fail=1
+  fi
+
+  # 4. 説明コメント投稿（Req 7.4）
+  local unmatched_line=""
+  if [ -n "$first_unmatched" ]; then
+    unmatched_line="- 最初に検出された allowlist 外パス: \`${first_unmatched}\`"
+  fi
+
+  local comment_body
+  comment_body=$(cat <<EOF
+## Phase D: semantic rebase により再レビューが必要です
+
+watcher (Phase D Auto Rebase Processor) が本 PR の \`needs-rebase\` 状態に対して
+Claude による rebase を実行しました。rebase 後の変更ファイルのうち \`MECHANICAL_PATHS\`
+allowlist に含まれない path が検出されたため、**semantic な書き換えを含む rebase**と
+判定しました。
+
+### 実施内容
+
+- rebase 前 head SHA: \`${before_sha}\`
+- rebase 後 head SHA: \`${after_sha}\`
+${unmatched_line}
+- 既存 approving review を **review dismissal API** で全件取り消しました
+- \`needs-rebase\` を除去し \`ready-for-review\` を付与しました
+
+### 次のアクション（人間レビュワー向け）
+
+Claude が rebase 過程で書き換えた内容は人間レビューを通っていません。差分を確認し、
+妥当であれば **再度 approve** してください。allowlist の見直しが必要な場合は
+\`MECHANICAL_PATHS\` 環境変数の設定値も併せて検討してください。
+
+---
+
+_本コメントは Phase D Auto Rebase Processor が自動投稿しました。本機能の挙動を変更する
+場合は \`AUTO_REBASE_MODE\` を \`off\` に切り替えてください。_
+
+<!-- idd-claude:auto-rebase pr=${pr_number} -->
+EOF
+)
+
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: semantic 説明コメントの投稿に失敗（${pr_url}）"
+    partial_fail=1
+  fi
+
+  if [ "$partial_fail" -eq 1 ]; then
+    return 2
+  fi
+  return 0
+}
+
 process_auto_rebase() {
   # Req 1.1: opt-in gate（未設定 / `off` / 不正値で起動しない）
   if [ "$AUTO_REBASE_MODE" = "off" ]; then
