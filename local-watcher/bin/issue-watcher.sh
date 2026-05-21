@@ -1158,6 +1158,47 @@ ar_error() {
   echo "[$(date '+%F %T')] [$REPO] auto-rebase: ERROR: $*" >&2
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_fetch_candidates: server-side + client-side の二段フィルタで候補 PR を返す
+#   出力: stdout に jq 配列形式の JSON 1 行（候補なしなら "[]"）
+#   戻り値: 0 = 正常（候補ゼロ件含む）、1 = API エラー（呼び出し側で WARN）
+#
+#   Req 2.1: needs-rebase + 1 件以上 approving review + open
+#   Req 2.2: claude-failed 付き除外（同じ PR の再試行を抑止 / Req 8.4）
+#   Req 2.3: draft 除外
+#   Req 2.4: fork PR 除外（head repo owner == base repo owner）
+#   Req 2.5: head branch pattern 整合（既存 MERGE_QUEUE_HEAD_PATTERN を再利用）
+# ─────────────────────────────────────────────────────────────────────────────
+ar_fetch_candidates() {
+  local repo_owner="${REPO%%/*}"
+  local prs_json
+  # Server-side filter（Phase A Re-check と同パターン）。
+  if ! prs_json=$(timeout "$AUTO_REBASE_GIT_TIMEOUT" gh pr list \
+      --repo "$REPO" \
+      --state open \
+      --search "review:approved label:\"$LABEL_NEEDS_REBASE\" -label:\"$LABEL_FAILED\" -draft:true" \
+      --json number,headRefName,baseRefName,labels,url,isDraft,reviewDecision,headRepositoryOwner,title \
+      --limit 100 2>/dev/null); then
+    ar_warn "対象 PR 一覧の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
+    echo "[]"
+    return 1
+  fi
+
+  # Client-side filter（server filter の保険 + head pattern + fork 除外）。
+  #   - isDraft / reviewDecision の再確認
+  #   - head ref prefix (MERGE_QUEUE_HEAD_PATTERN): 人間の手書き PR を巻き込まない
+  #   - head repo owner == base repo owner: fork PR を除外
+  echo "$prs_json" | jq \
+    --arg pattern "$MERGE_QUEUE_HEAD_PATTERN" \
+    --arg owner "$repo_owner" \
+    '[.[]
+      | select(.isDraft == false)
+      | select(.reviewDecision == "APPROVED")
+      | select(.headRefName | test($pattern))
+      | select((.headRepositoryOwner.login // "") == $owner)
+    ]'
+}
+
 process_auto_rebase() {
   # Req 1.1: opt-in gate（未設定 / `off` / 不正値で起動しない）
   if [ "$AUTO_REBASE_MODE" = "off" ]; then
@@ -1174,9 +1215,28 @@ process_auto_rebase() {
   # Req 1.4: サイクル開始時に有効値をログ出力
   ar_log "サイクル開始 (mode=${AUTO_REBASE_MODE}, paths=${MECHANICAL_PATHS:-(empty)}, max_prs=${AUTO_REBASE_MAX_PRS}, model=${AUTO_REBASE_MODEL}, max_turns=${AUTO_REBASE_MAX_TURNS}, timeout=${AUTO_REBASE_MAX_TURNS_SEC}s)"
 
-  # 候補取得・PR 処理は後続タスク（1.3 / 2.x / 3.x）で追加する。本タスクでは
-  # 空サマリ行を出力して skeleton を完成させる（Req 3.4 / NFR 2.2 の出力契約を満たす）。
-  ar_log "サマリ: mechanical=0, semantic=0, failed=0, skip=0, overflow=0"
+  # Req 2.1〜2.5 / Req 8.4: 候補 PR 取得（API エラー時は空配列を扱う）
+  local prs_json
+  prs_json=$(ar_fetch_candidates) || true
+  if [ -z "$prs_json" ]; then
+    prs_json="[]"
+  fi
+
+  local total
+  total=$(echo "$prs_json" | jq 'length' 2>/dev/null || echo 0)
+  local target_count="$total"
+  local skipped_overflow=0
+  if [ "$total" -gt "$AUTO_REBASE_MAX_PRS" ]; then
+    target_count="$AUTO_REBASE_MAX_PRS"
+    skipped_overflow=$((total - AUTO_REBASE_MAX_PRS))
+    ar_log "対象候補 ${total} 件中、上限 ${AUTO_REBASE_MAX_PRS} 件のみ処理（${skipped_overflow} 件は次回持ち越し）"
+  else
+    ar_log "対象候補 ${total} 件、処理対象 ${target_count} 件"
+  fi
+
+  # 本処理ループは後続タスク（3.7）で完成させる。本タスクでは候補抽出と overflow
+  # 集計までを実装し、サマリ行を出力する（Req 3.4 / NFR 2.2 の出力契約を満たす）。
+  ar_log "サマリ: mechanical=0, semantic=0, failed=0, skip=0, overflow=${skipped_overflow}"
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
