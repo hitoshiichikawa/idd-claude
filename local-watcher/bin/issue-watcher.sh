@@ -2459,6 +2459,67 @@ po_clear_awaiting_slot() {
   return 0
 }
 
+# ─── Phase E: Dispatcher Integration Point (#18 Req 1.1〜1.4 / 5.x / 6.x / 12.2) ───
+# _dispatcher_run の candidate ループ内、check_existing_impl_pr 通過直後・
+# _dispatcher_find_free_slot 呼び出し前に挿入する gate 関数。
+#
+# 関数冒頭で `[ "$PATH_OVERLAP_CHECK" = "true" ] || return 0` で opt-in gate を成立
+# させ、未設定 / off / 不正値（True / 1 / typo 等）は早期 return 0 = 従来挙動と
+# 完全一致（Req 1.2 / 1.3 / NFR 1.1）。
+#
+# Args: $1 = candidate issue number, $2 = candidate labels JSON
+#       （gh issue list の `.labels` フィールドを jq -c で取り出したもの）
+# Return: 0 = claim を続行してよい / 1 = この cycle では dispatch skip（continue）
+po_check_dispatch_gate() {
+  local candidate="$1"
+  local labels_json="$2"
+
+  # Req 1.2 / 1.3 / 1.4: opt-in gate（厳密一致 "true" のみ通す）
+  [ "$PATH_OVERLAP_CHECK" = "true" ] || return 0
+
+  # 候補の edit_paths を sticky から読む（Req 5.5: marker 不在は空配列扱い）
+  local cand_paths
+  cand_paths=$(po_load_edit_paths "$candidate")
+
+  # in-flight union を取得（Req 4.1〜4.4）。失敗時は fail-open で claim 続行
+  local inflight_paths
+  if ! inflight_paths=$(po_collect_inflight_issues "$candidate"); then
+    po_warn "issue=#${candidate} in-flight 列挙に失敗、本サイクルは overlap 判定を skip して claim 続行"
+    return 0
+  fi
+
+  # overlap 計算（Req 5.1 / 5.6）
+  local overlap overlap_count
+  overlap=$(po_compute_overlap "$cand_paths" "$inflight_paths")
+  overlap_count=$(echo "$overlap" | jq 'length' 2>/dev/null || echo 0)
+
+  # 現状の awaiting-slot ラベル付与状態（既存 labels_json から抽出）
+  local has_awaiting
+  has_awaiting=$(echo "$labels_json" \
+    | jq -r --arg lbl "$LABEL_AWAITING_SLOT" \
+        '[.[].name] | index($lbl) // empty' 2>/dev/null || echo "")
+
+  if [ "$overlap_count" -gt 0 ]; then
+    # Req 5.2 / 5.3 / 8.1 / 8.2: overlap 検出ログ → awaiting-slot 付与（未付与時のみ）
+    po_log "overlap detected candidate=#${candidate} paths=$(echo "$overlap" | jq -r 'join(",")')"
+    if [ -z "$has_awaiting" ]; then
+      if ! po_apply_awaiting_slot "$candidate" "$overlap"; then
+        po_warn "issue=#${candidate} awaiting-slot 付与 / コメント投稿に失敗（次サイクルで再評価）"
+      fi
+    fi
+    return 1  # dispatch skip
+  fi
+
+  # overlap 空: Req 6.2 / 6.4 / 8.3 自然解消
+  if [ -n "$has_awaiting" ]; then
+    if ! po_clear_awaiting_slot "$candidate"; then
+      po_warn "issue=#${candidate} awaiting-slot 除去に失敗（次サイクルで再試行のため本 cycle は claim 見送り）"
+      return 1
+    fi
+  fi
+  return 0  # claim 続行
+}
+
 # pp_resolve_target_branch: `PROMOTION_TARGET_BRANCH` のリモート存在を検証し、
 # `BASE_BRANCH` と異なることを確認する（Req 1.1.3, 1.2.2）。
 # 戻り値: 0 = 検証 OK / 1 = 中止すべき状態
@@ -8444,6 +8505,18 @@ _dispatcher_run() {
     # GraphQL 失敗 / レート制限も内部で skip 側に倒される（fail-safe / Req 1.7 / NFR 4.2）。
     # PR 不在の通常運用では exit 0 で素通り = 本機能導入前と完全等価（NFR 1.5）。
     if ! check_existing_impl_pr "$issue_number"; then
+      continue
+    fi
+
+    # ── Phase E: Path Overlap Gate (#18 Req 1.x / 5.x / 6.x) ──
+    # PATH_OVERLAP_CHECK=true のときのみ有効。未設定 / off / 不正値では関数冒頭で
+    # 早期 return 0 = 従来挙動と完全一致（NFR 1.1）。
+    # `awaiting-slot` 付き Issue を candidate query から除外していないため、本 gate が
+    # 後続 cron tick でも再評価され、overlap empty なら同サイクル内に
+    # po_clear_awaiting_slot → claim 続行する（Req 6.1 / 6.2 / 6.4 を構造的に保証）。
+    local labels_json
+    labels_json=$(echo "$issue" | jq -c '.labels')
+    if ! po_check_dispatch_gate "$issue_number" "$labels_json"; then
       continue
     fi
 
