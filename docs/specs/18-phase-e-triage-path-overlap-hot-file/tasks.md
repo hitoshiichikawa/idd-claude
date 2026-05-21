@@ -6,7 +6,7 @@
 > ため直列で配置する。Developer は impl-resume 時は task ID 順に着手し、完了ごとに
 > `- [x]` 化する（`IMPL_RESUME_PROGRESS_TRACKING` 既定 ON 規約）。
 
-- [ ] 1. Triage Prompt Template に `edit_paths` 出力指示を追加
+- [x] 1. Triage Prompt Template に `edit_paths` 出力指示を追加
   - `local-watcher/bin/triage-prompt.tmpl` の末尾「## 出力形式」節に additive 拡張として
     `edit_paths` フィールドの出力指示文を追加（既存 5 keys の指示は一切変更しない）
   - JSON schema 例示ブロックに `"edit_paths": [ ... ]` を追記
