@@ -4,8 +4,8 @@
 > 設計参照: `docs/specs/125-feat-watcher-stage-a-tasks-md-verify-bui/design.md`
 > 既存 watcher との後方互換性（NFR 1.1〜1.3）を維持すること。`STAGE_A_VERIFY_ENABLED=false` 明示時の挙動は本機能導入前と完全一致でなければならない。
 
-- [ ] 1. Config ブロック: 新 env 3 種の追加
-- [ ] 1.1 `local-watcher/bin/issue-watcher.sh` の Config ブロックに `STAGE_A_VERIFY_ENABLED` / `STAGE_A_VERIFY_TIMEOUT` / `STAGE_A_VERIFY_COMMAND` を追加
+- [x] 1. Config ブロック: 新 env 3 種の追加
+- [x] 1.1 `local-watcher/bin/issue-watcher.sh` の Config ブロックに `STAGE_A_VERIFY_ENABLED` / `STAGE_A_VERIFY_TIMEOUT` / `STAGE_A_VERIFY_COMMAND` を追加
   - 既存 `STAGE_CHECKPOINT_ENABLED` ブロック（L179-L185 周辺）の直後に新節「─── Stage A Verify 設定 (#125) ───」を挿入
   - `STAGE_A_VERIFY_ENABLED="${STAGE_A_VERIFY_ENABLED:-true}"` / `STAGE_A_VERIFY_TIMEOUT="${STAGE_A_VERIFY_TIMEOUT:-600}"` / `STAGE_A_VERIFY_COMMAND="${STAGE_A_VERIFY_COMMAND:-}"`
   - L251-L267 の `_idd_flag` ループ（#112 デフォルト有効化フラグの正規化）には **加えない**（本機能は `=false` 厳密一致のみ opt-out とし、他 8 種と同形ではあるが「未設定 vs 空 vs typo を opt-out として扱う」の判別が値検証ロジック上独立する。意図的に既存ループの正規化対象外とする）
@@ -13,15 +13,15 @@
   - `shellcheck` を流して警告ゼロを維持
   - _Requirements: 4.1, 4.2, 4.3, 4.5, NFR 1.1, NFR 3.3_
 
-- [ ] 2. Stage A Verify Module のヘルパ関数群を実装
-- [ ] 2.1 `sav_log` / `sav_warn` / `sav_error` ロガーを追加 (P)
+- [x] 2. Stage A Verify Module のヘルパ関数群を実装
+- [x] 2.1 `sav_log` / `sav_warn` / `sav_error` ロガーを追加 (P)
   - `Stage Checkpoint Module` ブロック（L2985-L3014 周辺）の直前 or 直後を推奨。既存 `sc_log` と同じファイル位置に並置
   - 行頭 prefix は `[YYYY-MM-DD HH:MM:SS] [$REPO] stage-a-verify:` 固定（Issue #119 規約 / NFR 4.1 / NFR 4.2）
   - warn / error は stderr へ
   - _Requirements: 5.1, 5.2, NFR 4.1, NFR 4.2_
   - _Boundary: issue-watcher.sh (logger 関数群)_
 
-- [ ] 2.2 `stage_a_verify_extract_command` 関数を実装 (P)
+- [x] 2.2 `stage_a_verify_extract_command` 関数を実装 (P)
   - design.md「Components and Interfaces / stage_a_verify_extract_command」の擬似コードに従う
   - 関数内 readonly 配列 `_SAV_KEYWORDS` に design.md で確定したキーワード集合を列挙
   - awk 1 パスで末尾走査し、末尾に最も近い 1 行を stdout に出す（O(N), Req 1.1 / 1.2 / NFR 3.1）
@@ -30,7 +30,7 @@
   - _Requirements: 1.1, 1.2, 1.5, NFR 2.1, NFR 3.1_
   - _Boundary: issue-watcher.sh (stage_a_verify_extract_command)_
 
-- [ ] 2.3 `stage_a_verify_resolve_command` 関数を実装 (P)
+- [x] 2.3 `stage_a_verify_resolve_command` 関数を実装 (P)
   - `STAGE_A_VERIFY_COMMAND` 非空時は最優先で採用（Req 4.4 / NFR 2.2）
   - 空ならば `stage_a_verify_extract_command` を呼ぶ
   - 解決失敗時は exit code 1
@@ -38,14 +38,14 @@
   - _Boundary: issue-watcher.sh (stage_a_verify_resolve_command)_
   - _Depends: 2.2_
 
-- [ ] 2.4 round counter helpers (`_round_path` / `_read_round` / `_bump_round` / `_reset_round`) を実装 (P)
+- [x] 2.4 round counter helpers (`_round_path` / `_read_round` / `_bump_round` / `_reset_round`) を実装 (P)
   - sidecar path は `$REPO_DIR/$SPEC_DIR_REL/.stage-a-verify-round`
   - 不在は round=0、書き込み失敗時は `sav_error` で警告（呼び出し元は差し戻し挙動を強制）
   - 書き込みは `printf '%d\n' "$N" > "$path"`
   - _Requirements: 3.1, 3.2, 3.3_
   - _Boundary: issue-watcher.sh (round counter sidecar)_
 
-- [ ] 3. `stage_a_verify_run` 統合ランナーを実装
+- [x] 3. `stage_a_verify_run` 統合ランナーを実装
   - design.md「stage_a_verify_run / Internal Flow」の擬似コードに従う
   - Gate 1（DISABLED）: `STAGE_A_VERIFY_ENABLED=false` 明示時 → `sav_log "DISABLED reason=env-opt-out"` + return 0（Req 4.1 / 5.4）
   - Gate 2（SKIPPED）: resolve_command が失敗時 → `sav_log "SKIPPED reason=no-verify-task-in-tasks-md"` + return 0（Req 1.4 / 5.3）
@@ -59,7 +59,7 @@
   - _Boundary: issue-watcher.sh (stage_a_verify_run / _sav_handle_failure)_
   - _Depends: 1.1, 2.1, 2.3, 2.4_
 
-- [ ] 4. `run_impl_pipeline` への挿入
+- [x] 4. `run_impl_pipeline` への挿入
   - design.md「run_impl_pipeline 挿入ブロック」の擬似コードに従い、Stage A 実行ブロックの直後・Stage B 実行ブロックの直前（現行 L4225 周辺、`case "$START_STAGE" in A) … B|C) … esac` の直後）に挿入する
   - Stage A skipped path（START_STAGE=B|C）でも本ブロックを通すこと（Stage Checkpoint resume との協調、design.md「stage-a-verify と Stage Checkpoint の協調」参照）
   - `stage_a_verify_run` の戻り値 0/1/2 を `run_impl_pipeline` の戻り値 0/1 にマップし、既存 exit code 契約（NFR 1.3）を維持
@@ -68,14 +68,14 @@
   - _Requirements: 2.2, 2.3, 4.1, 4.5, 6.1, 6.2, 6.3, NFR 1.1, NFR 1.3_
   - _Depends: 3_
 
-- [ ] 5. fixture テストの追加（抽出関数の回帰検出）
-- [ ] 5.1 `tests/local-watcher/stage-a-verify/fixtures/` を新設し、design.md「Testing Strategy / Unit-level」の 12 fixture を配置 (P)
+- [x] 5. fixture テストの追加（抽出関数の回帰検出）
+- [x] 5.1 `tests/local-watcher/stage-a-verify/fixtures/` を新設し、design.md「Testing Strategy / Unit-level」の 12 fixture を配置 (P)
   - `tasks-gradlew.md` / `tasks-npm.md` / `tasks-cargo.md` / `tasks-go.md` / `tasks-pytest.md` / `tasks-make.md` / `tasks-bundle.md` / `tasks-shellcheck.md` / `tasks-no-verify.md` / `tasks-deferrable.md` / `tasks-mixed.md` / `tasks-empty.md`
   - 各 fixture は実在 tasks.md と同じ書式（markdown bullet + アノテーション）を模す
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, NFR 6.1_
   - _Boundary: tests/local-watcher/stage-a-verify/fixtures_
 
-- [ ] 5.2 `tests/local-watcher/stage-a-verify/extract-driver.sh` を実装 (P)
+- [x] 5.2 `tests/local-watcher/stage-a-verify/extract-driver.sh` を実装 (P)
   - 各 fixture を一時 `$REPO_DIR/$SPEC_DIR_REL/tasks.md` として配置し、`stage_a_verify_extract_command` を source して呼ぶ
   - stdout と期待文字列を diff、全件 pass で exit 0 / 不一致あれば該当 fixture 名 + diff を出して exit 1
   - 期待値は fixture 隣の `.expected` ファイル or driver 内の lookup table のいずれか（実装判断、driver 内 lookup を推奨）
@@ -91,8 +91,8 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 4.1, 5.5, NFR 6.2_
   - _Boundary: tests/local-watcher/stage-a-verify/smoke.sh_
 
-- [ ] 6. README / ドキュメント整備
-- [ ] 6.1 README.md「オプション機能（標準有効 / 常時有効）一覧」表に `Stage A Verify Gate` 行を追加し、専用節を新設 (P)
+- [x] 6. README / ドキュメント整備
+- [x] 6.1 README.md「オプション機能（標準有効 / 常時有効）一覧」表に `Stage A Verify Gate` 行を追加し、専用節を新設 (P)
   - 既存「デフォルト有効（無効化する場合のみ `=false` 明示）」表（L1020-L1030）の末尾に行を 1 行追加: `**Stage A Verify Gate** (tasks.md 末尾 verify タスクの独立再実行) | STAGE_A_VERIFY_ENABLED | true | [Stage A Verify Gate (#125)](#stage-a-verify-gate-125) | #125`
   - 既存「## Stage Checkpoint (#68)」節（L2461 付近）の直後に「## Stage A Verify Gate (#125)」節を新設
   - 専用節に含める項目: 機能概要 / 状態遷移図（Mermaid）/ env 3 種一覧表 / cron 例（opt-out / escape hatch / timeout 延長）/ 影響範囲と既存挙動との互換性 / 失敗・異常系 / Migration Note / merge 後の再配置注意
@@ -108,7 +108,7 @@
   - _Requirements: 6.1, 6.3_
   - _Boundary: root CLAUDE.md_
 
-- [ ] 7. 最終検証（手動スモークテスト + static analysis）
+- [x] 7. 最終検証（手動スモークテスト + static analysis）
   - **Static analysis**:
     - `shellcheck local-watcher/bin/issue-watcher.sh .github/scripts/*.sh install.sh setup.sh tests/local-watcher/stage-a-verify/extract-driver.sh` — 警告ゼロ
     - `actionlint .github/workflows/*.yml` — クリーン
