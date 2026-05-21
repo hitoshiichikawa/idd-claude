@@ -1500,6 +1500,62 @@ ar_apply_mechanical() {
   return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_dismiss_all_approvals: PR の approving review を全件 review dismissal API
+#   (`gh api -X PUT .../reviews/{id}/dismissals`) で dismiss する。
+#   `gh pr review --request-changes` 形式の別レビュー投稿方式は使わない（Req 7.5）。
+#
+#   入力: $1=pr_number
+#   戻り値: 0=全 approving review の dismissal が成功（または対象なし）、
+#           1=1 件でも失敗（呼び出し側で escalate に流す）
+#
+#   Error Handling: dismissal API が 422 を返す場合（既に dismissed 等）は当該
+#   review を skip して次の review へ進む（business logic エラーとして個別 skip）。
+#   それ以外の non-zero は全体失敗扱い。
+# ─────────────────────────────────────────────────────────────────────────────
+ar_dismiss_all_approvals() {
+  local pr_number="$1"
+
+  # 1. PR の review 一覧を取得
+  local reviews_json
+  if ! reviews_json=$(timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh api "/repos/${REPO}/pulls/${pr_number}/reviews" 2>/dev/null); then
+    ar_warn "PR #${pr_number}: review 一覧の取得に失敗"
+    return 1
+  fi
+
+  # 2. state == APPROVED の review id を抽出
+  local approved_ids
+  approved_ids=$(echo "$reviews_json" | jq -r '[.[] | select(.state == "APPROVED") | .id] | .[]' 2>/dev/null || true)
+  if [ -z "$approved_ids" ]; then
+    # 対象なし（既に全部 dismissed / 状態が異なる）。冪等的に成功扱い。
+    ar_log "PR #${pr_number}: dismissal 対象の approving review なし（既に dismissed の可能性）"
+    return 0
+  fi
+
+  # 3. 各 review id について dismissal API を呼ぶ
+  local id rc=0
+  while IFS= read -r id; do
+    [ -z "$id" ] && continue
+    local stderr_file
+    stderr_file=$(mktemp 2>/dev/null || echo "/tmp/ar-dismiss-stderr-$$")
+    if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+        gh api -X PUT "/repos/${REPO}/pulls/${pr_number}/reviews/${id}/dismissals" \
+        -f message="Phase D semantic rebase: re-review required" >/dev/null 2>"$stderr_file"; then
+      # 422 (Unprocessable Entity) は既に dismissed の可能性が高い。skip 扱い。
+      if grep -q "HTTP 422" "$stderr_file" 2>/dev/null; then
+        ar_log "PR #${pr_number}: review id=${id} は既に dismissed の可能性 (HTTP 422、skip)"
+      else
+        ar_warn "PR #${pr_number}: review id=${id} の dismissal に失敗"
+        rc=1
+      fi
+    fi
+    rm -f "$stderr_file" 2>/dev/null || true
+  done <<< "$approved_ids"
+
+  return "$rc"
+}
+
 process_auto_rebase() {
   # Req 1.1: opt-in gate（未設定 / `off` / 不正値で起動しない）
   if [ "$AUTO_REBASE_MODE" = "off" ]; then
