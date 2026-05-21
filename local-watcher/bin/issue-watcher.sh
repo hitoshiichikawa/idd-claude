@@ -5135,6 +5135,132 @@ $(build_recovery_hint "unknown")"
   gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
 }
 
+# ─── _sav_handle_failure ───
+#
+# stage_a_verify_run の失敗パス共通処理。round counter を bump し、
+# round=1 なら Developer 差し戻し（Issue コメント投稿 + return 1）、
+# round=2 以降なら mark_issue_failed 経由で claude-failed 化（return 2）。
+# `needs-iteration` ラベルは Issue 側には付与しない既存契約（NFR 1.2）を維持。
+#
+# 入力:
+#   $1 = kind ("timeout" | "exit")
+#   $2 = detail (timeout 秒 | exit code)
+# 戻り値:
+#   1 = Developer 差し戻し（次 tick で stage-a-verify 再評価）
+#   2 = claude-failed 付与済み（watcher 退出）
+_sav_handle_failure() {
+  local kind="$1"
+  local detail="$2"
+  stage_a_verify_bump_round || sav_error "round counter 書き込みに失敗（差し戻し挙動を強制）"
+  local round
+  round=$(stage_a_verify_read_round)
+  case "$round" in
+    1)
+      sav_log "round=1 outcome=needs-iteration (Developer 差し戻し)"
+      # round=1 差し戻しコメント。`needs-iteration` ラベルは PR 専用契約であり
+      # Issue 側には付与しない（NFR 1.2 / 既存 L2860 / L5989 契約）。次 tick で
+      # Stage Checkpoint が START_STAGE=B を返しても、Stage B 開始前の
+      # stage-a-verify ゲートで再評価される（design.md「stage-a-verify と
+      # Stage Checkpoint の協調」参照）。
+      local comment_body
+      comment_body="🔁 stage-a-verify が失敗しました（round=1 / ${kind}=${detail}）。
+
+\`tasks.md\` 末尾の verify タスク（build/test/lint）を watcher が REPO_DIR で独立再実行したところ、exit code が 0 以外でした。
+
+- 検出されたコマンドの実行結果はログ \`${LOG:-(unknown)}\` を参照
+- 次サイクルで Developer が再実装し、Stage B 開始前に stage-a-verify が再評価されます
+- 修正後に \`./gradlew\` / \`npm test\` 等のローカル成功を確認してから commit/push してください
+
+本機能の詳細: README「Stage A Verify Gate (#125)」節 / Issue #125"
+      gh issue comment "$NUMBER" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1 || \
+        sav_warn "gh issue comment 投稿に失敗（差し戻し挙動は継続）"
+      return 1
+      ;;
+    *)
+      sav_log "round=$round outcome=claude-failed (escalate to human)"
+      stage_a_verify_reset_round
+      local extra_body
+      extra_body="stage-a-verify（\`tasks.md\` 末尾 verify タスクの独立再実行）が連続 ${round} 回失敗しました（${kind}=${detail}）。
+
+- 検出コマンドの実行結果はログ \`${LOG:-(unknown)}\` を参照
+- \`tasks.md\` 末尾の build/test/lint コマンドをローカルで通してから \`claude-failed\` を外してください
+- 一時的に gate を skip したい場合は cron / launchd 側で \`STAGE_A_VERIFY_ENABLED=false\` を渡してください（Req 4.1 / NFR 1.1）
+
+本機能の詳細: README「Stage A Verify Gate (#125)」節 / Issue #125"
+      mark_issue_failed "stageA-verify" "$extra_body"
+      return 2
+      ;;
+  esac
+}
+
+# ─── stage_a_verify_run ───
+#
+# Stage A Verify Module の統合ランナー。`run_impl_pipeline` の Stage A 成功直後・
+# Stage B 開始直前から 1 度だけ呼ばれる。
+#
+# 入力 (環境変数経由):
+#   REPO / REPO_DIR / SPEC_DIR_REL / NUMBER / LOG
+#   STAGE_A_VERIFY_ENABLED / STAGE_A_VERIFY_TIMEOUT / STAGE_A_VERIFY_COMMAND
+# 戻り値:
+#   0 = SUCCESS / SKIPPED / DISABLED → Stage A 完全完了として続行
+#   1 = FAILED (round=1) → 差し戻し済、次 tick で再試行
+#   2 = FAILED (round=2 以降) → mark_issue_failed 済（claude-failed 付与）、watcher 退出
+# 副作用:
+#   - cron.log / $LOG に 1 行以上の `[$REPO] stage-a-verify:` ログ（NFR 4.1）
+#   - round counter sidecar の read/bump/reset
+#   - 失敗時に gh issue comment（round=1 差し戻し / round=2 は mark_issue_failed が発火）
+#
+# 不変条件:
+#   - 1 回の呼び出しで `stage-a-verify:` 行を必ず 1 行以上出力（NFR 4.1）
+#   - 抽出した cmd は `bash -c` に **そのまま**渡し、watcher 側で `&&` / `||` / `;` を
+#     解釈しない（Req 1.3）
+stage_a_verify_run() {
+  # ── Gate 1: DISABLED ──
+  # `STAGE_A_VERIFY_ENABLED=false` 明示時のみ skip（`=false` 厳密一致、Req 4.1 /
+  # NFR 1.1）。`:-true` で `unset` も既定有効として扱う。
+  if [ "${STAGE_A_VERIFY_ENABLED:-true}" = "false" ]; then
+    sav_log "DISABLED reason=env-opt-out"
+    return 0
+  fi
+
+  # ── Gate 2: SKIPPED（解決できない / 一致なし）──
+  local cmd
+  if ! cmd=$(stage_a_verify_resolve_command); then
+    sav_log "SKIPPED reason=no-verify-task-in-tasks-md"
+    return 0
+  fi
+
+  # ── Execute ──
+  local _timeout="${STAGE_A_VERIFY_TIMEOUT:-600}"
+  # cmd の shell エスケープは printf %q で安全側に倒し、ログ復元性を確保する。
+  sav_log "EXEC issue=#${NUMBER:-?} timeout=${_timeout}s cmd=$(printf '%q' "$cmd")"
+  local rc=0
+  # subshell `(cd && ...)` で cwd を REPO_DIR に隔離（NFR 5.1）。
+  # `timeout --kill-after=10 "$_timeout"` で暴走を時間でも遮断し、タイムアウト到達時は
+  # 子孫プロセスも SIGKILL する（NFR 5.2）。
+  (cd "$REPO_DIR" && timeout --kill-after=10 "$_timeout" bash -c "$cmd") \
+      >> "$LOG" 2>&1 || rc=$?
+
+  # ── 結果分岐 ──
+  case "$rc" in
+    0)
+      sav_log "SUCCESS exit=0"
+      stage_a_verify_reset_round
+      return 0
+      ;;
+    124)
+      sav_warn "TIMEOUT timeout=${_timeout}s exit=124"
+      _sav_handle_failure "timeout" "$_timeout"
+      return $?
+      ;;
+    *)
+      sav_warn "FAILED exit=$rc"
+      _sav_handle_failure "exit" "$rc"
+      return $?
+      ;;
+  esac
+}
+
 # ─── run_impl_pipeline ───
 #
 # impl / impl-resume モードの Stage 状態機械を実装する。
