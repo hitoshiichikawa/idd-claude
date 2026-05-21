@@ -70,6 +70,10 @@ LABEL_NEEDS_QUOTA_WAIT="needs-quota-wait"
 LABEL_STAGED_FOR_RELEASE="staged-for-release"
 # Phase B: ST failure 検知後 revert 済みを示すラベル（Req 4.1）。
 LABEL_ST_FAILED="st-failed"
+# Phase E: hot file 競合予防で同サイクル dispatch を見送り中（#18 Req 7.1）。
+# Path Overlap Checker が付与・除去し、先行 Issue の PR merge で in-flight 集合から
+# 外れた次サイクルで自動除去される（Req 6.1〜6.4）。
+LABEL_AWAITING_SLOT="awaiting-slot"
 
 # ─── Base branch 設定 (#89) ───
 # watcher 経路（local cron）と Actions 経路の base branch を 1 つの env で切り替える
@@ -265,6 +269,15 @@ STAGE_CHECKPOINT_ENABLED="${STAGE_CHECKPOINT_ENABLED:-true}"
 STAGE_A_VERIFY_ENABLED="${STAGE_A_VERIFY_ENABLED:-true}"
 STAGE_A_VERIFY_TIMEOUT="${STAGE_A_VERIFY_TIMEOUT:-600}"
 STAGE_A_VERIFY_COMMAND="${STAGE_A_VERIFY_COMMAND:-}"
+
+# ─── Phase E: Path Overlap Checker 設定 (#18) ───
+# 新規 opt-in 機能。明示的に `=true` を指定したときだけ起動する（Req 1.1〜1.4）。
+# `=true` 以外（未設定 / 空 / `false` / `0` / `True` / `1` / typo 等）はすべて off
+# として扱う（Req 1.3）。本フラグは新規追加 = opt-in 制 + 既定 off が要件のため、
+# 上記「デフォルト有効化フラグの値正規化」ループには **含めない**（#112 の 8 種
+# 反転対象とは別扱い）。
+# 詳細は docs/specs/18-phase-e-triage-path-overlap-hot-file/design.md を参照。
+PATH_OVERLAP_CHECK="${PATH_OVERLAP_CHECK:-off}"
 
 # LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
 # 環境変数で明示上書きもできる。
@@ -2099,6 +2112,17 @@ pp_warn() {
 }
 pp_error() {
   echo "[$(date '+%F %T')] [$REPO] promote-pipeline: ERROR: $*" >&2
+}
+
+# ─── Phase E: Path Overlap Checker 専用ロガー (#18) ───
+# 既存 pp_log / mq_log / drr_log と同じ書式（時刻 prefix + [$REPO] + processor prefix）。
+# Req 8.1〜8.4: overlap 検出 / awaiting-slot 付与 / 除去のログを cron.log 経路に流す。
+# `PATH_OVERLAP_CHECK=off` の場合は呼ばれないため、後方互換性は呼び出し側 gate で保証。
+po_log() {
+  echo "[$(date '+%F %T')] [$REPO] path-overlap: $*"
+}
+po_warn() {
+  echo "[$(date '+%F %T')] [$REPO] path-overlap: WARN: $*" >&2
 }
 
 # pp_resolve_target_branch: `PROMOTION_TARGET_BRANCH` のリモート存在を検証し、
