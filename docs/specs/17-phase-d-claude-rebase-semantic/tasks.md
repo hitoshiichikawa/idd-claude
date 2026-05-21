@@ -20,7 +20,7 @@
   - 既存 env var（`REPO` / `REPO_DIR` / `LOG_DIR` / `LOCK_FILE` / `TRIAGE_MODEL` / `DEV_MODEL` / `MERGE_QUEUE_*` / `BASE_BRANCH` 等）の意味・既定値・正規化方式は変更しない（NFR 1.2）
   - _Requirements: 1.1, 1.3, NFR 1.1, NFR 1.2, NFR 3.2_
 
-- [ ] 1.2 `auto-rebase:` prefix の logger 三点セットと `process_auto_rebase` スケルトンを追加
+- [x] 1.2 `auto-rebase:` prefix の logger 三点セットと `process_auto_rebase` スケルトンを追加
   - `process_merge_queue` 関数（既存 L1090 直後）の直後に Phase D セクションを新設
   - `ar_log` / `ar_warn` / `ar_error` を既存 `mq_*` と同じ書式（`[YYYY-MM-DD HH:MM:SS] [$REPO] auto-rebase:` の 3 段 prefix）で定義
   - `process_auto_rebase()` のエントリ関数を作成: opt-in gate / dirty working tree check / サイクル開始ログ / 空サマリ行出力までを実装（候補抽出と PR 処理は次タスク）
