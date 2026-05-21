@@ -115,7 +115,7 @@
 
 ## 5. Prompt template 配置
 
-- [ ] 5.1 `auto-rebase-prompt.tmpl` を新規作成し install.sh の自動配置経路で配布 (P)
+- [x] 5.1 `auto-rebase-prompt.tmpl` を新規作成し install.sh の自動配置経路で配布 (P)
   - 配置: `local-watcher/bin/auto-rebase-prompt.tmpl`
   - プレースホルダ: `{{REPO}}` / `{{PR_NUMBER}}` / `{{PR_TITLE}}` / `{{PR_URL}}` / `{{HEAD_REF}}` / `{{BASE_REF}}` / `{{BASE_BRANCH}}`
   - Claude への指示: 「base ref を head に rebase し conflict 解消後 working tree clean な状態で終了する。force push / dismissal / label 操作は watcher が行うため Claude 側では行わない」
