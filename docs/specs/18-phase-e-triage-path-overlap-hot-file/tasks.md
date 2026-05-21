@@ -43,7 +43,7 @@
   - _Boundary: Triage Edit-Paths Parser, Path Overlap Persister_
   - _Depends: 1, 3_
 
-- [ ] 5. In-Flight Collector + Overlap Engine + Awaiting Slot State Machine を実装
+- [x] 5. In-Flight Collector + Overlap Engine + Awaiting Slot State Machine を実装
   - `issue-watcher.sh` に下記関数を追加:
     - `po_collect_inflight_issues $candidate` — `gh issue list --repo "$REPO" --search '...'` で Req 4.1 の 7 ラベルのいずれかを持ち、`st-failed` / `awaiting-slot` を持たない open Issue を列挙。候補自身を除外（Req 4.3）。各 Issue について `po_load_edit_paths` を呼んで union（jq `add | unique`）
     - `po_compute_overlap $candidate_paths_json $inflight_paths_json` — 正規化（先頭 `./` 剥がし / 連続スラッシュ圧縮 / top-level セグメント抽出）後に集合積を計算（jq def `normalize` 内蔵）。candidate 空配列は常に空（Req 5.5）
