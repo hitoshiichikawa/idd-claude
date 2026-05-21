@@ -126,7 +126,7 @@
 
 ## 6. ドキュメント更新
 
-- [ ] 6.1 README に Phase D 節を追加し言語別 `MECHANICAL_PATHS` 設定例を記載 (P)
+- [x] 6.1 README に Phase D 節を追加し言語別 `MECHANICAL_PATHS` 設定例を記載 (P)
   - 「オプション機能一覧」節の「opt-in（既定 OFF）」表に Phase D 行を追加（`AUTO_REBASE_MODE` / 既定 `off`）
   - 新規節「Auto Rebase Processor (Phase D)」を Phase B / Phase C と同階層で作成し、以下を含める:
     - 対象 PR の判定条件
