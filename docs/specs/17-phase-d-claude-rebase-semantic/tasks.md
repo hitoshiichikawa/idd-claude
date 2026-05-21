@@ -48,7 +48,7 @@
 
 ## 3. 分類と後処理（mechanical / semantic / failed）
 
-- [ ] 3.1 `ar_classify_diff` で `MECHANICAL_PATHS` allowlist と path 集合の照合を実装 (P)
+- [x] 3.1 `ar_classify_diff` で `MECHANICAL_PATHS` allowlist と path 集合の照合を実装 (P)
   - `git diff --name-only "origin/${base_ref}".."${head_ref}"` で変更 path 一覧を取得
   - `MECHANICAL_PATHS` 空 → 全件 `semantic`（保守的判定）
   - カンマ区切り pattern 配列を bash `[[ $path == $pattern ]]` glob 照合で走査（`# shellcheck disable=SC2053` を必要箇所に付与）
