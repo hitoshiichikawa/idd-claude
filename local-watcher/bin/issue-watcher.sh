@@ -1252,6 +1252,140 @@ ar_build_prompt() {
     ' "$AUTO_REBASE_TEMPLATE"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_run_claude_rebase: Claude CLI を 1 回起動して conflict 解消 rebase を試行し、
+#   成功すれば force-with-lease push する。Phase A の mq_try_rebase_pr の (subshell
+#   + trap) パターンを踏襲しつつ、rebase 実行を Claude に委ねる。
+#
+#   入力: $1=pr_number, $2=pr_title, $3=pr_url, $4=head_ref, $5=base_ref
+#   出力 (stdout 1 行): 成功時 "<before_sha> <after_sha>"、失敗時 空文字
+#   戻り値:
+#     0 : rebase + push 成功
+#     1 : Claude が conflict を解消できず終了（dirty 残置 / clean だが before==after）
+#     2 : timeout（exit 124）
+#     3 : push 失敗
+#     4 : fetch / checkout 失敗
+#     5 : rebase 不要（既に base が祖先、skip 候補）
+#
+#   Req 4.1, 4.2, 4.3, 4.5, 4.6, NFR 5.1, NFR 5.2, NFR 5.3
+# ─────────────────────────────────────────────────────────────────────────────
+ar_run_claude_rebase() {
+  local pr_number="$1"
+  local pr_title="$2"
+  local pr_url="$3"
+  local head_ref="$4"
+  local base_ref="$5"
+
+  # ログファイルは 1 PR ごとに分ける（タイムスタンプで一意化）
+  local log_file
+  log_file="${LOG_DIR}/auto-rebase-${pr_number}-$(date +%Y%m%d-%H%M%S).log"
+
+  local result_file
+  result_file=$(mktemp 2>/dev/null || echo "/tmp/ar-result-$$")
+
+  (
+    set +e
+    # サブシェル終了時は必ず元の base branch checkout に戻す（NFR 5.2）
+    # shellcheck disable=SC2064
+    trap "git rebase --abort >/dev/null 2>&1; git checkout '${BASE_BRANCH}' >/dev/null 2>&1" EXIT
+
+    # Req 4.3 前提: base/head 両方を最新化（API 状態と一致させる）
+    if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" git fetch origin "$head_ref" "$base_ref" >/dev/null 2>&1; then
+      exit 4
+    fi
+
+    # head branch を origin に同期して checkout（既存ローカルあれば force リセット）
+    if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" git checkout -B "$head_ref" "origin/${head_ref}" >/dev/null 2>&1; then
+      exit 4
+    fi
+
+    # Req 4.2 前段: rebase 前 SHA を記録
+    local before_sha
+    before_sha=$(git rev-parse HEAD 2>/dev/null) || exit 4
+    echo "before=${before_sha}" >>"$log_file"
+
+    # 既に base が head の祖先なら rebase 不要（skip 候補）。Phase A 本体が拾える
+    # ケースを Phase D で重複処理しないための短絡。
+    if git merge-base --is-ancestor "origin/${base_ref}" "origin/${head_ref}" 2>/dev/null; then
+      # skip 用 sentinel として before==after を出力して exit 5
+      printf '%s %s\n' "$before_sha" "$before_sha" >"$result_file"
+      exit 5
+    fi
+
+    # Claude prompt を組み立て
+    local prompt
+    if ! prompt=$(ar_build_prompt "$pr_number" "$pr_title" "$pr_url" "$head_ref" "$base_ref"); then
+      exit 4
+    fi
+
+    # Req 4.1 / NFR 5.1: Claude CLI を timeout 付きで起動。`--print` でバッチ実行、
+    # `--permission-mode bypassPermissions` で rebase 中の git 操作を許可。
+    # `--output-format stream-json` + `--verbose` で進捗を log ファイルに残す。
+    timeout "$AUTO_REBASE_MAX_TURNS_SEC" \
+      claude --print "$prompt" \
+             --model "$AUTO_REBASE_MODEL" \
+             --permission-mode bypassPermissions \
+             --max-turns "$AUTO_REBASE_MAX_TURNS" \
+             --output-format stream-json \
+             --verbose \
+        >>"$log_file" 2>&1
+    local claude_rc=$?
+
+    # Req 4.5: timeout (exit 124) 検知
+    if [ "$claude_rc" -eq 124 ]; then
+      git rebase --abort >/dev/null 2>&1 || true
+      exit 2
+    fi
+
+    # Claude 終了後の working tree が dirty なら conflict 未解消（半端な状態）
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+      git rebase --abort >/dev/null 2>&1 || true
+      exit 1
+    fi
+
+    # Req 4.2 後段: rebase 後 SHA を記録
+    local after_sha
+    after_sha=$(git rev-parse HEAD 2>/dev/null) || exit 1
+    echo "after=${after_sha}" >>"$log_file"
+
+    # before == after で base が head の祖先のままなら、Claude が rebase 実行を
+    # サボった可能性。skip 扱いにして次サイクルに委ねる（保守的）。
+    if [ "$before_sha" = "$after_sha" ]; then
+      if git merge-base --is-ancestor "origin/${base_ref}" "origin/${head_ref}" 2>/dev/null; then
+        printf '%s %s\n' "$before_sha" "$after_sha" >"$result_file"
+        exit 5
+      fi
+      # before==after だが base が祖先でない = rebase が走らなかった conflict
+      exit 1
+    fi
+
+    # Req 4.6 / NFR 5.3: 安全な force push のみ使用（`--force` 単独は使わない）
+    if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+        git push --force-with-lease origin "$head_ref" >>"$log_file" 2>&1; then
+      exit 3
+    fi
+
+    printf '%s %s\n' "$before_sha" "$after_sha" >"$result_file"
+    exit 0
+  )
+  local rc=$?
+
+  # サブシェル外でも安全側に倒して base branch に戻す（NFR 5.2）
+  git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
+
+  # 成功 / skip 時のみ stdout に SHA を出力（呼び出し側が parse する）
+  case $rc in
+    0|5)
+      if [ -f "$result_file" ]; then
+        cat "$result_file"
+      fi
+      ;;
+  esac
+  rm -f "$result_file" 2>/dev/null || true
+
+  return "$rc"
+}
+
 process_auto_rebase() {
   # Req 1.1: opt-in gate（未設定 / `off` / 不正値で起動しない）
   if [ "$AUTO_REBASE_MODE" = "off" ]; then
