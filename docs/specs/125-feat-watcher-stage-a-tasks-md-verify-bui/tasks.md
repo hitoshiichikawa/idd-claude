@@ -45,7 +45,7 @@
   - _Requirements: 3.1, 3.2, 3.3_
   - _Boundary: issue-watcher.sh (round counter sidecar)_
 
-- [ ] 3. `stage_a_verify_run` 統合ランナーを実装
+- [x] 3. `stage_a_verify_run` 統合ランナーを実装
   - design.md「stage_a_verify_run / Internal Flow」の擬似コードに従う
   - Gate 1（DISABLED）: `STAGE_A_VERIFY_ENABLED=false` 明示時 → `sav_log "DISABLED reason=env-opt-out"` + return 0（Req 4.1 / 5.4）
   - Gate 2（SKIPPED）: resolve_command が失敗時 → `sav_log "SKIPPED reason=no-verify-task-in-tasks-md"` + return 0（Req 1.4 / 5.3）
