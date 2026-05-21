@@ -147,7 +147,7 @@
 
 ## 7. 検証 / Dogfood
 
-- [ ] 7.1 `shellcheck` を `issue-watcher.sh` に対して通し警告ゼロを確認
+- [x] 7.1 `shellcheck` を `issue-watcher.sh` に対して通し警告ゼロを確認
   - `shellcheck local-watcher/bin/issue-watcher.sh` を実行
   - 必要な `# shellcheck disable=SC2053` を `ar_classify_diff` の glob 一致行にのみ局所付与
   - PR 本文の Test plan に shellcheck 出力を記載
