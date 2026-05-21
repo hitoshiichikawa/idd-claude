@@ -73,7 +73,7 @@
   - _Requirements: 7.1, 7.5, 7.6_
   - _Boundary: ar_dismiss_all_approvals_
 
-- [ ] 3.4 `ar_apply_semantic` で dismissal + label 遷移 + 説明コメント投稿を実装
+- [x] 3.4 `ar_apply_semantic` で dismissal + label 遷移 + 説明コメント投稿を実装
   - 順序: `ar_dismiss_all_approvals` → `needs-rebase` 除去 → `ready-for-review` 付与 → 説明コメント投稿
   - heredoc コメント本文に before_sha / after_sha、最初の unmatched path、dismissal 実施の旨、再レビュー要求の理由、hidden marker `<!-- idd-claude:auto-rebase pr=${pr_number} -->` を含める
   - dismissal 失敗時は呼び出し側（`ar_handle_pr`）に戻り値で通知し escalate 経路に流す
