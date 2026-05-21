@@ -108,7 +108,7 @@
   - _Requirements: 6.1, 6.3_
   - _Boundary: root CLAUDE.md_
 
-- [ ] 7. 最終検証（手動スモークテスト + static analysis）
+- [x] 7. 最終検証（手動スモークテスト + static analysis）
   - **Static analysis**:
     - `shellcheck local-watcher/bin/issue-watcher.sh .github/scripts/*.sh install.sh setup.sh tests/local-watcher/stage-a-verify/extract-driver.sh` — 警告ゼロ
     - `actionlint .github/workflows/*.yml` — クリーン
