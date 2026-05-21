@@ -26,7 +26,7 @@
   - `process_auto_rebase()` のエントリ関数を作成: opt-in gate / dirty working tree check / サイクル開始ログ / 空サマリ行出力までを実装（候補抽出と PR 処理は次タスク）
   - _Requirements: 1.1, 1.2, 1.4, 3.4, NFR 1.1, NFR 2.2, NFR 4.1_
 
-- [ ] 1.3 `ar_fetch_candidates` で `needs-rebase` + approved + 非 draft + 非 fork PR を抽出
+- [x] 1.3 `ar_fetch_candidates` で `needs-rebase` + approved + 非 draft + 非 fork PR を抽出
   - `gh pr list --search "review:approved label:\"needs-rebase\" -label:\"claude-failed\" -draft:true"` を server filter として使用
   - jq client filter: `isDraft == false` / `reviewDecision == "APPROVED"` / `headRefName | test($MERGE_QUEUE_HEAD_PATTERN)` / `headRepositoryOwner.login == $owner`
   - `process_auto_rebase` 内から呼び出し、overflow（`AUTO_REBASE_MAX_PRS` 超過分）の集計とログ出力までを実装
