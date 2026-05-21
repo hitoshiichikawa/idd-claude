@@ -10,7 +10,7 @@
 
 ## 1. Phase D 基盤（Config / Logger / 候補抽出）
 
-- [ ] 1.1 `AUTO_REBASE_*` env var 群と起動時 template 存在チェックを Config block に追加
+- [x] 1.1 `AUTO_REBASE_*` env var 群と起動時 template 存在チェックを Config block に追加
   - `local-watcher/bin/issue-watcher.sh` の Phase A Re-check Config 直後に Phase D Config を新設
   - 追加 env var: `AUTO_REBASE_MODE` (既定 `off`) / `MECHANICAL_PATHS` (既定 空) / `AUTO_REBASE_MODEL` (既定 `claude-opus-4-7`) / `AUTO_REBASE_MAX_TURNS` (既定 `30`) / `AUTO_REBASE_MAX_TURNS_SEC` (既定 `600`) / `AUTO_REBASE_GIT_TIMEOUT` (既定 `60`) / `AUTO_REBASE_MAX_PRS` (既定 `3`) / `AUTO_REBASE_TEMPLATE` (既定 `$HOME/bin/auto-rebase-prompt.tmpl`)
   - `AUTO_REBASE_MODE` を `case` で正規化（`claude` のみ通し、他はすべて `off` に固定）
