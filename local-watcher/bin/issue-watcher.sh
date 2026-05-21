@@ -131,6 +131,40 @@ MERGE_QUEUE_RECHECK_ENABLED="${MERGE_QUEUE_RECHECK_ENABLED:-true}"
 # 1 サイクルで再評価する PR 数の上限（残りは次回サイクルに持ち越し）。
 MERGE_QUEUE_RECHECK_MAX_PRS="${MERGE_QUEUE_RECHECK_MAX_PRS:-20}"
 
+# ─── Phase D: Auto Rebase Processor 設定 (#17) ───
+# `needs-rebase` 付き approved PR を Claude 経由で rebase し、変更ファイルが
+# `MECHANICAL_PATHS` allowlist に閉じている場合のみ approve を維持して auto-merge
+# に到達させる。allowlist 外の差分（= semantic 判断含む）が出た場合は approving
+# review を dismissal API で剥がし、`ready-for-review` に戻して再レビューを誘導
+# する。新規 opt-in 機能。`AUTO_REBASE_MODE=claude` を明示したリポジトリでのみ
+# 起動し、未設定 / `off` / 不正値のリポジトリは導入前と完全に同一の挙動を維持
+# する（Req 1.1, 1.3, NFR 1.1）。
+# 既存「デフォルト有効化フラグの値正規化」ループには加えない（既定 OFF の opt-in
+# 制のため、`=true` で有効化する 8 種とは別扱い）。
+AUTO_REBASE_MODE="${AUTO_REBASE_MODE:-off}"
+# 値正規化: `claude` のみ通し、それ以外（`off` / 未設定 / 空 / `on` / `true` /
+# `CLAUDE` / typo 等）はすべて `off` に固定する（Req 1.3）。
+case "$AUTO_REBASE_MODE" in
+  claude) : ;;
+  *)      AUTO_REBASE_MODE="off" ;;
+esac
+# mechanical と看做す path allowlist。カンマ区切り。各 pattern は bash glob
+# 構文（`*` / `?` / `[abc]`）。空 / 未設定なら全件 semantic 扱い（Req 5.4 /
+# NFR 3.2 保守的判定）。
+MECHANICAL_PATHS="${MECHANICAL_PATHS:-}"
+# Claude モデル ID。`PR_ITERATION_DEV_MODEL` と独立に上書き可能。
+AUTO_REBASE_MODEL="${AUTO_REBASE_MODEL:-claude-opus-4-7}"
+# Claude `--max-turns` 値。
+AUTO_REBASE_MAX_TURNS="${AUTO_REBASE_MAX_TURNS:-30}"
+# Claude rebase 試行の外側 timeout（秒）。NFR 5.1。
+AUTO_REBASE_MAX_TURNS_SEC="${AUTO_REBASE_MAX_TURNS_SEC:-600}"
+# git / gh の個別 timeout（秒）。既存 MERGE_QUEUE_GIT_TIMEOUT と同既定。
+AUTO_REBASE_GIT_TIMEOUT="${AUTO_REBASE_GIT_TIMEOUT:-60}"
+# 1 サイクルで処理する PR 数の上限。残りは次サイクル持ち越し。
+AUTO_REBASE_MAX_PRS="${AUTO_REBASE_MAX_PRS:-3}"
+# Prompt template の配置先（install.sh が `*.tmpl` glob で自動配置）。
+AUTO_REBASE_TEMPLATE="${AUTO_REBASE_TEMPLATE:-$HOME/bin/auto-rebase-prompt.tmpl}"
+
 # ─── PR Iteration Processor 設定 (#26) ───
 # `needs-iteration` ラベル付き PR をレビューコメントに基づいて自動で iterate する。
 # 標準機能としてデフォルト有効化（#112）。無効化したい場合は cron / launchd 側で
@@ -349,12 +383,21 @@ if [ "$PR_ITERATION_ENABLED" = "true" ] \
   exit 1
 fi
 
+# Phase D (Auto Rebase) が有効化されている時のみ template の存在を必須化（opt-in
+# gate）。`AUTO_REBASE_MODE=off`（既定）時は template 未配置でも watcher 全体を
+# 起動できるよう、無条件チェックを避ける（NFR 1.1）。
+if [ "$AUTO_REBASE_MODE" != "off" ] && [ ! -f "$AUTO_REBASE_TEMPLATE" ]; then
+  echo "Error: Auto Rebase テンプレートが見つかりません: $AUTO_REBASE_TEMPLATE" >&2
+  echo "  install.sh --local 再実行で配置されます。" >&2
+  exit 1
+fi
+
 mkdir -p "$LOG_DIR"
 
 # 解決済み base branch を起動時 log に出力（Req 1.7 / NFR 4.1）。
 # 運用者が cron mailer / log で `base-branch=...` を grep できるよう、
 # 既定値（main）でも明示的に出力する。
-echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH}"
+echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 多重起動防止
