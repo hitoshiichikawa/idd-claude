@@ -68,14 +68,14 @@
   - _Requirements: 2.2, 2.3, 4.1, 4.5, 6.1, 6.2, 6.3, NFR 1.1, NFR 1.3_
   - _Depends: 3_
 
-- [ ] 5. fixture テストの追加（抽出関数の回帰検出）
+- [x] 5. fixture テストの追加（抽出関数の回帰検出）
 - [x] 5.1 `tests/local-watcher/stage-a-verify/fixtures/` を新設し、design.md「Testing Strategy / Unit-level」の 12 fixture を配置 (P)
   - `tasks-gradlew.md` / `tasks-npm.md` / `tasks-cargo.md` / `tasks-go.md` / `tasks-pytest.md` / `tasks-make.md` / `tasks-bundle.md` / `tasks-shellcheck.md` / `tasks-no-verify.md` / `tasks-deferrable.md` / `tasks-mixed.md` / `tasks-empty.md`
   - 各 fixture は実在 tasks.md と同じ書式（markdown bullet + アノテーション）を模す
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, NFR 6.1_
   - _Boundary: tests/local-watcher/stage-a-verify/fixtures_
 
-- [ ] 5.2 `tests/local-watcher/stage-a-verify/extract-driver.sh` を実装 (P)
+- [x] 5.2 `tests/local-watcher/stage-a-verify/extract-driver.sh` を実装 (P)
   - 各 fixture を一時 `$REPO_DIR/$SPEC_DIR_REL/tasks.md` として配置し、`stage_a_verify_extract_command` を source して呼ぶ
   - stdout と期待文字列を diff、全件 pass で exit 0 / 不一致あれば該当 fixture 名 + diff を出して exit 1
   - 期待値は fixture 隣の `.expected` ファイル or driver 内の lookup table のいずれか（実装判断、driver 内 lookup を推奨）
