@@ -3227,12 +3227,31 @@ docs/specs/<N>-<slug>/
 | `ears-format.md` | PM | AC を EARS 5 パターン（Event / State / Unwanted / Optional / Ubiquitous）で記述 |
 | `requirements-review-gate.md` | PM | requirements.md ドラフトの自己レビュー（Mechanical + 判断、最大 2 パス。Claude Code v2.1.139+ では Mechanical Checks を `/goal` 自動ループで収束させる運用ノート付き） |
 | `design-principles.md` | Architect | design.md の必須セクションと詳細度の方針 |
-| `design-review-gate.md` | Architect | design.md の自己レビュー（Requirements Traceability / File Structure Plan 充填 / orphan 検出。Claude Code v2.1.139+ では同 Mechanical Checks を `/goal` 自動ループで収束させる運用ノート付き） |
+| `design-review-gate.md` | Architect | design.md の自己レビュー（Requirements Traceability / File Structure Plan 充填 / orphan 検出 / [Budget overflow check（#131）](#architect-review-gate-の-budget-overflow-check131)。Claude Code v2.1.139+ では Mechanical Checks を `/goal` 自動ループで収束させる運用ノート付き） |
 | `tasks-generation.md` | Architect / Developer | tasks.md の numeric 階層 ID とアノテーション（`_Requirements:_` / `_Boundary:_` / `_Depends:_` / `(P)`） |
 
 > `/goal` 運用ノートは Claude Code v2.1.139 以降でのみ有効です。v2.1.139 未満では当該節を
 > スキップし、従来の「最大 2 パス」手動運用がそのまま適用されます（[前提条件 / 共通](#共通)
 > の最低バージョン要件を参照）。
+
+#### Architect Review Gate の Budget overflow check（#131）
+
+`design-review-gate.md` の Mechanical Checks に **Budget overflow check** が追加されました。
+Architect が `tasks.md` を確定する直前に、最上位 numeric ID タスク（`- [ ] 1.` / `- [ ] 2.` …）の
+件数を機械的にカウントし、閾値（10 / 11–13 / 14+）に応じて次のように分岐します:
+
+| タスク件数 | 判定 | 動作 |
+|---|---|---|
+| ≤ 10 件 | pass | 追加アクションなしで確定（**既存挙動と同一**） |
+| 11〜13 件 | consolidate → split | タスク統合を試行し、なお減らないなら `design.md` 末尾に `## Split Proposal` セクションを追加し、Issue に `needs-decisions` ラベルを付与 |
+| ≥ 14 件 | forced split | consolidate を経由せず `## Split Proposal` セクション追加 ＋ `needs-decisions` ラベル付与 |
+
+> **migration note**: **既存ユーザに対する破壊的変更はありません**。本機能は `tasks.md` の
+> 件数が 10 件以下の正常ケース（既存運用の大半）では追加アクションを発生させず、Architect の
+> 挙動は本機能導入前と完全に同一です。11 件以上のケースで初めて consolidate / split proposal の
+> フローに分岐し、Developer の turn budget（典型 60 turn）超過による自動失敗を未然に防ぎます。
+> 既存の `tasks-generation.md` の「3〜10 件目安」ガイドラインと矛盾しない形で統合されており、
+> 同ガイドラインの 10 件上限を機械的な enforcement boundary として扱う実装上の取り決めです。
 
 ### cc-sdd との関係
 
