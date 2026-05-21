@@ -153,7 +153,7 @@
   - PR 本文の Test plan に shellcheck 出力を記載
   - _Requirements: NFR 4.1_
 
-- [ ] 7.2 cron-like 最小 PATH での起動確認と従来挙動の不変性スモークテスト
+- [x] 7.2 cron-like 最小 PATH での起動確認と従来挙動の不変性スモークテスト
   - `env -i HOME=$HOME PATH=/usr/bin:/bin bash -c 'command -v claude gh jq flock git timeout'`
   - `AUTO_REBASE_MODE` 未設定で `REPO=owner/test REPO_DIR=/tmp/test-repo $HOME/bin/issue-watcher.sh` を流し、Phase D 関連の起動ログが一切出ないこと、既存 Phase A / Re-check / PR Iteration のサマリ行が従来通り出力されることを確認
   - PR 本文の Test plan に観測ログ抜粋を記載
