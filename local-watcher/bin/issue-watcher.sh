@@ -1133,6 +1133,53 @@ process_merge_queue() {
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Phase D: Auto Rebase Processor (#17)
+#   `needs-rebase` + approved な open PR を Claude 経由で rebase し、変更ファイルが
+#   `MECHANICAL_PATHS` allowlist に閉じている場合は approve を維持して auto-merge
+#   に到達させる。allowlist 外の差分（= semantic 判断含む）が出た場合は approving
+#   review を review dismissal API で剥がし、`ready-for-review` に戻して再レビュー
+#   を誘導する。新規 opt-in 機能。`AUTO_REBASE_MODE=claude` を明示したリポジトリ
+#   でのみ起動し、未設定 / `off` / 不正値のリポジトリは導入前と完全に同一の挙動を
+#   維持する（Req 1.1, 1.3, NFR 1.1）。
+#
+#   既存 Phase A 系列との競合排除（Req 3.1〜3.3）は、Re-check（先行）→ Phase A 本体
+#   → Phase D の直列順序により構造的に保証される（design.md「順序根拠」参照）。
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# auto-rebase 専用ロガー（Phase A `mq_log` と同一の `[$REPO]` 3 段 prefix）。
+# Issue #119 Req 1.x: 時刻 prefix と processor prefix の間に `[$REPO]` を挿入。
+ar_log() {
+  echo "[$(date '+%F %T')] [$REPO] auto-rebase: $*"
+}
+ar_warn() {
+  echo "[$(date '+%F %T')] [$REPO] auto-rebase: WARN: $*" >&2
+}
+ar_error() {
+  echo "[$(date '+%F %T')] [$REPO] auto-rebase: ERROR: $*" >&2
+}
+
+process_auto_rebase() {
+  # Req 1.1: opt-in gate（未設定 / `off` / 不正値で起動しない）
+  if [ "$AUTO_REBASE_MODE" = "off" ]; then
+    return 0
+  fi
+
+  # NFR 5.2 / Phase A pattern: 想定外の dirty working tree を検知したら ERROR で
+  # サイクル中止（後続 Processor を阻害しないよう 0 return）
+  if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    ar_error "dirty working tree を検出しました。Phase D Auto Rebase Processor をスキップします。"
+    return 0
+  fi
+
+  # Req 1.4: サイクル開始時に有効値をログ出力
+  ar_log "サイクル開始 (mode=${AUTO_REBASE_MODE}, paths=${MECHANICAL_PATHS:-(empty)}, max_prs=${AUTO_REBASE_MAX_PRS}, model=${AUTO_REBASE_MODEL}, max_turns=${AUTO_REBASE_MAX_TURNS}, timeout=${AUTO_REBASE_MAX_TURNS_SEC}s)"
+
+  # 候補取得・PR 処理は後続タスク（1.3 / 2.x / 3.x）で追加する。本タスクでは
+  # 空サマリ行を出力して skeleton を完成させる（Req 3.4 / NFR 2.2 の出力契約を満たす）。
+  ar_log "サマリ: mechanical=0, semantic=0, failed=0, skip=0, overflow=0"
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Phase A: Merge Queue Re-check Processor (#27)
 #   `needs-rebase` 付き approved PR を別レーンで再評価し、`mergeable=MERGEABLE` に
 #   戻った PR のラベルを自動除去する。Phase A 本体（process_merge_queue）とは
