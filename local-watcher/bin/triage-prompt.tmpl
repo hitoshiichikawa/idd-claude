@@ -68,6 +68,10 @@ tasks をまとめた設計 PR を先行作成し、人間の merge を経てか
       "impact": "この決定が実装・運用に与える影響",
       "recommendation": "Claude の推奨とその理由"
     }
+  ],
+  "edit_paths": [
+    "local-watcher/",
+    "README.md"
   ]
 }
 ```
@@ -76,3 +80,19 @@ tasks をまとめた設計 PR を先行作成し、人間の merge を経てか
 - `needs_architect` が `false` の場合でも `architect_reason` には「軽微な修正のため不要」など根拠を残すこと
 - JSON 以外の文字列を出力しないこと（シェル側で jq パースに失敗します）
 - `{{FILE}}` への書き込みは Write ツールを使うこと
+
+## edit_paths の出力指示（Phase E）
+
+Triage の判定に加えて、当該 Issue を実装した場合に **編集される可能性が高い top-level
+path** を JSON 配列 `edit_paths` として出力してください。
+
+- 要素はリポジトリルートからの相対パスで、ディレクトリは末尾 `/` 付き、ファイルは `/` なし
+  （例: `local-watcher/`, `README.md`, `docs/`）
+- top-level（1 段目）のみ。サブパスや行番号は不要
+- Issue 本文に明示記載がある場合は確度高、推測でしかない場合は除外
+- 確信が持てない場合は空配列 `[]` を返してください（omit や null は不可）
+- 推定見込みであり 100% 正確である必要はない（過剰列挙より厳選を優先）
+
+本フィールドは Path Overlap Checker (Phase E) が hot file 競合予防のために利用します。
+既存 5 keys（`status` / `needs_architect` / `architect_reason` / `rationale` / `decisions`）の
+位置・型・意味は変更しないこと。

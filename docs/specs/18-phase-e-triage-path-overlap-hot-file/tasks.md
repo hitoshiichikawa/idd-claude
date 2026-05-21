@@ -6,7 +6,7 @@
 > ため直列で配置する。Developer は impl-resume 時は task ID 順に着手し、完了ごとに
 > `- [x]` 化する（`IMPL_RESUME_PROGRESS_TRACKING` 既定 ON 規約）。
 
-- [ ] 1. Triage Prompt Template に `edit_paths` 出力指示を追加
+- [x] 1. Triage Prompt Template に `edit_paths` 出力指示を追加
   - `local-watcher/bin/triage-prompt.tmpl` の末尾「## 出力形式」節に additive 拡張として
     `edit_paths` フィールドの出力指示文を追加（既存 5 keys の指示は一切変更しない）
   - JSON schema 例示ブロックに `"edit_paths": [ ... ]` を追記
@@ -15,7 +15,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.5_
   - _Boundary: Triage Prompt Template_
 
-- [ ] 2. `awaiting-slot` ラベルを `idd-claude-labels.sh` に追加 (P)
+- [x] 2. `awaiting-slot` ラベルを `idd-claude-labels.sh` に追加 (P)
   - `repo-template/.github/scripts/idd-claude-labels.sh` の `LABELS=( ... )` 配列末尾に
     `"awaiting-slot|c5def5|【Issue 用】 hot file 競合予防で同サイクル dispatch を見送り中（Phase E Path Overlap Checker が付与・除去）"` を 1 行追加
   - 既存ラベル 13 行の名前 / 色 / 説明文は変更しない（Req 7.3）
@@ -24,7 +24,7 @@
   - _Requirements: 7.1, 7.2, 7.3_
   - _Boundary: Label Provisioning Script Edit_
 
-- [ ] 3. `issue-watcher.sh` に env 定数とログ関数群を追加
+- [x] 3. `issue-watcher.sh` に env 定数とログ関数群を追加
   - `local-watcher/bin/issue-watcher.sh` の `LABEL_*` 定数ブロック末尾に `LABEL_AWAITING_SLOT="awaiting-slot"` を追加
   - env var ブロック（既存 `STAGE_A_VERIFY_*` 周辺）の後に新規セクション `# ─── Phase E: Path Overlap Checker 設定 (#18) ───` を追加し、`PATH_OVERLAP_CHECK="${PATH_OVERLAP_CHECK:-off}"` を配置
   - `#112` の「デフォルト有効化フラグの値正規化」ループには **追加しない**（opt-in default off のため）
@@ -32,7 +32,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 8.4_
   - _Boundary: Path Overlap Env Resolver, Path Overlap Logger_
 
-- [ ] 4. Triage Parser + Path Overlap Persister 関数群を実装
+- [x] 4. Triage Parser + Path Overlap Persister 関数群を実装
   - `issue-watcher.sh` に下記関数を追加（既存 `qa_persist_reset_time` / `qa_load_reset_time` の近傍、既存命名規約 `po_*` prefix）:
     - `po_parse_triage_edit_paths $triage_file` — `jq '.edit_paths // [] | if type == "array" then map(select(type == "string")) else [] end'` で fail-safe 抽出
     - `po_persist_edit_paths $issue_number $edit_paths_json` — sticky comment（marker `<!-- idd-claude:edit-paths:v1 -->` + 機械可読 `<!-- idd-claude:edit-paths-json:[...] -->`）の create / update
@@ -43,7 +43,7 @@
   - _Boundary: Triage Edit-Paths Parser, Path Overlap Persister_
   - _Depends: 1, 3_
 
-- [ ] 5. In-Flight Collector + Overlap Engine + Awaiting Slot State Machine を実装
+- [x] 5. In-Flight Collector + Overlap Engine + Awaiting Slot State Machine を実装
   - `issue-watcher.sh` に下記関数を追加:
     - `po_collect_inflight_issues $candidate` — `gh issue list --repo "$REPO" --search '...'` で Req 4.1 の 7 ラベルのいずれかを持ち、`st-failed` / `awaiting-slot` を持たない open Issue を列挙。候補自身を除外（Req 4.3）。各 Issue について `po_load_edit_paths` を呼んで union（jq `add | unique`）
     - `po_compute_overlap $candidate_paths_json $inflight_paths_json` — 正規化（先頭 `./` 剥がし / 連続スラッシュ圧縮 / top-level セグメント抽出）後に集合積を計算（jq def `normalize` 内蔵）。candidate 空配列は常に空（Req 5.5）
@@ -55,7 +55,7 @@
   - _Boundary: In-Flight Collector, Overlap Engine, Awaiting Slot State Machine_
   - _Depends: 3, 4_
 
-- [ ] 6. Dispatcher 統合点 `po_check_dispatch_gate` を実装し `_dispatcher_run` に挿入
+- [x] 6. Dispatcher 統合点 `po_check_dispatch_gate` を実装し `_dispatcher_run` に挿入
   - `issue-watcher.sh` に `po_check_dispatch_gate $issue_number $labels_json` を追加（戻り値 0 = claim 続行 / 1 = dispatch skip）
   - 関数冒頭で `[ "$PATH_OVERLAP_CHECK" = "true" ] || return 0` の早期 return で opt-in gate を成立（Req 1.2 / 1.3）
   - `_dispatcher_run` の candidate ループ内、`check_existing_impl_pr "$issue_number"` 通過直後・`_dispatcher_find_free_slot` 呼び出し前に挿入。skip 時は `continue` でループ次へ
@@ -65,7 +65,7 @@
   - _Boundary: Dispatcher Integration Point, Awaiting Slot Re-evaluator_
   - _Depends: 5_
 
-- [ ] 7. README に Phase E 節を追加 (P)
+- [x] 7. README に Phase E 節を追加 (P)
   - `README.md` の Phase D 節（`## Auto Rebase Processor (Phase D)`）の **後** に新規節
     `## Path Overlap Checker (Phase E)` を追加。サブセクション: 概要 / 環境変数 / in-flight ラベル定義 / 自然解消の流れ / 観測ログ / dogfood 確認手順 / Migration Note（後方互換性）
   - 「オプション機能（標準有効 / 常時有効）一覧」表（既存 Phase B / C / D 行の近傍）に
@@ -77,7 +77,7 @@
   - _Requirements: 9.1, 9.2, 9.3, 9.4_
   - _Boundary: README Section_
 
-- [ ] 8. 静的検査・スモークテスト・dogfood 手順を実施
+- [x] 8. 静的検査・スモークテスト・dogfood 手順を実施
   - `shellcheck local-watcher/bin/issue-watcher.sh` を実行し warnings ゼロを確認（Req 11.1）
   - `shellcheck repo-template/.github/scripts/idd-claude-labels.sh` を実行し warnings ゼロを確認
   - design.md「Testing Strategy」節の Unit-level Manual Smoke 4 ケース（`po_parse_triage_edit_paths` / `po_compute_overlap` / env normalize / sticky idempotency）を bash `source` で関数を直接呼んで入出力テーブルを検証

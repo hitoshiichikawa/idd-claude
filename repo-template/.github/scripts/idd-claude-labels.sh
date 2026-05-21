@@ -71,6 +71,7 @@ LABELS=(
   "needs-quota-wait|c5def5|【Issue 用】 Claude Max quota 超過で reset 待ち（Quota Resume Processor が自動除去）"
   "staged-for-release|b8e0d2|【Issue 用】 develop に merge 済み、main 到達待ち（multi-branch 運用専用）"
   "st-failed|d73a4a|【Issue 用】 ST failure 検知後 revert 済み（Phase B Promote Pipeline が付与）"
+  "awaiting-slot|c5def5|【Issue 用】 hot file 競合予防で同サイクル dispatch を見送り中（Phase E Path Overlap Checker が付与・除去）"
 )
 
 echo "📌 idd-claude ラベルを作成します"
