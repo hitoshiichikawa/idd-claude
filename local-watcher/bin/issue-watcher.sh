@@ -5286,12 +5286,23 @@ stage_a_verify_run() {
 #   `STAGE_CHECKPOINT_ENABLED=false`（明示 opt-out）では resolve は呼ばず、本関数は本機能
 #   導入前と 1 行も挙動を変えない（NFR 1.1）。
 #
+# stage-a-verify gate (#125, デフォルト有効): `STAGE_A_VERIFY_ENABLED=true`（既定）の
+#   ときに、Stage A 完了直後・Stage B 開始直前で `tasks.md` 末尾の verify タスク
+#   （build/test/lint）を watcher が REPO_DIR で独立再実行する。Stage A skipped path
+#   （START_STAGE=B|C）でも本ブロックを通すため、Stage Checkpoint resume 経由のフロー
+#   でも gate が機能する。`STAGE_A_VERIFY_ENABLED=false` 明示時は stage_a_verify_run
+#   が即 return 0 して本機能導入前と user-observable に完全同一の挙動になる
+#   （Req 4.1 / NFR 1.1）。失敗時は round=1 で Developer 差し戻し（return 1）、
+#   round=2 で claude-failed escalate（return 1、内部で mark_issue_failed 済）。
+#
 # 入力 (環境変数経由): NUMBER, TITLE, BODY, URL, BRANCH, MODE, SPEC_DIR_REL, LOG, REPO,
 #                      DEV_MODEL, DEV_MAX_TURNS, REVIEWER_MODEL, REVIEWER_MAX_TURNS,
-#                      STAGE_CHECKPOINT_ENABLED (#68, default=true since #112)
+#                      STAGE_CHECKPOINT_ENABLED (#68, default=true since #112),
+#                      STAGE_A_VERIFY_ENABLED / STAGE_A_VERIFY_TIMEOUT /
+#                      STAGE_A_VERIFY_COMMAND (#125)
 # 戻り値:
 #   0 = pipeline 成功（Stage C も成功 / PR 作成済み）または TERMINAL_OK 相当の停止
-#   1 = Stage A / A' / B / B' / C いずれかで失敗 → claude-failed 既に付与済み
+#   1 = Stage A / A' / B / B' / C / stage-a-verify いずれかで失敗 → claude-failed 既に付与済み
 run_impl_pipeline() {
   local prompt_a prompt_redo prompt_c
   local rev_rc
@@ -5374,6 +5385,31 @@ run_impl_pipeline() {
     B|C)
       sc_log "Stage A をスキップ（START_STAGE=$START_STAGE / 既存 impl-notes.md を再利用）" >> "$LOG"
       echo "⏭️  #$NUMBER: Stage A スキップ（Stage Checkpoint resume）" | tee -a "$LOG"
+      ;;
+  esac
+
+  # ── stage-a-verify gate (#125) ──
+  # Stage A 完了直後・Stage B 開始直前で `tasks.md` 末尾の verify タスク（build /
+  # test / lint）を watcher が REPO_DIR で独立再実行する。Stage A skipped path
+  # （START_STAGE=B|C）でも通すことで Stage Checkpoint resume 経由のフローでも
+  # gate が機能する（design.md「stage-a-verify と Stage Checkpoint の協調」参照）。
+  # `STAGE_A_VERIFY_ENABLED=false` 明示時は stage_a_verify_run が即 return 0 して
+  # 本機能導入前と user-observable に完全同一の挙動になる（Req 4.1 / NFR 1.1）。
+  # `stage_a_verify_run` の戻り値 0/1/2 を `run_impl_pipeline` の従来契約
+  # （0 = 成功 / 1 = 失敗）にマップする（NFR 1.3）。round=2 escalate (戻り値 2)
+  # 時は内部で `mark_issue_failed` が発火済みなので外部観測上は claude-failed。
+  local _sav_rc=0
+  stage_a_verify_run || _sav_rc=$?
+  case "$_sav_rc" in
+    0)
+      : ;;  # SUCCESS / SKIPPED / DISABLED → 続行
+    1)
+      echo "🔁 #$NUMBER: stage-a-verify 失敗（round=1）→ Developer 差し戻し（次 tick で再試行）" | tee -a "$LOG"
+      return 1
+      ;;
+    2)
+      echo "❌ #$NUMBER: stage-a-verify 連続 2 回失敗 → claude-failed" | tee -a "$LOG"
+      return 1
       ;;
   esac
 
