@@ -80,7 +80,7 @@
   - _Requirements: 7.1, 7.2, 7.3, 7.4_
   - _Depends: 3.3_
 
-- [ ] 3.5 `ar_escalate_to_failed` で `claude-failed` 付与と原因種別コメントを実装 (P)
+- [x] 3.5 `ar_escalate_to_failed` で `claude-failed` 付与と原因種別コメントを実装 (P)
   - 入力 `reason` ∈ `{conflict-unresolved, timeout, push-failed, dismissal-failed}` で heredoc を分岐
   - `needs-rebase` には触らない（Req 8.1）
   - `gh pr edit --add-label "$LABEL_FAILED"` + `gh pr comment` の順で実行（label 付与失敗時もコメントは試みる）
