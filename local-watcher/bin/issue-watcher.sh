@@ -1900,9 +1900,32 @@ process_auto_rebase() {
     ar_log "対象候補 ${total} 件、処理対象 ${target_count} 件"
   fi
 
-  # 本処理ループは後続タスク（3.7）で完成させる。本タスクでは候補抽出と overflow
-  # 集計までを実装し、サマリ行を出力する（Req 3.4 / NFR 2.2 の出力契約を満たす）。
-  ar_log "サマリ: mechanical=0, semantic=0, failed=0, skip=0, overflow=${skipped_overflow}"
+  local mechanical=0 semantic=0 failed=0 skipped=0
+
+  if [ "$target_count" -gt 0 ]; then
+    local pr_iter
+    pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]")
+
+    if [ -n "$pr_iter" ]; then
+      while IFS= read -r pr_json; do
+        local rc=0
+        ar_handle_pr "$pr_json" || rc=$?
+        case "$rc" in
+          0)  mechanical=$((mechanical + 1)) ;;
+          1)  semantic=$((semantic + 1)) ;;
+          2)  failed=$((failed + 1)) ;;
+          10) skipped=$((skipped + 1)) ;;
+          *)  failed=$((failed + 1)) ;;
+        esac
+      done <<< "$pr_iter"
+    fi
+  fi
+
+  # Req 3.4 / NFR 2.2: サマリ行 1 件
+  ar_log "サマリ: mechanical=${mechanical}, semantic=${semantic}, failed=${failed}, skip=${skipped}, overflow=${skipped_overflow}"
+
+  # NFR 5.2 / Phase A pattern: 念のため最終確認で base branch に戻す
+  git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
