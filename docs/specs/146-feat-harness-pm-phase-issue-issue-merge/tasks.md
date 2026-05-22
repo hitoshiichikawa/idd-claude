@@ -41,7 +41,7 @@
   - _Requirements: 7.1, 7.2, 7.3, 7.4, 7.5, 7.6, NFR 1.2, NFR 3.2_
   - _Boundary: idd-claude-labels.sh (self-hosting), idd-claude-labels.sh (consumer)_
 
-- [ ] 6. README.md のラベル一覧・状態遷移・運用フロー追記
+- [x] 6. README.md のラベル一覧・状態遷移・運用フロー追記
   - 「Step 2 GitHub 側の準備 → 作成されるラベル」表（行 445 周辺）に `blocked` 行を追加（色 = 濃赤 / 用途 = 依存 Issue 未 merge により auto-dev 進行不能）
   - 同節「手動で作成する場合」（行 464 周辺）に `gh label create blocked --repo owner/repo --color b60205 --description "..."` を追加
   - 「ラベル状態遷移まとめ」表（行 881 周辺）に `blocked` 行を追加（適用先=Issue、付与主=Claude (PM Phase Orchestrator)、解除=人間が手動除去）
