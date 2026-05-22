@@ -53,7 +53,7 @@
   - 起動前後で `pt_log "task=<id> implementer start/end ..."` を出力（NFR 2.1, NFR 2.2）
   - _Requirements: 2.2, 2.6, NFR 1.3, NFR 2.1, NFR 2.2_
 
-- [ ] 4. per-task Reviewer prompt builder と launcher
+- [x] 4. per-task Reviewer prompt builder と launcher
 - [x] 4.1 `build_per_task_reviewer_prompt <task_id> <range_start_sha> <range_end_sha> <round> <prev_result>` の実装
   - 既存 `build_reviewer_prompt` を踏襲。diff range は HEAD 全体ではなく
     `<range_start_sha>..<range_end_sha>` を Bash 実行ガイドに明示
@@ -62,7 +62,7 @@
   - `_Boundary:_` 違反は depth に関わらず常に reject 対象であることを明示
   - 既存 reviewer.md の 3 カテゴリ / RESULT 行 / review-notes.md 出力契約を流用
   - _Requirements: 3.1, 3.2, 3.3_
-- [ ] 4.2 `run_per_task_reviewer <task_id> <round>` の実装
+- [x] 4.2 `run_per_task_reviewer <task_id> <round>` の実装
   - `pt_resolve_diff_range <task_id>` で SHA range を取得
   - `qa_run_claude_stage "PerTask-Rev-<id>-r<round>" ...` 経由で
     `claude --print --model "$REVIEWER_MODEL" --max-turns "$REVIEWER_MAX_TURNS"` を起動
