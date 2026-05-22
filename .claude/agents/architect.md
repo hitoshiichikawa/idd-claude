@@ -206,6 +206,9 @@ interface <ComponentName>Service {
   - _Requirements: 2.1_
   - _Boundary: CheckoutService_
   - _Depends: 1.2_
+
+- [ ]* 2.2 <deferrable な追加テストタスク>
+  - _Requirements: 2.3_
 ```
 
 ## 重要なアノテーション
@@ -214,6 +217,15 @@ interface <ComponentName>Service {
 - `_Boundary:_` — `(P)` タスクでは必須。design.md の Components 名を列挙
 - `_Depends:_` — 非自明な cross-boundary 依存がある場合のみ
 - `(P)` — 並列実行可能を明示（`_Boundary:_` とセット）
+
+## Checkbox 形式の必須化
+
+**すべてのタスク行は `- [ ]`（未完了）または `- [ ]*`（deferrable 印）の checkbox 形式で
+開始すること**。これは Developer の resume 機能（`IMPL_RESUME_PROGRESS_TRACKING=true`、
+Issue #67 / #112 以降の既定）が `- [ ]` → `- [x]` の markdown checkbox 編集を進捗の **正本**
+として読む前提を確実に成立させるためです。markdown header のみ（例: `## T-01: タスク名` /
+`### Task 1` / `#### 1.1 子タスク`）でタスクを表現することは禁止されます。詳細は
+[`tasks-generation.md`](../rules/tasks-generation.md) の「Checkbox 形式の必須化」節を参照。
 
 # 行動指針
 
@@ -242,6 +254,12 @@ interface <ComponentName>Service {
 - [ ] `(P)` タスクには `_Boundary:_` が明示されている
 - [ ] **Budget overflow check**: tasks.md の最上位 numeric ID タスク件数が 10 件以下
       （後述「Budget overflow が検出された場合の対応」節を参照）
+- [ ] **tasks.md checkbox enforcement**: tasks.md の全タスク行が checkbox 形式
+      （`- [ ]` または `- [ ]*`）で開始し、markdown header のみのタスク表現が無いこと
+      （Developer の resume 機能が `- [ ]` → `- [x]` の markdown checkbox を進捗の正本として
+      読むため、checkbox 形式が必須。詳細は
+      [`design-review-gate.md`](../rules/design-review-gate.md) の「tasks.md checkbox
+      enforcement check」節を参照）
 
 問題が見つかれば draft を修正し、最大 2 パスで再レビューします。それでも曖昧性が残る場合は
 要件フェーズへ差し戻します（design.md 側で要件を発明しない）。

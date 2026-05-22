@@ -107,12 +107,24 @@ main に載っている）前提です。矛盾や実装上の問題に気づい
 - **書き換え禁止領域**: タスク本文 / `_Requirements:_` / `_Boundary:_` / `_Depends:_` /
   タスク順序 / 親タスクのインデント / deferrable 印 `- [ ]*`（アスタリスク付き、
   tasks-generation.md の deferrable 規約）
+- **タスク完了は checkbox 編集で表現する**: タスク完了時は `tasks.md` 上で該当タスク行の
+  `- [ ]` を `- [x]` に書き換えることでタスク完了を表現する。これが進捗の **正本** であり、
+  内部 TaskCreate / TaskUpdate ツール（エージェント内部の TODO トラッキング機能）や hidden
+  marker（コメントベースの隠し進捗マーカー）等を **進捗の正本としては用いない**（内部 TODO
+  ツールを思考補助として併用することは可だが、それを基に PR レビュワーが進捗を判断する
+  ことは想定しない）
 - **進捗 commit は別 commit**: マーカー更新は実装 commit と分けて
   `docs(tasks): mark <task-id> as done` で commit する。当該 commit には `tasks.md` 以外を
-  含めない
+  含めない（batch commit は不可。1 タスク完了 = 1 marker commit）
 - **親タスクの完了判定**: 子タスクが全て `- [x]` になったタイミングで親タスクも `- [x]`
   に更新する。deferrable 子タスク `- [ ]*` は未完了でも親完了に含めて良い
 - **hidden marker は使わない**（設計論点 2: `- [x]` の markdown checkbox のみで進捗を表現）
+- **tasks.md は checkbox 形式である前提**: Architect の自己レビューゲート
+  ([`design-review-gate.md`](../rules/design-review-gate.md) の「tasks.md checkbox
+  enforcement check」) により、全タスク行が `- [ ]` または `- [ ]*` で開始することが保証
+  されている。万が一 checkbox を持たないタスク行（markdown header のみで表現された行など）
+  を発見した場合は、`tasks.md` を勝手に書き換えず PR 本文「確認事項」に記載し、Architect への
+  差し戻しを Issue コメントで提案する
 
 本機能 OFF（`IMPL_RESUME_PRESERVE_COMMITS=false` を明示）の場合、本節は適用されない。
 watcher は注入セクション自体を出力しないため、Developer は通常通り tasks.md の番号順で
