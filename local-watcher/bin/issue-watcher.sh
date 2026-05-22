@@ -74,6 +74,14 @@ LABEL_ST_FAILED="st-failed"
 # Path Overlap Checker が付与・除去し、先行 Issue の PR merge で in-flight 集合から
 # 外れた次サイクルで自動除去される（Req 6.1〜6.4）。
 LABEL_AWAITING_SLOT="awaiting-slot"
+# Issue #146: 依存 Issue 未 merge により auto-dev 進行不能であることを示すラベル。
+# PM phase（Triage 起動前）の Dependency Resolver Gate が Issue 本文の依存記法
+# （canonical `Depends on:` / alias `前提依存:` / alias `Blocked by:`）を解析して、
+# 未解決依存が 1 件でも残る場合に付与する。dispatcher pickup 除外条件に追加され、
+# 人間が依存を解消後、本ラベルを手動除去すれば次サイクルで再評価される。
+# 既存 `needs-decisions`（汎用人間判断要求）とは意味的に独立した運用シグナル
+# （Req 9.1〜9.4）。
+LABEL_BLOCKED="blocked"
 
 # ─── Base branch 設定 (#89) ───
 # watcher 経路（local cron）と Actions 経路の base branch を 1 つの env で切り替える
@@ -10918,12 +10926,16 @@ _dispatcher_run() {
   # Issue（`staged-for-release` 付与）を Triage / Dispatcher / PR Iteration が誤って
   # 再 pickup しないよう除外する。single-branch 運用では本ラベルは付与されない想定なので
   # 影響なし（NFR 1.2: 既存除外条件の意味・順序は変更しない）。
+  # Issue #146: 依存 Issue 未 merge による blocked 状態を pickup 候補から除外する。
+  # PM phase の Dependency Resolver Gate が付与し、人間が依存解消後に手動除去すると
+  # 次サイクルで通常 pickup に再合流する（Req 4.1, 4.2）。既存除外ラベルとは独立した
+  # 状態遷移を持ち、`needs-decisions` と並列指定する（Req 9.3 / NFR 1.3）。
   local issues
   issues=$(gh issue list \
     --repo "$REPO" \
     --label "$LABEL_TRIGGER" \
     --state open \
-    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_STAGED_FOR_RELEASE\"" \
+    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_STAGED_FOR_RELEASE\" -label:\"$LABEL_BLOCKED\"" \
     --json number,title,body,url,labels \
     --limit 5)
 
