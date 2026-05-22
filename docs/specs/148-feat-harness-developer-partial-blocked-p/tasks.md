@@ -46,7 +46,7 @@
   - shellcheck をクリーンに保つ
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, NFR 2.2_
 
-- [ ] 5. orchestrator に `mark_issue_needs_decisions` helper を追加
+- [x] 5. orchestrator に `mark_issue_needs_decisions` helper を追加
   - `local-watcher/bin/issue-watcher.sh` の `mark_issue_failed` (L7858) 直後に
     新規 helper を追加
   - `gh issue edit` で `LABEL_CLAIMED` / `LABEL_PICKED` を除去 → `LABEL_NEEDS_DECISIONS`
