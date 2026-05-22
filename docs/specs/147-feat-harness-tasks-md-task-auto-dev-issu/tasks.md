@@ -25,15 +25,15 @@
   - _Requirements: 2.1, 2.2, 2.3_
   - _Boundary: tc_classify_
 
-- [ ] 3. `tc_should_run` gate と冪等マーカー検知の実装
-- [ ] 3.1 `tc_should_run` 実装
+- [x] 3. `tc_should_run` gate と冪等マーカー検知の実装
+- [x] 3.1 `tc_should_run` 実装
   - 環境変数 `NUMBER` / `REPO` / `REPO_DIR` / `SPEC_DIR_REL` / `TC_ENABLED` を参照
   - TC_ENABLED ≠ true / tasks.md 不在 / Issue に既存 `needs-decisions` ラベルあり、のいずれかで
     return 1 し、`tc_log` で `reason=<opt-out|tasks-md-missing|already-needs-decisions>` を記録
   - resume 経路の skip は hook 配置（design 分岐内部のみ）で構造的に保証されることを冒頭コメントに明記
   - _Requirements: 1.5, 2.6, 3.3, 4.2, 4.4_
   - _Boundary: tc_should_run_
-- [ ] 3.2 `tc_already_posted_marker_present` 実装
+- [x] 3.2 `tc_already_posted_marker_present` 実装
   - `gh issue view <number> --json comments --jq '.comments[].body'` で全コメントを取得
   - 固定マーカー `<!-- idd-claude:tasks-count-overflow kind=<warning|escalation> issue=<N> ... -->`
     を kind 別に grep し、検出時に return 0 / 未検出で return 1
