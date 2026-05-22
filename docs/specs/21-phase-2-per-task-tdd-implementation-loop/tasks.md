@@ -23,7 +23,7 @@
   - 抽出した numeric ID を `sort -V` で numeric 階層昇順に並べて stdout に出力
   - tasks.md 不在時は return 1
   - _Requirements: 2.1, 2.3, 5.1_
-- [ ] 2.2 `pt_extract_learnings <impl_notes_path>` の実装
+- [x] 2.2 `pt_extract_learnings <impl_notes_path>` の実装
   - `## Implementation Notes` 見出しから次の `## ` 見出し直前までを stdout に出力
   - セクション / ファイル不在時は空文字を返し常に return 0（Req 4.5 を構造的に保証）
   - _Requirements: 4.3, 4.4, 4.5, 5.4_
