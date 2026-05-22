@@ -51,7 +51,7 @@
   - `blocked` と `needs-decisions` の意味的差分（blocked = 依存 Issue 未 merge 専用 / needs-decisions = それ以外の汎用人間判断要求、将来統合しない方針）を 1〜2 行で明示
   - _Requirements: 8.1, 8.2, 8.3, 8.4, 8.5, 9.4_
 
-- [ ] 7. QUICK-HOWTO.md ラベル列挙への追記と shellcheck/E2E スモーク
+- [x] 7. QUICK-HOWTO.md ラベル列挙への追記と shellcheck/E2E スモーク
   - `QUICK-HOWTO.md` の「作成されるラベル」インライン列挙（行 72-74 周辺）に `blocked` を追記
   - shellcheck: `shellcheck local-watcher/bin/issue-watcher.sh .github/scripts/idd-claude-labels.sh repo-template/.github/scripts/idd-claude-labels.sh` で警告ゼロを確認
   - 手動スモーク (a): 依存記法非搭載の test Issue で従来通り Triage に進むこと（NFR 1.1 後方互換）
