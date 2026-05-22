@@ -54,7 +54,7 @@
   - _Requirements: 2.2, 2.6, NFR 1.3, NFR 2.1, NFR 2.2_
 
 - [ ] 4. per-task Reviewer prompt builder と launcher
-- [ ] 4.1 `build_per_task_reviewer_prompt <task_id> <range_start_sha> <range_end_sha> <round> <prev_result>` の実装
+- [x] 4.1 `build_per_task_reviewer_prompt <task_id> <range_start_sha> <range_end_sha> <round> <prev_result>` の実装
   - 既存 `build_reviewer_prompt` を踏襲。diff range は HEAD 全体ではなく
     `<range_start_sha>..<range_end_sha>` を Bash 実行ガイドに明示
   - 判定 depth 制約「当該 task の `_Requirements:_` AC のみ verify。それ以外の AC は reject 対象外」
