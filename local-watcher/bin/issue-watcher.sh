@@ -279,6 +279,24 @@ STAGE_A_VERIFY_COMMAND="${STAGE_A_VERIFY_COMMAND:-}"
 # 詳細は docs/specs/18-phase-e-triage-path-overlap-hot-file/design.md を参照。
 PATH_OVERLAP_CHECK="${PATH_OVERLAP_CHECK:-off}"
 
+# ─── Phase 2: Per-task TDD Implementation Loop 設定 (#21) ───
+# 新規 opt-in 機能。明示的に `=true` を指定したときだけ Stage A 内で per-task ループ
+# （task 1 件ごとに fresh Implementer + fresh Reviewer を起動）に分岐する（Req 1.2）。
+# `=true` 以外（未設定 / 空 / `false` / `0` / `True` / `1` / typo 等）はすべて off
+# として扱い、本機能導入前と完全に同一の Stage A 挙動を維持する（Req 1.1, 1.3 /
+# NFR 1.1）。本フラグは新規追加 = opt-in 制 + 既定 off が要件のため、上記
+# 「デフォルト有効化フラグの値正規化」ループには **含めない**（#112 の 8 種反転対象
+# とは別扱い）。詳細は docs/specs/21-phase-2-per-task-tdd-implementation-loop/design.md
+# を参照。
+#
+# - PER_TASK_LOOP_ENABLED: 本機能の opt-in gate。`=true` 厳密一致のみ有効。
+# - PER_TASK_MAX_TASKS:    安全装置（暴走防止）。1 ループで処理する task 件数上限。
+#                          `0` / 空文字 / 未設定 で無制限（既定）。N > 0 が指定された
+#                          場合、N 件目の Implementer 起動前に「上限到達」を
+#                          claude-failed + Issue コメントで通知して停止する。
+PER_TASK_LOOP_ENABLED="${PER_TASK_LOOP_ENABLED:-false}"
+PER_TASK_MAX_TASKS="${PER_TASK_MAX_TASKS:-0}"
+
 # LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
 # 環境変数で明示上書きもできる。
 LOG_DIR="${LOG_DIR:-$HOME/.issue-watcher/logs/$REPO_SLUG}"
@@ -5701,6 +5719,676 @@ rv_dev_log() {
   echo "[$(date '+%F %T')] developer: $*"
 }
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Phase 2: Per-task TDD Implementation Loop (#21) — ヘルパー関数群
+#
+# `PER_TASK_LOOP_ENABLED=true` のときに `run_impl_pipeline` の Stage A 内で起動される
+# per-task loop の補助関数を、既存 Reviewer Gate セクションの直前に独立セクションとして
+# 配置する。`PER_TASK_LOOP_ENABLED` が未指定 / `=true` 以外の場合、これらの関数は
+# どこからも呼ばれないため、本機能導入前と外形挙動は完全一致する（NFR 1.1 / Req 1.1）。
+#
+# 関数一覧:
+#   - pt_log:                    per-task ロガー (rv_log と同形式 / NFR 2.1, 2.2)
+#   - pt_extract_pending_tasks:  tasks.md から未完了 `- [ ]` を numeric ID 昇順抽出
+#   - pt_extract_learnings:      impl-notes.md の `## Implementation Notes` 抽出
+#   - pt_resolve_diff_range:     task 単位 diff range の開始/終了 SHA 解決
+#   - build_per_task_implementer_prompt: per-task Implementer prompt 組み立て
+#   - build_per_task_reviewer_prompt:    per-task Reviewer prompt 組み立て
+#   - run_per_task_implementer:  fresh Claude session で Implementer 起動
+#   - run_per_task_reviewer:     fresh Claude session で Reviewer 起動 + RESULT 抽出
+#   - run_per_task_loop:         dispatcher (pending タスクをループ消化)
+#
+# 詳細: docs/specs/21-phase-2-per-task-tdd-implementation-loop/design.md
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ─── pt_log ───
+# per-task ロガー。`[YYYY-MM-DD HH:MM:SS] per-task: <msg>` 形式で stdout に出力。
+# 呼び出し側で `>> "$LOG"` する規約（既存 rv_log / sc_log と同じ）。
+# NFR 2.1, NFR 2.2 を満たす。
+pt_log() {
+  echo "[$(date '+%F %T')] per-task: $*"
+}
+pt_warn() {
+  echo "[$(date '+%F %T')] per-task: WARN: $*" >&2
+}
+
+# ─── pt_extract_pending_tasks <tasks_md_path> ───
+#
+# tasks.md から未完了 task の numeric 階層 ID を numeric 階層昇順で抽出して stdout に出力。
+#
+# - 抽出対象: 行頭が `- [ ] <numeric_id>(\.)? ` で始まる行（deferrable `- [ ]*` は除外）
+#   - 親タスク慣習: `- [ ] 1. <title>`（ID の後ろに `.` + 空白）
+#   - 子タスク慣習: `- [ ] 1.1 <title>`（ID の後ろに空白のみ、末尾 `.` なし）
+#   - tasks-generation.md の規約と既存 tasks.md の実例（本リポジトリ含む）の双方を満たす
+# - 抽出した ID は親タスク末尾の `.` を除去した numeric 階層 ID（例: `1`, `1.1`, `1.10`）
+# - 出力順序は `sort -V`（version sort）で numeric 階層昇順を保証（`1.2` < `1.10`）
+# - tasks.md 不在時は return 1
+#
+# Requirements: 2.1, 2.3, 5.1
+pt_extract_pending_tasks() {
+  local tasks_md="$1"
+  if [ ! -f "$tasks_md" ]; then
+    return 1
+  fi
+  # `- [ ] N. <title>` (親タスク) または `- [ ] N.M(.K...) <title>` (子タスク) を抽出。
+  # `- [ ]*` (deferrable) は除外（`\[ \]` の直後に空白を要求するため自然に除外される）。
+  # 親タスクの末尾 `.` は sed の置換で剥がして numeric 階層 ID のみ取り出す。
+  grep -E '^- \[ \] [0-9]+(\.[0-9]+)*\.? ' "$tasks_md" \
+    | sed -E 's/^- \[ \] ([0-9]+(\.[0-9]+)*)\.? .*/\1/' \
+    | sort -V
+  return 0
+}
+
+# ─── pt_extract_learnings <impl_notes_path> ───
+#
+# impl-notes.md の `## Implementation Notes` 見出しから「次の `## ` 見出しが現れる直前まで」
+# を stdout に出力。learnings を後続 task の Implementer prompt に inline 注入するために
+# 使用する。
+#
+# - セクション不在 / impl-notes.md 自体が無い場合は空文字を返し常に return 0
+#   （Req 4.5: 単一 task の Issue で learnings 空を許容、を構造的に保証）
+# - 出力には見出し `## Implementation Notes` 自体も含む（Implementer が prompt から
+#   そのままセクションを参照できるようにするため）
+# - `## Implementation Notes` 以外のセクションには触れない（Req 4.4）
+#
+# Requirements: 4.3, 4.4, 4.5, 5.4
+pt_extract_learnings() {
+  local impl_notes="$1"
+  if [ ! -f "$impl_notes" ]; then
+    return 0
+  fi
+  # awk で `## Implementation Notes` セクションを抽出。
+  # - `## Implementation Notes` 行を見つけたら print 開始
+  # - print 開始後に別の `## ` 見出しが来たら print 停止
+  # - 末尾まで他の `## ` が来なければファイル末尾まで print
+  awk '
+    /^## Implementation Notes[[:space:]]*$/ { in_section = 1; print; next }
+    in_section && /^## / { exit }
+    in_section { print }
+  ' "$impl_notes"
+  return 0
+}
+
+# ─── pt_resolve_diff_range <task_id> ───
+#
+# per-task Reviewer に渡す diff range の開始 SHA / 終了 SHA を解決して
+# `<range_start_sha>\t<range_end_sha>` を stdout に出力。
+#
+# アルゴリズム（design.md「diff range 解決アルゴリズム」節）:
+#   1. `$BASE_BRANCH..HEAD` 範囲の `docs(tasks): mark <id> as done` commit を時系列昇順で全列挙
+#   2. 当該 task_id の mark commit SHA を特定（range_end）
+#   3. 全 mark commit 列の中で range_end の直前要素を range_start とする
+#   4. 直前要素が存在しない（初回 task）場合は range_start = `$BASE_BRANCH` の SHA
+#   5. 当該 task の mark commit が見つからない場合は return 1
+#
+# Requirements: 3.2, 4.5, 5.4
+pt_resolve_diff_range() {
+  local task_id="$1"
+  local base="${BASE_BRANCH:-main}"
+
+  # 全 mark commit を時系列昇順で取得（--reverse で oldest 先頭）
+  local all_marks
+  all_marks=$(git log --grep="^docs(tasks): mark " --format=%H --reverse "${base}..HEAD" 2>/dev/null || true)
+  if [ -z "$all_marks" ]; then
+    return 1
+  fi
+
+  # 当該 task の mark commit を特定（範囲内で最後のマッチを採用）
+  local current_mark
+  current_mark=$(git log --grep="^docs(tasks): mark ${task_id} as done\$" --format=%H "${base}..HEAD" 2>/dev/null | head -1 || true)
+  if [ -z "$current_mark" ]; then
+    return 1
+  fi
+
+  # all_marks 内で current_mark の直前要素を探す
+  local prev_mark="" line
+  while IFS= read -r line; do
+    if [ "$line" = "$current_mark" ]; then
+      break
+    fi
+    prev_mark="$line"
+  done <<<"$all_marks"
+
+  local range_start
+  if [ -n "$prev_mark" ]; then
+    range_start="$prev_mark"
+  else
+    # 初回 task: $BASE_BRANCH の SHA を使う
+    range_start=$(git rev-parse "$base" 2>/dev/null || true)
+    if [ -z "$range_start" ]; then
+      return 1
+    fi
+  fi
+
+  printf '%s\t%s\n' "$range_start" "$current_mark"
+  return 0
+}
+
+# ─── build_per_task_implementer_prompt <task_id> ───
+#
+# per-task Implementer 用の prompt を heredoc で組み立てて stdout に出力。
+# 既存 `build_dev_prompt_a` の形式を踏襲しつつ、以下を明示する:
+#
+#   - 本起動で実装する task は <task_id> 1 件のみ（他の未完了 task に着手しない / Req 2.2）
+#   - `tasks.md` の進捗マーカー更新 `- [ ]` → `- [x]` と `docs(tasks): mark <id> as done`
+#     commit 規約（既存 #67 / #112 規約を流用 / Req 2.4, 2.5）
+#   - `impl-notes.md` の `## Implementation Notes` 配下に `### Task <id>` を追記し、
+#     先行 task の learnings は **改変・削除・並び替え禁止**（Req 4.1, 4.2, 4.4）
+#   - 既存 learnings の inline 埋め込み（Req 4.3）
+#   - PR 作成禁止 / spec 書き換え禁止（既存 Stage A 制約と同等）
+#
+# Requirements: 2.2, 2.3, 2.4, 2.5, 4.1, 4.2, 4.3, 4.4
+build_per_task_implementer_prompt() {
+  local task_id="$1"
+  local learnings
+  learnings=$(pt_extract_learnings "$REPO_DIR/$SPEC_DIR_REL/impl-notes.md")
+  local learnings_block
+  if [ -n "$learnings" ]; then
+    learnings_block=$(cat <<EOF
+## これまで完了した task の learnings（impl-notes.md より）
+
+以下は先行 task の Implementer が記録した learning（採用方針 / 重要な判断 / 残存課題）です。
+**本 task の実装で、命名規約・採用ライブラリ・運用判断との一貫性を維持するために必ず参照**
+してください。各 \`### Task <id>\` セクションの本文を **改変・削除・並び替えしないこと**。
+
+\`\`\`markdown
+${learnings}
+\`\`\`
+EOF
+)
+  else
+    learnings_block=$(cat <<'EOF'
+## これまで完了した task の learnings（impl-notes.md より）
+
+（先行 task の learnings はまだ存在しません。本 task が最初の per-task 実装です）
+EOF
+)
+  fi
+
+  cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+本起動は **per-task ループ**（PER_TASK_LOOP_ENABLED=true）の下で、\`tasks.md\` の
+**1 件の task のみ** を fresh context で実装するために起動されました。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+- Body  : |
+${BODY}
+
+## 作業ブランチ
+${BRANCH}（${BASE_BRANCH} から派生・push 済み・現在チェックアウト中）
+
+## 作業ディレクトリ
+${SPEC_DIR_REL}/
+
+## 本起動で実装する task
+
+- **対象 task ID**: \`${task_id}\`
+- 本起動では \`tasks.md\` の **${task_id} 1 件のみ** を実装します。他の未完了 task には
+  一切着手しないこと（次 task は別の fresh Implementer 起動で消化されます）
+
+## 進め方
+
+1. developer サブエージェントを起動し、対象 task \`${task_id}\` を実装＋テスト＋commit する
+   - 入力: \`${SPEC_DIR_REL}/requirements.md\` / \`${SPEC_DIR_REL}/design.md\` / \`${SPEC_DIR_REL}/tasks.md\`
+   - design.md / tasks.md は人間レビュー済みで **書き換え禁止**（矛盾は impl-notes.md の
+     「確認事項」に記載するに留める）
+   - tasks.md の対象 task の \`_Requirements:_\` / \`_Boundary:_\` に従う
+   - 規約は CLAUDE.md に従う
+
+2. **進捗マーカー更新**（既存 #67 / #112 規約を流用）:
+   - 対象 task の \`- [ ] ${task_id}\` 行を \`- [x] ${task_id}\` に書き換える
+   - 子タスク（例: ${task_id}.1）を完了した場合、親 task（${task_id} の親、例: ${task_id%.*}）
+     配下の全子タスクが \`- [x]\` になったタイミングで親も \`- [x]\` に昇格する
+   - 進捗マーカー更新は **専用 commit**: \`docs(tasks): mark <id> as done\`
+     - 当該 commit には \`tasks.md\` 以外のファイルを含めない
+     - 親 task 昇格も同じ commit メッセージ形式（\`docs(tasks): mark <親 id> as done\`）
+   - 書き換え禁止領域: タスク本文 / \`_Requirements:_\` / \`_Boundary:_\` / \`_Depends:_\` /
+     タスク順序 / 親タスクのインデント / deferrable 印 \`- [ ]*\`
+
+3. **learning 追記**（per-task ループの中核 / Req 4.1, 4.2, 4.4）:
+   - \`${SPEC_DIR_REL}/impl-notes.md\` の \`## Implementation Notes\` セクション配下に
+     \`### Task ${task_id}\` 見出しを **追加**（既存セクションが無ければ作成）し、本 task の
+     learning を簡潔に記録する:
+     - 採用方針（1 行）
+     - 重要な判断（1〜3 行）
+     - 残存課題（次 task に影響する事項。なければ「なし」）
+   - **先行 task の \`### Task <id>\` 見出し（既存の learnings）は改変・削除・並び替えしない**
+   - \`## Implementation Notes\` セクション **外** の既存記述（補足ノート / 確認事項など）
+     には触れない
+
+${learnings_block}
+
+## 制約
+- ${BASE_BRANCH} に直接 push しないこと
+- 既存のテストを壊さないこと
+- 不明点は推測せず、impl-notes.md の「確認事項」セクションに列挙すること
+- **PR は作成しないこと**（Reviewer / PjM は別 stage で起動されます）
+- **本 task 以外の未完了 task には一切着手しないこと**
+- requirements.md / design.md / tasks.md 本文の書き換えは禁止（tasks.md の進捗マーカー
+  \`- [ ]\` → \`- [x]\` のみ例外）
+
+## 既存 commit の温存
+
+本 worktree は既存 commit を温存した状態でチェックアウトされています。
+
+- 作業前に \`git log --oneline ${BASE_BRANCH}..HEAD\` で既存 commit を確認すること
+- \`git reset\` / \`git rebase\` / branch の切り替えは **禁止**
+- 既存 commit と矛盾する変更が必要な場合は、既存 commit を打ち消す追加 commit を積むか、
+  impl-notes.md の「確認事項」に矛盾内容を記載して人間判断を仰ぐ
+EOF
+}
+
+# ─── build_per_task_reviewer_prompt <task_id> <range_start_sha> <range_end_sha> <round> <prev_result> ───
+#
+# per-task Reviewer 用の prompt を heredoc で組み立てて stdout に出力。
+# 既存 `build_reviewer_prompt` の形式を踏襲しつつ、以下を明示する:
+#
+#   - 判定対象 diff range は `<range_start>..<range_end>` のみ（HEAD 全体ではない / Req 3.2）
+#   - 判定 AC は当該 task の `_Requirements:_` 列挙分のみ（全 AC verify は Stage B / Req 3.3）
+#   - `_Boundary:_` 違反は depth に関わらず常に reject 対象
+#   - 既存 reviewer.md の 3 カテゴリ（AC 未カバー / missing test / boundary 逸脱）と
+#     RESULT 行 / review-notes.md 出力契約を流用
+#
+# Requirements: 3.1, 3.2, 3.3
+build_per_task_reviewer_prompt() {
+  local task_id="$1"
+  local range_start="$2"
+  local range_end="$3"
+  local round="$4"
+  local prev_result="$5"
+
+  cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+本起動は **per-task ループ**（PER_TASK_LOOP_ENABLED=true）の下で、直前の Implementer が
+完了した **1 件の task の commit 範囲のみ** を独立 context でレビューするために起動されました。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+- REPO  : ${REPO}
+
+## 作業ブランチ / spec ディレクトリ
+- BRANCH       : ${BRANCH}
+- BASE_BRANCH  : ${BASE_BRANCH}
+- SPEC_DIR_REL : ${SPEC_DIR_REL}
+- ROUND        : ${round}
+- PREV_RESULT  : ${prev_result}
+
+## 判定対象の task / diff range
+
+- **対象 task ID**: \`${task_id}\`
+- **range_start_sha**: \`${range_start}\` （= 直前の \`docs(tasks): mark\` commit、または初回時は \`${BASE_BRANCH}\` の SHA）
+- **range_end_sha**:   \`${range_end}\`   （= 当該 task の \`docs(tasks): mark ${task_id} as done\` commit）
+
+reviewer は **本 range のみ** を判定対象としてください。HEAD 全体は対象外（全体観点は
+最終 Stage B Reviewer が別途担当します）。
+
+## 必読ファイル
+
+reviewer サブエージェントは着手前に以下を必ず Read してください:
+
+- \`CLAUDE.md\`（特に「テスト規約」と「禁止事項」）
+- \`${SPEC_DIR_REL}/requirements.md\`（EARS 形式の AC、numeric ID）
+- \`${SPEC_DIR_REL}/tasks.md\`（特に対象 task \`${task_id}\` の \`_Requirements:_\` / \`_Boundary:_\`）
+- \`${SPEC_DIR_REL}/impl-notes.md\`（Developer の補足。\`### Task ${task_id}\` の learning を含む）
+- \`${SPEC_DIR_REL}/design.md\`（存在する場合）
+
+## 差分の取得（reviewer が Bash で実行）
+
+reviewer は **必ず自分で** Bash で以下を実行し、本 task の commit 範囲だけを取得してください:
+
+1. 全体把握（変更ファイル一覧と統計）:
+   \`\`\`bash
+   git diff --stat ${range_start}..${range_end}
+   git log --oneline ${range_start}..${range_end}
+   \`\`\`
+2. ファイル単位の詳細差分（必要に応じて変更ファイルごとに実行）:
+   \`\`\`bash
+   git diff ${range_start}..${range_end} -- <path>
+   \`\`\`
+
+## 判定基準（per-task ループの判定 depth 制約）
+
+reviewer.md の **3 カテゴリ**（AC 未カバー / missing test / boundary 逸脱）のみで判定します。
+per-task ループでは判定 depth が以下に絞り込まれます:
+
+- **判定対象 AC**: 当該 task \`${task_id}\` の \`_Requirements:_\` で列挙された numeric ID **のみ**
+  - それ以外の AC が当該 diff で未カバーであっても reject 理由にしないこと
+  - 全 AC verify は最終 Stage B Reviewer が HEAD 全体で実施するため、本 Reviewer では
+    範囲外 AC を理由とした reject を出さない
+- **\`_Boundary:_\` 違反**: depth に関わらず **常に reject 対象**（task 単位境界の逸脱検出が
+  本ループの主目的）
+
+## 進め方
+
+reviewer サブエージェントを起動し、以下を判定して \`${SPEC_DIR_REL}/review-notes.md\` に
+書き出してください（reviewer.md の出力契約に従う）。
+
+- 最終行は必ず \`RESULT: approve\` または \`RESULT: reject\` で終わること（lowercase 完全一致）
+- 装飾（バッククォート / bullet / blockquote / 行末プローズ）禁止
+
+## 制約
+- requirements.md / design.md / tasks.md / 既存実装コード / テストコードを書き換えないこと
+- \`git add\` / \`git commit\` / \`git push\` / \`gh\` を実行しないこと
+- スタイル / 命名 / lint / フォーマット観点での reject はしないこと
+EOF
+}
+
+# ─── run_per_task_implementer <task_id> ───
+#
+# 当該 task 1 件のみを対象に fresh Claude session で Implementer を起動。
+#
+# 戻り値:
+#   0  = success（Implementer が正常終了 + `docs(tasks): mark <id> as done` commit が積まれた前提）
+#   1  = claude 非 0 exit / 規約違反（claude-failed は呼び出し側で付与）
+#   99 = quota 超過（既存 #66 規約に従い呼び出し側に伝搬）
+#
+# Requirements: 2.2, 2.6, NFR 1.3, NFR 2.1, NFR 2.2
+run_per_task_implementer() {
+  local task_id="$1"
+  local prompt
+  prompt=$(build_per_task_implementer_prompt "$task_id")
+
+  pt_log "task=$task_id implementer start (model=$DEV_MODEL, max-turns=$DEV_MAX_TURNS)" >> "$LOG"
+  echo "--- per-task Implementer 実行 (task=$task_id) ---" >> "$LOG"
+
+  local _qa_reset_file _qa_rc=0 _qa_ts _qa_stage_label
+  _qa_ts=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-pt-impl-${task_id}-${_qa_ts}"
+  _qa_stage_label="PerTask-Impl-${task_id}"
+  qa_run_claude_stage "$_qa_stage_label" "$_qa_reset_file" -- \
+    claude \
+      --print "$prompt" \
+      --model "$DEV_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$DEV_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      >> "$LOG" 2>&1 || _qa_rc=$?
+
+  case "$_qa_rc" in
+    0)
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer end rc=0" >> "$LOG"
+      return 0
+      ;;
+    99)
+      local _qa_epoch
+      _qa_epoch=$(cat "$_qa_reset_file")
+      qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label" "$_qa_epoch"
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer end rc=99 result=quota-exceeded" >> "$LOG"
+      return 99
+      ;;
+    *)
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer end rc=$_qa_rc result=error" >> "$LOG"
+      return 1
+      ;;
+  esac
+}
+
+# ─── run_per_task_reviewer <task_id> <round> ───
+#
+# 当該 task の diff range のみを対象に fresh Claude session で Reviewer を起動。
+# `pt_resolve_diff_range` で range を解決し、`build_per_task_reviewer_prompt` で prompt を
+# 組み立てて `claude --print` 起動 → `parse_review_result` で RESULT を抽出。
+#
+# 戻り値:
+#   0  = approve
+#   1  = reject
+#   2  = 異常終了（claude crash / parse 失敗 / RESULT 行欠落 / diff range 解決失敗）
+#   99 = quota 超過
+#
+# Requirements: 3.1, 3.2, 3.3, NFR 2.1, NFR 2.2, NFR 2.3
+run_per_task_reviewer() {
+  local task_id="$1"
+  local round="$2"
+
+  # diff range 解決
+  local range_line range_start range_end
+  if ! range_line=$(pt_resolve_diff_range "$task_id"); then
+    pt_log "task=$task_id reviewer start round=$round result=error reason=diff-range-resolve-failed" >> "$LOG"
+    return 2
+  fi
+  range_start=$(printf '%s' "$range_line" | cut -f1)
+  range_end=$(printf '%s' "$range_line" | cut -f2)
+  if [ -z "$range_start" ] || [ -z "$range_end" ]; then
+    pt_log "task=$task_id reviewer start round=$round result=error reason=diff-range-empty" >> "$LOG"
+    return 2
+  fi
+
+  # prev_result（round=2 のみ意味あり）
+  local prev_result="(none)"
+  local notes_path="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
+  if [ "$round" = "2" ] && [ -f "$notes_path" ]; then
+    local _prev_token
+    if _prev_token=$(extract_review_result_token "$notes_path"); then
+      prev_result="RESULT: $_prev_token"
+    fi
+  fi
+
+  pt_log "task=$task_id reviewer start round=$round model=$REVIEWER_MODEL max-turns=$REVIEWER_MAX_TURNS range=${range_start:0:7}..${range_end:0:7}" >> "$LOG"
+  echo "--- per-task Reviewer 実行 (task=$task_id, round=$round) ---" >> "$LOG"
+
+  local prompt
+  prompt=$(build_per_task_reviewer_prompt "$task_id" "$range_start" "$range_end" "$round" "$prev_result")
+
+  local _qa_reset_file _qa_rc=0 _qa_ts _qa_stage_label
+  _qa_ts=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-pt-rev-${task_id}-r${round}-${_qa_ts}"
+  _qa_stage_label="PerTask-Rev-${task_id}-r${round}"
+  qa_run_claude_stage "$_qa_stage_label" "$_qa_reset_file" -- \
+    claude \
+      --print "$prompt" \
+      --model "$REVIEWER_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$REVIEWER_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      >> "$LOG" 2>&1 || _qa_rc=$?
+
+  case "$_qa_rc" in
+    0)
+      rm -f "$_qa_reset_file"
+      ;;
+    99)
+      local _qa_epoch
+      _qa_epoch=$(cat "$_qa_reset_file")
+      qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label" "$_qa_epoch"
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id reviewer end round=$round result=quota-exceeded" >> "$LOG"
+      return 99
+      ;;
+    *)
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id reviewer end round=$round result=error reason=claude-exit-nonzero rc=$_qa_rc" >> "$LOG"
+      return 2
+      ;;
+  esac
+
+  # review-notes.md を parse
+  local parsed
+  if ! parsed=$(parse_review_result "$notes_path"); then
+    pt_log "task=$task_id reviewer end round=$round result=error reason=parse-failed" >> "$LOG"
+    return 2
+  fi
+
+  local result categories targets
+  result=$(echo "$parsed" | cut -f1)
+  categories=$(echo "$parsed" | cut -f2)
+  targets=$(echo "$parsed" | cut -f3)
+
+  case "$result" in
+    approve)
+      pt_log "task=$task_id reviewer end round=$round result=approve verified=$targets" >> "$LOG"
+      return 0
+      ;;
+    reject)
+      # NFR 2.3: reject 時は task ID / カテゴリ / 対応 requirement ID をログに 1 行で記録
+      pt_log "task=$task_id reviewer end round=$round result=reject categories=$categories targets=$targets" >> "$LOG"
+      return 1
+      ;;
+    *)
+      pt_log "task=$task_id reviewer end round=$round result=error reason=unknown-result" >> "$LOG"
+      return 2
+      ;;
+  esac
+}
+
+# ─── run_per_task_loop ───
+#
+# Stage A の代替実体。未完了 task を numeric ID 順に 1 件ずつ Implementer + Reviewer で
+# 消化する dispatcher。
+#
+# 戻り値:
+#   0  = 全 task 消化成功（Stage A 完了相当）または pending 0 件で no-op
+#   1  = Implementer / Reviewer 失敗で claude-failed 付与済み（呼び出し側は伝搬 return 1）
+#
+# 副作用:
+#   - 成功時: 全 task が `- [x]` 化 + `docs(tasks): mark <id> as done` commit が積まれる
+#   - 失敗時: `mark_issue_failed` 経由で claude-failed 付与済
+#   - quota 超過時: 呼び出し側に return 99 相当で伝搬する代わりに return 0（既存 Stage A
+#     の quota パスと同じく watcher は正常終了し、Resume Processor が次 tick で再開）
+#
+# Requirements: 2.1, 2.6, 2.7, 3.4, 3.5, 3.6, 3.7, 5.1, 5.2
+run_per_task_loop() {
+  local tasks_md="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+  if [ ! -f "$tasks_md" ]; then
+    pt_warn "tasks.md が存在しません: $tasks_md → 通常 Stage A にフォールバック相当として return 1"
+    mark_issue_failed "per-task-tasks-missing" "per-task ループ起動に必要な \`tasks.md\` が見つかりません: \`$tasks_md\`。"
+    return 1
+  fi
+
+  # pending タスク一覧
+  local pending
+  pending=$(pt_extract_pending_tasks "$tasks_md" || true)
+  if [ -z "$pending" ]; then
+    pt_log "pending tasks=0 → no-op return 0 (Stage A 完了相当)" >> "$LOG"
+    return 0
+  fi
+
+  local pending_count
+  pending_count=$(printf '%s\n' "$pending" | wc -l | tr -d '[:space:]')
+  pt_log "pending tasks=$pending_count" >> "$LOG"
+
+  # PER_TASK_MAX_TASKS 超過チェック（暴走防止）
+  local max_tasks="${PER_TASK_MAX_TASKS:-0}"
+  if [ -n "$max_tasks" ] && [ "$max_tasks" != "0" ] && [ "$pending_count" -gt "$max_tasks" ]; then
+    pt_warn "pending tasks=$pending_count が PER_TASK_MAX_TASKS=$max_tasks を超過 → claude-failed"
+    mark_issue_failed "per-task-max-tasks-exceeded" "per-task ループの安全装置: 未完了 task 件数（${pending_count}）が \`PER_TASK_MAX_TASKS=${max_tasks}\` を超過したため、暴走防止のためループ起動前に停止しました。tasks.md を縮小するか \`PER_TASK_MAX_TASKS\` を引き上げてください。"
+    return 1
+  fi
+
+  # 各 task をループで消化
+  local task_id
+  while IFS= read -r task_id; do
+    [ -n "$task_id" ] || continue
+
+    # ── round=1: Implementer + Reviewer ──
+    local impl_rc=0
+    run_per_task_implementer "$task_id" || impl_rc=$?
+    case "$impl_rc" in
+      0) ;; # 続行
+      99)
+        # quota 超過: 既存 #66 規約に従い watcher は正常終了。Resume Processor が次 tick で再開
+        echo "⏸️ #$NUMBER: per-task Implementer (task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+        return 0
+        ;;
+      *)
+        echo "❌ #$NUMBER: per-task Implementer (task=$task_id) 失敗 → claude-failed" | tee -a "$LOG"
+        mark_issue_failed "per-task-implementer-failed" "per-task ループの Implementer が task=\`${task_id}\` で失敗しました（claude 非 0 exit）。残りの未完了 task は処理しません。\`$LOG\` を確認してください。"
+        return 1
+        ;;
+    esac
+
+    local rev_rc=0
+    run_per_task_reviewer "$task_id" 1 || rev_rc=$?
+    case "$rev_rc" in
+      0)
+        # approve → 次 task へ
+        ;;
+      99)
+        echo "⏸️ #$NUMBER: per-task Reviewer (task=$task_id, round=1) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+        return 0
+        ;;
+      1)
+        # reject 1 回目 → Implementer 再起動 + Reviewer round=2
+        echo "🔁 #$NUMBER: per-task Reviewer (task=$task_id, round=1) reject → Implementer 再実行" | tee -a "$LOG"
+
+        local impl2_rc=0
+        run_per_task_implementer "$task_id" || impl2_rc=$?
+        case "$impl2_rc" in
+          0) ;;
+          99)
+            echo "⏸️ #$NUMBER: per-task Implementer 再実行 (task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+            return 0
+            ;;
+          *)
+            echo "❌ #$NUMBER: per-task Implementer 再実行 (task=$task_id) 失敗 → claude-failed" | tee -a "$LOG"
+            mark_issue_failed "per-task-implementer-redo-failed" "per-task ループの Implementer 再実行が task=\`${task_id}\` で失敗しました（Reviewer reject 後の再起動 / claude 非 0 exit）。\`$LOG\` を確認してください。"
+            return 1
+            ;;
+        esac
+
+        local rev2_rc=0
+        run_per_task_reviewer "$task_id" 2 || rev2_rc=$?
+        case "$rev2_rc" in
+          0)
+            # round=2 approve → 次 task へ
+            ;;
+          99)
+            echo "⏸️ #$NUMBER: per-task Reviewer (task=$task_id, round=2) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+            return 0
+            ;;
+          1)
+            # 再 reject → claude-failed + Issue コメント
+            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) reject → claude-failed" | tee -a "$LOG"
+            local parsed2 cat2 tgt2
+            parsed2=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
+            cat2=$(echo "$parsed2" | cut -f2)
+            tgt2=$(echo "$parsed2" | cut -f3)
+            mark_issue_failed "per-task-reviewer-reject2" "per-task ループの Reviewer が task=\`${task_id}\` で 2 回連続 reject を出したため、残りの未完了 task の処理を停止し人間判断に委ねます。
+
+- 対象 task ID: ${task_id}
+- 対象 requirement ID: ${tgt2:-(unknown)}
+- reject カテゴリ: ${cat2:-(unknown)}
+- Reviewer 判定詳細: \`${SPEC_DIR_REL}/review-notes.md\` を参照
+
+### 次の手順
+1. review-notes.md と watcher ログ \`$LOG\` を読み、Reviewer 判定が妥当か確認
+2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
+3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
+            return 1
+            ;;
+          *)
+            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) 異常終了 → claude-failed" | tee -a "$LOG"
+            mark_issue_failed "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+            return 1
+            ;;
+        esac
+        ;;
+      *)
+        # round=1 reviewer error → claude-failed
+        echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) 異常終了 → claude-failed" | tee -a "$LOG"
+        mark_issue_failed "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が異常終了しました（claude crash / parse 失敗 / diff range 解決失敗）。\`$LOG\` を確認してください。"
+        return 1
+        ;;
+    esac
+  done <<<"$pending"
+
+  pt_log "all pending tasks completed (count=$pending_count) → return 0" >> "$LOG"
+  return 0
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Reviewer Gate (#20 Phase 1) 既存セクション（per-task ループ helper はここまで）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 # ─── Prompt Builders（Stage A / A' / B / C 用 4 関数）───
 #
 # 既存 DEV_PROMPT の組み立てパターン（heredoc + 変数展開）を踏襲する。
@@ -6752,50 +7440,71 @@ run_impl_pipeline() {
   fi
 
   # ── Stage A: PM + Developer（impl-resume では PM スキップ / Stage Checkpoint resume 時は skip 可）──
+  #
+  # Phase 2 (#21): `PER_TASK_LOOP_ENABLED=true` のときは Stage A の実体を
+  # `run_per_task_loop`（task 単位 fresh Implementer + fresh Reviewer のループ）に
+  # 置き換える Strategy 分岐を挿入する。`PER_TASK_LOOP_ENABLED` 未指定 / `=true` 以外
+  # では従来の単一 Developer 起動経路に流れ、本機能導入前と外形挙動は完全一致する
+  # （Req 1.1 / NFR 1.1）。loop 完了後の verify_pushed_or_retry / stage-a-verify /
+  # Stage B / Stage C は分岐の外で従来通り実行される（NFR 1.4）。
   case "$START_STAGE" in
     A)
-      echo "--- Stage A 実行（$MODE / PM + Developer）---" >> "$LOG"
-      prompt_a=$(build_dev_prompt_a "$MODE")
-      # Issue #66: Quota-Aware Watcher 経由で claude を起動（Req 1.1, 1.2, 2.1）
-      local _qa_reset_file_a _qa_rc_a=0 _qa_ts_a
-      _qa_ts_a=$(date +%Y%m%d-%H%M%S)
-      _qa_reset_file_a="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-${_qa_ts_a}"
-      qa_run_claude_stage "StageA" "$_qa_reset_file_a" -- \
-        claude \
-          --print "$prompt_a" \
-          --model "$DEV_MODEL" \
-          --permission-mode bypassPermissions \
-          --max-turns "$DEV_MAX_TURNS" \
-          --output-format stream-json \
-          --verbose \
-          >> "$LOG" 2>&1 || _qa_rc_a=$?
-      case "$_qa_rc_a" in
-        0)
-          # Issue #106 Req 1: Stage A 成功宣言の前にローカル HEAD が origin に到達しているか
-          # verify する。ahead == 0 なら従来どおり成功メッセージ（Req 1.3 / 5.1）、
-          # ahead > 0 なら自動 push リトライ 1 回。リトライ失敗時は claude-failed 化済で
-          # return 1 を伝搬する（Req 1.4, 4.4, 4.5）。
-          rm -f "$_qa_reset_file_a"
-          if ! verify_pushed_or_retry "stageA-push-missing" "$BRANCH" "Stage A"; then
-            return 1
-          fi
-          echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
-          ;;
-        99)
-          local _qa_epoch_a
-          _qa_epoch_a=$(cat "$_qa_reset_file_a")
-          qa_handle_quota_exceeded "$NUMBER" "StageA" "$_qa_epoch_a"
-          rm -f "$_qa_reset_file_a"
-          echo "⏸️ #$NUMBER: Stage A で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
-          return 0
-          ;;
-        *)
-          rm -f "$_qa_reset_file_a"
-          echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
-          mark_issue_failed "stageA" ""
+      if [ "${PER_TASK_LOOP_ENABLED:-false}" = "true" ]; then
+        echo "--- Stage A 実行（$MODE / per-task loop / PER_TASK_LOOP_ENABLED=true）---" >> "$LOG"
+        if ! run_per_task_loop; then
+          # run_per_task_loop 内で claude-failed 付与済 / 既に Issue コメント済。
           return 1
-          ;;
-      esac
+        fi
+        # per-task loop 内で逐次 commit + push される規約のため、loop 終了後の HEAD は
+        # 通常 ahead=0。万一 push 漏れがあれば verify_pushed_or_retry が 1 回リトライする。
+        if ! verify_pushed_or_retry "stageA-push-missing" "$BRANCH" "Stage A (per-task loop)"; then
+          return 1
+        fi
+        echo "✅ #$NUMBER: Stage A 完了（per-task loop）" | tee -a "$LOG"
+      else
+        echo "--- Stage A 実行（$MODE / PM + Developer）---" >> "$LOG"
+        prompt_a=$(build_dev_prompt_a "$MODE")
+        # Issue #66: Quota-Aware Watcher 経由で claude を起動（Req 1.1, 1.2, 2.1）
+        local _qa_reset_file_a _qa_rc_a=0 _qa_ts_a
+        _qa_ts_a=$(date +%Y%m%d-%H%M%S)
+        _qa_reset_file_a="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-${_qa_ts_a}"
+        qa_run_claude_stage "StageA" "$_qa_reset_file_a" -- \
+          claude \
+            --print "$prompt_a" \
+            --model "$DEV_MODEL" \
+            --permission-mode bypassPermissions \
+            --max-turns "$DEV_MAX_TURNS" \
+            --output-format stream-json \
+            --verbose \
+            >> "$LOG" 2>&1 || _qa_rc_a=$?
+        case "$_qa_rc_a" in
+          0)
+            # Issue #106 Req 1: Stage A 成功宣言の前にローカル HEAD が origin に到達しているか
+            # verify する。ahead == 0 なら従来どおり成功メッセージ（Req 1.3 / 5.1）、
+            # ahead > 0 なら自動 push リトライ 1 回。リトライ失敗時は claude-failed 化済で
+            # return 1 を伝搬する（Req 1.4, 4.4, 4.5）。
+            rm -f "$_qa_reset_file_a"
+            if ! verify_pushed_or_retry "stageA-push-missing" "$BRANCH" "Stage A"; then
+              return 1
+            fi
+            echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
+            ;;
+          99)
+            local _qa_epoch_a
+            _qa_epoch_a=$(cat "$_qa_reset_file_a")
+            qa_handle_quota_exceeded "$NUMBER" "StageA" "$_qa_epoch_a"
+            rm -f "$_qa_reset_file_a"
+            echo "⏸️ #$NUMBER: Stage A で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+            return 0
+            ;;
+          *)
+            rm -f "$_qa_reset_file_a"
+            echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
+            mark_issue_failed "stageA" ""
+            return 1
+            ;;
+        esac
+      fi
       ;;
     B|C)
       sc_log "Stage A をスキップ（START_STAGE=$START_STAGE / 既存 impl-notes.md を再利用）" >> "$LOG"
