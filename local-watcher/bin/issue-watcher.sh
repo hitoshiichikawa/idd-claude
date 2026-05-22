@@ -7019,6 +7019,93 @@ ${review_notes_content}
 EOF
 }
 
+# Stage A' / A'' (Debugger 経由 Developer 再実行): Debugger Gate (#22 Phase 3) で
+# 生成された `debugger-notes.md` の Fix Plan を inline 注入して Developer 再起動を依頼する。
+# 既存 `build_dev_prompt_redo` の heredoc 形式を踏襲し、review-notes.md は trigger が
+# `round2-reject` の場合のみ埋め込む（BLOCKED 経路では review-notes.md は無い / 古いため
+# 「(Reviewer 経由ではないため review-notes.md は無し)」と明示）。
+#
+# Requirements: 3.2, 4.3
+build_dev_prompt_redo_with_fix_plan() {
+  local review_notes_path="$1"
+  local debugger_notes_path="$2"
+
+  local debugger_notes_content
+  if [ -f "$debugger_notes_path" ]; then
+    debugger_notes_content=$(cat "$debugger_notes_path")
+  else
+    debugger_notes_content="(debugger-notes.md が見つかりません: $debugger_notes_path)"
+  fi
+
+  local review_notes_block
+  if [ -n "$review_notes_path" ] && [ -f "$review_notes_path" ]; then
+    local review_notes_content
+    review_notes_content=$(cat "$review_notes_path")
+    review_notes_block=$(cat <<EOF
+## Reviewer の reject 理由（review-notes.md より）
+
+\`\`\`markdown
+${review_notes_content}
+\`\`\`
+EOF
+)
+  else
+    review_notes_block=$(cat <<'EOF'
+## Reviewer の reject 理由
+
+(Reviewer 経由ではないため review-notes.md は無し / 古い内容のままです。BLOCKED 経路で起動された
+Debugger の Fix Plan を起点に是正を進めてください)
+EOF
+)
+  fi
+
+  cat <<EOF
+あなたはこのリポジトリの Claude Code オーケストレーターです。
+直前の Debugger サブエージェント（Phase 3 / #22）が \`debugger-notes.md\` に Fix Plan を
+出力しました。本 Fix Plan を起点に Developer の再実装を依頼します。
+
+## 対象 Issue
+- Number: #${NUMBER}
+- Title : ${TITLE}
+- URL   : ${URL}
+
+## 作業ブランチ
+${BRANCH}（追加 commit を積んでください。reset / branch 切り替えは禁止）
+
+## 作業ディレクトリ
+${SPEC_DIR_REL}/
+
+${review_notes_block}
+
+## Debugger の Fix Plan（debugger-notes.md より）
+
+\`\`\`markdown
+${debugger_notes_content}
+\`\`\`
+
+## 進め方
+
+1. developer サブエージェントを起動し、Debugger の Fix Plan に記載された **\`修正手順\`** を
+   順に実施する
+   - 要件（requirements.md）は変更しない（PM への差し戻し相当の事象があれば impl-notes.md の
+     「確認事項」に記載するに留める）
+   - 設計（design.md / tasks.md）が存在する場合も書き換えない
+   - 是正に必要なテストの追加・修正と、対応する実装変更のみを commit する
+2. 完了後に Fix Plan の **\`検証方法\`** に従って挙動確認を実行する（テストコマンド / 期待挙動）
+3. \`${SPEC_DIR_REL}/impl-notes.md\` に是正内容を 1 セクション追記する（Debugger 経由再実行で
+   実施したこと / 残課題があれば記載）
+
+## 制約
+- ${BASE_BRANCH} に直接 push しないこと
+- product-manager / project-manager サブエージェントは起動しないこと
+  （PM は不要、PjM は次の Reviewer round=3 が approve した後にオーケストレーターが起動）
+- **PR は作成しないこと**（再 Reviewer の判定を受けます）
+- 既存テストを壊さないこと
+- \`debugger-notes.md\` は **書き換えないこと**（Debugger の Fix Plan は記録として残す）
+- requirements.md / design.md / tasks.md / review-notes.md は書き換えないこと（既存契約）
+EOF
+}
+
 # Stage B (Reviewer): reviewer サブエージェントを独立 context で起動し、
 # review-notes.md を書かせる。差分は reviewer 自身が Bash ツールで取得する設計
 # （Issue #92: 大規模差分時の `Argument list too long` 回避のため、prompt から
