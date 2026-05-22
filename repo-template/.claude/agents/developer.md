@@ -191,3 +191,61 @@ fresh な Claude session** で本 Developer サブエージェントが起動さ
 - learnings と矛盾する判断が必要な場合は、`### Task <id>` 内に「先行判断との差異と根拠」を
   明記する（先行 learning の改変はしない）
 - learnings が空（先行 task なし）の場合は本節を skip して通常通り実装する
+
+# BLOCKED 宣言の規約（DEBUGGER_ENABLED=true 適用時のみ意味を持つ）
+
+実装中に「自身の context では原因究明不可能」と判断した場合、`impl-notes.md` の行頭に
+`BLOCKED: <reason>` を 1 行追加して終了することで、watcher が Debugger サブエージェントに
+処理を委譲します（DEBUGGER_ENABLED=true の運用環境のみ）。`DEBUGGER_ENABLED=false`（未設定
+含む）の運用環境では、watcher は BLOCKED 行を判定材料に使わず、現行の `claude-failed` 経路に
+直行します。本宣言は **DEBUGGER_ENABLED=true の opt-in 環境専用** の逃げ道です。
+
+## 適用範囲（最終手段の位置付け / Req 4.5）
+
+- 通常の実装失敗・軽微なエラー・既存テストの破壊では宣言しない
+- 以下のような「外部知識が必要」なケースに限り宣言する:
+  - 外部ライブラリの ABI / API 仕様が不明 / ドキュメントと挙動が異なる
+  - フレームワーク内部の挙動が context 内で再現できない
+  - CI / 実行環境固有の制約（OS / version / ネットワーク等）が原因と疑われる
+- 「テストが書けない / 何を実装すればよいか分からない」等は要件側の問題なので、impl-notes.md の
+  「確認事項」に記載して PM に差し戻すこと（BLOCKED 宣言の対象外）
+
+## reason 部の記載指針（Req 4.6）
+
+reason 部には web search を行う Debugger が手がかりにできる情報を平文で記載する:
+
+- 何を試したか（具体的な commit hash や手順）
+- 何が分からなかったか（エラーメッセージ / 期待挙動との差異）
+- Debugger が web search すべき疑問点（ライブラリ名 + version / フレームワーク + 内部関数名等）
+
+## 出力例
+
+```
+BLOCKED: vitest@1.6.0 の inline snapshot が ESM 環境で stale を返す。npm registry の changelog で類似 issue を web search したい
+```
+
+```
+BLOCKED: <library>@<version> の <function> 呼び出しが Node 20 で TypeError を返す。Node 18 では再現しない
+```
+
+## 行頭規約（厳密）
+
+watcher は `^BLOCKED: ` 固定 regex で検出するため、以下の **行頭規約**を厳守すること:
+
+- 行頭が `BLOCKED: `（半角コロン + 半角スペース）で始まる行のみ検出対象
+- インデント（spaces / tabs）/ list marker（`- ` / `* `）/ 引用（`> `）の prefix は **付けない**
+- 検出 regex: `^BLOCKED: (.+)$`
+- 複数行ある場合は **1 行目のみ**採用されるため、reason は 1 行に収めること（長文になる場合は
+  impl-notes.md の通常セクション内で背景を補足し、`BLOCKED:` 行は 1 行サマリにする）
+
+## Debugger 経由再起動時の挙動
+
+BLOCKED 宣言が受理されると、Debugger サブエージェントが Fix Plan markdown を
+`docs/specs/<番号>-<slug>/debugger-notes.md` に出力した後、Developer が再起動されます
+（Stage A'）。再起動時の prompt には Debugger の Fix Plan が inline 注入されるため、
+**Fix Plan の `修正手順` を順に実施し、`検証方法` で挙動を確認**してください。
+
+- `debugger-notes.md` は **書き換えない**（記録として残す）
+- Fix Plan の指針と既存 spec の規約が矛盾する場合は impl-notes.md の「確認事項」に記載
+- Debugger 経由再起動後に通常 Reviewer Round 1 → Round 2 → claude-failed のサイクルに戻るため、
+  実装品質は通常タスクと同じ厳しさで判定される
