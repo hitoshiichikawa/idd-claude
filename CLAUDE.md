@@ -198,6 +198,7 @@ Reviewer / PjM）は、以下の方針で **内部思考言語と出力言語を
 | `design-review-gate.md` | Architect | design.md の自己レビュー（traceability / File Structure Plan 充填 / orphan 検出） |
 | `tasks-generation.md` | Architect / Developer | tasks.md のアノテーション規約と numeric ID 階層 |
 | `feature-flag.md` | Developer / Reviewer | Feature Flag Protocol opt-in 宣言時の規約詳細（命名・両系統テスト・クリーンアップ責務） |
+| `issue-dependency.md` | PM / Triage / Architect | Issue 間依存・親子関係の canonical 記法（`Depends on:` / `Parent:` 他）と互換 alias マッピング |
 
 ルール群は [cc-sdd](https://github.com/gotalab/cc-sdd)（MIT License, Copyright gotalab）から adapt したものです。
 
