@@ -10584,6 +10584,97 @@ dr_apply_block() {
   return 0
 }
 
+# 引数:
+#   $1 = 対象 Issue 番号
+#   $2 = Issue 本文（多行 string）
+#   $3 = 既存ラベル名一覧（改行区切り、`_slot_run_issue` の $LABELS と同じ形式）
+# 戻り値:
+#   0 = block しない（Triage 続行可 / 検出ゼロ or 全件 resolved）
+#   1 = block 確定（caller は Triage skip して slot を return 0 する）
+# 副作用:
+#   - `dr_log` で構造化ログ 1 行を必ず出力（Req 6.1 / NFR 2.1）
+#   - ブロック確定時のみ `dr_apply_block` を呼んで blocked 付与 + コメント投稿
+#
+# 冪等性ガード（Req 3.4 / NFR 3.1）: 入力 LABELS に `blocked` を含む場合は何もせず
+# return 1 を返す（caller は skip、ラベル再付与・コメント再投稿なし）。N 回連続実行
+# されてもラベル付与数 1 / コメント投稿数 1 に収束する。
+#
+# 検出ゼロ時の挙動（Req 1.6 / 5.1〜5.3 / NFR 1.1）: gh API 呼び出しゼロ・ラベル
+# 変更ゼロ・コメント投稿ゼロで `verdict=skip_no_deps` の構造化ログ 1 行のみ出力。
+# 本機能導入前と完全に同一の pickup 挙動を維持。
+dr_check_dependencies() {
+  local issue_num="$1"
+  local body="$2"
+  local labels="$3"
+
+  # 冪等性ガード: 既に blocked が付与されている → 再付与せず caller 側 skip
+  # （Req 3.4）。LABELS は改行区切りなので `grep -qx` で完全一致判定。
+  if printf '%s\n' "$labels" | grep -qx "$LABEL_BLOCKED"; then
+    dr_log "issue=#${issue_num} verdict=blocked (既に blocked 付与済 / 冪等 skip)"
+    return 1
+  fi
+
+  # 依存抽出（gh 呼ばず、純粋関数）
+  local extracted
+  extracted=$(dr_extract_deps "$body")
+  if [ -z "$extracted" ]; then
+    # 検出ゼロ → 副作用ゼロで Triage 続行（Req 1.6 / 5.1〜5.3 / NFR 1.1）
+    dr_log "issue=#${issue_num} extracted= verdict=skip_no_deps"
+    return 0
+  fi
+
+  # 抽出件数分の依存先 Issue を解決。1 件以上 unresolved / api_error があれば
+  # ブロック確定（Req 2.6）。
+  local extracted_csv resolved_csv unresolved_csv api_errors_csv unresolved_lines
+  extracted_csv=""
+  resolved_csv=""
+  unresolved_csv=""
+  api_errors_csv=""
+  unresolved_lines=""
+  local dep verdict_for_dep
+  while IFS= read -r dep; do
+    [ -z "$dep" ] && continue
+    extracted_csv="${extracted_csv:+${extracted_csv},}#${dep}"
+    verdict_for_dep=$(dr_resolve_one "$dep")
+    case "$verdict_for_dep" in
+      resolved)
+        resolved_csv="${resolved_csv:+${resolved_csv},}#${dep}"
+        ;;
+      open)
+        unresolved_csv="${unresolved_csv:+${unresolved_csv},}#${dep} (open)"
+        unresolved_lines="${unresolved_lines}#${dep}|open"$'\n'
+        ;;
+      "closed unmerged")
+        unresolved_csv="${unresolved_csv:+${unresolved_csv},}#${dep} (closed_unmerged)"
+        unresolved_lines="${unresolved_lines}#${dep}|closed unmerged"$'\n'
+        ;;
+      "api error")
+        api_errors_csv="${api_errors_csv:+${api_errors_csv},}#${dep}"
+        unresolved_lines="${unresolved_lines}#${dep}|api error"$'\n'
+        ;;
+      *)
+        # 想定外（dr_resolve_one が新区分を返した）→ 安全側で unresolved 扱い
+        dr_warn "issue=#${issue_num} dep=#${dep} 未知の verdict: ${verdict_for_dep}"
+        api_errors_csv="${api_errors_csv:+${api_errors_csv},}#${dep}"
+        unresolved_lines="${unresolved_lines}#${dep}|api error"$'\n'
+        ;;
+    esac
+  done <<< "$extracted"
+
+  if [ -n "$unresolved_lines" ]; then
+    # ブロック確定 → blocked 付与 + コメント投稿（Req 3.1〜3.3, 3.5, 9.1）
+    dr_log "issue=#${issue_num} extracted=${extracted_csv} resolved=${resolved_csv} unresolved=${unresolved_csv} api_errors=${api_errors_csv} verdict=blocked"
+    if ! dr_apply_block "$issue_num" "${unresolved_lines%$'\n'}"; then
+      dr_warn "issue=#${issue_num} dr_apply_block 失敗 / caller は skip（NFR 4.2 安全側）"
+    fi
+    return 1
+  fi
+
+  # 全件 resolved → Triage 続行
+  dr_log "issue=#${issue_num} extracted=${extracted_csv} resolved=${resolved_csv} unresolved= api_errors= verdict=all_resolved"
+  return 0
+}
+
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
 # サブシェル `( _slot_run_issue n issue_json ) &` から呼び出される前提。
 #
@@ -10738,6 +10829,19 @@ _slot_run_issue() {
     ARCHITECT_REASON="Triage をスキップ（軽微な変更扱い）"
     MODE="impl"
   else
+    # ── Dependency Resolver Gate (Issue #146) ──
+    # Triage 起動直前に Issue 本文の前提依存（canonical `Depends on:` /
+    # alias `前提依存:` / alias `Blocked by:`）を機械検証し、依存先 Issue が
+    # 未 merge のまま残る場合は `blocked` 付与 + コメント投稿 + claim 系ラベル
+    # 除去で人間判断へ委ね、本サイクルの当該 Issue 処理を打ち切る（Req 3.5）。
+    # `HAS_EXISTING_SPEC=true`（impl-resume 経路）および `skip-triage` 経路では
+    # 呼び出さない（既に in-flight の Issue への retrofit を Out of Scope と
+    # する設計判断 / Req NFR 1.1 後方互換）。
+    if ! dr_check_dependencies "$NUMBER" "$BODY" "$LABELS"; then
+      slot_log "依存未解決により blocked 付与（Issue #146）"
+      return 0
+    fi
+
     # ── Triage フェーズ ──
     local TRIAGE_FILE="/tmp/triage-${REPO_SLUG}-${NUMBER}-${TS}.json"
     rm -f "$TRIAGE_FILE"
