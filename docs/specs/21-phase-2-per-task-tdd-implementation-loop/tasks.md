@@ -114,7 +114,7 @@
     新挙動の説明 / 累積コスト警告（3〜5 倍）/ Migration Note / 既存 env var 不変の明記）
   - _Requirements: 6.1, 6.2, 6.5, NFR 3.1_
 
-- [ ] 8. 静的解析と手動スモークによる検証（impl-notes.md への結果記録）
+- [x] 8. 静的解析と手動スモークによる検証（impl-notes.md への結果記録）
   - `shellcheck local-watcher/bin/issue-watcher.sh` を実行し新規警告 0 件を確認（NFR 4.1）
   - `actionlint .github/workflows/*.yml` 実行（YAML 変更なしのため自動的に達成）（NFR 4.2）
   - dry run #1: `PER_TASK_LOOP_ENABLED` 未設定で `REPO=owner/test REPO_DIR=/tmp/test-repo
