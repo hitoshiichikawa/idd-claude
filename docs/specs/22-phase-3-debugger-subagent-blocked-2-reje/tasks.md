@@ -5,7 +5,7 @@
 > `issue-watcher.sh` 内のヘルパー関数追加は **同一ファイル内の独立セクション**として実装するため、
 > 原則として並列実行は行わない（直列消化を前提に組んでいる）。
 
-- [ ] 1. 環境変数の追加と正規化（後方互換性ゲート）
+- [x] 1. 環境変数の追加と正規化（後方互換性ゲート）
   - `local-watcher/bin/issue-watcher.sh` の config block（既存 Reviewer subagent 設定の直後、行 297 周辺）に
     `DEBUGGER_ENABLED="${DEBUGGER_ENABLED:-false}"` /
     `DEBUGGER_MODEL="${DEBUGGER_MODEL:-claude-opus-4-7}"` /
