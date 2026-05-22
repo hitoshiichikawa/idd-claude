@@ -6325,6 +6325,63 @@ run_per_task_loop() {
         ;;
     esac
 
+    # ── Phase 3 (#22) Debugger Gate: per-task Implementer 完了直後 BLOCKED 検出 ──
+    # `DEBUGGER_ENABLED=true` 時のみ、当該 task の Implementer が impl-notes.md に
+    # `BLOCKED: <reason>` を出力していたら task 単位で Debugger を 1 回起動して
+    # Implementer 再起動 → 通常 Reviewer Round 1 サイクルに合流する（Req 6.2, 6.3）。
+    # 既起動なら直行 claude-failed（Req 5.2）。OFF 時は本ブロックが構造的に skip。
+    if [ "${DEBUGGER_ENABLED:-false}" = "true" ]; then
+      local _pt_blocked_reason=""
+      if _pt_blocked_reason=$(detect_blocked_marker "$REPO_DIR/$SPEC_DIR_REL/impl-notes.md"); then
+        if detect_debugger_already_invoked "$task_id"; then
+          dbg_log "trigger=blocked issue=#${NUMBER} task=${task_id} reason=\"${_pt_blocked_reason}\" result=skipped reason=debugger-already-invoked" >> "$LOG"
+          echo "❌ #$NUMBER: per-task BLOCKED 宣言検出 (task=$task_id) だが Debugger 既起動 → claude-failed (Req 5.2)" | tee -a "$LOG"
+          mark_issue_failed "per-task-debugger-blocked-but-invoked" "per-task ループの Developer が task=\`${task_id}\` で \`BLOCKED:\` 行を出力しましたが、本 task では既に Debugger が 1 回起動済みのため再起動を抑止し人間判断に委ねます（Req 5.1, 5.2, 6.3）。
+
+- 対象 task ID: ${task_id}
+- BLOCKED reason: ${_pt_blocked_reason}
+- 既存 Debugger Fix Plan: \`${SPEC_DIR_REL}/debugger-notes.md\` の \`## Task ${task_id}\` セクション
+- impl-notes.md: \`${SPEC_DIR_REL}/impl-notes.md\`
+
+\`$LOG\` を確認し、Fix Plan の追加修正 / 別 Issue 切り出し等を判断してください。"
+          return 1
+        fi
+
+        echo "🐛 #$NUMBER: per-task Developer BLOCKED 宣言検出 (task=$task_id) → Debugger Gate 起動" | tee -a "$LOG"
+        dbg_log "trigger=blocked issue=#${NUMBER} task=${task_id} reason=\"${_pt_blocked_reason}\" start" >> "$LOG"
+        local _pt_dbg_bl_rc=0
+        run_debugger_stage "blocked" "$task_id" "" || _pt_dbg_bl_rc=$?
+        case "$_pt_dbg_bl_rc" in
+          99)
+            echo "⏸️ #$NUMBER: Debugger (task=$task_id / BLOCKED 経路) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+            return 0
+            ;;
+          0)
+            echo "✅ #$NUMBER: Debugger (task=$task_id / BLOCKED 経路) 完了 → per-task Implementer 再起動" | tee -a "$LOG"
+            ;;
+          *)
+            return 1
+            ;;
+        esac
+
+        # Implementer 再起動（task 単位 / Fix Plan は impl-notes.md / debugger-notes.md を Implementer が読む）
+        local impl_bl_rc=0
+        run_per_task_implementer "$task_id" || impl_bl_rc=$?
+        case "$impl_bl_rc" in
+          0) ;; # 続行: 通常の Reviewer Round 1 に合流（Req 6.2 / 4.4 相当）
+          99)
+            echo "⏸️ #$NUMBER: per-task Implementer (BLOCKED 経路再実行 / task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+            return 0
+            ;;
+          *)
+            echo "❌ #$NUMBER: per-task Implementer (BLOCKED 経路再実行 / task=$task_id) 失敗 → claude-failed" | tee -a "$LOG"
+            mark_issue_failed "per-task-implementer-blocked-redo-failed" "per-task ループの BLOCKED 経路 Implementer 再実行が task=\`${task_id}\` で失敗しました（claude 非 0 exit）。\`$LOG\` を確認してください。"
+            return 1
+            ;;
+        esac
+      fi
+    fi
+
     local rev_rc=0
     run_per_task_reviewer "$task_id" 1 || rev_rc=$?
     case "$rev_rc" in
@@ -6365,13 +6422,95 @@ run_per_task_loop() {
             return 0
             ;;
           1)
-            # 再 reject → claude-failed + Issue コメント
-            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) reject → claude-failed" | tee -a "$LOG"
-            local parsed2 cat2 tgt2
-            parsed2=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
-            cat2=$(echo "$parsed2" | cut -f2)
-            tgt2=$(echo "$parsed2" | cut -f3)
-            mark_issue_failed "per-task-reviewer-reject2" "per-task ループの Reviewer が task=\`${task_id}\` で 2 回連続 reject を出したため、残りの未完了 task の処理を停止し人間判断に委ねます。
+            # 再 reject → Phase 3 (#22) Debugger Gate に分岐 (Req 6.1, 6.3)、
+            # 未対応なら claude-failed + Issue コメント
+            if [ "${DEBUGGER_ENABLED:-false}" = "true" ] && ! detect_debugger_already_invoked "$task_id"; then
+              echo "🐛 #$NUMBER: per-task Reviewer (task=$task_id, round=2) reject → Debugger Gate 起動（task scope）" | tee -a "$LOG"
+              local _pt_dbg_rc=0
+              run_debugger_stage "round2-reject" "$task_id" "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" || _pt_dbg_rc=$?
+              case "$_pt_dbg_rc" in
+                99)
+                  echo "⏸️ #$NUMBER: Debugger (task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+                  return 0
+                  ;;
+                0)
+                  echo "✅ #$NUMBER: Debugger (task=$task_id) 完了 → per-task Implementer 再起動 + Reviewer round=3" | tee -a "$LOG"
+                  ;;
+                *)
+                  # Debugger 異常終了 → mark_issue_failed 既発射
+                  return 1
+                  ;;
+              esac
+
+              # Implementer 再起動（Fix Plan 注入は per-task Implementer の prompt builder には未対応のため、
+              # debugger-notes.md の存在を Implementer が `### Task <id>` セクションで読むことに依拠する）
+              local impl3_rc=0
+              run_per_task_implementer "$task_id" || impl3_rc=$?
+              case "$impl3_rc" in
+                0) ;;
+                99)
+                  echo "⏸️ #$NUMBER: per-task Implementer 3 回目 (task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+                  return 0
+                  ;;
+                *)
+                  echo "❌ #$NUMBER: per-task Implementer 3 回目 (task=$task_id / Debugger 経由) 失敗 → claude-failed" | tee -a "$LOG"
+                  mark_issue_failed "per-task-implementer-pp-failed" "per-task ループの Debugger 経由 Implementer 再実行が task=\`${task_id}\` で失敗しました（claude 非 0 exit）。\`$LOG\` を確認してください。"
+                  return 1
+                  ;;
+              esac
+
+              # Reviewer Round 3（task 単位）
+              local rev3_rc=0
+              run_per_task_reviewer "$task_id" 3 || rev3_rc=$?
+              case "$rev3_rc" in
+                0)
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=approve" >> "$LOG"
+                  # approve → 次 task へ
+                  ;;
+                99)
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=quota-exceeded" >> "$LOG"
+                  echo "⏸️ #$NUMBER: per-task Reviewer (task=$task_id, round=3) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+                  return 0
+                  ;;
+                1)
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=reject" >> "$LOG"
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) reject → claude-failed (Req 3.5)" | tee -a "$LOG"
+                  local parsed3pt cat3pt tgt3pt
+                  parsed3pt=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
+                  cat3pt=$(echo "$parsed3pt" | cut -f2)
+                  tgt3pt=$(echo "$parsed3pt" | cut -f3)
+                  mark_issue_failed "per-task-reviewer-reject3" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) も reject を出したため、自動 iteration を打ち切り人間判断に委ねます（Debugger は 1 task あたり 1 回のみ起動するため再起動しません / Req 3.5, 6.3）。
+
+- 対象 task ID: ${task_id}
+- 対象 requirement ID: ${tgt3pt:-(unknown)}
+- reject カテゴリ: ${cat3pt:-(unknown)}
+- Reviewer 判定詳細: \`${SPEC_DIR_REL}/review-notes.md\` を参照
+- Debugger Fix Plan: \`${SPEC_DIR_REL}/debugger-notes.md\` を参照
+
+### 次の手順
+1. review-notes.md / debugger-notes.md / watcher ログ \`$LOG\` を読み、Reviewer 判定が妥当か確認
+2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
+3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
+                  return 1
+                  ;;
+                *)
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=error" >> "$LOG"
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) 異常終了 → claude-failed" | tee -a "$LOG"
+                  mark_issue_failed "per-task-reviewer-error" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+                  return 1
+                  ;;
+              esac
+            else
+              # DEBUGGER_ENABLED != "true" もしくは task sentinel 既起動 → 既存 per-task-reviewer-reject2 経路
+              if [ "${DEBUGGER_ENABLED:-false}" = "true" ]; then
+                dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} result=skipped reason=debugger-already-invoked" >> "$LOG"
+              fi
+              echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) reject → claude-failed" | tee -a "$LOG"
+              local parsed2 cat2 tgt2
+              parsed2=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
+              cat2=$(echo "$parsed2" | cut -f2)
+              tgt2=$(echo "$parsed2" | cut -f3)
+              mark_issue_failed "per-task-reviewer-reject2" "per-task ループの Reviewer が task=\`${task_id}\` で 2 回連続 reject を出したため、残りの未完了 task の処理を停止し人間判断に委ねます。
 
 - 対象 task ID: ${task_id}
 - 対象 requirement ID: ${tgt2:-(unknown)}
@@ -6382,7 +6521,8 @@ run_per_task_loop() {
 1. review-notes.md と watcher ログ \`$LOG\` を読み、Reviewer 判定が妥当か確認
 2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
 3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
-            return 1
+              return 1
+            fi
             ;;
           *)
             echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) 異常終了 → claude-failed" | tee -a "$LOG"
