@@ -7440,50 +7440,71 @@ run_impl_pipeline() {
   fi
 
   # ── Stage A: PM + Developer（impl-resume では PM スキップ / Stage Checkpoint resume 時は skip 可）──
+  #
+  # Phase 2 (#21): `PER_TASK_LOOP_ENABLED=true` のときは Stage A の実体を
+  # `run_per_task_loop`（task 単位 fresh Implementer + fresh Reviewer のループ）に
+  # 置き換える Strategy 分岐を挿入する。`PER_TASK_LOOP_ENABLED` 未指定 / `=true` 以外
+  # では従来の単一 Developer 起動経路に流れ、本機能導入前と外形挙動は完全一致する
+  # （Req 1.1 / NFR 1.1）。loop 完了後の verify_pushed_or_retry / stage-a-verify /
+  # Stage B / Stage C は分岐の外で従来通り実行される（NFR 1.4）。
   case "$START_STAGE" in
     A)
-      echo "--- Stage A 実行（$MODE / PM + Developer）---" >> "$LOG"
-      prompt_a=$(build_dev_prompt_a "$MODE")
-      # Issue #66: Quota-Aware Watcher 経由で claude を起動（Req 1.1, 1.2, 2.1）
-      local _qa_reset_file_a _qa_rc_a=0 _qa_ts_a
-      _qa_ts_a=$(date +%Y%m%d-%H%M%S)
-      _qa_reset_file_a="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-${_qa_ts_a}"
-      qa_run_claude_stage "StageA" "$_qa_reset_file_a" -- \
-        claude \
-          --print "$prompt_a" \
-          --model "$DEV_MODEL" \
-          --permission-mode bypassPermissions \
-          --max-turns "$DEV_MAX_TURNS" \
-          --output-format stream-json \
-          --verbose \
-          >> "$LOG" 2>&1 || _qa_rc_a=$?
-      case "$_qa_rc_a" in
-        0)
-          # Issue #106 Req 1: Stage A 成功宣言の前にローカル HEAD が origin に到達しているか
-          # verify する。ahead == 0 なら従来どおり成功メッセージ（Req 1.3 / 5.1）、
-          # ahead > 0 なら自動 push リトライ 1 回。リトライ失敗時は claude-failed 化済で
-          # return 1 を伝搬する（Req 1.4, 4.4, 4.5）。
-          rm -f "$_qa_reset_file_a"
-          if ! verify_pushed_or_retry "stageA-push-missing" "$BRANCH" "Stage A"; then
-            return 1
-          fi
-          echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
-          ;;
-        99)
-          local _qa_epoch_a
-          _qa_epoch_a=$(cat "$_qa_reset_file_a")
-          qa_handle_quota_exceeded "$NUMBER" "StageA" "$_qa_epoch_a"
-          rm -f "$_qa_reset_file_a"
-          echo "⏸️ #$NUMBER: Stage A で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
-          return 0
-          ;;
-        *)
-          rm -f "$_qa_reset_file_a"
-          echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
-          mark_issue_failed "stageA" ""
+      if [ "${PER_TASK_LOOP_ENABLED:-false}" = "true" ]; then
+        echo "--- Stage A 実行（$MODE / per-task loop / PER_TASK_LOOP_ENABLED=true）---" >> "$LOG"
+        if ! run_per_task_loop; then
+          # run_per_task_loop 内で claude-failed 付与済 / 既に Issue コメント済。
           return 1
-          ;;
-      esac
+        fi
+        # per-task loop 内で逐次 commit + push される規約のため、loop 終了後の HEAD は
+        # 通常 ahead=0。万一 push 漏れがあれば verify_pushed_or_retry が 1 回リトライする。
+        if ! verify_pushed_or_retry "stageA-push-missing" "$BRANCH" "Stage A (per-task loop)"; then
+          return 1
+        fi
+        echo "✅ #$NUMBER: Stage A 完了（per-task loop）" | tee -a "$LOG"
+      else
+        echo "--- Stage A 実行（$MODE / PM + Developer）---" >> "$LOG"
+        prompt_a=$(build_dev_prompt_a "$MODE")
+        # Issue #66: Quota-Aware Watcher 経由で claude を起動（Req 1.1, 1.2, 2.1）
+        local _qa_reset_file_a _qa_rc_a=0 _qa_ts_a
+        _qa_ts_a=$(date +%Y%m%d-%H%M%S)
+        _qa_reset_file_a="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-${_qa_ts_a}"
+        qa_run_claude_stage "StageA" "$_qa_reset_file_a" -- \
+          claude \
+            --print "$prompt_a" \
+            --model "$DEV_MODEL" \
+            --permission-mode bypassPermissions \
+            --max-turns "$DEV_MAX_TURNS" \
+            --output-format stream-json \
+            --verbose \
+            >> "$LOG" 2>&1 || _qa_rc_a=$?
+        case "$_qa_rc_a" in
+          0)
+            # Issue #106 Req 1: Stage A 成功宣言の前にローカル HEAD が origin に到達しているか
+            # verify する。ahead == 0 なら従来どおり成功メッセージ（Req 1.3 / 5.1）、
+            # ahead > 0 なら自動 push リトライ 1 回。リトライ失敗時は claude-failed 化済で
+            # return 1 を伝搬する（Req 1.4, 4.4, 4.5）。
+            rm -f "$_qa_reset_file_a"
+            if ! verify_pushed_or_retry "stageA-push-missing" "$BRANCH" "Stage A"; then
+              return 1
+            fi
+            echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
+            ;;
+          99)
+            local _qa_epoch_a
+            _qa_epoch_a=$(cat "$_qa_reset_file_a")
+            qa_handle_quota_exceeded "$NUMBER" "StageA" "$_qa_epoch_a"
+            rm -f "$_qa_reset_file_a"
+            echo "⏸️ #$NUMBER: Stage A で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+            return 0
+            ;;
+          *)
+            rm -f "$_qa_reset_file_a"
+            echo "❌ #$NUMBER: Stage A 失敗" | tee -a "$LOG"
+            mark_issue_failed "stageA" ""
+            return 1
+            ;;
+        esac
+      fi
       ;;
     B|C)
       sc_log "Stage A をスキップ（START_STAGE=$START_STAGE / 既存 impl-notes.md を再利用）" >> "$LOG"
