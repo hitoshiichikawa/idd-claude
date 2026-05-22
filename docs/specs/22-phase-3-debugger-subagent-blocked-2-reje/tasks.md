@@ -53,15 +53,15 @@
   - _Requirements: 2.3, 3.6, 4.3_
   - _Boundary: validate_debugger_notes_
 
-- [ ] 4. watcher: Debugger prompt builder と launcher
-- [ ] 4.1 `build_debugger_prompt <trigger> [<task_id>] [<review_notes_path>]` の実装
+- [x] 4. watcher: Debugger prompt builder と launcher
+- [x] 4.1 `build_debugger_prompt <trigger> [<task_id>] [<review_notes_path>]` の実装
   - 既存 `build_reviewer_prompt` の heredoc 形式を踏襲
   - prompt に含める内容: 対象 Issue 情報 / trigger 識別 / task_id（Phase 2 有効時）/ 必読ファイルパス / Bash 差分取得コマンド / web search 行使可能性 / 出力先パスと追記モード / 出力スキーマ / 禁止事項
   - BLOCKED 経路（trigger=`blocked`）: review-notes.md を必読対象から除外、impl-notes.md の `BLOCKED:` 行を重点参照
   - Round 2 reject 経路（trigger=`round2-reject`）: review-notes.md を必読対象に含める
   - Phase 2 有効時（task_id 指定）: 対象 task の tasks.md 該当行 + `_Requirements:_` 列挙 AC のみ verify 対象を明示
   - _Requirements: 2.2, 2.4, 2.5, 6.5_
-- [ ] 4.2 `run_debugger_stage <trigger> [<task_id>] [<review_notes_path>]` の実装
+- [x] 4.2 `run_debugger_stage <trigger> [<task_id>] [<review_notes_path>]` の実装
   - `qa_run_claude_stage "Debugger-<trigger>-<task|issue>" ...` 経由で `claude --print --model "$DEBUGGER_MODEL" --max-turns "$DEBUGGER_MAX_TURNS" --permission-mode bypassPermissions` を新規プロセス起動（NFR 5.1）
   - 戻り値 0 / 1 / 99（quota）を従来 Reviewer / Developer Stage と同形でマップ
   - 起動前後で `dbg_log "trigger=<...> issue=#<N> task=<id|none> start/end"` を出力（NFR 2.1〜2.3）
