@@ -10480,6 +10480,110 @@ ${items}
 EOF_DR_COMMENT
 }
 
+# 引数 $1 = 依存 Issue 番号（数字のみ）。
+# stdout = 区分文字列 1 行: "resolved" | "open" | "closed unmerged" | "api error"。
+# return = 常に 0（判定結果は stdout で返す）。
+# 副作用 = API エラー / jq parse 失敗時のみ dr_warn でログ（Req 6.2）。
+#
+# `gh issue view <N> --repo "$REPO" --json state,closedByPullRequestsReferences` を
+# 実行し、`jq` で以下を判定:
+#   - state == "OPEN"  → "open"（unresolved / Req 2.3）
+#   - state == "CLOSED" かつ closedByPullRequestsReferences[].merged のいずれかが
+#     true → "resolved"（Req 2.2）
+#   - state == "CLOSED" かつ上記が全て false / 空配列 → "closed unmerged"（Req 2.4）
+#   - gh / jq 失敗 / 未知の state → "api error"（Req 2.5 / NFR 4.2 安全側）
+#
+# timeout は呼び出し元のサイクル全体タイムアウトに従う（個別 timeout は導入しない:
+# 通常は数秒で帰る + watcher 全体 timeout で吸収）。
+dr_resolve_one() {
+  local dep_num="$1"
+  local json
+  if ! json=$(gh issue view "$dep_num" --repo "$REPO" \
+        --json state,closedByPullRequestsReferences 2>&1); then
+    dr_warn "issue=#${dep_num} gh issue view 失敗: ${json}"
+    echo "api error"
+    return 0
+  fi
+
+  local state
+  if ! state=$(printf '%s' "$json" | jq -r '.state' 2>/dev/null); then
+    dr_warn "issue=#${dep_num} jq parse 失敗（state 取り出し）"
+    echo "api error"
+    return 0
+  fi
+
+  case "$state" in
+    OPEN)
+      echo "open"
+      return 0
+      ;;
+    CLOSED)
+      # closedByPullRequestsReferences[].merged が true のものを 1 件以上検出すれば
+      # resolved。空配列 or 全 false は closed unmerged（Req 2.2, 2.4）。
+      local merged_count
+      if ! merged_count=$(printf '%s' "$json" \
+            | jq '[.closedByPullRequestsReferences[]? | select(.merged == true)] | length' \
+            2>/dev/null); then
+        dr_warn "issue=#${dep_num} jq parse 失敗（closedByPullRequestsReferences 集計）"
+        echo "api error"
+        return 0
+      fi
+      if [ "$merged_count" -gt 0 ]; then
+        echo "resolved"
+      else
+        echo "closed unmerged"
+      fi
+      return 0
+      ;;
+    *)
+      # 未知の state（GitHub API 仕様変更 / 異常応答）→ 安全側で api error 扱い
+      dr_warn "issue=#${dep_num} 未知の state: ${state}"
+      echo "api error"
+      return 0
+      ;;
+  esac
+}
+
+# 引数:
+#   $1 = 対象 Issue 番号（数字のみ）
+#   $2 = 未解決依存リスト（"#N|区分" 改行区切り、dr_format_unresolved_comment 用）
+# 戻り値:
+#   0 = ラベル付与 + コメント投稿が成功
+#   1 = いずれかが失敗（呼び出し元は当該 Issue を skip して slot を return 0 する）
+# 副作用:
+#   - `blocked` ラベル付与 + `claude-claimed` 除去を単一 PATCH で原子的に発行
+#   - エスカレーションコメント 1 件投稿（重複投稿は caller の冪等性ガードで防ぐ）
+#
+# `needs-decisions` ラベルには触れない（Req 9.1）。
+# 既存 `_slug_mismatch_escalate` と同パターンで gh 副作用エラーは `dr_warn` で
+# ログ + 非 0 return を返し、caller は安全側で slot を return 0 する。
+dr_apply_block() {
+  local issue_num="$1"
+  local unresolved="$2"
+
+  local body
+  body=$(dr_format_unresolved_comment "$unresolved")
+
+  # ラベル付け替えとコメント投稿を発射。失敗は dr_warn で記録、いずれかが
+  # 失敗した場合は呼び出し元（dr_check_dependencies）に非 0 を返す。
+  local label_rc=0 comment_rc=0
+  if ! gh issue edit "$issue_num" --repo "$REPO" \
+        --remove-label "$LABEL_CLAIMED" \
+        --add-label "$LABEL_BLOCKED" >/dev/null 2>&1; then
+    dr_warn "issue=#${issue_num} gh issue edit (blocked ラベル付与 / claim 除去) に失敗"
+    label_rc=1
+  fi
+  if ! gh issue comment "$issue_num" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+    dr_warn "issue=#${issue_num} エスカレーションコメント投稿に失敗"
+    comment_rc=1
+  fi
+
+  if [ "$label_rc" -ne 0 ] || [ "$comment_rc" -ne 0 ]; then
+    return 1
+  fi
+  return 0
+}
+
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
 # サブシェル `( _slot_run_issue n issue_json ) &` から呼び出される前提。
 #
