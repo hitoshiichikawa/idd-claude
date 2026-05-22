@@ -39,7 +39,7 @@
   - _Requirements: NFR 2.1, NFR 2.2_
 
 - [ ] 3. per-task Implementer prompt builder と launcher
-- [ ] 3.1 `build_per_task_implementer_prompt <task_id>` の実装
+- [x] 3.1 `build_per_task_implementer_prompt <task_id>` の実装
   - 既存 `build_dev_prompt_a` の heredoc 形式を踏襲し、「本 task 1 件のみ実装」「`### Task <id>`
     learning 追記」「先行 learnings 改変禁止」「`docs(tasks): mark <id> as done` commit 規約」
     「PR / requirements / design 改変禁止」を含む
