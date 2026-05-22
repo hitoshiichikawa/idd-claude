@@ -24,7 +24,7 @@
   - shellcheck 警告ゼロを維持
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 3.1, 3.2, 3.3, 6.2, 9.1, NFR 4.2_
 
-- [ ] 4. Dependency Resolver orchestrator と `_slot_run_issue` 統合
+- [x] 4. Dependency Resolver orchestrator と `_slot_run_issue` 統合
   - `dr_check_dependencies`: 引数 = Issue 番号 + 本文 + LABELS（改行区切り）。冪等性ガード（LABELS に `blocked` を含めば早期 return 1）→ `dr_extract_deps` で集合取得 → 空なら `verdict=skip_no_deps` ログ + return 0 → 非空なら各番号で `dr_resolve_one` 集計 → 全件 resolved なら `verdict=all_resolved` ログ + return 0 → 1 件以上未解決なら `dr_apply_block` 実行 + `verdict=blocked` ログ + return 1
   - 構造化ログ 1 行（design.md「Log Schema」と一致）を `dr_log` 経由で出力
   - `_slot_run_issue` 内の Triage 起動直前（`local TRIAGE_FILE=...` の手前、`HAS_EXISTING_SPEC=false` の `else` 分岐に入った後）で `dr_check_dependencies "$NUMBER" "$BODY" "$LABELS"` を呼び、非 0 なら `slot_log "依存未解決により blocked 付与（Issue #146）"` を残して `return 0`
