@@ -70,7 +70,7 @@
   - quota 99 受領時は既存 `qa_handle_quota_exceeded` 経路に伝搬（needs-quota-wait 退避）
   - _Requirements: 2.6, 3.6, 7.4, NFR 2.1, NFR 2.2, NFR 2.3, NFR 5.1_
 
-- [ ] 5. watcher: Fix Plan 注入版 Developer prompt builder
+- [x] 5. watcher: Fix Plan 注入版 Developer prompt builder
   - `build_dev_prompt_redo_with_fix_plan <review_notes_path> <debugger_notes_path>` を実装
   - 既存 `build_dev_prompt_redo` の heredoc 形式を踏襲（Issue / branch / spec dir 情報 / PR 作成禁止 / spec 改変禁止 / 既存テスト破壊禁止 / `${BASE_BRANCH}` 直 push 禁止）
   - `debugger-notes.md` の Fix Plan を inline markdown block で全文埋め込み
