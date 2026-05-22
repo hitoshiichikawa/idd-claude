@@ -72,7 +72,7 @@
   - shellcheck をクリーンに保つ
   - _Requirements: 1.3, 3.1, 3.2, 3.5, NFR 1.1, NFR 1.4, NFR 2.1, NFR 3.1, NFR 3.2_
 
-- [ ] 7. `run_impl_pipeline` の Stage A 完了直後 5 箇所に gate を挿入
+- [x] 7. `run_impl_pipeline` の Stage A 完了直後 5 箇所に gate を挿入
   - `local-watcher/bin/issue-watcher.sh` の `run_impl_pipeline` 内、以下 5 箇所に
     `handle_partial_status` 呼出を挿入（return 値で分岐）:
     - L8114 付近: per-task loop 完了後（`echo "✅ #$NUMBER: Stage A 完了（per-task loop）"`
