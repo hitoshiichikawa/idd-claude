@@ -8071,6 +8071,41 @@ $(build_recovery_hint "unknown")"
   gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
 }
 
+# Partial Status Gate (#148) のラベル付け替え + コメント投稿ヘルパー。
+# `mark_issue_failed` の `claude-failed` 専用設計と分離し、`needs-decisions` 経路の責務を
+# 1 関数に集約する。LABEL_FAILED は **付与しない**（NFR 1.3 / 既存ラベル併存禁止）。
+#
+# Args:
+#   $1 = status_code   (NFR 2.1 / grep 可能ログ用。本関数は body 組立済前提のため値だけ受領)
+#   $2 = comment_body  (build_partial_escalation_comment の出力)
+# Return: 0 always（best-effort、既存 mark_issue_failed と同方針）
+# 副作用:
+#   1. claude-claimed / claude-picked-up を除去
+#   2. needs-decisions を付与（1 コマンド原子的に発行）
+#   3. escalation コメントを 1 件投稿
+# Requirements: 3.3, 3.4, 3.6, NFR 1.3
+mark_issue_needs_decisions() {
+  local status_code="$1"
+  local comment_body="$2"
+
+  # ラベル付け替え（gh CLI は未付与ラベルの除去を no-op として扱う / 既存
+  # qa_handle_quota_exceeded / mark_issue_failed と同方針で 1 コマンド原子的に発行）。
+  # LABEL_FAILED (`claude-failed`) は **付与しない**（NFR 1.3 / Req 3.3, 3.4）。
+  if ! gh issue edit "$NUMBER" --repo "$REPO" \
+      --remove-label "$LABEL_CLAIMED" \
+      --remove-label "$LABEL_PICKED" \
+      --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1; then
+    # best-effort: 失敗してもコメント投稿は試行（既存 quota / failed 経路と同方針）
+    echo "[$(date '+%F %T')] [$REPO] partial-status: WARN ラベル付け替え失敗 issue=#${NUMBER} status=${status_code}" >&2
+  fi
+
+  # escalation コメント投稿（best-effort）
+  if ! gh issue comment "$NUMBER" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1; then
+    echo "[$(date '+%F %T')] [$REPO] partial-status: WARN コメント投稿失敗 issue=#${NUMBER} status=${status_code}" >&2
+  fi
+  return 0
+}
+
 # ─── _sav_handle_failure ───
 #
 # stage_a_verify_run の失敗パス共通処理。round counter を bump し、
