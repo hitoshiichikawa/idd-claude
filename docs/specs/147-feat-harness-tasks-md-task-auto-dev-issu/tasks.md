@@ -10,15 +10,15 @@
   - _Requirements: 1.6, 3.3, 4.2, NFR 1.1, NFR 2.1_
   - _Boundary: tc_log, tc_warn, tc_error_
 
-- [ ] 2. `tc_count_tasks` と `tc_classify` の純粋関数実装
-- [ ] 2.1 `tc_count_tasks` 実装 (P)
+- [x] 2. `tc_count_tasks` と `tc_classify` の純粋関数実装
+- [x] 2.1 `tc_count_tasks` 実装 (P)
   - `grep -cE '^- \[[ x]\]\*? [0-9]+(\.[0-9]+)*\.? '` で件数を抽出する関数を実装
   - tasks.md パスを引数で受け取り、存在しなければ return 1、存在すれば stdout に件数（整数 1 行）
   - 4 種 checkbox（未完了 `- [ ]` / 完了 `- [x]` / deferrable `- [ ]*` / 完了 deferrable `- [x]*`）+
     親子フラット展開 + `(P)` マーカー無視（同列カウント）を構造的に保証
   - _Requirements: 1.1, 1.2, 1.3, 1.4, NFR 3.1_
   - _Boundary: tc_count_tasks_
-- [ ] 2.2 `tc_classify` 実装 (P)
+- [x] 2.2 `tc_classify` 実装 (P)
   - 引数の整数を `TC_WARN_LOWER` / `TC_WARN_UPPER` / `TC_ESCALATE_LOWER` と比較して
     `normal` / `warn` / `escalate` の 3 値のいずれかを stdout に出力
   - 閾値 env var が非整数の場合は `tc_warn` で警告ログを出し、既定値（8 / 10 / 11）にフォールバック
