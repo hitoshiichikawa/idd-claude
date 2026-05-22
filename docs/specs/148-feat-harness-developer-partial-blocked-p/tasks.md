@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Developer prompt に STATUS 行・partial 自己判断・後方互換規約を追記
+- [x] 1. Developer prompt に STATUS 行・partial 自己判断・後方互換規約を追記
   - `.claude/agents/developer.md` に「# 出力契約（impl-notes.md 末尾の STATUS 行）」
     セクションを新設し、`STATUS: complete` / `partial_blocked` / `partial_overrun` の
     出力フォーマットを明記
