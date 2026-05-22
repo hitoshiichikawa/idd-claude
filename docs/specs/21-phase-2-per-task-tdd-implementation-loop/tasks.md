@@ -91,7 +91,7 @@
   - START_STAGE=B|C のスキップ経路は変更しない（Stage Checkpoint resume と直交）
   - _Requirements: 1.1, 1.2, 5.3, NFR 1.1, NFR 1.4_
 
-- [ ] 6. Agent 定義への per-task 責務追記
+- [x] 6. Agent 定義への per-task 責務追記
 - [x] 6.1 `repo-template/.claude/agents/developer.md` に「per-task ループ下での Implementer の責務」節を末尾追加
   - 「1 起動 = 1 task のみ」「`### Task <id>` learning 追記規約」「先行 learnings 改変禁止」
     「`## Implementation Notes` セクション外を触らない」「prompt の既存 learnings を参照して
@@ -99,7 +99,7 @@
   - 既存節（実装フロー / opt-in 時の追加実装フロー / impl-resume 規約 / テスト規約 etc）は
     一切改変しない
   - _Requirements: 6.3, 2.4, 2.5, 4.1, 4.2, 4.4_
-- [ ] 6.2 `repo-template/.claude/agents/reviewer.md` に「per-task ループ下での Reviewer の責務」節を末尾追加
+- [x] 6.2 `repo-template/.claude/agents/reviewer.md` に「per-task ループ下での Reviewer の責務」節を末尾追加
   - 「判定対象 diff range は `<range_start>..<range_end>` のみ」「判定 AC は当該 task の
     `_Requirements:_` 列挙分のみ」「`_Boundary:_` 違反は常に reject」「既存 3 カテゴリと
     RESULT 行規約を流用」を含む
