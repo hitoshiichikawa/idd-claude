@@ -8106,6 +8106,80 @@ mark_issue_needs_decisions() {
   return 0
 }
 
+# Partial Status Gate (#148) の coordinator。Stage A 完了直後の各経路から
+# 1 行 `handle_partial_status || _rc=$?; case ...` の形で呼ばれる。
+#
+# 入力 (環境変数経由):
+#   NUMBER / BRANCH / REPO / REPO_DIR / SPEC_DIR_REL / LOG / BASE_BRANCH
+# 出力:
+#   stdout なし（log のみ）
+# Return:
+#   0  = continue（既存フロー継続。status 行不在 or `complete`）
+#   10 = partial 検出済（呼出側は run_impl_pipeline から return 0 で抜けて Reviewer skip）
+#   1  = 不正 status / parse 失敗（mark_issue_failed 実行済。呼出側は return 1）
+#
+# 副作用:
+#   - partial 検出時: `mark_issue_needs_decisions` 経由でラベル付け替え + コメント投稿
+#     + grep 可能ログ 1 行（NFR 2.1）
+#   - 不正値時: `mark_issue_failed` 実行（NFR 3.1） + grep 可能ログ
+#   - continue 時: 副作用なし（既存挙動と外形等価 / NFR 1.1, 1.4）
+#
+# 不変条件:
+#   - 既存 `LABEL_NEEDS_DECISIONS` 以外のラベルを新規生成しない（Req 3.3, 3.4 / NFR 1.3）
+#   - 戻り値 10 は run_impl_pipeline 既存 return code 0/1 と衝突しない（quota 99 とも区別）
+#
+# Requirements: 1.3, 3.1, 3.2, 3.5, NFR 1.1, NFR 1.4, NFR 2.1, NFR 3.1, NFR 3.2
+handle_partial_status() {
+  local impl_notes="$REPO_DIR/$SPEC_DIR_REL/impl-notes.md"
+  local status_code rc=0
+  status_code=$(detect_partial_status "$impl_notes") || rc=$?
+  case "$rc" in
+    1|2)
+      # STATUS 行不在 or ファイル不在 → continue（NFR 1.1 / NFR 3.2）
+      # 既存挙動と外形完全等価（partial gate 導入前と同じ Stage B 起動経路へ）
+      return 0
+      ;;
+    0)
+      case "$status_code" in
+        complete)
+          # 明示的 complete = continue（NFR 1.4）
+          return 0
+          ;;
+        partial_blocked|partial_overrun)
+          # ── partial 検出: needs-decisions エスカレーション ──
+          # 1. grep 可能ログ（NFR 2.1）
+          echo "[$(date '+%F %T')] [$REPO] partial-status: detected issue=#${NUMBER} status=${status_code} branch=${BRANCH}" | tee -a "$LOG"
+          # 2. コメント本文組立
+          local body
+          body=$(build_partial_escalation_comment \
+            "$status_code" \
+            "$impl_notes" \
+            "$REPO_DIR/$SPEC_DIR_REL/tasks.md" \
+            "$BRANCH")
+          # 3. ラベル付け替え + コメント投稿（best-effort）
+          mark_issue_needs_decisions "$status_code" "$body"
+          # 4. partial 検出を呼出側に伝搬（return 10 = Reviewer skip + run_impl_pipeline 正常終了）
+          return 10
+          ;;
+        *)
+          # ── 不正 status code（NFR 3.1） ──
+          echo "[$(date '+%F %T')] [$REPO] partial-status: invalid issue=#${NUMBER} status='${status_code}'" | tee -a "$LOG"
+          mark_issue_failed "partial-status-invalid" \
+            "Developer 出力の \`STATUS:\` 行が \`${status_code}\` で、契約 (\`complete\` / \`partial_blocked\` / \`partial_overrun\`) のいずれにも該当しません。\`$LOG\` を確認してください。"
+          return 1
+          ;;
+      esac
+      ;;
+    *)
+      # 想定外の rc（防御的）: detect_partial_status は 0/1/2 しか返さない契約だが、
+      # 未来の規約変更に備えて safe-fallback で continue を選択（既存挙動を壊さない /
+      # NFR 1.1）。
+      echo "[$(date '+%F %T')] [$REPO] partial-status: WARN detect_partial_status unexpected rc=$rc → continue (safe-fallback)" >&2
+      return 0
+      ;;
+  esac
+}
+
 # ─── _sav_handle_failure ───
 #
 # stage_a_verify_run の失敗パス共通処理。round counter を bump し、
