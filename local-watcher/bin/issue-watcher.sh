@@ -314,6 +314,25 @@ DEV_MAX_TURNS="${DEV_MAX_TURNS:-60}"
 REVIEWER_MODEL="${REVIEWER_MODEL:-claude-opus-4-7}"
 REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-30}"
 
+# ─── Debugger subagent 設定 (#22 Phase 3) ───
+# 新規 opt-in 機能。明示的に `=true` を指定したときだけ Reviewer Round 2 reject 直前 /
+# Developer BLOCKED 宣言時に Debugger サブエージェントを fresh Claude CLI セッションで
+# 1 回起動して Fix Plan を `debugger-notes.md` に出力させ、後続 Developer 再起動 prompt
+# に inline 注入する（Req 1.1, 1.2 / NFR 1.1）。`=true` 以外（未設定 / 空 / `false` / `0` /
+# `True` / `1` / typo 等）はすべて off として扱い、本機能導入前と完全に同一の Reviewer
+# Round 1/2 + `claude-failed` 経路を維持する（Req 1.3 / NFR 1.1）。本フラグは新規追加 =
+# opt-in 制 + 既定 false が要件のため、上記「デフォルト有効化フラグの値正規化」ループには
+# **含めない**（#112 の 8 種反転対象とは別扱い）。値判定は使用箇所で
+# `[ "${DEBUGGER_ENABLED:-false}" = "true" ]` 完全一致のみ true 扱い。
+# 詳細は docs/specs/22-phase-3-debugger-subagent-blocked-2-reje/design.md を参照。
+#
+# - DEBUGGER_ENABLED:    本機能の opt-in gate。`=true` 厳密一致のみ有効（既定 `false`）。
+# - DEBUGGER_MODEL:      Debugger CLI に渡すモデル ID（既定 `claude-opus-4-7`）。
+# - DEBUGGER_MAX_TURNS:  Debugger CLI の `--max-turns` 値（既定 `40`、web search 含む）。
+DEBUGGER_ENABLED="${DEBUGGER_ENABLED:-false}"
+DEBUGGER_MODEL="${DEBUGGER_MODEL:-claude-opus-4-7}"
+DEBUGGER_MAX_TURNS="${DEBUGGER_MAX_TURNS:-40}"
+
 # ─── Quota-Aware Watcher 設定 (#66) ───
 # Claude Max の 5 時間ローリング quota を claude CLI の `rate_limit_event` JSON で
 # 検知し、quota 起因の停止と他失敗を `needs-quota-wait` ラベルで分離する。
