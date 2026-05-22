@@ -8023,6 +8023,97 @@ run_impl_pipeline() {
       ;;
   esac
 
+  # ── Debugger Gate (#22 Phase 3): Stage A 完了直後 BLOCKED 検出 ──
+  # `DEBUGGER_ENABLED=true` 時のみ、Stage A 完了直後・stage-a-verify gate 直前で
+  # `impl-notes.md` の行頭 `BLOCKED: <reason>` を検出し、Developer 自己宣言経路として
+  # Debugger を 1 回起動する。BLOCKED 経路の Stage A' は通常の Round 1 サイクルに合流
+  # するため、Stage B / B' で再度 Debugger 起動候補になっても sentinel が「起動済み」
+  # を返すため再起動はされない（Req 5.1, 5.2）。
+  # `DEBUGGER_ENABLED != "true"` の場合は本ブロックが構造的に skip され、BLOCKED 行は
+  # 判定材料に使われず stage-a-verify に直行する（Req 1.2 / NFR 1.1）。
+  if [ "${DEBUGGER_ENABLED:-false}" = "true" ]; then
+    local _blocked_reason=""
+    if _blocked_reason=$(detect_blocked_marker "$REPO_DIR/$SPEC_DIR_REL/impl-notes.md"); then
+      if detect_debugger_already_invoked; then
+        # 既起動状態での BLOCKED 再発生 → 直行 claude-failed (Req 5.2)
+        dbg_log "trigger=blocked issue=#${NUMBER} task=none reason=\"${_blocked_reason}\" result=skipped reason=debugger-already-invoked" >> "$LOG"
+        echo "❌ #$NUMBER: Developer BLOCKED 宣言を検出したが Debugger は既起動 → claude-failed (Req 5.2)" | tee -a "$LOG"
+        mark_issue_failed "debugger-blocked-but-invoked" "Developer が \`impl-notes.md\` に \`BLOCKED:\` 行を出力しましたが、本 Issue では既に Debugger が 1 回起動済みのため再起動を抑止し人間判断に委ねます（Req 5.1, 5.2）。
+
+- BLOCKED reason: ${_blocked_reason}
+- 既存 Debugger Fix Plan: \`${SPEC_DIR_REL}/debugger-notes.md\`
+- impl-notes.md: \`${SPEC_DIR_REL}/impl-notes.md\`
+
+\`$LOG\` を確認し、Fix Plan の追加修正 / 別 Issue 切り出し等を判断してください。"
+        return 1
+      fi
+
+      # 未起動: Stage D (BLOCKED 経路) → Stage A' (通常差し戻し + Fix Plan 注入) → 通常 Round 1 サイクル
+      echo "🐛 #$NUMBER: Developer BLOCKED 宣言検出 → Debugger Gate 起動（DEBUGGER_ENABLED=true）" | tee -a "$LOG"
+      dbg_log "trigger=blocked issue=#${NUMBER} task=none reason=\"${_blocked_reason}\" start (detected at impl-notes.md)" >> "$LOG"
+      local _dbg_rc=0
+      run_debugger_stage "blocked" "" "" || _dbg_rc=$?
+      case "$_dbg_rc" in
+        99)
+          echo "⏸️ #$NUMBER: Debugger (BLOCKED 経路) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+          return 0
+          ;;
+        0)
+          echo "✅ #$NUMBER: Debugger (BLOCKED 経路) 完了 → Stage A' (Developer 再起動 + Fix Plan 注入)" | tee -a "$LOG"
+          ;;
+        *)
+          # Debugger 異常終了 → mark_issue_failed 既発射、Stage A' 実行なし (Req 3.6)
+          return 1
+          ;;
+      esac
+
+      # ── Stage A' (Developer 再起動 + Fix Plan 注入 / BLOCKED 経路、review-notes.md なし) ──
+      echo "--- Stage A' 実行（Developer 再起動 / BLOCKED 経路 Debugger Fix Plan 注入）---" >> "$LOG"
+      local prompt_redo_bl
+      # BLOCKED 経路では review-notes.md は無いため空文字を渡す（build_dev_prompt_redo_with_fix_plan
+      # が「(Reviewer 経由ではないため review-notes.md は無し)」と明示する）
+      prompt_redo_bl=$(build_dev_prompt_redo_with_fix_plan \
+        "" \
+        "$REPO_DIR/$SPEC_DIR_REL/debugger-notes.md")
+      local _qa_reset_file_bl _qa_rc_bl=0 _qa_ts_bl
+      _qa_ts_bl=$(date +%Y%m%d-%H%M%S)
+      _qa_reset_file_bl="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-prime-blocked-${_qa_ts_bl}"
+      qa_run_claude_stage "StageA-prime-blocked" "$_qa_reset_file_bl" -- \
+        claude \
+          --print "$prompt_redo_bl" \
+          --model "$DEV_MODEL" \
+          --permission-mode bypassPermissions \
+          --max-turns "$DEV_MAX_TURNS" \
+          --output-format stream-json \
+          --verbose \
+          >> "$LOG" 2>&1 || _qa_rc_bl=$?
+      case "$_qa_rc_bl" in
+        0)
+          rm -f "$_qa_reset_file_bl"
+          if ! verify_pushed_or_retry "stageA-prime-blocked-push-missing" "$BRANCH" "Stage A' (BLOCKED 経路)"; then
+            return 1
+          fi
+          echo "✅ #$NUMBER: Stage A' (BLOCKED 経路) 完了 → 通常 Round 1 サイクルに合流 (Req 4.4)" | tee -a "$LOG"
+          ;;
+        99)
+          local _qa_epoch_bl
+          _qa_epoch_bl=$(cat "$_qa_reset_file_bl")
+          qa_handle_quota_exceeded "$NUMBER" "StageA-prime-blocked" "$_qa_epoch_bl"
+          rm -f "$_qa_reset_file_bl"
+          echo "⏸️ #$NUMBER: Stage A' (BLOCKED 経路) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+          return 0
+          ;;
+        *)
+          rm -f "$_qa_reset_file_bl"
+          echo "❌ #$NUMBER: Stage A' (BLOCKED 経路 Developer 再実行) 失敗" | tee -a "$LOG"
+          mark_issue_failed "stageA-prime-blocked" "BLOCKED 経路の Debugger 経由 Developer 再実行（Stage A'）が claude 非 0 exit で失敗しました（rc=${_qa_rc_bl}）。\`$LOG\` を確認してください。"
+          return 1
+          ;;
+      esac
+      # 続行: stage-a-verify → Stage B (Round 1) に合流（Req 4.4）
+    fi
+  fi
+
   # ── stage-a-verify gate (#125) ──
   # Stage A 完了直後・Stage B 開始直前で `tasks.md` 末尾の verify タスク（build /
   # test / lint）を watcher が REPO_DIR で独立再実行する。Stage A skipped path
