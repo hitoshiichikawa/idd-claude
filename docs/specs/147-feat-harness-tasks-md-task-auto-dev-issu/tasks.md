@@ -41,15 +41,15 @@
   - _Requirements: 2.6_
   - _Boundary: tc_already_posted_marker_present_
 
-- [ ] 4. コメント投稿・ラベル付与関数の実装
-- [ ] 4.1 `tc_post_warning_comment` 実装 (P)
+- [x] 4. コメント投稿・ラベル付与関数の実装
+- [x] 4.1 `tc_post_warning_comment` 実装 (P)
   - 8〜10 件レンジ用警告コメントを冪等投稿（事前に `tc_already_posted_marker_present` で重複検知）
   - コメント本文に件数・適用閾値・後続フェーズ通常進行の旨を含め、末尾に冪等マーカー
     `<!-- idd-claude:tasks-count-overflow kind=warning issue=<N> count=<C> -->` を必ず付与
   - 投稿失敗時は `tc_warn` を出すが戻り値 0 を返す（fail-open）
   - _Requirements: 2.2, 2.6, NFR 1.2_
   - _Boundary: tc_post_warning_comment_
-- [ ] 4.2 `tc_post_escalation_comment` 実装 (P)
+- [x] 4.2 `tc_post_escalation_comment` 実装 (P)
   - 11 件以上用エスカレーションコメントを冪等投稿
   - 本文に件数・適用閾値・抑止された後続フェーズ名（Developer 自動起動 / impl-resume）・
     人間が取りうる回復手順（Issue 分割 / `needs-decisions` 外し / `TC_ENABLED=false` opt-out）を含め、
@@ -57,7 +57,7 @@
     （NFR 1.2 識別文字列兼用）を必ず付与
   - _Requirements: 2.3, 2.5, 2.6, NFR 1.2_
   - _Boundary: tc_post_escalation_comment_
-- [ ] 4.3 `tc_add_needs_decisions_label` 実装 (P)
+- [x] 4.3 `tc_add_needs_decisions_label` 実装 (P)
   - `gh issue edit <number> --add-label "$LABEL_NEEDS_DECISIONS"` で冪等に付与
   - 失敗時は `tc_warn` を出すが戻り値 0（fail-open）
   - 既存 `LABEL_NEEDS_DECISIONS` 変数（`needs-decisions`）を参照し新ラベル名は導入しない
