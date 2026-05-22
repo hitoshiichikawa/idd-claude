@@ -64,8 +64,8 @@
   - _Requirements: 2.3, 2.4, 4.4, NFR 2.2_
   - _Boundary: tc_add_needs_decisions_label_
 
-- [ ] 5. Orchestrator `tc_run_post_architect_check` と design 分岐 hook 統合
-- [ ] 5.1 `tc_run_post_architect_check` 実装
+- [x] 5. Orchestrator `tc_run_post_architect_check` と design 分岐 hook 統合
+- [x] 5.1 `tc_run_post_architect_check` 実装
   - 順序: `tc_should_run` → `tc_count_tasks` → `tc_classify` → range 分岐
   - range=normal はログのみ / range=warn は `tc_post_warning_comment` /
     range=escalate は `tc_post_escalation_comment` + `tc_add_needs_decisions_label`
@@ -73,7 +73,7 @@
   - _Requirements: 1.1, 1.6, 2.1, 2.2, 2.3, 3.3, 4.1_
   - _Boundary: tc_run_post_architect_check_
   - _Depends: 3.1, 4.1, 4.2, 4.3_
-- [ ] 5.2 `_slot_run_issue` design 分岐 rc=0 case への hook 差し込み
+- [x] 5.2 `_slot_run_issue` design 分岐 rc=0 case への hook 差し込み
   - `local-watcher/bin/issue-watcher.sh` 行 10086–10091 相当の rc=0 case で、`slot_log "$MODE 完了"` と
     `rm -f "$_qa_reset_file_design"` の間に `tc_run_post_architect_check || true` を 1 行追加
   - rc=99 / non-zero ブランチおよび impl / impl-resume 分岐には差し込まない（Req 3.1 / 3.2 を構造的に保証）
