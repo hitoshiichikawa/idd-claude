@@ -27,7 +27,7 @@
   - `## Implementation Notes` 見出しから次の `## ` 見出し直前までを stdout に出力
   - セクション / ファイル不在時は空文字を返し常に return 0（Req 4.5 を構造的に保証）
   - _Requirements: 4.3, 4.4, 4.5, 5.4_
-- [ ] 2.3 `pt_resolve_diff_range <task_id>` の実装
+- [x] 2.3 `pt_resolve_diff_range <task_id>` の実装
   - `git log --grep="^docs(tasks): mark " --format=%H --reverse $BASE_BRANCH..HEAD` で時系列昇順 SHA 列を取得
   - 当該 task の mark commit SHA を特定し、その直前 SHA を range_start とする
   - 直前が存在しない（初回 task）場合は range_start に `$BASE_BRANCH` のコミット SHA を使う
