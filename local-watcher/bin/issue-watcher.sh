@@ -6405,7 +6405,138 @@ run_per_task_loop() {
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Reviewer Gate (#20 Phase 1) 既存セクション（per-task ループ helper はここまで）
+# Debugger Gate (#22 Phase 3) — ヘルパー関数群
+#
+# `DEBUGGER_ENABLED=true` のときに `run_impl_pipeline` の Stage B' (Round 2) reject 直前
+# / Stage A 完了直後 BLOCKED 検出経路で起動される Debugger サブエージェントの補助関数を、
+# Reviewer Gate セクションの直前に独立セクションとして配置する。`DEBUGGER_ENABLED` が
+# 未指定 / `=true` 以外の場合、これらの関数はどこからも呼ばれないため、本機能導入前と
+# 外形挙動は完全一致する（NFR 1.1 / Req 1.1, 1.2）。
+#
+# 関数一覧:
+#   - dbg_log:                          Debugger 専用ロガー (rv_log / pt_log と同形式 / NFR 2.1, 2.2)
+#   - detect_blocked_marker:            impl-notes.md の行頭 `BLOCKED: <reason>` を検出
+#   - detect_debugger_already_invoked:  sentinel file ベースで再起動抑止判定
+#   - validate_debugger_notes:          debugger-notes.md の必須 h2 セクション 4 つを verify
+#   - build_debugger_prompt:            Debugger 起動用 prompt を組立
+#   - run_debugger_stage:               claude --print で fresh Debugger 起動 + 結果 verify
+#   - build_dev_prompt_redo_with_fix_plan: Fix Plan 注入版 Developer 再起動 prompt
+#
+# 詳細: docs/specs/22-phase-3-debugger-subagent-blocked-2-reje/design.md
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# ─── dbg_log ───
+# Debugger 専用ロガー。`[YYYY-MM-DD HH:MM:SS] [$REPO] debugger: <msg>` 形式で stdout
+# に出力。呼び出し側で `>> "$LOG"` する規約（既存 rv_log / pt_log / qa_log と同じ）。
+# Issue #119 規約準拠で時刻 prefix と processor prefix の間に `[$REPO]` を 1 つだけ挿入。
+# NFR 2.1 / NFR 2.2 を満たす。
+dbg_log() {
+  echo "[$(date '+%F %T')] [$REPO] debugger: $*"
+}
+dbg_warn() {
+  echo "[$(date '+%F %T')] [$REPO] debugger: WARN: $*" >&2
+}
+
+# ─── detect_blocked_marker <impl_notes_path> ───
+#
+# impl-notes.md の **行頭固定** で `BLOCKED: <reason>` 行を検出し、reason 部を stdout に
+# 出力する。検出時 return 0、未検出 / ファイル不在時 return 1。
+#
+# 規約（Req 4.2 / 誤検出抑止）:
+#   - regex は `^BLOCKED: (.+)$`（行頭固定、半角コロン + 半角スペース + 任意 reason 文字列）
+#   - インデント / list marker `- ` / 引用 `> ` の prefix は **検出対象外**
+#   - reason 部の `:` 文字は破壊しない（grep -E で行マッチした上で sed で先頭 `BLOCKED: ` を剥がす）
+#   - 複数マッチ時は **1 行目** のみ採用
+#
+# Requirements: 4.1, 4.2
+detect_blocked_marker() {
+  local impl_notes="$1"
+  if [ ! -f "$impl_notes" ]; then
+    return 1
+  fi
+  local line
+  # grep -E で行頭固定マッチ。set -euo pipefail 配下では grep no-match で関数全体が止まるため
+  # `|| true` で吸収。
+  line=$(grep -E '^BLOCKED: .+$' "$impl_notes" 2>/dev/null | head -n 1 || true)
+  if [ -z "$line" ]; then
+    return 1
+  fi
+  # 先頭 `BLOCKED: `（10 文字）を剥がして reason のみ stdout に出す。
+  # reason 部に `:` が含まれても破壊されないよう、置換ではなく substring 切り出しを行う。
+  printf '%s\n' "${line#BLOCKED: }"
+  return 0
+}
+
+# ─── detect_debugger_already_invoked [<task_id>] ───
+#
+# sentinel file ベースで「当該 scope（Issue or task）で Debugger が既に 1 回起動済み」を
+# 判定する。Issue 単位 / task 単位の両方に対応。
+#
+# 判定ロジック:
+#   - Issue 単位（task_id 空 / 引数なし）: `$REPO_DIR/$SPEC_DIR_REL/debugger-notes.md` が
+#     存在すれば「起動済み」（return 0）
+#   - task 単位（task_id 指定）: 上記ファイル内に `## Task <task_id>` セクション見出しが
+#     存在すれば「起動済み」（grep で行頭マッチ）
+#   - 未起動時は return 1（呼び出し側が run_debugger_stage を起動可能）
+#
+# 既存 commit に乗っている sentinel は impl-resume 経由の pickup 再開でも観測可能（Req 5.5）。
+#
+# Requirements: 5.1, 5.2, 5.5, 6.3, 6.4
+detect_debugger_already_invoked() {
+  local task_id="${1:-}"
+  local sentinel="$REPO_DIR/$SPEC_DIR_REL/debugger-notes.md"
+  if [ ! -f "$sentinel" ]; then
+    return 1
+  fi
+  if [ -z "$task_id" ]; then
+    # Issue 単位: ファイル存在で「起動済み」
+    return 0
+  fi
+  # task 単位: `## Task <id>` 見出しの存在で判定（行頭固定マッチ）。
+  if grep -qE "^## Task ${task_id}\$" "$sentinel" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# ─── validate_debugger_notes <debugger_notes_path> [<task_id>] ───
+#
+# Debugger 終了後、`debugger-notes.md` の必須セクション 4 つが存在するかを grep で verify する。
+#
+# 必須セクション:
+#   - Issue 単位（task_id 空 / 引数なし）: `## 根本原因` / `## 修正手順` / `## 検証方法` / `## 関連参考資料`
+#   - Phase 2 有効時（task_id 指定）: `## Task <id>` 配下に
+#     `### 根本原因` / `### 修正手順` / `### 検証方法` / `### 関連参考資料`
+#
+# 1 つでも欠落していたら return 1（呼び出し側は claude-failed）。ファイル不在時も return 1。
+#
+# Requirements: 2.3, 3.6, 4.3
+validate_debugger_notes() {
+  local notes_path="$1"
+  local task_id="${2:-}"
+  if [ ! -f "$notes_path" ]; then
+    return 1
+  fi
+  local prefix sec
+  if [ -z "$task_id" ]; then
+    prefix="## "
+  else
+    # task 単位は h2 `## Task <id>` の存在を前提に h3 4 つを verify
+    if ! grep -qE "^## Task ${task_id}\$" "$notes_path" 2>/dev/null; then
+      return 1
+    fi
+    prefix="### "
+  fi
+  for sec in "根本原因" "修正手順" "検証方法" "関連参考資料"; do
+    if ! grep -qF "${prefix}${sec}" "$notes_path" 2>/dev/null; then
+      return 1
+    fi
+  done
+  return 0
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Reviewer Gate (#20 Phase 1) 既存セクション（per-task ループ helper / Debugger Gate helper はここまで）
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # ─── Prompt Builders（Stage A / A' / B / C 用 4 関数）───
