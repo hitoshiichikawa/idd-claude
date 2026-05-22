@@ -57,7 +57,7 @@
   - shellcheck をクリーンに保つ
   - _Requirements: 3.3, 3.4, 3.6, NFR 1.3_
 
-- [ ] 6. orchestrator に `handle_partial_status` coordinator helper を追加
+- [x] 6. orchestrator に `handle_partial_status` coordinator helper を追加
   - `local-watcher/bin/issue-watcher.sh` の `mark_issue_needs_decisions` 直後に
     coordinator 関数を追加
   - 引数なし、env var 経由で `NUMBER` / `BRANCH` / `REPO` / `REPO_DIR` / `SPEC_DIR_REL`
