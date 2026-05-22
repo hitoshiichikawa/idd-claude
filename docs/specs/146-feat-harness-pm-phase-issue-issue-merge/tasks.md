@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. `LABEL_BLOCKED` 定数追加と dispatcher pickup 除外フィルタ拡張
+- [x] 1. `LABEL_BLOCKED` 定数追加と dispatcher pickup 除外フィルタ拡張
   - `local-watcher/bin/issue-watcher.sh` Config 節（`LABEL_AWAITING_SLOT` 近傍）に `LABEL_BLOCKED="blocked"` を追加
   - `_dispatcher_run` 内の `gh issue list --search` 文字列の既存除外リスト末尾に `-label:\"$LABEL_BLOCKED\"` を追加（既存除外 label の順序・値は変更しない）
   - 既存コメント（Issue #54 / #66 / #100 由来の経緯コメント）と整合する形で「Issue #146: 依存 Issue 未 merge による blocked 状態を pickup 候補から除外」の 1 行コメントを併記
