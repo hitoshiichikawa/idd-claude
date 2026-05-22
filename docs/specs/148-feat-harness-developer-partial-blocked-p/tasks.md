@@ -97,7 +97,7 @@
   - shellcheck をクリーンに保つ
   - _Requirements: 3.1, 3.2, 3.5, NFR 1.1, NFR 1.4_
 
-- [ ] 8. README に Migration Notes (#148) を追記
+- [x] 8. README に Migration Notes (#148) を追記
   - `README.md` の既存 migration notes セクション（または「オプション機能一覧」末尾）に
     「Developer partial status codes (#148)」項目を追加
   - 記載内容:
