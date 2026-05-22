@@ -92,7 +92,7 @@
   - _Requirements: 1.1, 1.2, 5.3, NFR 1.1, NFR 1.4_
 
 - [ ] 6. Agent 定義への per-task 責務追記
-- [ ] 6.1 `repo-template/.claude/agents/developer.md` に「per-task ループ下での Implementer の責務」節を末尾追加
+- [x] 6.1 `repo-template/.claude/agents/developer.md` に「per-task ループ下での Implementer の責務」節を末尾追加
   - 「1 起動 = 1 task のみ」「`### Task <id>` learning 追記規約」「先行 learnings 改変禁止」
     「`## Implementation Notes` セクション外を触らない」「prompt の既存 learnings を参照して
     一貫性を維持」を含む
