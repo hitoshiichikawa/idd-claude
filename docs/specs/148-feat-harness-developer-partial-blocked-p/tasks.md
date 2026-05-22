@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Developer prompt に STATUS 行・partial 自己判断・後方互換規約を追記
+- [x] 1. Developer prompt に STATUS 行・partial 自己判断・後方互換規約を追記
   - `.claude/agents/developer.md` に「# 出力契約（impl-notes.md 末尾の STATUS 行）」
     セクションを新設し、`STATUS: complete` / `partial_blocked` / `partial_overrun` の
     出力フォーマットを明記
@@ -13,13 +13,13 @@
   - `repo-template/.claude/agents/developer.md` に **完全同一の追記内容** を同期反映
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.3, 2.4, NFR 1.1_
 
-- [ ] 2. Reviewer prompt に partial 経路では起動されない旨を informational 追記
+- [x] 2. Reviewer prompt に partial 経路では起動されない旨を informational 追記
   - `.claude/agents/reviewer.md` に「## partial status との関係（informational）」段落を追加
   - 既存 3 カテゴリ判定基準（AC 未カバー / missing test / boundary 逸脱）は変更しない
   - `repo-template/.claude/agents/reviewer.md` に同一内容を同期反映
   - _Requirements: 3.1, 3.2, NFR 1.3_
 
-- [ ] 3. orchestrator に `detect_partial_status` helper を追加
+- [x] 3. orchestrator に `detect_partial_status` helper を追加
   - `local-watcher/bin/issue-watcher.sh` の Debugger Gate セクション
     （`detect_blocked_marker` 付近 / L6592 周辺）に新規 helper を追加
   - 関数規約: 引数 = impl-notes.md path、stdout = status code 値、return = 0/1/2
@@ -31,7 +31,7 @@
   - shellcheck をクリーンに保つ
   - _Requirements: 1.1, 1.2, 1.3, NFR 1.1, NFR 3.2_
 
-- [ ] 4. orchestrator に `build_partial_escalation_comment` helper を追加
+- [x] 4. orchestrator に `build_partial_escalation_comment` helper を追加
   - `local-watcher/bin/issue-watcher.sh` の `qa_build_escalation_comment` (L758) と
     同セクション帯に新規 helper を追加
   - 引数 4 つ: `<status_code> <impl_notes_path> <tasks_md_path> <branch>`
@@ -46,7 +46,7 @@
   - shellcheck をクリーンに保つ
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, NFR 2.2_
 
-- [ ] 5. orchestrator に `mark_issue_needs_decisions` helper を追加
+- [x] 5. orchestrator に `mark_issue_needs_decisions` helper を追加
   - `local-watcher/bin/issue-watcher.sh` の `mark_issue_failed` (L7858) 直後に
     新規 helper を追加
   - `gh issue edit` で `LABEL_CLAIMED` / `LABEL_PICKED` を除去 → `LABEL_NEEDS_DECISIONS`
@@ -57,7 +57,7 @@
   - shellcheck をクリーンに保つ
   - _Requirements: 3.3, 3.4, 3.6, NFR 1.3_
 
-- [ ] 6. orchestrator に `handle_partial_status` coordinator helper を追加
+- [x] 6. orchestrator に `handle_partial_status` coordinator helper を追加
   - `local-watcher/bin/issue-watcher.sh` の `mark_issue_needs_decisions` 直後に
     coordinator 関数を追加
   - 引数なし、env var 経由で `NUMBER` / `BRANCH` / `REPO` / `REPO_DIR` / `SPEC_DIR_REL`
@@ -72,7 +72,7 @@
   - shellcheck をクリーンに保つ
   - _Requirements: 1.3, 3.1, 3.2, 3.5, NFR 1.1, NFR 1.4, NFR 2.1, NFR 3.1, NFR 3.2_
 
-- [ ] 7. `run_impl_pipeline` の Stage A 完了直後 5 箇所に gate を挿入
+- [x] 7. `run_impl_pipeline` の Stage A 完了直後 5 箇所に gate を挿入
   - `local-watcher/bin/issue-watcher.sh` の `run_impl_pipeline` 内、以下 5 箇所に
     `handle_partial_status` 呼出を挿入（return 値で分岐）:
     - L8114 付近: per-task loop 完了後（`echo "✅ #$NUMBER: Stage A 完了（per-task loop）"`
@@ -97,7 +97,7 @@
   - shellcheck をクリーンに保つ
   - _Requirements: 3.1, 3.2, 3.5, NFR 1.1, NFR 1.4_
 
-- [ ] 8. README に Migration Notes (#148) を追記
+- [x] 8. README に Migration Notes (#148) を追記
   - `README.md` の既存 migration notes セクション（または「オプション機能一覧」末尾）に
     「Developer partial status codes (#148)」項目を追加
   - 記載内容:
