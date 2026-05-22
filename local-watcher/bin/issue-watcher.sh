@@ -270,6 +270,32 @@ STAGE_A_VERIFY_ENABLED="${STAGE_A_VERIFY_ENABLED:-true}"
 STAGE_A_VERIFY_TIMEOUT="${STAGE_A_VERIFY_TIMEOUT:-600}"
 STAGE_A_VERIFY_COMMAND="${STAGE_A_VERIFY_COMMAND:-}"
 
+# ─── Tasks Count Gate 設定 (#147) ───
+# Architect が `tasks.md` を確定した直後（design モードの Claude 実行 rc=0 直後）に
+# watcher 側でタスク件数を機械的に再カウントし、件数レンジに応じて 3 段階の運用
+# 判定（通常 / 警告 / Developer 抑止）を適用する harness ガード（Req 1, 2 / Issue #147）。
+# 本機能は Issue #131 の Architect 側 budget overflow 検知（design.md `## Split
+# Proposal`）を置き換えず、ハーネス側で独立かつ重畳に作用する追加レイヤとして導入する。
+#
+#   - TC_ENABLED:           本機能の有効化。既定 true。`=false` 明示時のみ opt-out
+#                           として post-Architect の tasks-count 判定全体を skip し、
+#                           本機能導入前と user-observable に同一の design 分岐挙動
+#                           に戻る（Req 4.2 / NFR 2.1）。`=false` 以外は典型的な
+#                           「true 既定」として扱う。
+#   - TC_WARN_LOWER:        警告レンジの下限件数（既定 8、Req 2.2）。
+#   - TC_WARN_UPPER:        警告レンジの上限件数（既定 10、Req 2.2）。
+#   - TC_ESCALATE_LOWER:    エスカレーション（needs-decisions + Dev 抑止）の下限件数
+#                           （既定 11、Req 2.3）。
+#
+# 件数 ≤ TC_WARN_LOWER-1（既定 ≤ 7）は通常進行（Req 2.1）。
+# TC_WARN_LOWER ≤ 件数 ≤ TC_WARN_UPPER（既定 8〜10）は警告コメント 1 件投稿で進行（Req 2.2）。
+# 件数 ≥ TC_ESCALATE_LOWER（既定 ≥ 11）は `needs-decisions` 付与 + エスカレーション
+# コメント投稿で Developer 自動起動を抑止（Req 2.3 / 2.4）。
+TC_ENABLED="${TC_ENABLED:-true}"
+TC_WARN_LOWER="${TC_WARN_LOWER:-8}"
+TC_WARN_UPPER="${TC_WARN_UPPER:-10}"
+TC_ESCALATE_LOWER="${TC_ESCALATE_LOWER:-11}"
+
 # ─── Phase E: Path Overlap Checker 設定 (#18) ───
 # 新規 opt-in 機能。明示的に `=true` を指定したときだけ起動する（Req 1.1〜1.4）。
 # `=true` 以外（未設定 / 空 / `false` / `0` / `True` / `1` / typo 等）はすべて off
@@ -5708,6 +5734,41 @@ stage_checkpoint_resolve_resume_point() {
 
   sc_log "--- end resolve ---" >> "$LOG"
   return 0
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Tasks Count Gate Module (#147) — Architect 完了直後の tasks.md 件数ガード
+#
+# Architect が `tasks.md` を確定した直後（design モードの Claude 実行 rc=0 直後）に
+# watcher 側で task 件数を機械的に再カウントし、件数レンジに応じて 3 段階の運用判定
+# （通常 / 警告 / Developer 抑止）を適用する harness ガード（Req 1, 2 / Issue #147）。
+#
+# 関数群:
+#   - tc_log / tc_warn / tc_error                  : `tasks-count:` prefix logger
+#   - tc_count_tasks                               : tasks.md からタスク行件数を抽出
+#   - tc_classify                                  : 件数を normal/warn/escalate に分類
+#   - tc_should_run                                : gate（opt-out / 不在 / 重複検知）
+#   - tc_already_posted_marker_present             : 冪等マーカー検知
+#   - tc_post_warning_comment                      : 8〜10 件レンジの警告コメント投稿
+#   - tc_post_escalation_comment                   : 11 件以上のエスカレーションコメント
+#   - tc_add_needs_decisions_label                 : `needs-decisions` ラベル付与
+#   - tc_run_post_architect_check                  : design rc=0 hook の orchestrator
+#
+# 設計参照: docs/specs/147-feat-harness-tasks-md-task-auto-dev-issu/design.md
+# 関連    : Issue #131（Architect 側 budget overflow 検知）と独立かつ重畳に作用する
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# tasks-count 専用ロガー（既存 sav_log / sc_log と同形式）。
+# 行頭 `[YYYY-MM-DD HH:MM:SS] [$REPO] tasks-count:` の 3 段 prefix を維持し、
+# `grep '\[.*\] tasks-count:'` で全件抽出可能（NFR 1.1）。
+tc_log() {
+  echo "[$(date '+%F %T')] [$REPO] tasks-count: $*"
+}
+tc_warn() {
+  echo "[$(date '+%F %T')] [$REPO] tasks-count: WARN: $*" >&2
+}
+tc_error() {
+  echo "[$(date '+%F %T')] [$REPO] tasks-count: ERROR: $*" >&2
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
