@@ -19,7 +19,7 @@
   - `repo-template/.claude/agents/reviewer.md` に同一内容を同期反映
   - _Requirements: 3.1, 3.2, NFR 1.3_
 
-- [ ] 3. orchestrator に `detect_partial_status` helper を追加
+- [x] 3. orchestrator に `detect_partial_status` helper を追加
   - `local-watcher/bin/issue-watcher.sh` の Debugger Gate セクション
     （`detect_blocked_marker` 付近 / L6592 周辺）に新規 helper を追加
   - 関数規約: 引数 = impl-notes.md path、stdout = status code 値、return = 0/1/2
