@@ -5771,6 +5771,82 @@ tc_error() {
   echo "[$(date '+%F %T')] [$REPO] tasks-count: ERROR: $*" >&2
 }
 
+# ─── tc_count_tasks ───
+#
+# `tasks.md` 1 ファイルからタスク行件数を整数で返す純粋関数（Req 1.1〜1.4 / NFR 3.1）。
+#
+# count 抽出 regex (POSIX 互換 ERE): `^- \[[ x]\]\*? [0-9]+(\.[0-9]+)*\.? `
+#   - 4 種 checkbox（未完了 `- [ ]` / 完了 `- [x]` / deferrable `- [ ]*` /
+#     完了 deferrable `- [x]*`）を許容（Req 1.2）
+#   - numeric 階層 ID（`1` / `1.1` / `2.1.3` 等）+ 半角スペースを必須
+#   - 親タスク末尾 `.` を `\.?` でオプショナル化（`- [ ] 1. <名前>` /
+#     `- [ ] 1.1 <名前>` 両対応）
+#   - 既存 `design-review-gate.md` の checkbox enforcement 判定パターンと同一規約
+#   - 子タスク（小数階層 ID）・`(P)` マーカーは regex から見て区別されないため、
+#     それぞれ 1 件として数える（Req 1.3 / 1.4 を構造的に保証）
+#
+# 入力: 第 1 引数 = tasks.md の絶対パス
+# 戻り値: 0 = 抽出成功（stdout に件数 0 以上の整数 1 行）/ 1 = ファイル不在
+# 副作用: なし（pure read）
+tc_count_tasks() {
+  local tasks_path="$1"
+  [ -f "$tasks_path" ] || return 1
+  # grep -cE: マッチ行数（件数）を 1 行で stdout に書き出す。マッチ 0 件でも
+  # `--count` モードは 0 を返して exit 1 になるため、`|| true` で吸収する。
+  local count
+  count=$(grep -cE '^- \[[ x]\]\*? [0-9]+(\.[0-9]+)*\.? ' "$tasks_path" 2>/dev/null || true)
+  # 空文字（読み取り失敗）の場合は安全側に 0 を返す
+  echo "${count:-0}"
+}
+
+# ─── tc_classify ───
+#
+# 件数を 3 値レンジ（`normal` / `warn` / `escalate`）に分類して stdout に出力する
+# 純粋関数（Req 2.1, 2.2, 2.3）。
+#
+#   - count < TC_WARN_LOWER         → normal    （既定で count ≤ 7）
+#   - TC_WARN_LOWER ≤ count ≤ UPPER → warn      （既定で 8 ≤ count ≤ 10）
+#   - count ≥ TC_ESCALATE_LOWER     → escalate  （既定で count ≥ 11）
+#
+# 閾値 env var が非整数の場合、tc_warn で警告ログを出したうえで既定値（8 / 10 / 11）に
+# フォールバック（fail-safe / Req 4.2 系の安全側挙動）。
+#
+# 入力: 第 1 引数 = 件数（0 以上の整数）
+# 戻り値: 常に 0（純粋関数、副作用は警告ログのみ）
+# stdout: `normal` / `warn` / `escalate` のいずれか 1 つ
+tc_classify() {
+  local count="$1"
+  # 閾値 env var の整数検証（非整数なら既定値にフォールバック）
+  local lower="$TC_WARN_LOWER"
+  local upper="$TC_WARN_UPPER"
+  local escalate="$TC_ESCALATE_LOWER"
+  if ! [[ "$lower" =~ ^[0-9]+$ ]]; then
+    tc_warn "TC_WARN_LOWER='$lower' は整数でないため既定値 8 にフォールバック"
+    lower=8
+  fi
+  if ! [[ "$upper" =~ ^[0-9]+$ ]]; then
+    tc_warn "TC_WARN_UPPER='$upper' は整数でないため既定値 10 にフォールバック"
+    upper=10
+  fi
+  if ! [[ "$escalate" =~ ^[0-9]+$ ]]; then
+    tc_warn "TC_ESCALATE_LOWER='$escalate' は整数でないため既定値 11 にフォールバック"
+    escalate=11
+  fi
+  # count 自体が整数でない場合は normal にフォールバック（fail-safe）
+  if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+    tc_warn "count='$count' は整数でないため normal にフォールバック"
+    echo "normal"
+    return 0
+  fi
+  if [ "$count" -ge "$escalate" ]; then
+    echo "escalate"
+  elif [ "$count" -ge "$lower" ] && [ "$count" -le "$upper" ]; then
+    echo "warn"
+  else
+    echo "normal"
+  fi
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Reviewer Gate (#20 Phase 1) — impl 系モード stage 分割パイプライン
 #
