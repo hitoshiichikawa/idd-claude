@@ -137,7 +137,7 @@
     - コスト記述: 「Debugger 1 回起動あたり web search 含む最大 `DEBUGGER_MAX_TURNS`（既定 40）ターンの Claude CLI 実行コストが追加される」「Debugger 1 回 + Stage A''（Debugger 経由 Developer 再起動）1 回 + Reviewer Round 3 1 回 が本機能で追加される最大コスト」
   - _Requirements: 8.1, 8.2, 8.5, NFR 3.1, NFR 3.2_
 
-- [ ] 10. 静的解析と手動スモークによる検証（impl-notes.md への結果記録）
+- [x] 10. 静的解析と手動スモークによる検証（impl-notes.md への結果記録）
   - `shellcheck local-watcher/bin/issue-watcher.sh` を実行し新規警告 0 件を確認（NFR 4.1）
   - `actionlint .github/workflows/*.yml` 実行（YAML 変更なしのため自動的に達成）（NFR 4.2）
   - dry run #1: `DEBUGGER_ENABLED` 未設定で `REPO=owner/test REPO_DIR=/tmp/test-repo $HOME/bin/issue-watcher.sh` を空 Issue 状態で流し、`処理対象の Issue なし` で正常終了すること（既存挙動が不変であることの確認 / Req 1.1, 1.2 / NFR 1.1）
