@@ -10383,6 +10383,103 @@ _resume_branch_assert_slug_match() {
   return 1
 }
 
+# ─── Dependency Resolver (Issue #146) ───
+# PM phase（Triage 起動前）に Issue 本文の前提依存記法
+# （canonical `Depends on:` / alias `前提依存:` / alias `Blocked by:`）を機械抽出し、
+# 各依存先 Issue の merge 状態を GitHub から確認して、未解決依存が 1 件でも残れば
+# `blocked` ラベルを付与 + エスカレーションコメント 1 件投稿 + claim 系ラベル除去で
+# 人間判断へ委ねるためのゲート関数群。
+#
+# 既存 `_slug_mismatch_escalate` / `mq_log` / `pi_log` 等と同書式のロガーを採用し、
+# 構造化ログ prefix `dr:` で grep 集計できるようにする（Req 6.1〜6.3 / NFR 2.1〜2.2）。
+# helper スクリプト化はせず watcher 単体で完結させる（install.sh の配布対象拡張を
+# 避けるため）。
+dr_log() {
+  echo "[$(date '+%F %T')] dr: $*"
+}
+dr_warn() {
+  echo "[$(date '+%F %T')] dr: WARN: $*" >&2
+}
+dr_error() {
+  echo "[$(date '+%F %T')] dr: ERROR: $*" >&2
+}
+
+# 引数 = Issue 本文（多行 string、改行入り）。
+# stdout = 重複排除済の Issue 番号集合（改行区切り、各行は数字のみ）。
+# 空入力・記法非存在では空 stdout を返す（return 0）。
+# 副作用なし（純粋関数）。
+#
+# 検出する記法（`.claude/rules/issue-dependency.md` と整合 / Req 1.1〜1.5, 1.7）:
+#   - canonical: `Depends on: #N` （行頭の `- ` などの list prefix を許容）
+#   - alias 日本語: `前提依存: #N`
+#   - alias 英語慣習: `Blocked by: #N`
+#
+# 1 行に複数の Issue 番号がスペース区切り / カンマ区切りで列挙される場合も対応する
+# （Req 1.4）。`grep -oE '#[0-9]+'` で行内の番号を全列挙し、`sort -u` で uniq 化
+# （Req 1.5）。
+#
+# 誤検出許容範囲（NFR 1.4）: markdown コードフェンス内・引用ブロック内の
+# 同記法も検出してしまう可能性があるが、本機能のスコープ外（誤検出時は運用者が
+# `blocked` ラベルを手動除去で復旧する設計）。
+dr_extract_deps() {
+  local body="$1"
+
+  # 行抽出: canonical + alias の 3 パターン。
+  # `-E` で ERE、`-i` は使わず大文字小文字を厳密にし誤検出を減らす（既存運用で
+  # `Depends on:` / `Blocked by:` は大文字始まり前提）。`前提依存:` は UTF-8
+  # バイト列として直接マッチ（grep -E で安全）。
+  local matched_lines
+  matched_lines=$(printf '%s\n' "$body" \
+    | grep -E '(Depends on:|前提依存:|Blocked by:)' || true)
+
+  if [ -z "$matched_lines" ]; then
+    return 0
+  fi
+
+  # 行ごとに `#[0-9]+` を全列挙し、`#` を剥がして数字のみにし uniq 化。
+  # `sort -u -n` で数値昇順 + uniq（出力決定性を確保）。
+  printf '%s\n' "$matched_lines" \
+    | grep -oE '#[0-9]+' \
+    | sed -E 's/^#//' \
+    | sort -u -n
+}
+
+# 引数 $1 = 未解決依存リスト（"#N|区分" の改行区切り、各行は `#N|<区分>` 形式）。
+# stdout = 依存未解決専用 markdown 本文（多行）。
+# 副作用なし（純粋関数）。
+#
+# design.md「Escalation Comment Template」と一致する文面を生成し、
+# `needs-decisions` テンプレートと混在しない依存未解決専用語彙を使う（Req 3.2,
+# 3.6, 8.4, 9.2）。
+dr_format_unresolved_comment() {
+  local unresolved="$1"
+
+  # 未解決依存リストを markdown 箇条書きに整形（"#N|区分" → "- #N (区分)"）。
+  local items
+  items=$(printf '%s\n' "$unresolved" \
+    | awk -F'|' 'NF==2 && $1 != "" {printf "- %s (%s)\n", $1, $2}')
+
+  cat <<EOF_DR_COMMENT
+🛑 依存 Issue 未 merge のため自動処理を中止しました。
+
+### 未解決依存
+
+${items}
+
+### 次の手順
+
+1. 上記依存 Issue の解消（merge）を進めてください
+2. すべて merge 済みになったら、本 Issue から \`blocked\` ラベルを手動で除去してください
+3. 次回 cron tick (\`watcher 起動\` 後) で依存チェックが再実行され、解消済みなら通常の Triage / 実装フローに合流します
+
+### \`blocked\` と \`needs-decisions\` の使い分け
+
+本ラベルは **依存 Issue 未 merge 専用** です。それ以外の人間判断要求（Triage の判断不能 /
+スラグ衝突等）は従来通り \`needs-decisions\` が付与されます。両ラベルは独立した状態遷移を
+持ちます（[README.md ラベル状態遷移まとめ](https://github.com/${REPO}#ラベル状態遷移まとめ) 参照）。
+EOF_DR_COMMENT
+}
+
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
 # サブシェル `( _slot_run_issue n issue_json ) &` から呼び出される前提。
 #
