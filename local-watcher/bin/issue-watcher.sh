@@ -5924,6 +5924,119 @@ tc_already_posted_marker_present() {
   return 1
 }
 
+# ─── tc_post_warning_comment ───
+#
+# 8〜10 件レンジの警告コメントを冪等に投稿する（Req 2.2 / 2.6 / NFR 1.2）。
+#
+# 本文には以下を含める:
+#   - 検知件数と適用閾値（TC_WARN_LOWER〜TC_WARN_UPPER）
+#   - 後続フェーズは抑止されず通常進行する旨
+#   - 末尾に固定識別マーカー
+#     `<!-- idd-claude:tasks-count-overflow kind=warning issue=<N> count=<C> -->`
+#
+# 入力: 第 1 引数 = Issue 番号 / 第 2 引数 = 件数
+# 戻り値: 常に 0（fail-open。投稿失敗は tc_warn でログのみ、watcher 全体は止めない）
+tc_post_warning_comment() {
+  local issue_number="$1"
+  local count="$2"
+  if tc_already_posted_marker_present "$issue_number" "warning"; then
+    tc_log "issue=#${issue_number} already-warned skip duplicate comment"
+    return 0
+  fi
+  local body
+  body=$(cat <<EOF
+⚠️ **Tasks Count Gate (harness, #147)**: tasks.md のタスク件数が警告レンジに該当しています
+
+- 検知件数: **${count} 件**
+- 適用閾値: ${TC_WARN_LOWER} 件以上 ${TC_WARN_UPPER} 件以下で警告（参考: ≥ ${TC_ESCALATE_LOWER} 件で Developer 自動起動抑止）
+- 本コメントは通知のみで、**後続フェーズ（Developer 自動起動）は通常通り進行します**
+
+タスク件数が turn budget を圧迫する境界域です。Developer Round 1 で PR 作成まで完走しない可能性が高まるため、Issue 分割を検討してください（Issue #131 で Architect 側にも同種の自己レビュー gate が動いています）。
+
+<!-- idd-claude:tasks-count-overflow kind=warning issue=${issue_number} count=${count} -->
+EOF
+)
+  if gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+    tc_log "issue=#${issue_number} posted warning-comment count=${count}"
+  else
+    tc_warn "issue=#${issue_number} gh issue comment 失敗（warning 投稿、fail-open で続行）"
+  fi
+  return 0
+}
+
+# ─── tc_post_escalation_comment ───
+#
+# 11 件以上のエスカレーションコメントを冪等に投稿する
+# （Req 2.3 / 2.5 / 2.6 / NFR 1.2）。
+#
+# 本文には以下を必ず含める:
+#   - 検知件数と適用閾値（TC_ESCALATE_LOWER）
+#   - 抑止された後続フェーズ名（Developer 自動起動 / impl-resume）
+#   - 人間が取りうる回復手順:
+#     - 推奨: Issue 分割の検討（PM / Architect に差し戻し）
+#     - バイパス: `needs-decisions` ラベルを人間が外す（次サイクルで再評価。件数が
+#       変わらなければ再付与される旨も注記）
+#     - 完全 opt-out: `TC_ENABLED=false` で watcher を再起動
+#   - 末尾に固定識別マーカー
+#     `<!-- idd-claude:tasks-count-overflow kind=escalation issue=<N> count=<C> -->`
+#     （NFR 1.2 の本機能由来判別文字列を兼ねる）
+#
+# 入力: 第 1 引数 = Issue 番号 / 第 2 引数 = 件数
+# 戻り値: 常に 0（fail-open）
+tc_post_escalation_comment() {
+  local issue_number="$1"
+  local count="$2"
+  if tc_already_posted_marker_present "$issue_number" "escalation"; then
+    tc_log "issue=#${issue_number} already-escalated skip duplicate comment"
+    return 0
+  fi
+  local body
+  body=$(cat <<EOF
+🚫 **Tasks Count Gate (harness, #147)**: tasks.md のタスク件数が **エスカレーション閾値**を超えています
+
+- 検知件数: **${count} 件**
+- 適用閾値: ${TC_ESCALATE_LOWER} 件以上でエスカレーション（参考: ${TC_WARN_LOWER}〜${TC_WARN_UPPER} 件は警告のみ）
+- **抑止された後続フェーズ**: Developer 自動起動 / impl-resume（\`needs-decisions\` ラベルにより watcher Issue 候補抽出から除外されます）
+- 根拠: KeyNest 3 事例で 10 件超の tasks.md は Developer Round 1 で PR 作成まで完走しない確率が高く、turn budget 超過によるキャッシュトークン浪費が観測されています
+
+### 人間が取りうる回復手順
+
+1. **推奨: Issue 分割の検討** — PM / Architect に差し戻し、要件・設計を複数 Issue に分割してください
+2. **バイパス: \`needs-decisions\` ラベルを人間が外す** — 次サイクルで watcher は再 pickup を試行しますが、件数が変わらなければ本機能が再付与します（恒久バイパスにはなりません）
+3. **完全 opt-out: \`TC_ENABLED=false\`** — cron / launchd の env var に追加して watcher を再起動すると、本機能による全 Issue への評価が無効化されます
+
+<!-- idd-claude:tasks-count-overflow kind=escalation issue=${issue_number} count=${count} -->
+EOF
+)
+  if gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+    tc_log "issue=#${issue_number} posted escalation-comment count=${count}"
+  else
+    tc_warn "issue=#${issue_number} gh issue comment 失敗（escalation 投稿、fail-open で続行）"
+  fi
+  return 0
+}
+
+# ─── tc_add_needs_decisions_label ───
+#
+# `needs-decisions` ラベルを冪等に付与する（Req 2.3 / 2.4 / 4.4 / NFR 2.2）。
+#
+# `gh issue edit --add-label` は同名ラベルを多重付与しない仕様のため、構造的に冪等。
+# 既存 `LABEL_NEEDS_DECISIONS` env var 値（既定 `needs-decisions`）を参照し、
+# 新ラベル名は導入しない（NFR 2.2 既存ラベル名互換）。
+#
+# 入力: 第 1 引数 = Issue 番号
+# 戻り値: 常に 0（fail-open。付与失敗は次サイクルで再判定して再付与トライ可能）
+tc_add_needs_decisions_label() {
+  local issue_number="$1"
+  if gh issue edit "$issue_number" --repo "$REPO" \
+      --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1; then
+    tc_log "issue=#${issue_number} added label=${LABEL_NEEDS_DECISIONS}"
+  else
+    tc_warn "issue=#${issue_number} gh issue edit --add-label 失敗（fail-open で続行）"
+  fi
+  return 0
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Reviewer Gate (#20 Phase 1) — impl 系モード stage 分割パイプライン
 #
