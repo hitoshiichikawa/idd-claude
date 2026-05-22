@@ -25,27 +25,27 @@
   - 両ファイルの内容が同期していることを目視確認（行差分なし）
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 6.5, 7.4, NFR 5.1, NFR 5.2_
 
-- [ ] 3. watcher: Debugger ヘルパ関数群（検出 / 判定 / verify / ロガー）
-- [ ] 3.1 `dbg_log` ロガーの追加 (P)
+- [x] 3. watcher: Debugger ヘルパ関数群（検出 / 判定 / verify / ロガー）
+- [x] 3.1 `dbg_log` ロガーの追加 (P)
   - 既存 `rv_log` / `pt_log` と同形式で `[YYYY-MM-DD HH:MM:SS] [$REPO] debugger: $*` を stdout 出力
   - 呼び出し側で `>> "$LOG"` する規約（既存 rv_log / pt_log と同じ）
   - ログメッセージには `trigger=<round2-reject|blocked>` / `task=<id|none>` / `issue=#<NUMBER>` を含める
   - _Requirements: NFR 2.1, NFR 2.2, NFR 2.3_
   - _Boundary: dbg_log_
-- [ ] 3.2 `detect_blocked_marker <impl_notes_path>` の実装 (P)
+- [x] 3.2 `detect_blocked_marker <impl_notes_path>` の実装 (P)
   - 行頭固定 regex `^BLOCKED: (.+)$` で BLOCKED 行を検出（インデント / list marker `- ` / 引用 `> ` は **検出対象外**、誤検出抑止）
   - reason 部の `:` 文字を破壊しないよう grep + sed の組み合わせで `.+` を貪欲抽出
   - 検出時に stdout に reason 1 行目を出力、return 0。未検出時は return 1（stdout 空）
   - impl-notes.md 不在時も return 1
   - _Requirements: 4.1, 4.2_
   - _Boundary: detect_blocked_marker_
-- [ ] 3.3 `detect_debugger_already_invoked [<task_id>]` の実装 (P)
+- [x] 3.3 `detect_debugger_already_invoked [<task_id>]` の実装 (P)
   - Issue 単位判定: `$REPO_DIR/$SPEC_DIR_REL/debugger-notes.md` が存在すれば「起動済み」（return 0）
   - task 単位判定: `debugger-notes.md` 内に `### Task <task_id>` セクションが存在すれば「起動済み」（grep で行頭マッチ）
   - 未起動時は return 1（呼び出し側が `run_debugger_stage` を起動可能）
   - _Requirements: 5.1, 5.2, 5.5, 6.3, 6.4_
   - _Boundary: detect_debugger_already_invoked_
-- [ ] 3.4 `validate_debugger_notes <debugger_notes_path> [<task_id>]` の実装 (P)
+- [x] 3.4 `validate_debugger_notes <debugger_notes_path> [<task_id>]` の実装 (P)
   - 必須セクション: `## 根本原因` / `## 修正手順` / `## 検証方法` / `## 関連参考資料`（Issue 単位）
   - Phase 2 有効時（task_id 指定）: `## Task <id>` + その配下 h3 `### 根本原因` / `### 修正手順` / `### 検証方法` / `### 関連参考資料`
   - すべて grep で行頭一致 verify。1 つでも欠落すれば return 1
