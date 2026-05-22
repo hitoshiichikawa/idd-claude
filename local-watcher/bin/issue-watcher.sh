@@ -5847,6 +5847,83 @@ tc_classify() {
   fi
 }
 
+# ─── tc_should_run ───
+#
+# 本機能を実行すべきか判定する gate（Req 1.5, 2.6, 3.3, 4.2, 4.4）。
+#
+# 以下のいずれかが真の場合 return 1（skip）、いずれも偽なら return 0:
+#   - TC_ENABLED != "true"                              → reason=opt-out（Req 4.2）
+#   - tasks.md が存在しない / 読み取れない              → reason=tasks-md-missing（Req 1.5）
+#   - Issue に既に `needs-decisions` ラベルが付与済み   → reason=already-needs-decisions
+#                                                          （Req 2.6 / 4.4。#131 由来でも
+#                                                          本機能由来でも区別せず skip）
+#
+# resume 経路（impl-resume / Stage Checkpoint Resume）の skip は、本機能の hook が
+# **design 分岐内側にのみ配置される**ことで構造的に保証される（Req 3.1 / 3.2）。
+# impl-resume / Stage Checkpoint Resume はそれぞれ MODE=impl-resume または
+# START_STAGE=B|C で動き、design 分岐に到達しないため、本関数の判定対象にならない。
+#
+# 入力: 環境変数 NUMBER / REPO / REPO_DIR / SPEC_DIR_REL / TC_ENABLED /
+#       LABEL_NEEDS_DECISIONS
+# 戻り値: 0 = run / 1 = skip
+# 副作用: skip 時に tc_log で reason を記録（NFR 1.1）
+tc_should_run() {
+  # 1. opt-out 判定（TC_ENABLED != "true"）
+  if [ "${TC_ENABLED:-true}" != "true" ]; then
+    tc_log "issue=#${NUMBER:-?} skip reason=opt-out TC_ENABLED=${TC_ENABLED:-(unset)}"
+    return 1
+  fi
+  # 2. tasks.md 不在 / 読み取り不可
+  local tasks_path="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+  if [ ! -f "$tasks_path" ] || [ ! -r "$tasks_path" ]; then
+    tc_log "issue=#${NUMBER:-?} skip reason=tasks-md-missing path=$tasks_path"
+    return 1
+  fi
+  # 3. 既に needs-decisions ラベル付与済み（#131 由来でも本機能由来でも区別せず skip）
+  #    gh issue view が失敗しても skip 判定は false-negative 側に倒す（最悪重複適用のみ）
+  local label_json existing_label_match
+  if label_json=$(gh issue view "$NUMBER" --repo "$REPO" --json labels 2>/dev/null); then
+    existing_label_match=$(echo "$label_json" \
+      | jq -r --arg L "$LABEL_NEEDS_DECISIONS" '.labels[]? | select(.name == $L) | .name' 2>/dev/null \
+      || true)
+    if [ -n "$existing_label_match" ]; then
+      tc_log "issue=#${NUMBER:-?} skip reason=already-needs-decisions"
+      return 1
+    fi
+  else
+    tc_warn "issue=#${NUMBER:-?} gh issue view 失敗（label 確認 skip、本機能は続行）"
+  fi
+  return 0
+}
+
+# ─── tc_already_posted_marker_present ───
+#
+# Issue コメント履歴に本機能由来の冪等マーカーが既に存在するか検知する（Req 2.6）。
+#
+# 固定識別子: `<!-- idd-claude:tasks-count-overflow kind=<warning|escalation> issue=<N> ... -->`
+# （NFR 1.2 の本機能由来判別文字列を兼ねる）
+#
+# 入力: 第 1 引数 = Issue 番号 / 第 2 引数 = kind（warning | escalation）
+# 戻り値: 0 = marker 検出済み（skip 推奨）/ 1 = 未検出（投稿可）
+# 副作用: なし
+#
+# gh API 失敗時は marker absent (return 1) として扱う（最悪重複コメント投稿のみ）。
+tc_already_posted_marker_present() {
+  local issue_number="$1"
+  local kind="$2"
+  local bodies
+  if ! bodies=$(gh issue view "$issue_number" --repo "$REPO" \
+      --json comments --jq '.comments[].body' 2>/dev/null); then
+    return 1
+  fi
+  # 固定マーカー prefix で grep（issue=<N> 部分も付き合わせて誤検出を抑える）
+  local marker_prefix="<!-- idd-claude:tasks-count-overflow kind=$kind issue=$issue_number"
+  if echo "$bodies" | grep -qF "$marker_prefix"; then
+    return 0
+  fi
+  return 1
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Reviewer Gate (#20 Phase 1) — impl 系モード stage 分割パイプライン
 #
