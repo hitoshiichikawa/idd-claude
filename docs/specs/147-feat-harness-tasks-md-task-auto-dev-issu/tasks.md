@@ -109,7 +109,7 @@
   - `CLAUDE.md` は既存内容で十分（破壊的変更ではないため新規追記不要）
   - _Requirements: 4.2, 4.3_
 
-- [ ]* 8. パフォーマンス計測テスト追加
+- [x]* 8. パフォーマンス計測テスト追加
   - 1 MB の tasks.md fixture を生成し、`tc_count_tasks` の wall clock を `time` で計測
   - 1 秒以内に完了することを driver で assert（CI 化はしない、ローカル実行で十分）
   - _Requirements: NFR 3.1_
