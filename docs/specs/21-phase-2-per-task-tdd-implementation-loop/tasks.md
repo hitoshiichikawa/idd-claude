@@ -72,7 +72,7 @@
   - _Requirements: 3.1, 3.2, 3.3, NFR 2.1, NFR 2.2, NFR 2.3_
 
 - [ ] 5. per-task dispatcher と差し戻しハンドラ
-- [ ] 5.1 `run_per_task_loop` 本体の実装
+- [x] 5.1 `run_per_task_loop` 本体の実装
   - `pt_extract_pending_tasks "$REPO_DIR/$SPEC_DIR_REL/tasks.md"` で pending 一覧を取得
   - 空なら即 return 0（Req 2.7, 5.2）
   - `PER_TASK_MAX_TASKS != 0` で件数超過チェック（暴走防止）
