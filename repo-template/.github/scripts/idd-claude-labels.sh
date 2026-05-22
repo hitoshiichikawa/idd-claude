@@ -72,6 +72,7 @@ LABELS=(
   "staged-for-release|b8e0d2|【Issue 用】 develop に merge 済み、main 到達待ち（multi-branch 運用専用）"
   "st-failed|d73a4a|【Issue 用】 ST failure 検知後 revert 済み（Phase B Promote Pipeline が付与）"
   "awaiting-slot|c5def5|【Issue 用】 hot file 競合予防で同サイクル dispatch を見送り中（Phase E Path Overlap Checker が付与・除去）"
+  "blocked|b60205|【Issue 用】 依存 Issue 未 merge により auto-dev 進行不能"
 )
 
 echo "📌 idd-claude ラベルを作成します"
