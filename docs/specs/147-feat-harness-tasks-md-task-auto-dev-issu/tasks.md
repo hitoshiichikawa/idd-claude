@@ -83,7 +83,7 @@
   - _Boundary: _slot_run_issue (design branch)_
   - _Depends: 5.1_
 
-- [ ] 6. 回帰テスト fixture と driver の追加
+- [x] 6. 回帰テスト fixture と driver の追加
 - [x] 6.1 fixture ファイル群の作成
   - `tests/local-watcher/tasks-count/fixtures/tasks-7.md`（normal レンジ最大、7 件）
   - `tests/local-watcher/tasks-count/fixtures/tasks-8.md`（warn レンジ最小、8 件）
@@ -93,7 +93,7 @@
     `(P)` 混在、混在件数は driver の期待値と整合）
   - `tests/local-watcher/tasks-count/fixtures/tasks-empty.md`（0 件、normal 扱い）
   - _Requirements: 1.2, 1.3, 1.4_
-- [ ] 6.2 `tests/local-watcher/tasks-count/extract-driver.sh` の実装
+- [x] 6.2 `tests/local-watcher/tasks-count/extract-driver.sh` の実装
   - 既存 `tests/local-watcher/stage-a-verify/extract-driver.sh` と同形式で
     `tc_count_tasks` / `tc_classify` を `issue-watcher.sh` から awk 抽出して source する
   - 期待値テーブルに（fixture 名, expected_count, expected_classification）を持ち、
