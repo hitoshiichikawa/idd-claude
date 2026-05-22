@@ -16,7 +16,7 @@
   - 既存ラベル名・契約を改変しないこと（Req 1.5）
   - _Requirements: 1.3, 1.4, 1.5, 7.1, 7.2, 7.3, 7.5_
 
-- [ ] 2. Debugger エージェント定義の追加（repo-template + self-hosting 同期）
+- [x] 2. Debugger エージェント定義の追加（repo-template + self-hosting 同期）
   - `repo-template/.claude/agents/debugger.md` を新規作成（責務 / 入力 / 出力契約 / 禁止事項 / debugger-notes.md スキーマ）
     - frontmatter: `name: debugger` / `description: ...` / `tools: Read, Grep, Glob, Bash, Write, WebSearch, WebFetch` / `model: claude-opus-4-7`
     - 必読ファイル列挙、Bash 差分取得方法、出力スキーマ（h2 必須 4 セクション）、Phase 2 有効時の `## Task <id>` + h3 4 セクション構造
