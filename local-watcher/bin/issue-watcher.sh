@@ -74,6 +74,14 @@ LABEL_ST_FAILED="st-failed"
 # Path Overlap Checker が付与・除去し、先行 Issue の PR merge で in-flight 集合から
 # 外れた次サイクルで自動除去される（Req 6.1〜6.4）。
 LABEL_AWAITING_SLOT="awaiting-slot"
+# Issue #146: 依存 Issue 未 merge により auto-dev 進行不能であることを示すラベル。
+# PM phase（Triage 起動前）の Dependency Resolver Gate が Issue 本文の依存記法
+# （canonical `Depends on:` / alias `前提依存:` / alias `Blocked by:`）を解析して、
+# 未解決依存が 1 件でも残る場合に付与する。dispatcher pickup 除外条件に追加され、
+# 人間が依存を解消後、本ラベルを手動除去すれば次サイクルで再評価される。
+# 既存 `needs-decisions`（汎用人間判断要求）とは意味的に独立した運用シグナル
+# （Req 9.1〜9.4）。
+LABEL_BLOCKED="blocked"
 
 # ─── Base branch 設定 (#89) ───
 # watcher 経路（local cron）と Actions 経路の base branch を 1 つの env で切り替える
@@ -10375,6 +10383,298 @@ _resume_branch_assert_slug_match() {
   return 1
 }
 
+# ─── Dependency Resolver (Issue #146) ───
+# PM phase（Triage 起動前）に Issue 本文の前提依存記法
+# （canonical `Depends on:` / alias `前提依存:` / alias `Blocked by:`）を機械抽出し、
+# 各依存先 Issue の merge 状態を GitHub から確認して、未解決依存が 1 件でも残れば
+# `blocked` ラベルを付与 + エスカレーションコメント 1 件投稿 + claim 系ラベル除去で
+# 人間判断へ委ねるためのゲート関数群。
+#
+# 既存 `_slug_mismatch_escalate` / `mq_log` / `pi_log` 等と同書式のロガーを採用し、
+# 構造化ログ prefix `dr:` で grep 集計できるようにする（Req 6.1〜6.3 / NFR 2.1〜2.2）。
+# helper スクリプト化はせず watcher 単体で完結させる（install.sh の配布対象拡張を
+# 避けるため）。
+dr_log() {
+  echo "[$(date '+%F %T')] dr: $*"
+}
+dr_warn() {
+  echo "[$(date '+%F %T')] dr: WARN: $*" >&2
+}
+dr_error() {
+  echo "[$(date '+%F %T')] dr: ERROR: $*" >&2
+}
+
+# 引数 = Issue 本文（多行 string、改行入り）。
+# stdout = 重複排除済の Issue 番号集合（改行区切り、各行は数字のみ）。
+# 空入力・記法非存在では空 stdout を返す（return 0）。
+# 副作用なし（純粋関数）。
+#
+# 検出する記法（`.claude/rules/issue-dependency.md` と整合 / Req 1.1〜1.5, 1.7）:
+#   - canonical: `Depends on: #N` （行頭の `- ` などの list prefix を許容）
+#   - alias 日本語: `前提依存: #N`
+#   - alias 英語慣習: `Blocked by: #N`
+#
+# 1 行に複数の Issue 番号がスペース区切り / カンマ区切りで列挙される場合も対応する
+# （Req 1.4）。`grep -oE '#[0-9]+'` で行内の番号を全列挙し、`sort -u` で uniq 化
+# （Req 1.5）。
+#
+# 誤検出許容範囲（NFR 1.4）: markdown コードフェンス内・引用ブロック内の
+# 同記法も検出してしまう可能性があるが、本機能のスコープ外（誤検出時は運用者が
+# `blocked` ラベルを手動除去で復旧する設計）。
+dr_extract_deps() {
+  local body="$1"
+
+  # 行抽出: canonical + alias の 3 パターン。
+  # `-E` で ERE、`-i` は使わず大文字小文字を厳密にし誤検出を減らす（既存運用で
+  # `Depends on:` / `Blocked by:` は大文字始まり前提）。`前提依存:` は UTF-8
+  # バイト列として直接マッチ（grep -E で安全）。
+  local matched_lines
+  matched_lines=$(printf '%s\n' "$body" \
+    | grep -E '(Depends on:|前提依存:|Blocked by:)' || true)
+
+  if [ -z "$matched_lines" ]; then
+    return 0
+  fi
+
+  # 行ごとに `#[0-9]+` を全列挙し、`#` を剥がして数字のみにし uniq 化。
+  # `sort -u -n` で数値昇順 + uniq（出力決定性を確保）。
+  printf '%s\n' "$matched_lines" \
+    | grep -oE '#[0-9]+' \
+    | sed -E 's/^#//' \
+    | sort -u -n
+}
+
+# 引数 $1 = 未解決依存リスト（"#N|区分" の改行区切り、各行は `#N|<区分>` 形式）。
+# stdout = 依存未解決専用 markdown 本文（多行）。
+# 副作用なし（純粋関数）。
+#
+# design.md「Escalation Comment Template」と一致する文面を生成し、
+# `needs-decisions` テンプレートと混在しない依存未解決専用語彙を使う（Req 3.2,
+# 3.6, 8.4, 9.2）。
+dr_format_unresolved_comment() {
+  local unresolved="$1"
+
+  # 未解決依存リストを markdown 箇条書きに整形（"#N|区分" → "- #N (区分)"）。
+  local items
+  items=$(printf '%s\n' "$unresolved" \
+    | awk -F'|' 'NF==2 && $1 != "" {printf "- %s (%s)\n", $1, $2}')
+
+  cat <<EOF_DR_COMMENT
+🛑 依存 Issue 未 merge のため自動処理を中止しました。
+
+### 未解決依存
+
+${items}
+
+### 次の手順
+
+1. 上記依存 Issue の解消（merge）を進めてください
+2. すべて merge 済みになったら、本 Issue から \`blocked\` ラベルを手動で除去してください
+3. 次回 cron tick (\`watcher 起動\` 後) で依存チェックが再実行され、解消済みなら通常の Triage / 実装フローに合流します
+
+### \`blocked\` と \`needs-decisions\` の使い分け
+
+本ラベルは **依存 Issue 未 merge 専用** です。それ以外の人間判断要求（Triage の判断不能 /
+スラグ衝突等）は従来通り \`needs-decisions\` が付与されます。両ラベルは独立した状態遷移を
+持ちます（[README.md ラベル状態遷移まとめ](https://github.com/${REPO}#ラベル状態遷移まとめ) 参照）。
+EOF_DR_COMMENT
+}
+
+# 引数 $1 = 依存 Issue 番号（数字のみ）。
+# stdout = 区分文字列 1 行: "resolved" | "open" | "closed unmerged" | "api error"。
+# return = 常に 0（判定結果は stdout で返す）。
+# 副作用 = API エラー / jq parse 失敗時のみ dr_warn でログ（Req 6.2）。
+#
+# `gh issue view <N> --repo "$REPO" --json state,closedByPullRequestsReferences` を
+# 実行し、`jq` で以下を判定:
+#   - state == "OPEN"  → "open"（unresolved / Req 2.3）
+#   - state == "CLOSED" かつ closedByPullRequestsReferences[].merged のいずれかが
+#     true → "resolved"（Req 2.2）
+#   - state == "CLOSED" かつ上記が全て false / 空配列 → "closed unmerged"（Req 2.4）
+#   - gh / jq 失敗 / 未知の state → "api error"（Req 2.5 / NFR 4.2 安全側）
+#
+# timeout は呼び出し元のサイクル全体タイムアウトに従う（個別 timeout は導入しない:
+# 通常は数秒で帰る + watcher 全体 timeout で吸収）。
+dr_resolve_one() {
+  local dep_num="$1"
+  local json
+  if ! json=$(gh issue view "$dep_num" --repo "$REPO" \
+        --json state,closedByPullRequestsReferences 2>&1); then
+    dr_warn "issue=#${dep_num} gh issue view 失敗: ${json}"
+    echo "api error"
+    return 0
+  fi
+
+  local state
+  if ! state=$(printf '%s' "$json" | jq -r '.state' 2>/dev/null); then
+    dr_warn "issue=#${dep_num} jq parse 失敗（state 取り出し）"
+    echo "api error"
+    return 0
+  fi
+
+  case "$state" in
+    OPEN)
+      echo "open"
+      return 0
+      ;;
+    CLOSED)
+      # closedByPullRequestsReferences[].merged が true のものを 1 件以上検出すれば
+      # resolved。空配列 or 全 false は closed unmerged（Req 2.2, 2.4）。
+      local merged_count
+      if ! merged_count=$(printf '%s' "$json" \
+            | jq '[.closedByPullRequestsReferences[]? | select(.merged == true)] | length' \
+            2>/dev/null); then
+        dr_warn "issue=#${dep_num} jq parse 失敗（closedByPullRequestsReferences 集計）"
+        echo "api error"
+        return 0
+      fi
+      if [ "$merged_count" -gt 0 ]; then
+        echo "resolved"
+      else
+        echo "closed unmerged"
+      fi
+      return 0
+      ;;
+    *)
+      # 未知の state（GitHub API 仕様変更 / 異常応答）→ 安全側で api error 扱い
+      dr_warn "issue=#${dep_num} 未知の state: ${state}"
+      echo "api error"
+      return 0
+      ;;
+  esac
+}
+
+# 引数:
+#   $1 = 対象 Issue 番号（数字のみ）
+#   $2 = 未解決依存リスト（"#N|区分" 改行区切り、dr_format_unresolved_comment 用）
+# 戻り値:
+#   0 = ラベル付与 + コメント投稿が成功
+#   1 = いずれかが失敗（呼び出し元は当該 Issue を skip して slot を return 0 する）
+# 副作用:
+#   - `blocked` ラベル付与 + `claude-claimed` 除去を単一 PATCH で原子的に発行
+#   - エスカレーションコメント 1 件投稿（重複投稿は caller の冪等性ガードで防ぐ）
+#
+# `needs-decisions` ラベルには触れない（Req 9.1）。
+# 既存 `_slug_mismatch_escalate` と同パターンで gh 副作用エラーは `dr_warn` で
+# ログ + 非 0 return を返し、caller は安全側で slot を return 0 する。
+dr_apply_block() {
+  local issue_num="$1"
+  local unresolved="$2"
+
+  local body
+  body=$(dr_format_unresolved_comment "$unresolved")
+
+  # ラベル付け替えとコメント投稿を発射。失敗は dr_warn で記録、いずれかが
+  # 失敗した場合は呼び出し元（dr_check_dependencies）に非 0 を返す。
+  local label_rc=0 comment_rc=0
+  if ! gh issue edit "$issue_num" --repo "$REPO" \
+        --remove-label "$LABEL_CLAIMED" \
+        --add-label "$LABEL_BLOCKED" >/dev/null 2>&1; then
+    dr_warn "issue=#${issue_num} gh issue edit (blocked ラベル付与 / claim 除去) に失敗"
+    label_rc=1
+  fi
+  if ! gh issue comment "$issue_num" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+    dr_warn "issue=#${issue_num} エスカレーションコメント投稿に失敗"
+    comment_rc=1
+  fi
+
+  if [ "$label_rc" -ne 0 ] || [ "$comment_rc" -ne 0 ]; then
+    return 1
+  fi
+  return 0
+}
+
+# 引数:
+#   $1 = 対象 Issue 番号
+#   $2 = Issue 本文（多行 string）
+#   $3 = 既存ラベル名一覧（改行区切り、`_slot_run_issue` の $LABELS と同じ形式）
+# 戻り値:
+#   0 = block しない（Triage 続行可 / 検出ゼロ or 全件 resolved）
+#   1 = block 確定（caller は Triage skip して slot を return 0 する）
+# 副作用:
+#   - `dr_log` で構造化ログ 1 行を必ず出力（Req 6.1 / NFR 2.1）
+#   - ブロック確定時のみ `dr_apply_block` を呼んで blocked 付与 + コメント投稿
+#
+# 冪等性ガード（Req 3.4 / NFR 3.1）: 入力 LABELS に `blocked` を含む場合は何もせず
+# return 1 を返す（caller は skip、ラベル再付与・コメント再投稿なし）。N 回連続実行
+# されてもラベル付与数 1 / コメント投稿数 1 に収束する。
+#
+# 検出ゼロ時の挙動（Req 1.6 / 5.1〜5.3 / NFR 1.1）: gh API 呼び出しゼロ・ラベル
+# 変更ゼロ・コメント投稿ゼロで `verdict=skip_no_deps` の構造化ログ 1 行のみ出力。
+# 本機能導入前と完全に同一の pickup 挙動を維持。
+dr_check_dependencies() {
+  local issue_num="$1"
+  local body="$2"
+  local labels="$3"
+
+  # 冪等性ガード: 既に blocked が付与されている → 再付与せず caller 側 skip
+  # （Req 3.4）。LABELS は改行区切りなので `grep -qx` で完全一致判定。
+  if printf '%s\n' "$labels" | grep -qx "$LABEL_BLOCKED"; then
+    dr_log "issue=#${issue_num} verdict=blocked (既に blocked 付与済 / 冪等 skip)"
+    return 1
+  fi
+
+  # 依存抽出（gh 呼ばず、純粋関数）
+  local extracted
+  extracted=$(dr_extract_deps "$body")
+  if [ -z "$extracted" ]; then
+    # 検出ゼロ → 副作用ゼロで Triage 続行（Req 1.6 / 5.1〜5.3 / NFR 1.1）
+    dr_log "issue=#${issue_num} extracted= verdict=skip_no_deps"
+    return 0
+  fi
+
+  # 抽出件数分の依存先 Issue を解決。1 件以上 unresolved / api_error があれば
+  # ブロック確定（Req 2.6）。
+  local extracted_csv resolved_csv unresolved_csv api_errors_csv unresolved_lines
+  extracted_csv=""
+  resolved_csv=""
+  unresolved_csv=""
+  api_errors_csv=""
+  unresolved_lines=""
+  local dep verdict_for_dep
+  while IFS= read -r dep; do
+    [ -z "$dep" ] && continue
+    extracted_csv="${extracted_csv:+${extracted_csv},}#${dep}"
+    verdict_for_dep=$(dr_resolve_one "$dep")
+    case "$verdict_for_dep" in
+      resolved)
+        resolved_csv="${resolved_csv:+${resolved_csv},}#${dep}"
+        ;;
+      open)
+        unresolved_csv="${unresolved_csv:+${unresolved_csv},}#${dep} (open)"
+        unresolved_lines="${unresolved_lines}#${dep}|open"$'\n'
+        ;;
+      "closed unmerged")
+        unresolved_csv="${unresolved_csv:+${unresolved_csv},}#${dep} (closed_unmerged)"
+        unresolved_lines="${unresolved_lines}#${dep}|closed unmerged"$'\n'
+        ;;
+      "api error")
+        api_errors_csv="${api_errors_csv:+${api_errors_csv},}#${dep}"
+        unresolved_lines="${unresolved_lines}#${dep}|api error"$'\n'
+        ;;
+      *)
+        # 想定外（dr_resolve_one が新区分を返した）→ 安全側で unresolved 扱い
+        dr_warn "issue=#${issue_num} dep=#${dep} 未知の verdict: ${verdict_for_dep}"
+        api_errors_csv="${api_errors_csv:+${api_errors_csv},}#${dep}"
+        unresolved_lines="${unresolved_lines}#${dep}|api error"$'\n'
+        ;;
+    esac
+  done <<< "$extracted"
+
+  if [ -n "$unresolved_lines" ]; then
+    # ブロック確定 → blocked 付与 + コメント投稿（Req 3.1〜3.3, 3.5, 9.1）
+    dr_log "issue=#${issue_num} extracted=${extracted_csv} resolved=${resolved_csv} unresolved=${unresolved_csv} api_errors=${api_errors_csv} verdict=blocked"
+    if ! dr_apply_block "$issue_num" "${unresolved_lines%$'\n'}"; then
+      dr_warn "issue=#${issue_num} dr_apply_block 失敗 / caller は skip（NFR 4.2 安全側）"
+    fi
+    return 1
+  fi
+
+  # 全件 resolved → Triage 続行
+  dr_log "issue=#${issue_num} extracted=${extracted_csv} resolved=${resolved_csv} unresolved= api_errors= verdict=all_resolved"
+  return 0
+}
+
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
 # サブシェル `( _slot_run_issue n issue_json ) &` から呼び出される前提。
 #
@@ -10529,6 +10829,19 @@ _slot_run_issue() {
     ARCHITECT_REASON="Triage をスキップ（軽微な変更扱い）"
     MODE="impl"
   else
+    # ── Dependency Resolver Gate (Issue #146) ──
+    # Triage 起動直前に Issue 本文の前提依存（canonical `Depends on:` /
+    # alias `前提依存:` / alias `Blocked by:`）を機械検証し、依存先 Issue が
+    # 未 merge のまま残る場合は `blocked` 付与 + コメント投稿 + claim 系ラベル
+    # 除去で人間判断へ委ね、本サイクルの当該 Issue 処理を打ち切る（Req 3.5）。
+    # `HAS_EXISTING_SPEC=true`（impl-resume 経路）および `skip-triage` 経路では
+    # 呼び出さない（既に in-flight の Issue への retrofit を Out of Scope と
+    # する設計判断 / Req NFR 1.1 後方互換）。
+    if ! dr_check_dependencies "$NUMBER" "$BODY" "$LABELS"; then
+      slot_log "依存未解決により blocked 付与（Issue #146）"
+      return 0
+    fi
+
     # ── Triage フェーズ ──
     local TRIAGE_FILE="/tmp/triage-${REPO_SLUG}-${NUMBER}-${TS}.json"
     rm -f "$TRIAGE_FILE"
@@ -10918,12 +11231,16 @@ _dispatcher_run() {
   # Issue（`staged-for-release` 付与）を Triage / Dispatcher / PR Iteration が誤って
   # 再 pickup しないよう除外する。single-branch 運用では本ラベルは付与されない想定なので
   # 影響なし（NFR 1.2: 既存除外条件の意味・順序は変更しない）。
+  # Issue #146: 依存 Issue 未 merge による blocked 状態を pickup 候補から除外する。
+  # PM phase の Dependency Resolver Gate が付与し、人間が依存解消後に手動除去すると
+  # 次サイクルで通常 pickup に再合流する（Req 4.1, 4.2）。既存除外ラベルとは独立した
+  # 状態遷移を持ち、`needs-decisions` と並列指定する（Req 9.3 / NFR 1.3）。
   local issues
   issues=$(gh issue list \
     --repo "$REPO" \
     --label "$LABEL_TRIGGER" \
     --state open \
-    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_STAGED_FOR_RELEASE\"" \
+    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_STAGED_FOR_RELEASE\" -label:\"$LABEL_BLOCKED\"" \
     --json number,title,body,url,labels \
     --limit 5)
 
