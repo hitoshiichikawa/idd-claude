@@ -9,7 +9,7 @@
   - shellcheck 警告ゼロを維持
   - _Requirements: 4.1, 4.2, 4.3, 9.3, NFR 1.3_
 
-- [ ] 2. Dependency Resolver 純粋関数群の追加
+- [x] 2. Dependency Resolver 純粋関数群の追加
   - `local-watcher/bin/issue-watcher.sh` の `_slug_mismatch_escalate` 近傍（`_slot_run_issue` より上）に Dependency Resolver セクションを設ける
   - `dr_log` / `dr_warn` / `dr_error` を既存 `mq_log` / `pi_log` / `drr_log` と同書式で実装
   - `dr_extract_deps`（純粋関数）: 引数 = 本文文字列、stdout = 数字 1 行/件の重複排除済集合。canonical `Depends on:` / alias `前提依存:` / alias `Blocked by:` を `grep -E` で行抽出し `grep -oE '#[0-9]+'` で番号列展開、`sort -u` で uniq 化
