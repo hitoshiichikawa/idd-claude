@@ -17,7 +17,7 @@
     `IMPL_RESUME_*` 等）の名前・既定値・意味を変更しないこと（Req 1.4）
   - _Requirements: 1.3, 1.4, 1.5_
 
-- [ ] 2. per-task ヘルパー関数群（抽出 / 解決系）
+- [x] 2. per-task ヘルパー関数群（抽出 / 解決系）
 - [x] 2.1 `pt_extract_pending_tasks <tasks_md_path>` の実装
   - tasks.md から `^- \[ \] ([0-9]+(\.[0-9]+)*) ` にマッチする行を抽出（deferrable `- [ ]*` は除外）
   - 抽出した numeric ID を `sort -V` で numeric 階層昇順に並べて stdout に出力
@@ -33,7 +33,7 @@
   - 直前が存在しない（初回 task）場合は range_start に `$BASE_BRANCH` のコミット SHA を使う
   - stdout に `<range_start_sha>\t<range_end_sha>` を出力。mark commit 不在時は return 1
   - _Requirements: 3.2, 4.5, 5.4_
-- [ ] 2.4 `pt_log` ロガーの追加
+- [x] 2.4 `pt_log` ロガーの追加
   - 既存 `rv_log` / `pt_log` と同形式で `[YYYY-MM-DD HH:MM:SS] per-task: $*` を stdout 出力
   - 呼び出し側で `>> "$LOG"` する規約（既存 rv_log と同じ）
   - _Requirements: NFR 2.1, NFR 2.2_
