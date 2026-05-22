@@ -270,6 +270,32 @@ STAGE_A_VERIFY_ENABLED="${STAGE_A_VERIFY_ENABLED:-true}"
 STAGE_A_VERIFY_TIMEOUT="${STAGE_A_VERIFY_TIMEOUT:-600}"
 STAGE_A_VERIFY_COMMAND="${STAGE_A_VERIFY_COMMAND:-}"
 
+# ─── Tasks Count Gate 設定 (#147) ───
+# Architect が `tasks.md` を確定した直後（design モードの Claude 実行 rc=0 直後）に
+# watcher 側でタスク件数を機械的に再カウントし、件数レンジに応じて 3 段階の運用
+# 判定（通常 / 警告 / Developer 抑止）を適用する harness ガード（Req 1, 2 / Issue #147）。
+# 本機能は Issue #131 の Architect 側 budget overflow 検知（design.md `## Split
+# Proposal`）を置き換えず、ハーネス側で独立かつ重畳に作用する追加レイヤとして導入する。
+#
+#   - TC_ENABLED:           本機能の有効化。既定 true。`=false` 明示時のみ opt-out
+#                           として post-Architect の tasks-count 判定全体を skip し、
+#                           本機能導入前と user-observable に同一の design 分岐挙動
+#                           に戻る（Req 4.2 / NFR 2.1）。`=false` 以外は典型的な
+#                           「true 既定」として扱う。
+#   - TC_WARN_LOWER:        警告レンジの下限件数（既定 8、Req 2.2）。
+#   - TC_WARN_UPPER:        警告レンジの上限件数（既定 10、Req 2.2）。
+#   - TC_ESCALATE_LOWER:    エスカレーション（needs-decisions + Dev 抑止）の下限件数
+#                           （既定 11、Req 2.3）。
+#
+# 件数 ≤ TC_WARN_LOWER-1（既定 ≤ 7）は通常進行（Req 2.1）。
+# TC_WARN_LOWER ≤ 件数 ≤ TC_WARN_UPPER（既定 8〜10）は警告コメント 1 件投稿で進行（Req 2.2）。
+# 件数 ≥ TC_ESCALATE_LOWER（既定 ≥ 11）は `needs-decisions` 付与 + エスカレーション
+# コメント投稿で Developer 自動起動を抑止（Req 2.3 / 2.4）。
+TC_ENABLED="${TC_ENABLED:-true}"
+TC_WARN_LOWER="${TC_WARN_LOWER:-8}"
+TC_WARN_UPPER="${TC_WARN_UPPER:-10}"
+TC_ESCALATE_LOWER="${TC_ESCALATE_LOWER:-11}"
+
 # ─── Phase E: Path Overlap Checker 設定 (#18) ───
 # 新規 opt-in 機能。明示的に `=true` を指定したときだけ起動する（Req 1.1〜1.4）。
 # `=true` 以外（未設定 / 空 / `false` / `0` / `True` / `1` / typo 等）はすべて off
@@ -5852,6 +5878,357 @@ stage_checkpoint_resolve_resume_point() {
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Tasks Count Gate Module (#147) — Architect 完了直後の tasks.md 件数ガード
+#
+# Architect が `tasks.md` を確定した直後（design モードの Claude 実行 rc=0 直後）に
+# watcher 側で task 件数を機械的に再カウントし、件数レンジに応じて 3 段階の運用判定
+# （通常 / 警告 / Developer 抑止）を適用する harness ガード（Req 1, 2 / Issue #147）。
+#
+# 関数群:
+#   - tc_log / tc_warn / tc_error                  : `tasks-count:` prefix logger
+#   - tc_count_tasks                               : tasks.md からタスク行件数を抽出
+#   - tc_classify                                  : 件数を normal/warn/escalate に分類
+#   - tc_should_run                                : gate（opt-out / 不在 / 重複検知）
+#   - tc_already_posted_marker_present             : 冪等マーカー検知
+#   - tc_post_warning_comment                      : 8〜10 件レンジの警告コメント投稿
+#   - tc_post_escalation_comment                   : 11 件以上のエスカレーションコメント
+#   - tc_add_needs_decisions_label                 : `needs-decisions` ラベル付与
+#   - tc_run_post_architect_check                  : design rc=0 hook の orchestrator
+#
+# 設計参照: docs/specs/147-feat-harness-tasks-md-task-auto-dev-issu/design.md
+# 関連    : Issue #131（Architect 側 budget overflow 検知）と独立かつ重畳に作用する
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# tasks-count 専用ロガー（既存 sav_log / sc_log と同形式）。
+# 行頭 `[YYYY-MM-DD HH:MM:SS] [$REPO] tasks-count:` の 3 段 prefix を維持し、
+# `grep '\[.*\] tasks-count:'` で全件抽出可能（NFR 1.1）。
+tc_log() {
+  echo "[$(date '+%F %T')] [$REPO] tasks-count: $*"
+}
+tc_warn() {
+  echo "[$(date '+%F %T')] [$REPO] tasks-count: WARN: $*" >&2
+}
+tc_error() {
+  echo "[$(date '+%F %T')] [$REPO] tasks-count: ERROR: $*" >&2
+}
+
+# ─── tc_count_tasks ───
+#
+# `tasks.md` 1 ファイルからタスク行件数を整数で返す純粋関数（Req 1.1〜1.4 / NFR 3.1）。
+#
+# count 抽出 regex (POSIX 互換 ERE): `^- \[[ x]\]\*? [0-9]+(\.[0-9]+)*\.? `
+#   - 4 種 checkbox（未完了 `- [ ]` / 完了 `- [x]` / deferrable `- [ ]*` /
+#     完了 deferrable `- [x]*`）を許容（Req 1.2）
+#   - numeric 階層 ID（`1` / `1.1` / `2.1.3` 等）+ 半角スペースを必須
+#   - 親タスク末尾 `.` を `\.?` でオプショナル化（`- [ ] 1. <名前>` /
+#     `- [ ] 1.1 <名前>` 両対応）
+#   - 既存 `design-review-gate.md` の checkbox enforcement 判定パターンと同一規約
+#   - 子タスク（小数階層 ID）・`(P)` マーカーは regex から見て区別されないため、
+#     それぞれ 1 件として数える（Req 1.3 / 1.4 を構造的に保証）
+#
+# 入力: 第 1 引数 = tasks.md の絶対パス
+# 戻り値: 0 = 抽出成功（stdout に件数 0 以上の整数 1 行）/ 1 = ファイル不在
+# 副作用: なし（pure read）
+tc_count_tasks() {
+  local tasks_path="$1"
+  [ -f "$tasks_path" ] || return 1
+  # grep -cE: マッチ行数（件数）を 1 行で stdout に書き出す。マッチ 0 件でも
+  # `--count` モードは 0 を返して exit 1 になるため、`|| true` で吸収する。
+  local count
+  count=$(grep -cE '^- \[[ x]\]\*? [0-9]+(\.[0-9]+)*\.? ' "$tasks_path" 2>/dev/null || true)
+  # 空文字（読み取り失敗）の場合は安全側に 0 を返す
+  echo "${count:-0}"
+}
+
+# ─── tc_classify ───
+#
+# 件数を 3 値レンジ（`normal` / `warn` / `escalate`）に分類して stdout に出力する
+# 純粋関数（Req 2.1, 2.2, 2.3）。
+#
+#   - count < TC_WARN_LOWER         → normal    （既定で count ≤ 7）
+#   - TC_WARN_LOWER ≤ count ≤ UPPER → warn      （既定で 8 ≤ count ≤ 10）
+#   - count ≥ TC_ESCALATE_LOWER     → escalate  （既定で count ≥ 11）
+#
+# 閾値 env var が非整数の場合、tc_warn で警告ログを出したうえで既定値（8 / 10 / 11）に
+# フォールバック（fail-safe / Req 4.2 系の安全側挙動）。
+#
+# 入力: 第 1 引数 = 件数（0 以上の整数）
+# 戻り値: 常に 0（純粋関数、副作用は警告ログのみ）
+# stdout: `normal` / `warn` / `escalate` のいずれか 1 つ
+tc_classify() {
+  local count="$1"
+  # 閾値 env var の整数検証（非整数なら既定値にフォールバック）
+  local lower="$TC_WARN_LOWER"
+  local upper="$TC_WARN_UPPER"
+  local escalate="$TC_ESCALATE_LOWER"
+  if ! [[ "$lower" =~ ^[0-9]+$ ]]; then
+    tc_warn "TC_WARN_LOWER='$lower' は整数でないため既定値 8 にフォールバック"
+    lower=8
+  fi
+  if ! [[ "$upper" =~ ^[0-9]+$ ]]; then
+    tc_warn "TC_WARN_UPPER='$upper' は整数でないため既定値 10 にフォールバック"
+    upper=10
+  fi
+  if ! [[ "$escalate" =~ ^[0-9]+$ ]]; then
+    tc_warn "TC_ESCALATE_LOWER='$escalate' は整数でないため既定値 11 にフォールバック"
+    escalate=11
+  fi
+  # count 自体が整数でない場合は normal にフォールバック（fail-safe）
+  if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+    tc_warn "count='$count' は整数でないため normal にフォールバック"
+    echo "normal"
+    return 0
+  fi
+  if [ "$count" -ge "$escalate" ]; then
+    echo "escalate"
+  elif [ "$count" -ge "$lower" ] && [ "$count" -le "$upper" ]; then
+    echo "warn"
+  else
+    echo "normal"
+  fi
+}
+
+# ─── tc_should_run ───
+#
+# 本機能を実行すべきか判定する gate（Req 1.5, 2.6, 3.3, 4.2, 4.4）。
+#
+# 以下のいずれかが真の場合 return 1（skip）、いずれも偽なら return 0:
+#   - TC_ENABLED != "true"                              → reason=opt-out（Req 4.2）
+#   - tasks.md が存在しない / 読み取れない              → reason=tasks-md-missing（Req 1.5）
+#   - Issue に既に `needs-decisions` ラベルが付与済み   → reason=already-needs-decisions
+#                                                          （Req 2.6 / 4.4。#131 由来でも
+#                                                          本機能由来でも区別せず skip）
+#
+# resume 経路（impl-resume / Stage Checkpoint Resume）の skip は、本機能の hook が
+# **design 分岐内側にのみ配置される**ことで構造的に保証される（Req 3.1 / 3.2）。
+# impl-resume / Stage Checkpoint Resume はそれぞれ MODE=impl-resume または
+# START_STAGE=B|C で動き、design 分岐に到達しないため、本関数の判定対象にならない。
+#
+# 入力: 環境変数 NUMBER / REPO / REPO_DIR / SPEC_DIR_REL / TC_ENABLED /
+#       LABEL_NEEDS_DECISIONS
+# 戻り値: 0 = run / 1 = skip
+# 副作用: skip 時に tc_log で reason を記録（NFR 1.1）
+tc_should_run() {
+  # 1. opt-out 判定（TC_ENABLED != "true"）
+  if [ "${TC_ENABLED:-true}" != "true" ]; then
+    tc_log "issue=#${NUMBER:-?} skip reason=opt-out TC_ENABLED=${TC_ENABLED:-(unset)}"
+    return 1
+  fi
+  # 2. tasks.md 不在 / 読み取り不可
+  local tasks_path="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+  if [ ! -f "$tasks_path" ] || [ ! -r "$tasks_path" ]; then
+    tc_log "issue=#${NUMBER:-?} skip reason=tasks-md-missing path=$tasks_path"
+    return 1
+  fi
+  # 3. 既に needs-decisions ラベル付与済み（#131 由来でも本機能由来でも区別せず skip）
+  #    gh issue view が失敗しても skip 判定は false-negative 側に倒す（最悪重複適用のみ）
+  local label_json existing_label_match
+  if label_json=$(gh issue view "$NUMBER" --repo "$REPO" --json labels 2>/dev/null); then
+    existing_label_match=$(echo "$label_json" \
+      | jq -r --arg L "$LABEL_NEEDS_DECISIONS" '.labels[]? | select(.name == $L) | .name' 2>/dev/null \
+      || true)
+    if [ -n "$existing_label_match" ]; then
+      tc_log "issue=#${NUMBER:-?} skip reason=already-needs-decisions"
+      return 1
+    fi
+  else
+    tc_warn "issue=#${NUMBER:-?} gh issue view 失敗（label 確認 skip、本機能は続行）"
+  fi
+  return 0
+}
+
+# ─── tc_already_posted_marker_present ───
+#
+# Issue コメント履歴に本機能由来の冪等マーカーが既に存在するか検知する（Req 2.6）。
+#
+# 固定識別子: `<!-- idd-claude:tasks-count-overflow kind=<warning|escalation> issue=<N> ... -->`
+# （NFR 1.2 の本機能由来判別文字列を兼ねる）
+#
+# 入力: 第 1 引数 = Issue 番号 / 第 2 引数 = kind（warning | escalation）
+# 戻り値: 0 = marker 検出済み（skip 推奨）/ 1 = 未検出（投稿可）
+# 副作用: なし
+#
+# gh API 失敗時は marker absent (return 1) として扱う（最悪重複コメント投稿のみ）。
+tc_already_posted_marker_present() {
+  local issue_number="$1"
+  local kind="$2"
+  local bodies
+  if ! bodies=$(gh issue view "$issue_number" --repo "$REPO" \
+      --json comments --jq '.comments[].body' 2>/dev/null); then
+    return 1
+  fi
+  # 固定マーカー prefix で grep（issue=<N> 部分も付き合わせて誤検出を抑える）
+  local marker_prefix="<!-- idd-claude:tasks-count-overflow kind=$kind issue=$issue_number"
+  if echo "$bodies" | grep -qF "$marker_prefix"; then
+    return 0
+  fi
+  return 1
+}
+
+# ─── tc_post_warning_comment ───
+#
+# 8〜10 件レンジの警告コメントを冪等に投稿する（Req 2.2 / 2.6 / NFR 1.2）。
+#
+# 本文には以下を含める:
+#   - 検知件数と適用閾値（TC_WARN_LOWER〜TC_WARN_UPPER）
+#   - 後続フェーズは抑止されず通常進行する旨
+#   - 末尾に固定識別マーカー
+#     `<!-- idd-claude:tasks-count-overflow kind=warning issue=<N> count=<C> -->`
+#
+# 入力: 第 1 引数 = Issue 番号 / 第 2 引数 = 件数
+# 戻り値: 常に 0（fail-open。投稿失敗は tc_warn でログのみ、watcher 全体は止めない）
+tc_post_warning_comment() {
+  local issue_number="$1"
+  local count="$2"
+  if tc_already_posted_marker_present "$issue_number" "warning"; then
+    tc_log "issue=#${issue_number} already-warned skip duplicate comment"
+    return 0
+  fi
+  local body
+  body=$(cat <<EOF
+⚠️ **Tasks Count Gate (harness, #147)**: tasks.md のタスク件数が警告レンジに該当しています
+
+- 検知件数: **${count} 件**
+- 適用閾値: ${TC_WARN_LOWER} 件以上 ${TC_WARN_UPPER} 件以下で警告（参考: ≥ ${TC_ESCALATE_LOWER} 件で Developer 自動起動抑止）
+- 本コメントは通知のみで、**後続フェーズ（Developer 自動起動）は通常通り進行します**
+
+タスク件数が turn budget を圧迫する境界域です。Developer Round 1 で PR 作成まで完走しない可能性が高まるため、Issue 分割を検討してください（Issue #131 で Architect 側にも同種の自己レビュー gate が動いています）。
+
+<!-- idd-claude:tasks-count-overflow kind=warning issue=${issue_number} count=${count} -->
+EOF
+)
+  if gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+    tc_log "issue=#${issue_number} posted warning-comment count=${count}"
+  else
+    tc_warn "issue=#${issue_number} gh issue comment 失敗（warning 投稿、fail-open で続行）"
+  fi
+  return 0
+}
+
+# ─── tc_post_escalation_comment ───
+#
+# 11 件以上のエスカレーションコメントを冪等に投稿する
+# （Req 2.3 / 2.5 / 2.6 / NFR 1.2）。
+#
+# 本文には以下を必ず含める:
+#   - 検知件数と適用閾値（TC_ESCALATE_LOWER）
+#   - 抑止された後続フェーズ名（Developer 自動起動 / impl-resume）
+#   - 人間が取りうる回復手順:
+#     - 推奨: Issue 分割の検討（PM / Architect に差し戻し）
+#     - バイパス: `needs-decisions` ラベルを人間が外す（次サイクルで再評価。件数が
+#       変わらなければ再付与される旨も注記）
+#     - 完全 opt-out: `TC_ENABLED=false` で watcher を再起動
+#   - 末尾に固定識別マーカー
+#     `<!-- idd-claude:tasks-count-overflow kind=escalation issue=<N> count=<C> -->`
+#     （NFR 1.2 の本機能由来判別文字列を兼ねる）
+#
+# 入力: 第 1 引数 = Issue 番号 / 第 2 引数 = 件数
+# 戻り値: 常に 0（fail-open）
+tc_post_escalation_comment() {
+  local issue_number="$1"
+  local count="$2"
+  if tc_already_posted_marker_present "$issue_number" "escalation"; then
+    tc_log "issue=#${issue_number} already-escalated skip duplicate comment"
+    return 0
+  fi
+  local body
+  body=$(cat <<EOF
+🚫 **Tasks Count Gate (harness, #147)**: tasks.md のタスク件数が **エスカレーション閾値**を超えています
+
+- 検知件数: **${count} 件**
+- 適用閾値: ${TC_ESCALATE_LOWER} 件以上でエスカレーション（参考: ${TC_WARN_LOWER}〜${TC_WARN_UPPER} 件は警告のみ）
+- **抑止された後続フェーズ**: Developer 自動起動 / impl-resume（\`needs-decisions\` ラベルにより watcher Issue 候補抽出から除外されます）
+- 根拠: KeyNest 3 事例で 10 件超の tasks.md は Developer Round 1 で PR 作成まで完走しない確率が高く、turn budget 超過によるキャッシュトークン浪費が観測されています
+
+### 人間が取りうる回復手順
+
+1. **推奨: Issue 分割の検討** — PM / Architect に差し戻し、要件・設計を複数 Issue に分割してください
+2. **バイパス: \`needs-decisions\` ラベルを人間が外す** — 次サイクルで watcher は再 pickup を試行しますが、件数が変わらなければ本機能が再付与します（恒久バイパスにはなりません）
+3. **完全 opt-out: \`TC_ENABLED=false\`** — cron / launchd の env var に追加して watcher を再起動すると、本機能による全 Issue への評価が無効化されます
+
+<!-- idd-claude:tasks-count-overflow kind=escalation issue=${issue_number} count=${count} -->
+EOF
+)
+  if gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+    tc_log "issue=#${issue_number} posted escalation-comment count=${count}"
+  else
+    tc_warn "issue=#${issue_number} gh issue comment 失敗（escalation 投稿、fail-open で続行）"
+  fi
+  return 0
+}
+
+# ─── tc_add_needs_decisions_label ───
+#
+# `needs-decisions` ラベルを冪等に付与する（Req 2.3 / 2.4 / 4.4 / NFR 2.2）。
+#
+# `gh issue edit --add-label` は同名ラベルを多重付与しない仕様のため、構造的に冪等。
+# 既存 `LABEL_NEEDS_DECISIONS` env var 値（既定 `needs-decisions`）を参照し、
+# 新ラベル名は導入しない（NFR 2.2 既存ラベル名互換）。
+#
+# 入力: 第 1 引数 = Issue 番号
+# 戻り値: 常に 0（fail-open。付与失敗は次サイクルで再判定して再付与トライ可能）
+tc_add_needs_decisions_label() {
+  local issue_number="$1"
+  if gh issue edit "$issue_number" --repo "$REPO" \
+      --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1; then
+    tc_log "issue=#${issue_number} added label=${LABEL_NEEDS_DECISIONS}"
+  else
+    tc_warn "issue=#${issue_number} gh issue edit --add-label 失敗（fail-open で続行）"
+  fi
+  return 0
+}
+
+# ─── tc_run_post_architect_check ───
+#
+# design 分岐 rc=0 直後に呼ばれる orchestrator。本機能の単一エントリポイント
+# （Req 1.1, 1.6, 2.1, 2.2, 2.3, 3.3, 4.1）。
+#
+# 順序:
+#   1. tc_should_run を呼び、skip 判定なら return 0（design 分岐の挙動を維持）
+#   2. tc_count_tasks で件数取得
+#   3. tc_classify でレンジを取得
+#   4. レンジに応じて分岐:
+#      - normal   → ログのみ
+#      - warn     → tc_post_warning_comment
+#      - escalate → tc_post_escalation_comment + tc_add_needs_decisions_label
+#
+# 戻り値: 常に 0（呼び出し元 design 分岐 rc=0 の挙動を変えない / fail-open）
+# 副作用: ログ書き込み、gh issue edit/comment
+tc_run_post_architect_check() {
+  if ! tc_should_run; then
+    return 0
+  fi
+  local tasks_path="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+  local count
+  count=$(tc_count_tasks "$tasks_path")
+  # tc_count_tasks は空文字を返さないが、defensive に整数フォールバックを入れる
+  if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+    tc_warn "issue=#${NUMBER:-?} count='$count' が整数でないため 0 にフォールバック"
+    count=0
+  fi
+  local range
+  range=$(tc_classify "$count")
+  case "$range" in
+    normal)
+      tc_log "issue=#${NUMBER:-?} count=${count} range=normal action=none"
+      ;;
+    warn)
+      tc_log "issue=#${NUMBER:-?} count=${count} range=warn action=warning-comment"
+      tc_post_warning_comment "$NUMBER" "$count" || true
+      ;;
+    escalate)
+      tc_log "issue=#${NUMBER:-?} count=${count} range=escalate action=needs-decisions+escalation-comment"
+      tc_post_escalation_comment "$NUMBER" "$count" || true
+      tc_add_needs_decisions_label "$NUMBER" || true
+      ;;
+    *)
+      tc_warn "issue=#${NUMBER:-?} unknown classification='$range' count=${count} (fail-open)"
+      ;;
+  esac
+  return 0
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Reviewer Gate (#20 Phase 1) — impl 系モード stage 分割パイプライン
 #
 # 既存の impl / impl-resume モードは DEV_PROMPT 1 回で PM + Developer + PjM を
@@ -10431,6 +10808,12 @@ EOF
       0)
         echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
         slot_log "$MODE 完了"
+        # Issue #147: Tasks Count Gate — Architect 確定直後の tasks.md 件数を再評価し、
+        # 8〜10 件で警告コメント、11 件以上で needs-decisions + Developer 抑止を適用。
+        # 本機能は fail-open（戻り値は常に 0）かつ TC_ENABLED=false で完全 opt-out 可。
+        # design 分岐 rc=0 case にのみ配置し、impl / impl-resume / Stage Checkpoint
+        # Resume 経路には差し込まないことで Req 3.1 / 3.2 を構造的に保証する。
+        tc_run_post_architect_check || true
         rm -f "$_qa_reset_file_design"
         return 0
         ;;
