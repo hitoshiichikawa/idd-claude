@@ -6607,6 +6607,47 @@ detect_blocked_marker() {
   return 0
 }
 
+# ─── detect_partial_status <impl_notes_path> ───
+#
+# impl-notes.md の **行頭固定** で `STATUS: <value>` 行を検出し、value 部を stdout に
+# 出力する（Partial Status Gate / #148）。
+#
+# 戻り値:
+#   0 = STATUS 行検出（stdout に値を出力。値の妥当性チェックは呼出側責務）
+#   1 = STATUS 行不在（既存 complete fallback / NFR 1.1）
+#   2 = ファイル不在
+#
+# 規約（design.md 「Service Interface」/ Req 1.1, 1.2, 1.3 / NFR 3.2）:
+#   - regex は `^STATUS: (.+)$`（行頭固定、半角コロン + 半角スペース + 任意 value 文字列）
+#   - インデント / list marker `- ` / 引用 `> ` / バッククォートの prefix は **検出対象外**
+#   - 複数マッチ時は **最終行** を採用（Developer 再実行で上書きされた場合に新しい値を採用）
+#   - 値は前後の空白を trim
+#   - status 値の正規化（complete / partial_blocked / partial_overrun / 不正）は呼出側
+#     （handle_partial_status）の責務（テスト容易性のため本関数では raw 値を返す）
+#
+# Requirements: 1.1, 1.2, 1.3, NFR 1.1, NFR 3.2
+detect_partial_status() {
+  local impl_notes="$1"
+  if [ ! -f "$impl_notes" ]; then
+    return 2
+  fi
+  local line
+  # grep -E で行頭固定マッチ。`tail -n 1` で複数マッチ時は最終行採用（detect_blocked_marker
+  # との違い: BLOCKED は 1 行目採用 / STATUS は最終行採用 = 再実行で上書きされた新しい値を優先）。
+  # set -euo pipefail 配下では grep no-match で関数全体が止まるため `|| true` で吸収。
+  line=$(grep -E '^STATUS: .+$' "$impl_notes" 2>/dev/null | tail -n 1 || true)
+  if [ -z "$line" ]; then
+    return 1
+  fi
+  # 先頭 `STATUS: `（8 文字）を剥がして value のみ取り出す。
+  local value="${line#STATUS: }"
+  # 前後の空白を trim（POSIX 互換: ${var#"..."} / ${var%"..."} で extglob 不要）。
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s\n' "$value"
+  return 0
+}
+
 # ─── detect_debugger_already_invoked [<task_id>] ───
 #
 # sentinel file ベースで「当該 scope（Issue or task）で Debugger が既に 1 回起動済み」を
