@@ -13,7 +13,7 @@
   - `repo-template/.claude/agents/developer.md` に **完全同一の追記内容** を同期反映
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.3, 2.4, NFR 1.1_
 
-- [ ] 2. Reviewer prompt に partial 経路では起動されない旨を informational 追記
+- [x] 2. Reviewer prompt に partial 経路では起動されない旨を informational 追記
   - `.claude/agents/reviewer.md` に「## partial status との関係（informational）」段落を追加
   - 既存 3 カテゴリ判定基準（AC 未カバー / missing test / boundary 逸脱）は変更しない
   - `repo-template/.claude/agents/reviewer.md` に同一内容を同期反映
