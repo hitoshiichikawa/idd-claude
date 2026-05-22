@@ -105,7 +105,7 @@
   - `DEBUGGER_ENABLED != "true"` 時は BLOCKED 行を判定材料に使わず stage-a-verify に直行（Req 1.2）
   - _Requirements: 1.1, 1.2, 4.1, 4.2, 4.3, 4.4, 5.2, 5.4_
 
-- [ ] 8. watcher: Phase 2 (per-task loop) との統合
+- [x] 8. watcher: Phase 2 (per-task loop) との統合
   - `run_per_task_loop`（Issue #21 で導入）の task 単位 Reviewer Round 2 reject 分岐と per-task Implementer 完了後の BLOCKED 検出ブロックに、上記タスク 6 / 7 と同等の Debugger 経路を追加
     - task 単位 Round 2 reject 経路: `run_debugger_stage "round2-reject" "$task_id" "..."` を起動、成功時に per-task Implementer + per-task Reviewer Round 3 を起動
     - task 単位 BLOCKED 経路: `detect_blocked_marker` + `detect_debugger_already_invoked "$task_id"` で判定、起動時に `run_debugger_stage "blocked" "$task_id" ""` 経由で per-task Implementer 再起動 → 通常 task サイクル合流
