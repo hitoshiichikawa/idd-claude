@@ -5,7 +5,7 @@
 > 内のヘルパー関数追加は **同一ファイル内の独立セクション** として実装するため、原則として
 > 並列実行は行わない（直列消化を前提に組んでいる）。
 
-- [ ] 1. 環境変数の追加と正規化（後方互換性ゲート）
+- [x] 1. 環境変数の追加と正規化（後方互換性ゲート）
   - `local-watcher/bin/issue-watcher.sh` の config block に
     `PER_TASK_LOOP_ENABLED="${PER_TASK_LOOP_ENABLED:-false}"` と
     `PER_TASK_MAX_TASKS="${PER_TASK_MAX_TASKS:-0}"` を追加
