@@ -38,7 +38,7 @@
   - 呼び出し側で `>> "$LOG"` する規約（既存 rv_log と同じ）
   - _Requirements: NFR 2.1, NFR 2.2_
 
-- [ ] 3. per-task Implementer prompt builder と launcher
+- [x] 3. per-task Implementer prompt builder と launcher
 - [x] 3.1 `build_per_task_implementer_prompt <task_id>` の実装
   - 既存 `build_dev_prompt_a` の heredoc 形式を踏襲し、「本 task 1 件のみ実装」「`### Task <id>`
     learning 追記」「先行 learnings 改変禁止」「`docs(tasks): mark <id> as done` commit 規約」
@@ -46,7 +46,7 @@
   - `pt_extract_learnings` の出力を「## これまで完了した task の learnings」として inline 埋め込み
   - `RESUME_PRESERVE=true` 時の既存 commit 温存規約セクションも従来通り含める
   - _Requirements: 2.2, 2.3, 2.4, 2.5, 4.1, 4.2, 4.3, 4.4_
-- [ ] 3.2 `run_per_task_implementer <task_id>` の実装
+- [x] 3.2 `run_per_task_implementer <task_id>` の実装
   - `qa_run_claude_stage "PerTask-Impl-<id>" ...` 経由で `claude --print --model "$DEV_MODEL"
     --max-turns "$DEV_MAX_TURNS"` を起動
   - 戻り値 0 / 1 / 99（quota）を従来 Stage A と同形でマップ
