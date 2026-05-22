@@ -115,20 +115,20 @@
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5_
   - _Depends: 6, 7_
 
-- [ ] 9. ドキュメント整備（developer.md / CLAUDE.md / README.md）
-- [ ] 9.1 `repo-template/.claude/agents/developer.md` への BLOCKED 宣言規約追記 (P)
+- [x] 9. ドキュメント整備（developer.md / CLAUDE.md / README.md）
+- [x] 9.1 `repo-template/.claude/agents/developer.md` への BLOCKED 宣言規約追記 (P)
   - 末尾に「BLOCKED 宣言の規約（DEBUGGER_ENABLED=true 適用時のみ意味を持つ）」節を追加
   - 内容: 最終手段の位置付け / reason 部の記載指針（試したこと / 不明点 / web search 疑問点）/ 行頭規約（`^BLOCKED: ` 厳密）/ DEBUGGER_ENABLED=false 環境での扱い
   - 既存節（実装フロー / opt-in 時の追加実装フロー / impl-resume 規約 / テスト規約 etc）は一切改変しない
   - _Requirements: 4.5, 4.6, 8.4_
   - _Boundary: developer.md_
-- [ ] 9.2 `repo-template/CLAUDE.md` のエージェント連携ルール節に Debugger 項目追記 (P)
+- [x] 9.2 `repo-template/CLAUDE.md` のエージェント連携ルール節に Debugger 項目追記 (P)
   - 「エージェント連携ルール」節に Debugger サブエージェントの責務を 1 項目追加
   - 内容: 「コード書き換えなし / 判定なし / Fix Plan 出力のみ / 1 Issue または 1 task あたり最大 1 回」「DEBUGGER_ENABLED=true の opt-in 環境で Round 2 reject 直前 / BLOCKED 宣言時に起動」
   - 既存節は改変しない
   - _Requirements: 8.3_
   - _Boundary: repo-template/CLAUDE.md_
-- [ ] 9.3 `README.md` への opt-in 機能追加と専用解説節
+- [x] 9.3 `README.md` への opt-in 機能追加と専用解説節
   - 「opt-in（既定 OFF、明示的に有効化が必要）」表（行 1094 周辺）に `DEBUGGER_ENABLED` 行を追加（既存表組のフォーマットを踏襲）
   - 専用解説節「Debugger Subagent (Phase 3, #22)」を追加（既存「Stage Checkpoint (#68)」と同一構造）。含む内容:
     - 用途 / 既定値 / 有効化方法（`DEBUGGER_ENABLED=true` / `DEBUGGER_MODEL` / `DEBUGGER_MAX_TURNS` の説明）
