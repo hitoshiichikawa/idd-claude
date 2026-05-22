@@ -17,7 +17,7 @@
   - shellcheck 警告ゼロを維持
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.7, 3.2, 3.6, 8.4, 9.2, NFR 1.4_
 
-- [ ] 3. gh API ラッパとブロック付与関数の追加
+- [x] 3. gh API ラッパとブロック付与関数の追加
   - `dr_resolve_one`: 引数 = 依存 Issue 番号、stdout = `resolved` / `open` / `closed unmerged` / `api error` の 4 区分文字列 1 行。`gh issue view <N> --repo "$REPO" --json state,closedByPullRequestsReferences` を実行し、`jq` で `.state` と `.closedByPullRequestsReferences[].merged` を判定。gh / jq 失敗時は `api error` を返し `dr_warn` でログ
   - `dr_apply_block`: 引数 = Issue 番号 + 未解決依存リスト。単一 `gh issue edit --remove-label "$LABEL_CLAIMED" --add-label "$LABEL_BLOCKED"` で原子的に付け替え、`gh issue comment` で `dr_format_unresolved_comment` の出力を投稿。`needs-decisions` ラベルには触れない
   - 既存 `_slug_mismatch_escalate` のエラーハンドリングパターン（`|| true` / `dr_warn` の使い分け）を参考に、ラベル付与失敗は `dr_warn` + 非 0 return で caller に通知
