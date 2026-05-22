@@ -8403,6 +8403,17 @@ run_impl_pipeline() {
           return 1
         fi
         echo "✅ #$NUMBER: Stage A 完了（per-task loop）" | tee -a "$LOG"
+        # ── Partial Status Gate (#148) ──
+        # Developer が impl-notes.md 末尾に `STATUS: partial_*` を出力した場合は
+        # Reviewer 起動を skip して needs-decisions エスカレーションする。status 行不在
+        # / `complete` の場合は副作用なしで既存フローへ続行（NFR 1.1, 1.4）。
+        local _partial_rc=0
+        handle_partial_status || _partial_rc=$?
+        case "$_partial_rc" in
+          0)  : ;;        # continue（既存フロー）
+          10) return 0 ;; # partial 検出: Reviewer skip + 正常終了
+          *)  return 1 ;; # 不正 status: mark_issue_failed 実行済
+        esac
       else
         echo "--- Stage A 実行（$MODE / PM + Developer）---" >> "$LOG"
         prompt_a=$(build_dev_prompt_a "$MODE")
@@ -8430,6 +8441,17 @@ run_impl_pipeline() {
               return 1
             fi
             echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
+            # ── Partial Status Gate (#148) ──
+            # 通常 Developer 経路 (PM + Developer / 単一 Implementer) の Stage A 完了直後
+            # に impl-notes.md の `STATUS:` 行を検出し、partial を 1st-class に処理する。
+            # status 行不在 / `complete` の場合は副作用なし（NFR 1.1, 1.4）。
+            local _partial_rc_n=0
+            handle_partial_status || _partial_rc_n=$?
+            case "$_partial_rc_n" in
+              0)  : ;;        # continue
+              10) return 0 ;; # partial 検出: Reviewer skip
+              *)  return 1 ;; # 不正 status: mark_issue_failed 実行済
+            esac
             ;;
           99)
             local _qa_epoch_a
@@ -8525,6 +8547,16 @@ run_impl_pipeline() {
             return 1
           fi
           echo "✅ #$NUMBER: Stage A' (BLOCKED 経路) 完了 → 通常 Round 1 サイクルに合流 (Req 4.4)" | tee -a "$LOG"
+          # ── Partial Status Gate (#148) ──
+          # BLOCKED 経路の Stage A' 完了直後でも partial 検出を有効化する（Debugger Fix Plan
+          # 注入後の再実装で Developer が partial を宣言した場合に Reviewer 起動を skip）。
+          local _partial_rc_bl=0
+          handle_partial_status || _partial_rc_bl=$?
+          case "$_partial_rc_bl" in
+            0)  : ;;        # continue
+            10) return 0 ;; # partial 検出: Reviewer skip
+            *)  return 1 ;; # 不正 status: mark_issue_failed 実行済
+          esac
           ;;
         99)
           local _qa_epoch_bl
@@ -8626,6 +8658,17 @@ run_impl_pipeline() {
                 return 1
               fi
               echo "✅ #$NUMBER: Stage A' 完了" | tee -a "$LOG"
+              # ── Partial Status Gate (#148) ──
+              # Reviewer reject 差し戻し経路の Stage A' 完了直後でも partial 検出を有効化
+              # する（再実装中に Developer が partial を宣言した場合に Reviewer round=2
+              # 起動を skip）。
+              local _partial_rc_aredo=0
+              handle_partial_status || _partial_rc_aredo=$?
+              case "$_partial_rc_aredo" in
+                0)  : ;;        # continue
+                10) return 0 ;; # partial 検出: Reviewer skip
+                *)  return 1 ;; # 不正 status: mark_issue_failed 実行済
+              esac
               ;;
             99)
               local _qa_epoch_aredo
@@ -8721,6 +8764,17 @@ run_impl_pipeline() {
                       return 1
                     fi
                     echo "✅ #$NUMBER: Stage A'' 完了" | tee -a "$LOG"
+                    # ── Partial Status Gate (#148) ──
+                    # Debugger 経由 Stage A'' 完了直後でも partial 検出を有効化する。
+                    # Fix Plan を注入されてもなお Developer が partial を宣言した場合に
+                    # Reviewer round=3 起動を skip。
+                    local _partial_rc_app=0
+                    handle_partial_status || _partial_rc_app=$?
+                    case "$_partial_rc_app" in
+                      0)  : ;;        # continue
+                      10) return 0 ;; # partial 検出: Reviewer skip
+                      *)  return 1 ;; # 不正 status: mark_issue_failed 実行済
+                    esac
                     ;;
                   99)
                     local _qa_epoch_app
