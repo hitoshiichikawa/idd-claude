@@ -18,7 +18,7 @@
   - _Requirements: 1.3, 1.4, 1.5_
 
 - [ ] 2. per-task ヘルパー関数群（抽出 / 解決系）
-- [ ] 2.1 `pt_extract_pending_tasks <tasks_md_path>` の実装
+- [x] 2.1 `pt_extract_pending_tasks <tasks_md_path>` の実装
   - tasks.md から `^- \[ \] ([0-9]+(\.[0-9]+)*) ` にマッチする行を抽出（deferrable `- [ ]*` は除外）
   - 抽出した numeric ID を `sort -V` で numeric 階層昇順に並べて stdout に出力
   - tasks.md 不在時は return 1
