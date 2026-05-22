@@ -71,7 +71,7 @@
     で NFR 2.3 のログ粒度を担保
   - _Requirements: 3.1, 3.2, 3.3, NFR 2.1, NFR 2.2, NFR 2.3_
 
-- [ ] 5. per-task dispatcher と差し戻しハンドラ
+- [x] 5. per-task dispatcher と差し戻しハンドラ
 - [x] 5.1 `run_per_task_loop` 本体の実装
   - `pt_extract_pending_tasks "$REPO_DIR/$SPEC_DIR_REL/tasks.md"` で pending 一覧を取得
   - 空なら即 return 0（Req 2.7, 5.2）
@@ -82,7 +82,7 @@
   - 再 reject / Implementer 非 0 exit / Reviewer 異常 で `mark_issue_failed` を呼んで return 1
   - quota（99）受領時は呼び出し側に伝搬し、watcher 側で needs-quota-wait に遷移（既存 #66 経路）
   - _Requirements: 2.1, 2.6, 2.7, 3.4, 3.5, 3.6, 3.7, 5.1, 5.2_
-- [ ] 5.2 `run_impl_pipeline` への Strategy 分岐挿入
+- [x] 5.2 `run_impl_pipeline` への Strategy 分岐挿入
   - Stage A 実行直前（`case "$START_STAGE" in A)` 分岐内）で
     `[ "${PER_TASK_LOOP_ENABLED:-false}" = "true" ]` を判定
   - true なら `run_per_task_loop` を呼ぶ。完了後の `verify_pushed_or_retry` / stage-a-verify /
