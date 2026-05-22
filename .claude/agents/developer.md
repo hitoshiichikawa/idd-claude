@@ -52,6 +52,72 @@ main に載っている）前提です。矛盾や実装上の問題に気づい
 - 変更前に `grep` / `glob` で既存実装・影響範囲を必ず把握する
 - 依存ライブラリを追加する場合は PR 本文にその理由を残せるよう、コミットメッセージにも記録する
 
+# Tool 呼び出しの並列化規律（Issue #135 以降適用）
+
+independent な tool 操作（後続 tool の引数が前の結果に依存しない操作）は、**同一 assistant
+message 内に parallel tool call としてまとめて発行する** こと。直列で別 turn に分けると
+turn 消費が不要に膨らみ、Opus 4.7 の context / 予算を実装本体ではなく往復に費やす原因と
+なります（umbrella Issue #132 の起点となった効率改善要件）。
+
+## 規律ステートメント（Req 1.1）
+
+- **independent な tool 操作は 1 turn にまとめる**: 互いに依存しない `Read` / `Glob` / `Grep` /
+  状態確認系 `Bash` は、別 message に分割せず同一 assistant message 内で parallel call として
+  並べる
+
+## 並列化すべき具体例（Req 1.2）
+
+以下は反射的に parallel call にまとめるべき代表ケース:
+
+- **複数ファイルの同時 Read**: `requirements.md` / `design.md` / `tasks.md` を同時に確認する場面、
+  編集対象の関連ファイル群（例: `.claude/agents/developer.md` と `repo-template/.claude/agents/developer.md`）
+  を同時に Read する場面
+- **Glob と Grep の組み合わせ調査**: 「該当ファイルを Glob で列挙しつつ、別パターンを Grep で
+  検索する」ような独立した検索操作の同時実行
+- **状態確認系 Bash の同時実行**: `git status` / `git diff` / `git log --oneline` 等の read-only
+  な状態確認コマンドを同時に発行する場面（commit 前の現状把握フェーズで頻出）
+
+```text
+# 推奨パターン（1 turn / 3 tool call）
+[assistant message]
+  - Read(requirements.md)
+  - Read(design.md)
+  - Read(tasks.md)
+
+# 非推奨パターン（3 turn / 各 1 tool call）
+[turn 1] Read(requirements.md)
+[turn 2] Read(design.md)
+[turn 3] Read(tasks.md)
+```
+
+## 直列にすべきケース（Req 1.3）
+
+以下は意図的に直列で実行すること（parallel 化すると正しさを損なう）:
+
+- **後続 tool の引数が前の結果に依存するケース**: Glob 結果のファイルパスを Grep / Read に
+  渡すケース、`gh issue view` の結果から Issue body を抽出して後続コマンドに渡すケース
+- **Edit 後の検証 Read / Bash**: 編集後にその場で内容を再 Read して反映を確認するケース、
+  `git commit` 後に `git log` で結果を確認するケース、テスト実装後に test runner を実行する
+  ケース（Edit / Write の直後はファイル状態が変わるため、後続の依存操作を同一 turn に
+  混ぜない）
+
+## 数値ガイド（Req 1.4）
+
+- **1 turn あたり 2〜3 tool call を目安にする**。independent な操作が 3 件以上ある場合は
+  まとめて 1 turn に発行することで turn 数を圧縮する
+- 観測指標としては「tool call / turn 比率 2.5+」を目標とする（直近の Developer 実行ログで
+  1.7 程度に留まっていた状況の改善が umbrella Issue #132 の目的）
+
+## 過度な並列化への注意（Req 1.6）
+
+- **1 turn に 5 件以上を詰め込むと context が肥大化** しやすい。特に `Read` を大量に同時発行
+  すると、各ファイル全文が同一 message の tool result として返るため、後続 turn の context
+  が圧迫される
+- 1 turn の tool call 件数は **目安として 4 件以下に抑える**（厳密な上限ではない / 観測データ
+  蓄積後に閾値を見直す予定）。Read 対象ファイルが大きい場合は更に件数を絞る
+- 並列化はあくまで「independent かつ結果サイズが手頃な操作」に限る。判断に迷う場合は
+  直列で実行する（誤った並列化より直列の方が安全）
+
 # 実装フロー
 
 1. `requirements.md` を読み、各 requirement ID（1.1, 2.3 ...）に対応する AC をテストケースに落とし込む
