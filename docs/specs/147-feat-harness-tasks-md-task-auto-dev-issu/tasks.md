@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. `tc_*` Config 追加とロガー実装
+- [x] 1. `tc_*` Config 追加とロガー実装
   - `local-watcher/bin/issue-watcher.sh` の Config ブロック（`STAGE_A_VERIFY_*` 群の近傍、行 269 付近）に
     新規 env var 4 件を追加: `TC_ENABLED="${TC_ENABLED:-true}"` / `TC_WARN_LOWER="${TC_WARN_LOWER:-8}"` /
     `TC_WARN_UPPER="${TC_WARN_UPPER:-10}"` / `TC_ESCALATE_LOWER="${TC_ESCALATE_LOWER:-11}"`
