@@ -93,7 +93,7 @@
   - `DEBUGGER_ENABLED != "true"` 時に Stage D 分岐が **構造的に skip** されることを実装上保証（NFR 1.1）
   - _Requirements: 1.1, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 5.2, 5.3, 5.4_
 
-- [ ] 7. watcher: Stage A 完了直後の BLOCKED 検出経路への Debugger 組込
+- [x] 7. watcher: Stage A 完了直後の BLOCKED 検出経路への Debugger 組込
   - `run_impl_pipeline` の Stage A 完了直後・**stage-a-verify gate 直前**（行 6805 周辺）に BLOCKED 検出ブロックを挿入:
     1. `[ "${DEBUGGER_ENABLED:-false}" = "true" ]` を判定（gate）
     2. `detect_blocked_marker "$REPO_DIR/$SPEC_DIR_REL/impl-notes.md"` で BLOCKED 行を検出
