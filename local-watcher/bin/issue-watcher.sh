@@ -279,6 +279,24 @@ STAGE_A_VERIFY_COMMAND="${STAGE_A_VERIFY_COMMAND:-}"
 # 詳細は docs/specs/18-phase-e-triage-path-overlap-hot-file/design.md を参照。
 PATH_OVERLAP_CHECK="${PATH_OVERLAP_CHECK:-off}"
 
+# ─── Phase 2: Per-task TDD Implementation Loop 設定 (#21) ───
+# 新規 opt-in 機能。明示的に `=true` を指定したときだけ Stage A 内で per-task ループ
+# （task 1 件ごとに fresh Implementer + fresh Reviewer を起動）に分岐する（Req 1.2）。
+# `=true` 以外（未設定 / 空 / `false` / `0` / `True` / `1` / typo 等）はすべて off
+# として扱い、本機能導入前と完全に同一の Stage A 挙動を維持する（Req 1.1, 1.3 /
+# NFR 1.1）。本フラグは新規追加 = opt-in 制 + 既定 off が要件のため、上記
+# 「デフォルト有効化フラグの値正規化」ループには **含めない**（#112 の 8 種反転対象
+# とは別扱い）。詳細は docs/specs/21-phase-2-per-task-tdd-implementation-loop/design.md
+# を参照。
+#
+# - PER_TASK_LOOP_ENABLED: 本機能の opt-in gate。`=true` 厳密一致のみ有効。
+# - PER_TASK_MAX_TASKS:    安全装置（暴走防止）。1 ループで処理する task 件数上限。
+#                          `0` / 空文字 / 未設定 で無制限（既定）。N > 0 が指定された
+#                          場合、N 件目の Implementer 起動前に「上限到達」を
+#                          claude-failed + Issue コメントで通知して停止する。
+PER_TASK_LOOP_ENABLED="${PER_TASK_LOOP_ENABLED:-false}"
+PER_TASK_MAX_TASKS="${PER_TASK_MAX_TASKS:-0}"
+
 # LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
 # 環境変数で明示上書きもできる。
 LOG_DIR="${LOG_DIR:-$HOME/.issue-watcher/logs/$REPO_SLUG}"
