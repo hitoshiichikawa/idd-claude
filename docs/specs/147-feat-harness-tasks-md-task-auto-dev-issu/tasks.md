@@ -84,7 +84,7 @@
   - _Depends: 5.1_
 
 - [ ] 6. 回帰テスト fixture と driver の追加
-- [ ] 6.1 fixture ファイル群の作成
+- [x] 6.1 fixture ファイル群の作成
   - `tests/local-watcher/tasks-count/fixtures/tasks-7.md`（normal レンジ最大、7 件）
   - `tests/local-watcher/tasks-count/fixtures/tasks-8.md`（warn レンジ最小、8 件）
   - `tests/local-watcher/tasks-count/fixtures/tasks-10.md`（warn レンジ最大、10 件）
