@@ -106,7 +106,7 @@
   - 既存節（必読ファイル / 判定基準 / round 別判断 / 出力契約 etc）は一切改変しない
   - _Requirements: 6.4, 3.2, 3.3_
 
-- [ ] 7. README ドキュメント整備
+- [x] 7. README ドキュメント整備
   - 「オプション機能（標準有効 / 常時有効）一覧」表の `opt-in（既定 OFF、明示的に有効化が必要）`
     サブセクションに `PER_TASK_LOOP_ENABLED` 行を追加（既存表組のフォーマットを踏襲）
   - 専用解説節「Per-task TDD Implementation Loop (#21)」を追加（既存「impl-resume Branch
