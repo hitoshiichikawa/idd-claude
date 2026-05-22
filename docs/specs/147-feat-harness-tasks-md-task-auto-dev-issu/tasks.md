@@ -102,7 +102,7 @@
   - _Requirements: 1.2, 1.3, 1.4, 2.1, 2.2, 2.3_
   - _Depends: 2.1, 2.2, 6.1_
 
-- [ ] 7. ドキュメント整備（README Migration Note）
+- [x] 7. ドキュメント整備（README Migration Note）
   - `README.md` のオプション機能一覧近傍（行 1057 付近）に本機能を 1 項目追記
   - Migration Note 形式で「既定で有効 / 7 件以下では挙動変化なし / `TC_ENABLED=false` で opt-out
     可 / 既存 env var とラベル契約は不変」を明記
