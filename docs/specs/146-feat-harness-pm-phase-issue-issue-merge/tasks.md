@@ -32,7 +32,7 @@
   - shellcheck 警告ゼロを維持
   - _Requirements: 1.6, 2.6, 3.4, 3.5, 5.1, 5.2, 5.3, 6.1, 6.3, NFR 1.1, NFR 2.1, NFR 2.2, NFR 3.1, NFR 4.1, NFR 4.2_
 
-- [ ] 5. `idd-claude-labels.sh` 両系統に `blocked` 定義を追加 (P)
+- [x] 5. `idd-claude-labels.sh` 両系統に `blocked` 定義を追加 (P)
   - `.github/scripts/idd-claude-labels.sh` の `LABELS=( ... )` 配列末尾に `"blocked|b60205|【Issue 用】 依存 Issue 未 merge により auto-dev 進行不能"` を追加
   - `repo-template/.github/scripts/idd-claude-labels.sh` の `LABELS=( ... )` 配列末尾にも同じ `"blocked|b60205|【Issue 用】 依存 Issue 未 merge により auto-dev 進行不能"` を追加（Req 7.6 同名同 description）
   - 既存ラベル行（name / color / description / 順序）は一切変更しない（NFR 1.2）
