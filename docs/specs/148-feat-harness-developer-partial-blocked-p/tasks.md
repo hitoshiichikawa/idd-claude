@@ -31,7 +31,7 @@
   - shellcheck をクリーンに保つ
   - _Requirements: 1.1, 1.2, 1.3, NFR 1.1, NFR 3.2_
 
-- [ ] 4. orchestrator に `build_partial_escalation_comment` helper を追加
+- [x] 4. orchestrator に `build_partial_escalation_comment` helper を追加
   - `local-watcher/bin/issue-watcher.sh` の `qa_build_escalation_comment` (L758) と
     同セクション帯に新規 helper を追加
   - 引数 4 つ: `<status_code> <impl_notes_path> <tasks_md_path> <branch>`
