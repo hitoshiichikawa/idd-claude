@@ -6482,6 +6482,7 @@ detect_blocked_marker() {
 # 既存 commit に乗っている sentinel は impl-resume 経由の pickup 再開でも観測可能（Req 5.5）。
 #
 # Requirements: 5.1, 5.2, 5.5, 6.3, 6.4
+# shellcheck disable=SC2120  # task_id は意図的に optional（Issue 単位起動時は引数なしで呼ぶ / Req 6.4）
 detect_debugger_already_invoked() {
   local task_id="${1:-}"
   local sentinel="$REPO_DIR/$SPEC_DIR_REL/debugger-notes.md"
@@ -8139,19 +8140,144 @@ run_impl_pipeline() {
               ;;
             1)
               # Issue #106 Req 3.1: Stage B 完了は reject / approve いずれも verify 対象。
-              # 本ケース（round=2 reject）はいずれにせよ reviewer-reject2 で claude-failed に
-              # 確定するため、verify 自体は best-effort で実行し失敗してもより情報量の多い
-              # reviewer-reject2 経路を優先する。ahead > 0 検出時の WARN ログ / 自動 push 復旧
-              # コメントは verify_pushed_or_retry 内で出力済（観測可能性は維持）。
+              # 本ケース（round=2 reject）は Debugger Gate 経路への分岐 / もしくは
+              # reviewer-reject2 で claude-failed に確定するため、verify 自体は best-effort
+              # で実行し失敗してもより情報量の多い後続経路を優先する。ahead > 0 検出時の
+              # WARN ログ / 自動 push 復旧コメントは verify_pushed_or_retry 内で出力済
+              # （観測可能性は維持）。
               verify_pushed_or_retry "stageB-push-missing" "$BRANCH" "Stage B (round=2 reject)" || true
-              # 2 回目 reject → claude-failed + Issue コメントに reject 理由 / 対象 ID を含める
-              echo "❌ #$NUMBER: Reviewer round=2 reject → claude-failed" | tee -a "$LOG"
-              local parsed2 cat2 tgt2
-              parsed2=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
-              cat2=$(echo "$parsed2" | cut -f2)
-              tgt2=$(echo "$parsed2" | cut -f3)
-              local reject_body
-              reject_body="Reviewer が 2 回連続で reject を出したため、自動 iteration を打ち切り、人間判断に委ねます。
+
+              # Phase 3 (#22): DEBUGGER_ENABLED=true 時のみ Debugger Gate に分岐。
+              # Debugger 未起動（sentinel 不在）なら Stage D (Round 2 reject) → Stage A''
+              # (Developer 再起動 + Fix Plan 注入) → Stage B'' (Reviewer Round 3) を 1 回だけ
+              # 試行する。`DEBUGGER_ENABLED != "true"` または sentinel 既起動の場合は
+              # 既存 reviewer-reject2 経路（claude-failed 直行）にフォールバック。
+              # 本分岐が構造的に skip されるため、DEBUGGER_ENABLED 未指定 / `=false` の
+              # 既存挙動は完全に不変（NFR 1.1 / Req 1.1, 1.2）。
+              if [ "${DEBUGGER_ENABLED:-false}" = "true" ] && ! detect_debugger_already_invoked; then
+                echo "🐛 #$NUMBER: Reviewer round=2 reject → Debugger Gate 起動（DEBUGGER_ENABLED=true）" | tee -a "$LOG"
+                local _dbg_rc=0
+                run_debugger_stage "round2-reject" "" "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" || _dbg_rc=$?
+                case "$_dbg_rc" in
+                  99)
+                    # quota 超過: 既存 #66 規約に従い watcher は正常終了。Resume Processor が次 tick で再開
+                    echo "⏸️ #$NUMBER: Debugger で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+                    return 0
+                    ;;
+                  0)
+                    # Debugger 正常終了 + debugger-notes.md verify 成功 → Stage A'' へ
+                    echo "✅ #$NUMBER: Debugger 完了 → Stage A'' (Developer 再起動 + Fix Plan 注入)" | tee -a "$LOG"
+                    ;;
+                  *)
+                    # Debugger 異常終了 / verify 失敗 → mark_issue_failed 既発射、Stage A''/B'' 実行なし (Req 3.6)
+                    return 1
+                    ;;
+                esac
+
+                # ── Stage A'' (Developer 再起動 + Fix Plan 注入) ──
+                echo "--- Stage A'' 実行（Developer 再起動 / Debugger Fix Plan 注入）---" >> "$LOG"
+                local prompt_redo_fp
+                prompt_redo_fp=$(build_dev_prompt_redo_with_fix_plan \
+                  "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" \
+                  "$REPO_DIR/$SPEC_DIR_REL/debugger-notes.md")
+                local _qa_reset_file_app _qa_rc_app=0 _qa_ts_app
+                _qa_ts_app=$(date +%Y%m%d-%H%M%S)
+                _qa_reset_file_app="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-stageA-pp-${_qa_ts_app}"
+                qa_run_claude_stage "StageA-pp" "$_qa_reset_file_app" -- \
+                  claude \
+                    --print "$prompt_redo_fp" \
+                    --model "$DEV_MODEL" \
+                    --permission-mode bypassPermissions \
+                    --max-turns "$DEV_MAX_TURNS" \
+                    --output-format stream-json \
+                    --verbose \
+                    >> "$LOG" 2>&1 || _qa_rc_app=$?
+                case "$_qa_rc_app" in
+                  0)
+                    rm -f "$_qa_reset_file_app"
+                    if ! verify_pushed_or_retry "stageA-pp-push-missing" "$BRANCH" "Stage A''"; then
+                      return 1
+                    fi
+                    echo "✅ #$NUMBER: Stage A'' 完了" | tee -a "$LOG"
+                    ;;
+                  99)
+                    local _qa_epoch_app
+                    _qa_epoch_app=$(cat "$_qa_reset_file_app")
+                    qa_handle_quota_exceeded "$NUMBER" "StageA-pp" "$_qa_epoch_app"
+                    rm -f "$_qa_reset_file_app"
+                    echo "⏸️ #$NUMBER: Stage A'' で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+                    return 0
+                    ;;
+                  *)
+                    rm -f "$_qa_reset_file_app"
+                    echo "❌ #$NUMBER: Stage A'' (Debugger 経由 Developer 再実行) 失敗" | tee -a "$LOG"
+                    mark_issue_failed "stageA-pp" "Debugger 経由 Developer 再実行（Stage A''）が claude 非 0 exit で失敗しました（rc=${_qa_rc_app}）。\`$LOG\` を確認してください。"
+                    return 1
+                    ;;
+                esac
+
+                # ── Stage B'' (Reviewer Round 3): Debugger 経由の最終 Reviewer ──
+                local rev_rc3=0
+                run_reviewer_stage 3 || rev_rc3=$?
+                # Round 3 結果をログに記録（NFR 2.1 の 4 イベント目）
+                case "$rev_rc3" in
+                  0)
+                    dbg_log "trigger=round2-reject issue=#${NUMBER} task=none round3 result=approve" >> "$LOG"
+                    if ! verify_pushed_or_retry "stageB-pp-push-missing" "$BRANCH" "Stage B'' (round=3 approve)"; then
+                      return 1
+                    fi
+                    echo "✅ #$NUMBER: Reviewer round=3 approve（Debugger 経由）" | tee -a "$LOG"
+                    # 既存 approve 後経路（Stage C）に合流するため case を抜ける
+                    ;;
+                  99)
+                    dbg_log "trigger=round2-reject issue=#${NUMBER} task=none round3 result=quota-exceeded" >> "$LOG"
+                    echo "⏸️ #$NUMBER: Reviewer round=3 で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+                    return 0
+                    ;;
+                  1)
+                    dbg_log "trigger=round2-reject issue=#${NUMBER} task=none round3 result=reject" >> "$LOG"
+                    verify_pushed_or_retry "stageB-pp-push-missing" "$BRANCH" "Stage B'' (round=3 reject)" || true
+                    echo "❌ #$NUMBER: Reviewer round=3 reject → claude-failed（Debugger 再起動なし / Req 3.5）" | tee -a "$LOG"
+                    local parsed3 cat3 tgt3
+                    parsed3=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
+                    cat3=$(echo "$parsed3" | cut -f2)
+                    tgt3=$(echo "$parsed3" | cut -f3)
+                    local reject_body3
+                    reject_body3="Debugger 経由の Reviewer round=3 でも reject となったため、自動 iteration を打ち切り人間判断に委ねます（Debugger は 1 Issue あたり 1 回のみ起動するため再起動しません / Req 3.5）。
+
+- 対象 requirement ID: ${tgt3:-(unknown)}
+- reject カテゴリ: ${cat3:-(unknown)}
+- Reviewer 判定詳細: \`${SPEC_DIR_REL}/review-notes.md\` を参照
+- Debugger Fix Plan: \`${SPEC_DIR_REL}/debugger-notes.md\` を参照
+
+### 次の手順
+1. review-notes.md / debugger-notes.md / watcher ログを読み、Reviewer 判定が妥当か確認
+2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
+3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
+                    mark_issue_failed "reviewer-reject3" "$reject_body3"
+                    return 1
+                    ;;
+                  *)
+                    dbg_log "trigger=round2-reject issue=#${NUMBER} task=none round3 result=error" >> "$LOG"
+                    echo "❌ #$NUMBER: Reviewer round=3 異常終了 → claude-failed" | tee -a "$LOG"
+                    mark_issue_failed "reviewer-error" "Debugger 経由の Reviewer round=3 が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+                    return 1
+                    ;;
+                esac
+              else
+                # DEBUGGER_ENABLED != "true" もしくは sentinel 既起動 → 既存 reviewer-reject2 経路
+                if [ "${DEBUGGER_ENABLED:-false}" = "true" ]; then
+                  # Debugger 既起動状態での Round 2 reject 再発生 (Req 5.2)
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=none result=skipped reason=debugger-already-invoked" >> "$LOG"
+                fi
+                # 2 回目 reject → claude-failed + Issue コメントに reject 理由 / 対象 ID を含める
+                echo "❌ #$NUMBER: Reviewer round=2 reject → claude-failed" | tee -a "$LOG"
+                local parsed2 cat2 tgt2
+                parsed2=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
+                cat2=$(echo "$parsed2" | cut -f2)
+                tgt2=$(echo "$parsed2" | cut -f3)
+                local reject_body
+                reject_body="Reviewer が 2 回連続で reject を出したため、自動 iteration を打ち切り、人間判断に委ねます。
 
 - 対象 requirement ID: ${tgt2:-(unknown)}
 - reject カテゴリ: ${cat2:-(unknown)}
@@ -8161,8 +8287,9 @@ run_impl_pipeline() {
 1. review-notes.md と watcher ログを読み、Reviewer 判定が妥当か確認
 2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
 3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
-              mark_issue_failed "reviewer-reject2" "$reject_body"
-              return 1
+                mark_issue_failed "reviewer-reject2" "$reject_body"
+                return 1
+              fi
               ;;
             *)
               # round=2 reviewer error
