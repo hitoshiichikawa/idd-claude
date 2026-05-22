@@ -78,7 +78,7 @@
   - 指示: 「Debugger の Fix Plan に記載された `修正手順` を順に実施し、`検証方法` で挙動を確認する」
   - _Requirements: 3.2, 4.3_
 
-- [ ] 6. watcher: Stage B' (Round 2) reject 経路への Debugger 組込
+- [x] 6. watcher: Stage B' (Round 2) reject 経路への Debugger 組込
   - `run_impl_pipeline`（行 6921 周辺）の Round 2 reject 分岐（`case $rev_rc in 1)`）を以下で改修:
     1. 既存 verify_pushed_or_retry / parse_review_result を維持
     2. `[ "${DEBUGGER_ENABLED:-false}" = "true" ] && ! detect_debugger_already_invoked` を判定
