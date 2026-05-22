@@ -28,6 +28,29 @@ Architect が出力する `tasks.md` は、Developer が迷わず実装を進め
   - _Depends: 2.1_
 ```
 
+## Checkbox 形式の必須化
+
+`tasks.md` の **すべての実装タスク行**は、行頭が `- [ ]`（未完了）または `- [ ]*`（deferrable
+印、後述）の checkbox 形式で開始することを **必須** とします。これは Developer の resume
+機能（`IMPL_RESUME_PROGRESS_TRACKING=true`、Issue #67 / #112 以降の既定）が `- [ ]` → `- [x]`
+の markdown checkbox 編集を進捗の **正本** として読む前提を確実に成立させるためです。
+
+- **親タスク行・子タスク行のいずれにも checkbox を付与すること**
+  （例: `- [ ] 1. ...` / `- [ ] 1.1 ...` のように親も子もリスト項目 + checkbox で書く）
+- **markdown header のみ**（例: `## T-01: タスク名` / `### Task 1` / `#### 1.1 子タスク`）で
+  タスクを表現することは **禁止**。タスク行は必ずリスト項目 (`- [ ]`) で書くこと
+- 詳細項目（`_Requirements:_` 等のアノテーション行や説明箇条書き）は checkbox を持たない
+  通常のリスト項目で構わない（タスクそのものを表現する行のみが checkbox 必須）
+- 判定パターン（POSIX 互換 ERE）: `^- \[[ x]\]\*? [0-9]+(\.[0-9]+)*\.? ` — 行頭が `- [ ]`
+  / `- [ ]*` / `- [x]` / `- [x]*` のいずれかで、続けて numeric 階層 ID（`1` / `1.1` /
+  `2.1.3` 等）+ 半角スペースで始まる行をタスク行と認識する（最上位タスクは ID 末尾の
+  `.` あり [`- [ ] 1. <名前>`]、子タスクは末尾の `.` なし [`- [ ] 1.1 <名前>`] が既存表記）
+
+> **Mechanical Check との対応**: 上記必須化は Architect の自己レビュー時に
+> [`design-review-gate.md`](./design-review-gate.md) の **tasks.md checkbox enforcement check**
+> Mechanical Check が機械的に検証します（checkbox 不在のタスク行を 1 件でも検出した場合は
+> 違反として報告し、Architect が `- [ ] <numeric ID>. <タスク名>` 形式に修正してから確定する）。
+
 ## アノテーション
 
 | キー | 必須? | 用途 |
@@ -50,7 +73,8 @@ Architect が出力する `tasks.md` は、Developer が迷わず実装を進め
 ## Optional なテストタスク
 
 deferrable なテスト追加タスクは checkbox を `- [ ]*`（アスタリスク付き）と記述し、詳細項目で
-対応する AC を説明します:
+対応する AC を説明します。**`- [ ]*` も checkbox 形式の一種**として扱われ、上記
+「Checkbox 形式の必須化」節および Mechanical Check の判定で違反として報告されません:
 
 ```markdown
 - [ ]* 1.3 統合テスト追加

@@ -43,6 +43,9 @@ Architect が `design.md` を書き終える前に、このゲートに従って
   File Structure Plan に対応ファイルが無いものを検出
 - **Budget overflow check**: tasks.md の最上位 numeric ID タスク件数を機械的にカウントし、
   閾値に応じて分岐する（後述「Budget overflow check（tasks.md 件数）」節を参照）
+- **tasks.md checkbox enforcement check**: tasks.md のすべてのタスク行が checkbox 形式
+  （`- [ ]` または `- [ ]*`）で開始することを機械的に確認する（後述「tasks.md checkbox
+  enforcement check」節を参照）
 
 ### Budget overflow check（tasks.md 件数）
 
@@ -95,6 +98,62 @@ Architect は `design.md` の **末尾**（既存セクション群の後）に 
 - `docs/specs/131-feat-architect-tasks-md-budget-overflow/test-fixtures/tasks-13.md`（consolidate → split）
 - `docs/specs/131-feat-architect-tasks-md-budget-overflow/test-fixtures/tasks-14.md`（forced split）
 - `docs/specs/131-feat-architect-tasks-md-budget-overflow/test-count.sh` — count 抽出 regex の整合性検証
+
+### tasks.md checkbox enforcement check
+
+`tasks.md` の **すべてのタスク行** が checkbox 形式（`- [ ]` 未完了 / `- [ ]*` deferrable）で
+開始することを機械的に確認します。本チェックは Developer の resume 機能
+（`IMPL_RESUME_PROGRESS_TRACKING=true`、Issue #67 / #112 以降の既定）が markdown 上の
+checkbox を進捗の **正本** として読む前提を、Architect 段階で確実に成立させるためのものです。
+
+#### 判定パターン（参照実装）
+
+タスク行と認識する POSIX 互換 ERE:
+
+```
+^- \[[ x]\]\*? [0-9]+(\.[0-9]+)*\.? 
+```
+
+意味: 行頭が `- [ ]` / `- [ ]*` / `- [x]` / `- [x]*` のいずれかで、続けて numeric 階層 ID
+（`1` / `1.1` / `2.1.3` 等）+ 半角スペースで始まる行をタスク行と認識する（最上位タスクは
+ID 末尾の `.` あり [`- [ ] 1. <名前>`]、子タスクは末尾の `.` なし [`- [ ] 1.1 <名前>`] が
+既存表記。regex 末尾の `\.?` がこの差を吸収）。checkbox を持たないタスク表現
+（例: `## T-01: タスク名` / `### Task 1` / `#### 1.1 子タスク` 等の markdown header だけで
+タスクを表す行）は本パターンにマッチせず、**違反として報告**されます。
+
+#### 検証手順
+
+1. Architect は `tasks.md` ドラフトの確定直前に、上記判定パターンで全タスク行を抽出する
+2. タスク本体を表す行が **markdown header のみ**（`^#{1,6} ` で始まり、リスト項目になって
+   いない行）でタスクを表現している箇所が無いかを目視確認する（例: `## T-01: タスク名` /
+   `### 子タスク`）
+3. checkbox 不在のタスク行を 1 件でも検出した場合、該当行を `- [ ] <numeric ID>. <タスク名>`
+   形式（または `- [ ]* <numeric ID> <タスク名>`）に修正してから確定する
+4. [`tasks-generation.md`](./tasks-generation.md) の「Checkbox 形式の必須化」節と整合する
+   ことを確認する（同節と本チェックは同一 checkbox 規約に依拠する）
+
+#### Budget overflow check との関係
+
+本 checkbox enforcement check と既存の **Budget overflow check** は、**同一の checkbox 規約**
+（`- [ ]` / `- [ ]*` で始まるタスク行の認識）に依拠しています:
+
+- Budget overflow check の count 抽出 regex `^- \[ \]\*? [0-9]+\. ` は **最上位 numeric ID
+  タスク**のみを数える狭い判定（ID 末尾の `.` を必須化）
+- checkbox enforcement check の判定パターン `^- \[[ x]\]\*? [0-9]+(\.[0-9]+)*\.? ` は
+  **親タスク・子タスク・完了済みタスク** を含む広い判定（ID 末尾の `.` をオプショナル化）
+- 両者は同じ「タスク行 = リスト項目 + checkbox + numeric ID」という規約を共有しており、
+  本機能導入により Budget overflow check の判定境界（10 / 11 / 13 / 14 件）は **変化しません**
+  （`docs/specs/131-feat-architect-tasks-md-budget-overflow/test-fixtures/` の 4 fixture が
+  全て `- [ ]` checkbox を持つことで引き続き動作します）
+
+#### 適用範囲（後方互換性）
+
+- 本チェックの対象は **Architect が新規に生成・編集する `tasks.md`** に限定する
+- 既に main に merge 済みの spec の `tasks.md` に対する **遡及的なルール違反検出は要求しない**
+  （retrofit は本 rule のスコープ外）
+- 既存 deferrable テストタスク表記 `- [ ]*` は有効な checkbox 形式として扱う（違反として
+  報告しない）
+- ≤ 10 件の正常ケースを含む Budget overflow check の挙動は変化しない
 
 ### `/goal` による自動ループ運用（Claude Code v2.1.139+）
 
