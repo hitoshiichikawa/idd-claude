@@ -6037,6 +6037,56 @@ tc_add_needs_decisions_label() {
   return 0
 }
 
+# ─── tc_run_post_architect_check ───
+#
+# design 分岐 rc=0 直後に呼ばれる orchestrator。本機能の単一エントリポイント
+# （Req 1.1, 1.6, 2.1, 2.2, 2.3, 3.3, 4.1）。
+#
+# 順序:
+#   1. tc_should_run を呼び、skip 判定なら return 0（design 分岐の挙動を維持）
+#   2. tc_count_tasks で件数取得
+#   3. tc_classify でレンジを取得
+#   4. レンジに応じて分岐:
+#      - normal   → ログのみ
+#      - warn     → tc_post_warning_comment
+#      - escalate → tc_post_escalation_comment + tc_add_needs_decisions_label
+#
+# 戻り値: 常に 0（呼び出し元 design 分岐 rc=0 の挙動を変えない / fail-open）
+# 副作用: ログ書き込み、gh issue edit/comment
+tc_run_post_architect_check() {
+  if ! tc_should_run; then
+    return 0
+  fi
+  local tasks_path="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+  local count
+  count=$(tc_count_tasks "$tasks_path")
+  # tc_count_tasks は空文字を返さないが、defensive に整数フォールバックを入れる
+  if ! [[ "$count" =~ ^[0-9]+$ ]]; then
+    tc_warn "issue=#${NUMBER:-?} count='$count' が整数でないため 0 にフォールバック"
+    count=0
+  fi
+  local range
+  range=$(tc_classify "$count")
+  case "$range" in
+    normal)
+      tc_log "issue=#${NUMBER:-?} count=${count} range=normal action=none"
+      ;;
+    warn)
+      tc_log "issue=#${NUMBER:-?} count=${count} range=warn action=warning-comment"
+      tc_post_warning_comment "$NUMBER" "$count" || true
+      ;;
+    escalate)
+      tc_log "issue=#${NUMBER:-?} count=${count} range=escalate action=needs-decisions+escalation-comment"
+      tc_post_escalation_comment "$NUMBER" "$count" || true
+      tc_add_needs_decisions_label "$NUMBER" || true
+      ;;
+    *)
+      tc_warn "issue=#${NUMBER:-?} unknown classification='$range' count=${count} (fail-open)"
+      ;;
+  esac
+  return 0
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Reviewer Gate (#20 Phase 1) — impl 系モード stage 分割パイプライン
 #
@@ -10413,6 +10463,12 @@ EOF
       0)
         echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
         slot_log "$MODE 完了"
+        # Issue #147: Tasks Count Gate — Architect 確定直後の tasks.md 件数を再評価し、
+        # 8〜10 件で警告コメント、11 件以上で needs-decisions + Developer 抑止を適用。
+        # 本機能は fail-open（戻り値は常に 0）かつ TC_ENABLED=false で完全 opt-out 可。
+        # design 分岐 rc=0 case にのみ配置し、impl / impl-resume / Stage Checkpoint
+        # Resume 経路には差し込まないことで Req 3.1 / 3.2 を構造的に保証する。
+        tc_run_post_architect_check || true
         rm -f "$_qa_reset_file_design"
         return 0
         ;;
