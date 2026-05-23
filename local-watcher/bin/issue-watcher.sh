@@ -10197,13 +10197,25 @@ _hook_invoke() {
 
   # IDD_SLOT_NUMBER / IDD_SLOT_WORKTREE / PARALLEL_SLOTS / REPO / REPO_DIR を export
   # して子プロセスに引き継ぐ。直接 exec のみ（Req 5.5: shell 展開なし）。
+  #
+  # Issue #170 Req 1.2: stderr 捕捉は同期リダイレクト `2>"$stderr_tmp"` で行う。
+  # 旧実装の非同期プロセス置換 `2> >(tee -a "$stderr_tmp" >&2)` は、フック終了直後の
+  # `tail -c 2000` 読み出しと tee の flush の間にレースを生じ、失敗ログ末尾が欠落
+  # しうる。同期リダイレクトでフック終了時に一時ファイルが確定したのち、Req 1.4 を
+  # 満たすため `cat "$stderr_tmp" >&2` で stderr を従来どおり運用者へ流す。
   if [ -n "$stderr_tmp" ]; then
     IDD_SLOT_NUMBER="$n" \
       IDD_SLOT_WORKTREE="$wt" \
       PARALLEL_SLOTS="$PARALLEL_SLOTS" \
       REPO="$REPO" \
       REPO_DIR="$REPO_DIR" \
-      "$SLOT_INIT_HOOK" 2> >(tee -a "$stderr_tmp" >&2) || rc=$?
+      "$SLOT_INIT_HOOK" 2>"$stderr_tmp" || rc=$?
+    # フック終了後（一時ファイル確定後）に同期で stderr へ転記する。
+    # `set -euo pipefail` 下で cat 失敗が誤って _hook_invoke を致命化しないよう
+    # `|| true` でガードする（Req 1.4: stderr 観測性維持 / NFR 3.1）。
+    if [ -s "$stderr_tmp" ]; then
+      cat "$stderr_tmp" >&2 || true
+    fi
   else
     IDD_SLOT_NUMBER="$n" \
       IDD_SLOT_WORKTREE="$wt" \
@@ -11553,6 +11565,54 @@ EOF
 # サブシェル fork 後、_slot_release で fd を閉じてもこの map で「どの slot が誰の
 # 子プロセスか」を後で再特定できる。
 declare -A _DISPATCHER_SLOT_PIDS
+
+# ── Issue #170 Req 3: Dispatcher のシグナル捕捉（SIGINT / SIGTERM）──
+# cron/launchd からの中断や手動 Ctrl-C 時、fork 済み slot worker（サブシェル）が
+# 孤立して `.broken-*` worktree が蓄積するのを防ぐための最小実装。
+#
+# 本 trap は Dispatcher トップレベル（メインスクリプト本体）に置く。サブシェル
+# `( _slot_run_issue ... ) &` 内には伝播しない（trap はサブシェルでリセットされる）ため、
+# 既存のサブシェル内ローカル EXIT trap（rebase/revert/checkout の base branch 復帰）の
+# 挙動は一切変更しない（Req 3.4）。flock fd 200 は本プロセス終了時に OS が解放するため、
+# 多重起動防止ロックの解放契約も従来どおり維持される（Req 3.3）。
+#
+# NFR 2.2: 同一シグナルが処理中に再送されても worktree prune を二重実行しないよう
+# ガードフラグ _DISPATCHER_SIGNAL_HANDLED で 1 回に制限する。
+_DISPATCHER_SIGNAL_HANDLED=0
+# shellcheck disable=SC2317  # trap 経由で間接呼び出しされるため到達不能に見えるが正しく実行される
+_dispatcher_on_signal() {
+  local sig="$1"
+  # 再入ガード（NFR 2.2）: 既に処理済みなら何もしない。
+  if [ "$_DISPATCHER_SIGNAL_HANDLED" -ne 0 ]; then
+    return 0
+  fi
+  _DISPATCHER_SIGNAL_HANDLED=1
+  dispatcher_warn "シグナル ${sig} を受信。fork 済み slot worker を終了し worktree prune を実行します"
+
+  # Req 3.1: fork 済みの slot worker 子プロセスへ終了シグナルを送る。
+  local n pid
+  for n in "${!_DISPATCHER_SLOT_PIDS[@]}"; do
+    pid="${_DISPATCHER_SLOT_PIDS[$n]}"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill -TERM "$pid" 2>/dev/null || true
+    fi
+  done
+  # 子プロセスの終了を回収（孤立防止）。reap 失敗は致命化させない。
+  wait 2>/dev/null || true
+
+  # Req 3.2 / NFR 2.2: worktree prune を 1 回だけ実行する。
+  git -C "$REPO_DIR" worktree prune >/dev/null 2>&1 || true
+
+  # 中断由来の終了 exit code は 128+signal（bash 慣例）。SIGINT=130 / SIGTERM=143。
+  local rc=143
+  case "$sig" in
+    INT) rc=130 ;;
+    TERM) rc=143 ;;
+  esac
+  exit "$rc"
+}
+trap '_dispatcher_on_signal INT' INT
+trap '_dispatcher_on_signal TERM' TERM
 
 # 完了した子プロセスを slot_pid map から prune する。
 # `kill -0 <pid>` が失敗（プロセス不在）なら slot は空いたとみなす。
