@@ -64,6 +64,18 @@ declare -A _SAV_EXPECTED=(
   ["tasks-deferrable.md"]="pytest tests/integration/"
   ["tasks-mixed.md"]="./gradlew assembleDebug && ./gradlew test"
   ["tasks-empty.md"]=""
+  # #160 fixtures: backtick 抽出と fenced code block 扱いの回帰検出
+  #   - tasks-backtick-with-prose.md: 散文 + backtick 行の末尾。lint 緑 行から
+  #     backtick 内の `./gradlew :app:lintDebug` のみを抽出する（Req 1.1）。
+  #   - tasks-backtick-multi.md: 同一行に複数 backtick。最初に keyword 一致した
+  #     `npm test` を採用（Req 1.2）。`echo skip` は keyword 一致しないので skip。
+  #   - tasks-fenced-only.md: 複数行 fenced code block のみ → SKIPPED (Req 3.1)。
+  #   - tasks-backtick-and-bare-mix.md: bare verify 行と backtick 行が混在する場合
+  #     末尾行を採用、その行が backtick を含めば中身を抽出（Req 2.3）。
+  ["tasks-backtick-with-prose.md"]="./gradlew :app:lintDebug"
+  ["tasks-backtick-multi.md"]="npm test"
+  ["tasks-fenced-only.md"]=""
+  ["tasks-backtick-and-bare-mix.md"]="./gradlew :app:lintDebug"
 )
 
 _pass=0

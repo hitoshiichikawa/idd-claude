@@ -5510,7 +5510,19 @@ stage_a_verify_extract_command() {
 
   # awk 1 パス走査で「直近で keyword に一致した行」を変数 last に保持し、
   # ファイル末尾まで読んだら最後の保持値を出力する（= 末尾に最も近い 1 行、
-  # Req 1.2）。O(N) 線形時間（NFR 3.1）。
+  # Req 1.2 / #160 Req 1.3, 2.2, 2.3）。O(N) 線形時間（NFR 3.1 / #160 NFR 2.1）。
+  #
+  # #160 修正: backtick で囲まれたインラインコードスパン（`...`）が行内にあり、
+  #   その中身が keyword に一致した場合、**スパン内の中身のみ** を抽出する
+  #   （Req 1.1）。散文 + backtick で書かれた verify 行（例: `- lint 緑:
+  #   \`./gradlew :app:lintDebug\` で新規 error なし`）が exit 127 を起こす
+  #   regression（#125 で導入）を解消する。
+  #   同一行に複数のインラインコードスパンが存在する場合は、最初に keyword に
+  #   一致したスパンの中身を採用（Req 1.2）。
+  #   行内に backtick がペアで存在せず、行全体が keyword に部分一致した場合は
+  #   従来通り「装飾除去後の行全体」を採用する（Req 2.1 / 後方互換）。
+  #   複数行 fenced code block（` ``` ` フェンスで囲まれた範囲）内の行は
+  #   抽出対象から除外する（Req 3.1）。
   # 装飾 strip:
   #   - 行頭の "- " / "  - " / "  - [ ] " 等の markdown bullet と list checkbox
   #   - 行頭 / 行末の空白
@@ -5520,15 +5532,65 @@ stage_a_verify_extract_command() {
     BEGIN {
       n = split(kws, ARR, "\n")
       last = ""
+      in_fence = 0
     }
     {
-      line = $0
+      raw = $0
+      # 複数行 fenced code block の境界判定（行頭 ``` で開閉、言語タグ任意）。
+      # in_fence 状態の行は keyword マッチ対象から除外する（#160 Req 3.1, 3.2）。
+      if (raw ~ /^[[:space:]]*```/) {
+        in_fence = (in_fence == 0) ? 1 : 0
+        next
+      }
+      if (in_fence) { next }
+
+      line = raw
       # markdown bullet / checkbox / アスタリスク（deferrable 印）の装飾除去
       sub(/^[[:space:]]+/, "", line)
       sub(/^-[[:space:]]+/, "", line)
       sub(/^\[[[:space:]xX]\]\*?[[:space:]]+/, "", line)
       sub(/^[0-9]+(\.[0-9]+)*[[:space:]]+/, "", line)
       sub(/[[:space:]]+$/, "", line)
+
+      # インラインコードスパン抽出（#160 Req 1.1, 1.2）:
+      #   バッククォートで囲まれた中身を順に走査し、最初に keyword 一致した
+      #   スパンの中身を採用する。
+      span_hit = 0
+      span_content = ""
+      tail = line
+      while (1) {
+        p1 = index(tail, "`")
+        if (p1 == 0) { break }
+        rest = substr(tail, p1 + 1)
+        p2 = index(rest, "`")
+        if (p2 == 0) { break }
+        candidate = substr(rest, 1, p2 - 1)
+        for (i = 1; i <= n; i++) {
+          kw = ARR[i]
+          if (kw == "") continue
+          if (index(candidate, kw) > 0) {
+            span_content = candidate
+            span_hit = 1
+            break
+          }
+        }
+        if (span_hit) { break }
+        tail = substr(rest, p2 + 1)
+      }
+      if (span_hit) {
+        last = span_content
+        next
+      }
+
+      # backtick 無し / backtick はあるが keyword 不一致の場合は、装飾除去後の
+      # 行全体が keyword に部分一致するか従来ロジックで判定（#160 Req 2.1 後方互換）。
+      # ただし line に backtick がペアで含まれる場合は「散文+backtick で keyword は
+      # スパン外にしか出現しない」ケース（#160 の本丸 regression）なので行全体採用
+      # は誤動作を起こす。よって backtick ペアが存在する場合は line fallback を
+      # 行わず、当該行を抽出候補から除外する（Req 1.4 / Req 5.1）。
+      bt_count = gsub(/`/, "`", line)
+      if (bt_count >= 2) { next }
+
       for (i = 1; i <= n; i++) {
         kw = ARR[i]
         if (kw == "") continue
