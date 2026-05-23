@@ -106,6 +106,8 @@ idd-claude/
 - 常時稼働可能な macOS / Linux マシン
 - ローカルで `claude /login` 済み
 - `flock` コマンド（Linux では標準、macOS は `brew install util-linux` で `flock` を導入）
+- `timeout` コマンド（Linux では標準、macOS は `brew install coreutils` で `gtimeout` を導入。
+  `timeout` 不在時は watcher が `gtimeout` を自動検出してフォールバックするため、手動シンボリックリンク作成は不要）
 
 ### GitHub Actions 方式
 
@@ -1312,7 +1314,11 @@ Phase A 導入による後方互換性は以下のとおり保証されます:
 - **Phase A 機能は #112 以降デフォルト有効**: `MERGE_QUEUE_ENABLED` のデフォルトは `true`。
   従来通り無効化したい場合は `MERGE_QUEUE_ENABLED=false` を cron / launchd に明示する
 - **新規追加コマンド**: Phase A は `timeout` コマンドに依存します（Linux 標準 / macOS は `coreutils`）。
-  既存環境で利用可能か確認してください
+  既存環境で利用可能か確認してください。macOS で `brew install coreutils` を実行すると
+  `timeout` は `gtimeout` という名前で導入されますが、watcher は `timeout` 不在かつ `gtimeout`
+  存在の環境を自動検出し、`timeout` 呼び出しを透過的に `gtimeout` へフォールバックします
+  （手動シンボリックリンク作成や PATH 調整は不要）。`timeout` も `gtimeout` も無い環境では
+  起動時に明示エラーで停止します
 - **新規ラベル `needs-rebase` は冪等追加**: `idd-claude-labels.sh` を再実行すれば既存環境にも追加されます
 - **head branch / fork PR フィルタを追加**: `MERGE_QUEUE_HEAD_PATTERN`（デフォルト `^claude/`）に合致する
   head branch かつ、head repo owner が base repo owner と同一の PR のみが対象。既存の自動生成 PR 命名
