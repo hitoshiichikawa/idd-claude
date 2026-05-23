@@ -436,14 +436,42 @@ unset _idd_flag
 TRIAGE_TEMPLATE="${TRIAGE_TEMPLATE:-$HOME/bin/triage-prompt.tmpl}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# gtimeout 透過フォールバック（macOS coreutils 互換 / #168）
+#
+# macOS には GNU coreutils の `timeout` が標準搭載されておらず、`brew install coreutils`
+# で導入しても通常 `gtimeout` という名前でインストールされる。`timeout` が PATH 上に
+# 無く `gtimeout` がある環境では、`timeout` という呼び出しを `gtimeout` の実行に解決する
+# シェル関数を定義し、以降のスクリプト内の `timeout ...` 呼び出し（コマンド置換 / サブ
+# シェル / バックグラウンド fork / オプション付き呼び出し）を透過的に gtimeout へ委譲する。
+# `export -f` で `bash -c` 経由の子 bash にも関数を継承させる（Req 2.3）。
+#
+# Linux など `timeout` が存在する環境ではこの関数を定義しないため、挙動は一切変わらない
+# （NFR 1.1 / 1.2）。本フォールバックは下の前提ツールチェックより前に確立する（Req 1.3）。
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+if ! command -v timeout >/dev/null 2>&1 && command -v gtimeout >/dev/null 2>&1; then
+  # shellcheck disable=SC2317  # 関数本体は後続の `timeout ...` 呼び出しから実行される
+  timeout() { gtimeout "$@"; }
+  export -f timeout
+fi
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 前提ツールチェック
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-for cmd in gh jq claude git flock timeout; do
+for cmd in gh jq claude git flock; do
   command -v "$cmd" >/dev/null 2>&1 || {
     echo "Error: $cmd が見つかりません。PATH を確認してください。" >&2
     exit 1
   }
 done
+
+# timeout は gtimeout フォールバック（上記）込みで判定する。フォールバック関数が定義済み
+# なら `command -v timeout` は function として true を返す。いずれも無い場合は macOS 向けの
+# 解決手順を添えて明示エラーで停止する（Req 3.1 / 3.2 / 3.3）。
+command -v timeout >/dev/null 2>&1 || {
+  echo "Error: timeout コマンドが見つかりません。PATH を確認してください。" >&2
+  echo "  macOS では 'brew install coreutils' で gtimeout を導入すると自動検出されます。" >&2
+  exit 1
+}
 
 [ -f "$TRIAGE_TEMPLATE" ] || {
   echo "Error: Triage テンプレートが見つかりません: $TRIAGE_TEMPLATE" >&2
