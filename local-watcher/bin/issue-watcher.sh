@@ -6483,40 +6483,89 @@ pt_extract_learnings() {
 # per-task Reviewer に渡す diff range の開始 SHA / 終了 SHA を解決して
 # `<range_start_sha>\t<range_end_sha>` を stdout に出力。
 #
-# アルゴリズム（design.md「diff range 解決アルゴリズム」節）:
-#   1. `$BASE_BRANCH..HEAD` 範囲の `docs(tasks): mark <id> as done` commit を時系列昇順で全列挙
-#   2. 当該 task_id の mark commit SHA を特定（range_end）
+# アルゴリズム（design.md「diff range 解決アルゴリズム」節 + Issue #164 拡張）:
+#   1. `$BASE_BRANCH..HEAD` 範囲の `docs(tasks): mark ... as done` commit を SHA+subject の
+#      タブ区切り pair で時系列昇順に全列挙
+#   2. 当該 task_id の marker commit を以下の優先順で特定（range_end）:
+#      a. 単記 marker（subject が `docs(tasks): mark <task_id> as done` に完全一致）
+#         複数マッチ時は最後（最新）のマッチを採用（既存挙動を維持 / Req 3.1）
+#      b. 単記 marker が無ければ連記 marker（subject が `docs(tasks): mark <ids> as done` で
+#         <ids> を `/` / `,` / 空白で token 化したときに task_id と完全一致する token を含む）
+#         複数マッチ時は最後のマッチを採用（NFR 2.1: 連記経由解決時は stdout ログに
+#         `via=multi-id-marker` を残す）
 #   3. 全 mark commit 列の中で range_end の直前要素を range_start とする
 #   4. 直前要素が存在しない（初回 task）場合は range_start = `$BASE_BRANCH` の SHA
-#   5. 当該 task の mark commit が見つからない場合は return 1
+#   5. 当該 task の marker commit が単記でも連記でも見つからない場合は return 1
 #
-# Requirements: 3.2, 4.5, 5.4
+# 後方互換性（Req 3.1 / NFR 1.1）:
+#   - 単記 marker のみで構成されるリポジトリ履歴では、単記 marker が常に優先採用されるため
+#     本変更前と完全に同一の SHA pair を返す
+#   - 連記 marker は単記 marker が無い場合の fallback として動作するため、既存ログ列の
+#     観測可能な副作用は発生しない
+#
+# False positive 防止（Req 2.5）:
+#   - <ids> 部を `/` / `,` / 空白で正規化した後 word 単位で完全一致照合するため、task_id `1`
+#     が `1.1` や `11` に誤マッチしない
+#
+# Requirements: 3.2, 4.5, 5.4, Issue #164 Req 2.1, 2.2, 2.3, 2.4, 2.5, 3.1, 3.2, NFR 2.1
 pt_resolve_diff_range() {
   local task_id="$1"
   local base="${BASE_BRANCH:-main}"
 
-  # 全 mark commit を時系列昇順で取得（--reverse で oldest 先頭）
-  local all_marks
-  all_marks=$(git log --grep="^docs(tasks): mark " --format=%H --reverse "${base}..HEAD" 2>/dev/null || true)
-  if [ -z "$all_marks" ]; then
+  # 全 mark commit pair (SHA<TAB>subject) を時系列昇順で取得（--reverse で oldest 先頭）
+  local all_pairs
+  all_pairs=$(git log --grep="^docs(tasks): mark " --format='%H%x09%s' --reverse "${base}..HEAD" 2>/dev/null || true)
+  if [ -z "$all_pairs" ]; then
     return 1
   fi
 
-  # 当該 task の mark commit を特定（範囲内で最後のマッチを採用）
-  local current_mark
-  current_mark=$(git log --grep="^docs(tasks): mark ${task_id} as done\$" --format=%H "${base}..HEAD" 2>/dev/null | head -1 || true)
+  # ─── (a) 単記 marker を優先検索（subject 完全一致 / Req 3.1 後方互換） ───
+  local current_mark="" via="" sha subject id_list tok found
+  while IFS=$'\t' read -r sha subject; do
+    [ -n "$sha" ] || continue
+    if [ "$subject" = "docs(tasks): mark ${task_id} as done" ]; then
+      current_mark="$sha"
+      via="single-id-marker"
+    fi
+  done <<<"$all_pairs"
+
+  # ─── (b) 単記 marker が無ければ連記 marker を fallback 検索（Req 2.2 / 2.5） ───
+  if [ -z "$current_mark" ]; then
+    while IFS=$'\t' read -r sha subject; do
+      [ -n "$sha" ] || continue
+      # subject から <ids> 部を抽出（`docs(tasks): mark <ids> as done`）。
+      # 末尾アンカで「as done」以降にコメント等が付いた変則 subject は対象外とする。
+      id_list=$(printf '%s' "$subject" | sed -nE 's/^docs\(tasks\): mark (.+) as done$/\1/p')
+      [ -n "$id_list" ] || continue
+      # `/` / `,` を空白に正規化し、word 単位で task_id と完全一致する token を探す。
+      # word splitting は IFS のデフォルト（空白）で行われ、任意連続空白に対応する。
+      found=false
+      for tok in $(printf '%s' "$id_list" | tr '/,' '  '); do
+        if [ "$tok" = "$task_id" ]; then
+          found=true
+          break
+        fi
+      done
+      if [ "$found" = "true" ]; then
+        current_mark="$sha"
+        via="multi-id-marker"
+      fi
+    done <<<"$all_pairs"
+  fi
+
   if [ -z "$current_mark" ]; then
     return 1
   fi
 
-  # all_marks 内で current_mark の直前要素を探す
-  local prev_mark="" line
-  while IFS= read -r line; do
-    if [ "$line" = "$current_mark" ]; then
+  # all_pairs 順序を再度走査して current_mark の直前要素を探す（既存挙動を踏襲）
+  local prev_mark=""
+  while IFS=$'\t' read -r sha subject; do
+    [ -n "$sha" ] || continue
+    if [ "$sha" = "$current_mark" ]; then
       break
     fi
-    prev_mark="$line"
-  done <<<"$all_marks"
+    prev_mark="$sha"
+  done <<<"$all_pairs"
 
   local range_start
   if [ -n "$prev_mark" ]; then
@@ -6527,6 +6576,14 @@ pt_resolve_diff_range() {
     if [ -z "$range_start" ]; then
       return 1
     fi
+  fi
+
+  # NFR 2.1: 連記経由で解決した場合は stdout ログに識別可能な印を残す（運用者が
+  # `grep via=multi-id-marker` で件数把握できる）。単記経由は出力しない（既存ログ量を
+  # 増やさない後方互換）。stdout に出すことで呼び出し側 `pt_log` 経由のログ書式と
+  # 揃える代わりに、関数の主出力（SHA pair）と区別するため独立行 + tag prefix で出す。
+  if [ "$via" = "multi-id-marker" ]; then
+    echo "[$(date '+%F %T')] per-task: diff-range resolved via=multi-id-marker task_id=${task_id} sha=${current_mark}" >&2
   fi
 
   printf '%s\t%s\n' "$range_start" "$current_mark"
@@ -6607,13 +6664,24 @@ ${SPEC_DIR_REL}/
    - tasks.md の対象 task の \`_Requirements:_\` / \`_Boundary:_\` に従う
    - 規約は CLAUDE.md に従う
 
-2. **進捗マーカー更新**（既存 #67 / #112 規約を流用）:
+2. **進捗マーカー更新**（既存 #67 / #112 規約 + Issue #164「1 commit = 1 task ID」厳格化）:
    - 対象 task の \`- [ ] ${task_id}\` 行を \`- [x] ${task_id}\` に書き換える
    - 子タスク（例: ${task_id}.1）を完了した場合、親 task（${task_id} の親、例: ${task_id%.*}）
      配下の全子タスクが \`- [x]\` になったタイミングで親も \`- [x]\` に昇格する
    - 進捗マーカー更新は **専用 commit**: \`docs(tasks): mark <id> as done\`
      - 当該 commit には \`tasks.md\` 以外のファイルを含めない
-     - 親 task 昇格も同じ commit メッセージ形式（\`docs(tasks): mark <親 id> as done\`）
+   - **【重要 / Issue #164】1 つの marker commit には 1 つの task ID のみを含めること**:
+     - 1 つの \`docs(tasks): mark <id> as done\` commit には **必ず 1 つの task ID のみ**
+       を含めること（per-task Reviewer の diff range 解決が task ID 単位で行われるため）
+     - **親 task の完了昇格も別 commit に分割**する。例: 子 \`1.1\` 完了で親 \`1\` も
+       全完了になる場合、まず \`docs(tasks): mark 1.1 as done\` を 1 commit で作成し、
+       続けて \`docs(tasks): mark 1 as done\` を **別 commit** として続けて作成する
+     - **連記禁止例（NG）**: \`docs(tasks): mark 1 / 1.1 as done\` /
+       \`docs(tasks): mark 1, 1.1 as done\` のように複数 ID を 1 commit にまとめる
+       subject 表記は禁止
+     - 連記 marker commit を作成すると、per-task Reviewer の diff range 解決が単記 ID で
+       一致しなくなり \`diff-range-resolve-failed\` を起こす可能性がある（watcher 側で
+       fallback 解決は試行するが、canonical は単記分割のみ）
    - 書き換え禁止領域: タスク本文 / \`_Requirements:_\` / \`_Boundary:_\` / \`_Depends:_\` /
      タスク順序 / 親タスクのインデント / deferrable 印 \`- [ ]*\`
 
@@ -6810,10 +6878,19 @@ run_per_task_implementer() {
 # 戻り値:
 #   0  = approve
 #   1  = reject
-#   2  = 異常終了（claude crash / parse 失敗 / RESULT 行欠落 / diff range 解決失敗）
+#   2  = 異常終了（claude crash / parse 失敗 / RESULT 行欠落）
+#   3  = diff range 解決失敗（marker commit が単記でも連記でも見つからない / Issue #164）
 #   99 = quota 超過
 #
-# Requirements: 3.1, 3.2, 3.3, NFR 2.1, NFR 2.2, NFR 2.3
+# 戻り値 2 と 3 の使い分け（Issue #164 Req 4）:
+#   - rc=2: claude プロセスが起動した後の異常終了（呼び出し側は既存の
+#     `per-task-reviewer-error` カテゴリで `claude-failed` 付与）
+#   - rc=3: claude プロセス起動前に diff range が解決できなかった（marker 不在）。
+#     呼び出し側は専用の復旧手順付き Issue コメントで `claude-failed` 付与する。
+#     NFR 3.1 に従い「reflog で push 前 commit を回収」「1 commit = 1 task ID で分割」
+#     旨を運用者向けに 5 分以内に判断できる粒度で出力する。
+#
+# Requirements: 3.1, 3.2, 3.3, NFR 2.1, NFR 2.2, NFR 2.3, Issue #164 Req 4.1, 4.2, 4.3, NFR 2.2
 run_per_task_reviewer() {
   local task_id="$1"
   local round="$2"
@@ -6821,14 +6898,15 @@ run_per_task_reviewer() {
   # diff range 解決
   local range_line range_start range_end
   if ! range_line=$(pt_resolve_diff_range "$task_id"); then
-    pt_log "task=$task_id reviewer start round=$round result=error reason=diff-range-resolve-failed" >> "$LOG"
-    return 2
+    # Issue #164 NFR 2.2: 単記 / 連記いずれの候補も見つからなかった旨を明示
+    pt_log "task=$task_id reviewer start round=$round result=error reason=diff-range-resolve-failed detail=no-marker-commit-found(single-id-and-multi-id-both-missing)" >> "$LOG"
+    return 3
   fi
   range_start=$(printf '%s' "$range_line" | cut -f1)
   range_end=$(printf '%s' "$range_line" | cut -f2)
   if [ -z "$range_start" ] || [ -z "$range_end" ]; then
-    pt_log "task=$task_id reviewer start round=$round result=error reason=diff-range-empty" >> "$LOG"
-    return 2
+    pt_log "task=$task_id reviewer start round=$round result=error reason=diff-range-empty detail=resolved-but-empty-pair" >> "$LOG"
+    return 3
   fi
 
   # prev_result（round=2 のみ意味あり）
@@ -6907,6 +6985,132 @@ run_per_task_reviewer() {
       return 2
       ;;
   esac
+}
+
+# ─── pt_mark_diff_range_resolve_failed <task_id> <round> ───
+#
+# diff-range-resolve-failed カテゴリで `claude-failed` を付与し、復旧手順付き Issue
+# コメントを投稿する専用ヘルパー（Issue #164 Req 4）。
+#
+# 通常の `per-task-reviewer-error` 経路（claude crash / parse 失敗等）との違い:
+#   - claude プロセス起動 **前** の失敗（marker commit 単記 / 連記いずれも見つからない）
+#   - 重大なデータ損失リスク（push 前の Developer commit が次サイクル worktree reset で
+#     失われる）を回避するため、運用者向けに `git reflog` 復旧手順と marker commit 分割
+#     規約（1 commit = 1 task ID）を明示する
+#
+# 重複コメント抑制（Req 4.4）:
+#   - HTML コメント marker `<!-- idd-claude:per-task-diff-range-resolve-failed:#<issue>:<task> -->`
+#     を本文末尾に埋め込み、当該 Issue に同一 marker のコメントが既存なら新規投稿を skip
+#     して既存コメントに「追記」する形式の単発コメントのみ追加する
+#
+# Args:
+#   $1 = task_id (例: `1.2`)
+#   $2 = round (1 / 2 / 3 のいずれか / どの round で失敗したかを Issue に明示するため)
+#
+# 副作用:
+#   1. claude-claimed / claude-picked-up を除去し claude-failed を付与
+#   2. 復旧手順付き Issue コメントを 1 件投稿（既存があれば追記コメント）
+#
+# Requirements: Issue #164 Req 4.1, 4.2, 4.3, 4.4, NFR 1.2, NFR 3.1
+pt_mark_diff_range_resolve_failed() {
+  local task_id="$1"
+  local round="$2"
+  local hostname_val
+  hostname_val=$(hostname)
+  local marker="<!-- idd-claude:per-task-diff-range-resolve-failed:#${NUMBER}:${task_id} -->"
+
+  # NFR 1.2: 重複コメント抑制のため既存 marker を gh API で検索
+  local comments_json existing_count=0
+  if comments_json=$(gh issue view "$NUMBER" --repo "$REPO" --json comments 2>/dev/null); then
+    existing_count=$(echo "$comments_json" | jq -r --arg marker "$marker" '
+      (.comments // []) | map(select(.body | contains($marker))) | length
+    ' 2>/dev/null || echo "0")
+    [ -n "$existing_count" ] || existing_count=0
+  fi
+
+  # ラベル付け替え（既存 mark_issue_failed と同方針 / 1 コマンド原子的に発行）
+  gh issue edit "$NUMBER" --repo "$REPO" \
+    --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
+
+  local body_header
+  if [ "$existing_count" -gt 0 ]; then
+    body_header="⚠️ 自動開発が失敗しました（${hostname_val} / モード: $MODE / 失敗 stage: per-task-diff-range-resolve-failed / round=${round}）— **追記コメント**
+
+本 Issue には同一カテゴリ (\`diff-range-resolve-failed\` / task=\`${task_id}\`) の失敗コメントが既に存在します。
+本コメントは状況が再発生したことを示す追記です。詳細な復旧手順は既存コメントを参照してください。"
+  else
+    body_header="⚠️ 自動開発が失敗しました（${hostname_val} / モード: $MODE / 失敗 stage: per-task-diff-range-resolve-failed / round=${round}）"
+  fi
+
+  local body
+  body=$(cat <<EOF
+${body_header}
+
+## 失敗カテゴリ
+- カテゴリ: \`diff-range-resolve-failed\`
+- 対象 task ID: \`${task_id}\`
+- 失敗 round: ${round}
+- ログ: \`$LOG\`
+
+## 原因
+per-task Reviewer が当該 task の \`docs(tasks): mark ${task_id} as done\` marker commit を
+\`${BASE_BRANCH}..HEAD\` 範囲で解決できませんでした（単記 marker / 連記 marker いずれも
+不一致）。Developer が以下のいずれかに該当した可能性があります:
+
+- 進捗 marker commit を作成せずに実装 commit のみで完了した
+- marker commit subject が canonical 形式 \`docs(tasks): mark <id> as done\` から逸脱した
+  （例: prefix 違い / suffix の追加 / typo）
+- 連記 marker commit に task ID \`${task_id}\` と完全一致するトークンが含まれていない
+  （Issue #164 で許容拡大した連記マッチ機構でも検出できなかった）
+
+## 復旧手順（重要 / データ損失リスク回避）
+
+**【重要】次サイクルで本ブランチの worktree が reset される可能性があります。**
+push 前の Developer commit が残っていれば、次サイクル前に必ず以下を実施してください:
+
+1. **push 前 commit の有無を確認**:
+   \`\`\`bash
+   cd <worktree-or-repo-dir>
+   git reflog --date=iso | head -50
+   git log --oneline ${BASE_BRANCH}..HEAD
+   git status
+   \`\`\`
+2. **push 前 commit がある場合は手動で push して保護**:
+   \`\`\`bash
+   git push origin <current-branch>
+   \`\`\`
+   または、reflog から拾い直して別ブランチに退避:
+   \`\`\`bash
+   git branch <rescue-branch-name> <reflog-sha>
+   git push origin <rescue-branch-name>
+   \`\`\`
+3. **marker commit の補完**: 不足している \`docs(tasks): mark ${task_id} as done\` commit を
+   手動で作成（tasks.md の \`- [ ]\` → \`- [x]\` を 1 行編集して 1 commit）してから
+   \`claude-failed\` ラベルを外す。これにより次サイクルで watcher が当該 task を resume できる
+
+## 推奨される marker commit 分割の規約（1 commit = 1 task ID）
+
+per-task Reviewer の diff range 解決は **task ID 単位**で行われます。Developer は以下を厳守すること:
+
+- **1 つの \`docs(tasks): mark <id> as done\` commit には 1 つの task ID のみを含める**
+- 親 task の完了昇格も **別 commit に分割**する（例: 子 \`1.1\` 完了で親 \`1\` も全完了に
+  なる場合、\`docs(tasks): mark 1.1 as done\` と \`docs(tasks): mark 1 as done\` を別 commit
+  にする）
+- 連記表記（\`mark 1 / 1.1 as done\` / \`mark 1, 1.1 as done\`）は watcher が fallback 解決を
+  試行するが、canonical ではない。発見次第、commit を分割し直すこと
+
+詳細は \`repo-template/.claude/agents/developer.md\` の「per-task ループ下での Implementer の
+責務」節を参照してください。
+
+${marker}
+EOF
+)
+
+  body="${body}
+
+問題を解決してから \`claude-failed\` ラベルを外してください。"
+
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
 }
 
 # ─── run_per_task_loop ───
@@ -7143,6 +7347,13 @@ run_per_task_loop() {
 3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
                   return 1
                   ;;
+                3)
+                  # diff-range-resolve-failed (Issue #164) → 専用の復旧手順付き失敗ハンドラ
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=diff-range-resolve-failed" >> "$LOG"
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) diff range 解決失敗 → claude-failed (diff-range-resolve-failed)" | tee -a "$LOG"
+                  pt_mark_diff_range_resolve_failed "$task_id" 3
+                  return 1
+                  ;;
                 *)
                   dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=error" >> "$LOG"
                   echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) 異常終了 → claude-failed" | tee -a "$LOG"
@@ -7174,6 +7385,12 @@ run_per_task_loop() {
               return 1
             fi
             ;;
+          3)
+            # diff-range-resolve-failed (Issue #164) → 専用の復旧手順付き失敗ハンドラ
+            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) diff range 解決失敗 → claude-failed (diff-range-resolve-failed)" | tee -a "$LOG"
+            pt_mark_diff_range_resolve_failed "$task_id" 2
+            return 1
+            ;;
           *)
             echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) 異常終了 → claude-failed" | tee -a "$LOG"
             mark_issue_failed "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
@@ -7181,10 +7398,16 @@ run_per_task_loop() {
             ;;
         esac
         ;;
+      3)
+        # diff-range-resolve-failed (Issue #164) → 専用の復旧手順付き失敗ハンドラ
+        echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) diff range 解決失敗 → claude-failed (diff-range-resolve-failed)" | tee -a "$LOG"
+        pt_mark_diff_range_resolve_failed "$task_id" 1
+        return 1
+        ;;
       *)
         # round=1 reviewer error → claude-failed
         echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) 異常終了 → claude-failed" | tee -a "$LOG"
-        mark_issue_failed "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が異常終了しました（claude crash / parse 失敗 / diff range 解決失敗）。\`$LOG\` を確認してください。"
+        mark_issue_failed "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
         return 1
         ;;
     esac
