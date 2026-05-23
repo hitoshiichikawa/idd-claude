@@ -370,6 +370,13 @@ fresh な Claude session** で本 Developer サブエージェントが起動さ
   親 task のみ
 - 進捗 commit は `docs(tasks): mark <id> as done`（既存 #67 / #112 規約と同一）。当該
   commit には `tasks.md` 以外のファイルを含めない
+- **【重要 / Issue #164】1 commit = 1 task ID**: 1 つの `docs(tasks): mark <id> as done`
+  commit には **必ず 1 つの task ID のみ**を含めること。親 task の完了昇格も **別 commit
+  に分割**する（例: 子 `1.1` 完了で親 `1` も全完了になる場合、`docs(tasks): mark 1.1 as done`
+  と `docs(tasks): mark 1 as done` を別 commit にする）。連記表記（`mark 1 / 1.1 as done`
+  / `mark 1, 1.1 as done`）は per-task Reviewer の diff range 解決が単記 ID 一致で行われる
+  ため、`diff-range-resolve-failed` を引き起こすリスクがある（watcher 側で fallback 解決は
+  試行するが、canonical は単記分割のみ）。
 
 ## learning 追記の責務（per-task ループの中核 / Req 4.1, 4.2, 4.4）
 
