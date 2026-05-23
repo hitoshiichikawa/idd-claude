@@ -10116,15 +10116,22 @@ _worktree_reset() {
   if [ ! -d "$wt" ]; then
     return 1
   fi
-  # 1. 最新の origin を取得
-  if ! git -C "$wt" fetch origin --prune >/dev/null 2>&1; then
-    return 1
-  fi
-  # 2. detached HEAD を origin/$BASE_BRANCH に強制移動
+  # NOTE (Issue #167): ここで以前行っていた per-slot の
+  #   `git -C "$wt" fetch origin --prune`
+  # は削除した。複数 slot worktree は同一 $REPO_DIR の .git オブジェクト DB / refs を
+  # 共有するため、PARALLEL_SLOTS>1 で複数 slot がほぼ同時に fetch すると
+  # refs/remotes/origin/<branch>.lock / packed-refs.lock の取得競争が起き、
+  # 競合に負けた側の fetch が非 0 終了する。set -euo pipefail 下では本関数が失敗扱いと
+  # なり、無実の Issue に偽陽性の claude-failed ラベルとエラーコメントが付いていた。
+  # origin 参照の最新化は親プロセスがサイクル冒頭（本ファイル冒頭付近の
+  # `cd "$REPO_DIR"; git fetch origin --prune`）で 1 回だけ実行済みであり、slot worktree は
+  # その origin/$BASE_BRANCH 参照を共有して読むため、per-slot fetch なしでも reset 起点は
+  # 確保できる（親 fetch から slot 起動までの遅延による ref stale は許容範囲）。
+  # 1. detached HEAD を origin/$BASE_BRANCH に強制移動
   if ! git -C "$wt" reset --hard "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
     return 1
   fi
-  # 3. untracked + ignored を消去（前回 Issue の build artifact / node_modules を残さない）
+  # 2. untracked + ignored を消去（前回 Issue の build artifact / node_modules を残さない）
   if ! git -C "$wt" clean -fdx >/dev/null 2>&1; then
     return 1
   fi
