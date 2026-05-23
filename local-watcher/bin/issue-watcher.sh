@@ -5447,6 +5447,58 @@ sav_error() {
   echo "[$(date '+%F %T')] [$REPO] stage-a-verify: ERROR: $*" >&2
 }
 
+# ─── _sav_cmd_starts_with_keyword ───
+#
+# 抽出した shell コマンド ($1) が verify keyword 集合のいずれかで「行頭一致」
+# するかを確認する。`stage_a_verify_run` の Gate 3 として `stage_a_verify_extract_command`
+# 側の strict 抽出に対する defense-in-depth として使う（#160 Req 5.3）。
+#
+# 注: keyword 集合の Single Source of Truth は `stage_a_verify_extract_command`
+#     内の awk script に渡される `_SAV_KEYWORDS` である。本関数の keyword リストは
+#     当該定義と **完全一致** している必要があり、追加時は両方を更新すること
+#     （tasks-generation.md の design.md「Components and Interfaces /
+#     stage_a_verify_extract_command」を参照）。
+#     抽出関数側で既に行頭一致を保証しているため、本関数のチェックが SKIPPED に
+#     倒すケースは「将来抽出関数の挙動が緩んだ場合のセーフティネット」と
+#     「将来の caller 拡張」を想定したもの。
+#
+# 入力: $1 = 抽出済み shell コマンド文字列
+# 戻り値: 0 = いずれかの keyword で開始 / 1 = 一致しない（= SKIPPED 候補）
+_sav_cmd_starts_with_keyword() {
+  local cmd="$1"
+  case "$cmd" in
+    "./gradlew"*) return 0 ;;
+    "gradle "*) return 0 ;;
+    "mvn "*) return 0 ;;
+    "npm test"*) return 0 ;;
+    "npm run"*) return 0 ;;
+    "npm ci"*) return 0 ;;
+    "pnpm "*) return 0 ;;
+    "yarn "*) return 0 ;;
+    "cargo "*) return 0 ;;
+    "go test"*) return 0 ;;
+    "go build"*) return 0 ;;
+    "go vet"*) return 0 ;;
+    "pytest"*) return 0 ;;
+    "python -m pytest"*) return 0 ;;
+    "python -m unittest"*) return 0 ;;
+    "make test"*) return 0 ;;
+    "make build"*) return 0 ;;
+    "make check"*) return 0 ;;
+    "make verify"*) return 0 ;;
+    "bundle exec"*) return 0 ;;
+    "rake "*) return 0 ;;
+    "dotnet test"*) return 0 ;;
+    "dotnet build"*) return 0 ;;
+    "shellcheck"*) return 0 ;;
+    "actionlint"*) return 0 ;;
+    "tox "*) return 0 ;;
+    "swift test"*) return 0 ;;
+    "swift build"*) return 0 ;;
+  esac
+  return 1
+}
+
 # ─── stage_a_verify_extract_command ───
 #
 # `tasks.md` を 1 パスで走査し、抽出キーワード集合に一致した行のうち
@@ -5553,8 +5605,13 @@ stage_a_verify_extract_command() {
       sub(/[[:space:]]+$/, "", line)
 
       # インラインコードスパン抽出（#160 Req 1.1, 1.2）:
-      #   バッククォートで囲まれた中身を順に走査し、最初に keyword 一致した
-      #   スパンの中身を採用する。
+      #   バッククォートで囲まれた中身を順に走査し、最初に keyword に**行頭一致**
+      #   したスパンの中身を採用する。
+      #   #160 round=2 (Req 5.3): `index(candidate, kw) > 0` だと
+      #   `cd app && ./gradlew test` のように冒頭が keyword 以外のスパンも
+      #   採用してしまい、`bash -c "cd app && ..."` が走って意図せず副作用を起こす
+      #   恐れがあるため `== 1` （= 行頭一致）に厳格化する。span の冒頭が keyword
+      #   で始まらない場合は当該 span を抽出対象から外し、次の span を走査する。
       span_hit = 0
       span_content = ""
       tail = line
@@ -5568,7 +5625,7 @@ stage_a_verify_extract_command() {
         for (i = 1; i <= n; i++) {
           kw = ARR[i]
           if (kw == "") continue
-          if (index(candidate, kw) > 0) {
+          if (index(candidate, kw) == 1) {
             span_content = candidate
             span_hit = 1
             break
@@ -5583,18 +5640,23 @@ stage_a_verify_extract_command() {
       }
 
       # backtick 無し / backtick はあるが keyword 不一致の場合は、装飾除去後の
-      # 行全体が keyword に部分一致するか従来ロジックで判定（#160 Req 2.1 後方互換）。
+      # 行全体が keyword で**行頭一致**するか判定する（#160 Req 2.1 後方互換 +
+      # Req 5.3）。
       # ただし line に backtick がペアで含まれる場合は「散文+backtick で keyword は
       # スパン外にしか出現しない」ケース（#160 の本丸 regression）なので行全体採用
       # は誤動作を起こす。よって backtick ペアが存在する場合は line fallback を
       # 行わず、当該行を抽出候補から除外する（Req 1.4 / Req 5.1）。
+      # #160 round=2 (Req 5.3): 部分一致 `index(...) > 0` だと
+      # `lint を実行する` のような散文の "lint" を `./gradlew :app:lintDebug`
+      # 等とマッチさせる可能性があるため、行頭一致 `index(...) == 1` に厳格化する。
+      # 既存 12 fixture はいずれも装飾除去後の行頭が keyword で始まるため挙動不変。
       bt_count = gsub(/`/, "`", line)
       if (bt_count >= 2) { next }
 
       for (i = 1; i <= n; i++) {
         kw = ARR[i]
         if (kw == "") continue
-        if (index(line, kw) > 0) {
+        if (index(line, kw) == 1) {
           last = line
           break
         }
@@ -8720,6 +8782,17 @@ stage_a_verify_run() {
   if ! cmd=$(stage_a_verify_resolve_command); then
     sav_log "SKIPPED reason=no-verify-task-in-tasks-md"
     return 0
+  fi
+
+  # ── Gate 3: SKIPPED（抽出した cmd が keyword で開始しない）──
+  # `stage_a_verify_extract_command` 側で行頭一致を保証しているが、defense-in-depth
+  # として実行直前にも確認する（#160 Req 5.3）。`STAGE_A_VERIFY_COMMAND` env による
+  # escape hatch 経路（Req 4.1）は運用者が明示指定した値なので本チェックを bypass する。
+  if [ -z "${STAGE_A_VERIFY_COMMAND:-}" ]; then
+    if ! _sav_cmd_starts_with_keyword "$cmd"; then
+      sav_log "SKIPPED reason=cmd-does-not-start-with-keyword cmd=$(printf '%q' "$cmd")"
+      return 0
+    fi
   fi
 
   # ── Execute ──
