@@ -3429,6 +3429,13 @@ cron / launchd の `REPO=... REPO_DIR=...` に `PER_TASK_LOOP_ENABLED=true` を 
 
 opt-in した状態で `impl` / `impl-resume` モードが Stage A に入ると、以下のフローに変わります:
 
+> **tasks.md 不在時のフォールバック (#166)**: `PER_TASK_LOOP_ENABLED=true` でも対象 Issue の
+> `docs/specs/<番号>-<slug>/tasks.md` が存在しない場合（Architect 不要 triage を通過した
+> Issue 等）、watcher は Issue を `claude-failed` 扱いせず、**従来の単一 Developer Stage A
+> 経路（single-shot Implementer + Reviewer round=1 + PR 作成）へフォールバック**します。
+> フォールバック発生時は slot ログに `per-task: tasks.md 不在 → Stage A fallback` 行が出力
+> されます（Req 1.1 / AC5）。
+
 1. **未完了 task 抽出**: `tasks.md` から `- [ ]` で始まる numeric ID task 行を抽出し、
    `sort -V` で numeric 階層昇順に並べる（`1.10` > `1.2` を保証 / deferrable `- [ ]*` は除外）
 2. **task ごとのループ**: 各 task について以下を順次実行:

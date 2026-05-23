@@ -7119,7 +7119,8 @@ EOF
 # 消化する dispatcher。
 #
 # 戻り値:
-#   0  = 全 task 消化成功（Stage A 完了相当）または pending 0 件で no-op
+#   0  = 全 task 消化成功（Stage A 完了相当）/ pending 0 件で no-op /
+#        tasks.md 不在の防御ガード（呼び出し側で Stage A fallback 済みの想定 / #166）
 #   1  = Implementer / Reviewer 失敗で claude-failed 付与済み（呼び出し側は伝搬 return 1）
 #
 # 副作用:
@@ -7131,10 +7132,13 @@ EOF
 # Requirements: 2.1, 2.6, 2.7, 3.4, 3.5, 3.6, 3.7, 5.1, 5.2
 run_per_task_loop() {
   local tasks_md="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+  # tasks.md 不在の事前分岐は呼び出し側 run_impl_pipeline() の Stage A 分岐で実施済み
+  # （#166: tasks.md 不在なら per-task ループへ入らず従来 Stage A へフォールバックする）。
+  # 本ブロックは万一直接呼び出し等で到達した場合の防御ガード。Issue を失敗扱いせず
+  # （claude-failed を付けず）no-op return 0 で抜け、メッセージと実装の乖離を作らない。
   if [ ! -f "$tasks_md" ]; then
-    pt_warn "tasks.md が存在しません: $tasks_md → 通常 Stage A にフォールバック相当として return 1"
-    mark_issue_failed "per-task-tasks-missing" "per-task ループ起動に必要な \`tasks.md\` が見つかりません: \`$tasks_md\`。"
-    return 1
+    pt_warn "tasks.md が存在しません: $tasks_md → per-task ループを起動せず no-op return 0（呼び出し側で Stage A fallback 済みの想定）"
+    return 0
   fi
 
   # pending タスク一覧
@@ -9134,7 +9138,22 @@ run_impl_pipeline() {
   # Stage B / Stage C は分岐の外で従来通り実行される（NFR 1.4）。
   case "$START_STAGE" in
     A)
+      # per-task loop は `tasks.md` が存在する場合にのみ起動する。`PER_TASK_LOOP_ENABLED=true`
+      # でも tasks.md 不在（Architect 不要 triage を通過した Issue 等）の場合は、Issue を
+      # 失敗扱いせず従来の単一 Developer 経路（else ブランチ）へフォールバックする（#166 /
+      # Req 1.1, 1.2, 3.1）。判定を if 条件に畳むことで、従来 Stage A ブロックを重複させずに
+      # 到達させる（NFR 2.1: per-task ループ dispatcher 本体は変更しない）。
+      local _pt_tasks_md="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+      local _pt_loop_enabled=false
       if [ "${PER_TASK_LOOP_ENABLED:-false}" = "true" ]; then
+        if [ -f "$_pt_tasks_md" ]; then
+          _pt_loop_enabled=true
+        else
+          # AC5: フォールバック発生を判別可能なログ行を slot ログに出力（claude-failed は付けない）
+          echo "--- per-task: tasks.md 不在 → Stage A fallback（$_pt_tasks_md）---" | tee -a "$LOG"
+        fi
+      fi
+      if [ "$_pt_loop_enabled" = "true" ]; then
         echo "--- Stage A 実行（$MODE / per-task loop / PER_TASK_LOOP_ENABLED=true）---" >> "$LOG"
         if ! run_per_task_loop; then
           # run_per_task_loop 内で claude-failed 付与済 / 既に Issue コメント済。
