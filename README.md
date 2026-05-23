@@ -2540,8 +2540,9 @@ quota 超過時に claude CLI は `rate_limit_event (status=exceeded)` を含む
 - 検知時:
   - `claude-claimed` / `claude-picked-up` を除去 → `needs-quota-wait` 付与（atomic
     1 PATCH）。`claude-failed` は **付与しない**
-  - reset 予定時刻を Issue body の hidden marker
-    `<!-- idd-claude:quota-reset:<epoch>:v1 -->` として永続化（1 Issue につき 1 件のみ）
+  - reset 予定時刻を repo slug 単位で分離済みの `LOG_DIR` 配下のローカルファイル
+    `quota-reset-times.json`（Issue 番号 keyed JSON）に永続化（1 Issue につき最新値 1 件のみ）。
+    Issue body への書き込みは行わない（#169。GitHub UI での人間編集との lost update を解消）
   - escalation コメントを 1 件投稿（Stage 種別 / reset epoch / ISO 8601 / grace 値を含む）
 - cron tick 冒頭の **Quota Resume Processor** が `needs-quota-wait` 付き open Issue を
   走査し、現在時刻が `reset 予定時刻 + QUOTA_RESUME_GRACE_SEC` を超えていれば
@@ -2570,18 +2571,36 @@ Anthropic アカウント token を共有する場合は、reset 直後に複数
 
 ### reset 時刻の永続化方式
 
-reset 時刻は **Issue body の末尾に hidden HTML コメント 1 行** として永続化される:
+reset 時刻は **`LOG_DIR` 配下のローカルファイル** `quota-reset-times.json` に
+Issue 番号 keyed の JSON として永続化される（#169）:
 
+```json
+{
+  "<issue_number>": <epoch_seconds>,
+  "<issue_number>": <epoch_seconds>
+}
 ```
-<!-- idd-claude:quota-reset:<epoch_seconds>:v1 -->
-```
 
-- `<epoch_seconds>`: UNIX 秒（10 桁。例: `1745928000`）
-- `:v1`: 将来スキーマ変更時の version tag
-- 1 Issue につき 1 個のみ（書き込み時は既存 marker 行を全削除してから新値を追記）
+- ファイルパス: `$LOG_DIR/quota-reset-times.json`（`LOG_DIR` は `$HOME/.issue-watcher/logs/<repo_slug>`。
+  repo slug 単位で分離済みのため、異なる repo の reset 時刻は同一ファイルに混在しない）
+- `<issue_number>`: GitHub Issue 番号（文字列キー）
+- `<epoch_seconds>`: UNIX 秒（整数。例: `1745928000`）
+- 1 Issue につき最新値 1 件のみ（書き込み時は当該 Issue 番号 key を upsert。`jq` で
+  temp file → `mv` のアトミック書込）
+- 環境変数 `QUOTA_RESET_STATE_FILE` で永続化先パスを上書き可能（既定は上記）
 
-`gh issue view <N> --json body` で読み出し、`gh issue edit <N> --body` で書き込み
-する。GitHub UI には表示されない。
+`jq` でローカルファイルを読み書きする。**Issue body への書き込み（`gh issue edit --body`）は
+行わない**ため、人間が GitHub UI で同 Issue 本文を編集しても watcher の永続化処理が
+それを上書きする lost update は発生しない（#169 で旧 read-modify-write 方式から移行）。
+
+#### 移行期の本文 marker フォールバック読取
+
+本変更デプロイ前に旧方式（Issue body の hidden marker
+`<!-- idd-claude:quota-reset:<epoch>:v1 -->`）で永続化済みの Issue が `needs-quota-wait`
+状態で残っている場合に取り残されないよう、**読取はローカルファイルを優先しつつ、ローカルに
+当該 Issue の有効な値が無ければ Issue body の旧 marker をフォールバックとして読み取る**。
+ローカルファイルと本文 marker の両方に値がある場合はローカルファイルを優先する。
+既存 Issue body に残存する旧 marker の能動的な一括削除は行わない（読取互換のため残置）。
 
 ### 検知 Stage 一覧
 
@@ -2622,20 +2641,22 @@ watcher が `<StageLabel>` 実行中に Claude CLI から `rate_limit_event (sta
 ### 手動介入したい場合
 
 - 即時再開: `needs-quota-wait` ラベルを手動で外すと次サイクルで pickup されます
-- quota 起因でないと判断する場合: 当該 Issue body の `<!-- idd-claude:quota-reset:...:v1 -->` 行を
-  削除した上で `needs-quota-wait` を `claude-failed` に手動付け替えしてください
+- quota 起因でないと判断する場合: `needs-quota-wait` を `claude-failed` に手動付け替えしてください
+  （reset 予定時刻は watcher 環境内のローカルファイルに保持されており、Issue body の編集は不要です）
 ```
 
 ### 自動 resume の条件
 
 - Quota Resume Processor が `gh issue list --label needs-quota-wait --state open` で
-  対象 Issue を取得し、各 Issue について Issue body の hidden marker から reset epoch を
-  読み出す
+  対象 Issue を取得し、各 Issue について reset epoch を読み出す（ローカルファイル
+  `quota-reset-times.json` を優先し、無ければ移行期フォールバックとして Issue body の
+  旧 marker を読む）
 - 現在時刻 ≥ `reset_epoch + QUOTA_RESUME_GRACE_SEC` のとき `--remove-label
   needs-quota-wait` で除去
 - 除去後はラベル状態のみ変更し、claim や Stage 実行を直接トリガーしない（次サイクルの
   Dispatcher が通常 pickup ループの対象として再選定する）
-- 永続化値が読み出せない / 不正値の場合はラベル維持で人間判断に委ねる（自動除去しない）
+- 永続化値が読み出せない / 不正値（破損ファイル含む）の場合はラベル維持で人間判断に委ねる
+  （自動除去しない）
 
 ### Migration Note（既存ユーザー向け）
 

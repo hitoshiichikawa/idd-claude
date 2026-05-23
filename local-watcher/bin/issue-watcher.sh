@@ -556,8 +556,10 @@ git pull --ff-only origin "$BASE_BRANCH"
 # Quota-Aware Watcher Helpers (#66)
 #   Claude Max の 5 時間ローリング quota 超過を、Stage 実行中の claude CLI が出す
 #   `rate_limit_event` (status=exceeded) JSON で検知する。検知時は当該 Issue を
-#   `needs-quota-wait` 状態にし、reset 予定時刻を Issue body の hidden marker として
-#   永続化。次サイクル以降の Quota Resume Processor が reset+grace 経過した Issue
+#   `needs-quota-wait` 状態にし、reset 予定時刻を repo slug 単位で分離済みの $LOG_DIR
+#   配下のローカルファイル（Issue 番号 keyed JSON）に永続化する（#169。Issue body の
+#   read-modify-write を廃止し lost update を解消。移行期は本文 marker をフォールバック
+#   読取）。次サイクル以降の Quota Resume Processor が reset+grace 経過した Issue
 #   からラベルを除去して通常 pickup ループに戻す。
 #
 #   QUOTA_AWARE_ENABLED=false（明示 opt-out）では本セクションの全関数は呼ばれるが、
@@ -767,38 +769,91 @@ qa_run_claude_stage() {
   return "$claude_rc"
 }
 
-# Issue body の hidden marker として reset 予定時刻を 1 件のみ保持する形で
-# 永続化する（Req 4.1, 4.3）。既存 marker 行があれば全削除してから新値を追記。
+# reset 予定時刻のローカル永続化ファイル（#169）。
+# Issue body の read-modify-write（lost update リスクあり）を廃止し、repo slug 単位で
+# 分離済みの $LOG_DIR 配下に Issue 番号 keyed の JSON で永続化する（Req 1.1〜1.4, 2.x）。
+# JSON 形状: { "<issue_number>": <reset_epoch_int>, ... }（1 Issue 最新値 1 件 / NFR 4.1）。
+# $LOG_DIR は repo ごとに分離されているため、本ファイルに他 repo の値は混在しない（Req 1.4）。
+QUOTA_RESET_STATE_FILE="${QUOTA_RESET_STATE_FILE:-$LOG_DIR/quota-reset-times.json}"
+
+# reset 予定時刻をローカルファイルへ Issue 番号 keyed で永続化する（Req 1.1〜1.4, 2.1, 2.3,
+# 4.1, 4.2, NFR 4.1）。Issue body への書き込み（gh issue edit --body 相当）は一切行わない
+# （Req 1.2, 1.3）。書込はアトミック（temp file → mv）で破損リスクを抑える。
 #
 # Args: $1 = issue number, $2 = reset epoch (integer)
-# Return: 0 = persisted, 1 = gh failure (warn only, do not fail caller)
+# Return: 0 = persisted, 1 = failure (warn only, do not fail caller / Req 4.2)
 qa_persist_reset_time() {
   local issue_number="$1"
   local epoch="$2"
-  local body
-  if ! body=$(gh issue view "$issue_number" --repo "$REPO" --json body --jq '.body' 2>/dev/null); then
+
+  # 不正な epoch（数値以外）は永続化しない（malformed 値を書き込まない / NFR 4.1 整合）
+  if ! [[ "$epoch" =~ ^[0-9]+$ ]]; then
     return 1
   fi
-  # 既存 marker 行を全削除（複数あったとしても落とす）
-  local cleaned
-  cleaned=$(printf '%s\n' "$body" | sed -E '/<!-- idd-claude:quota-reset:[0-9]+:v1 -->/d')
-  # body 末尾を空行 1 つで区切って marker を 1 行追記
-  local new_body
-  new_body=$(printf '%s\n\n<!-- idd-claude:quota-reset:%s:v1 -->' "$cleaned" "$epoch")
-  if ! gh issue edit "$issue_number" --repo "$REPO" --body "$new_body" >/dev/null 2>&1; then
+
+  # 永続化先ディレクトリを確保（$LOG_DIR は通常起動時に mkdir 済みだが防御的に）
+  local state_dir
+  state_dir=$(dirname "$QUOTA_RESET_STATE_FILE")
+  if ! mkdir -p "$state_dir" 2>/dev/null; then
+    return 1
+  fi
+
+  # 既存ファイルを基に Issue 番号 key を upsert する。ファイル不在 / 破損時は空 object から
+  # 初期化（Req 4.5 の破損耐性は読取側で担保するが、書込時も破損を引きずらない）。
+  local base_json="{}"
+  if [ -f "$QUOTA_RESET_STATE_FILE" ]; then
+    local existing
+    if existing=$(jq -e '.' "$QUOTA_RESET_STATE_FILE" 2>/dev/null); then
+      base_json="$existing"
+    fi
+  fi
+
+  # アトミック書込: temp file に出力 → mv で置換（同一 Issue・同一 epoch を複数回実行しても
+  # 1 件の最新値に収束 / NFR 4.1）。temp file は同一ディレクトリに作り mv を atomic に保つ。
+  local tmp_file
+  if ! tmp_file=$(mktemp "${QUOTA_RESET_STATE_FILE}.XXXXXX" 2>/dev/null); then
+    return 1
+  fi
+  if ! printf '%s' "$base_json" | jq \
+      --arg num "$issue_number" \
+      --argjson epoch "$epoch" \
+      '. + {($num): $epoch}' > "$tmp_file" 2>/dev/null; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+  if ! mv -f "$tmp_file" "$QUOTA_RESET_STATE_FILE" 2>/dev/null; then
+    rm -f "$tmp_file"
     return 1
   fi
   return 0
 }
 
-# Issue body から hidden marker を読み出して reset epoch を返す（Req 4.2, 4.4）。
-# marker 不在 / 不正値 / API 失敗いずれの場合も数値以外を返さない。
+# Issue 番号に対応する reset epoch を返す（Req 3.1〜3.4, 4.3, 4.4, 4.5）。
+# 読取順: 1) ローカルファイル（優先 / Req 3.1, 3.3） 2) Issue body の hidden marker
+# `<!-- idd-claude:quota-reset:<epoch>:v1 -->`（移行期フォールバック / Req 3.2, 3.4）。
+# 破損ファイル / 不正値 / 双方不在いずれの場合も数値以外を返さず return 1（Req 4.4, 4.5）。
 #
 # Args: $1 = issue number
 # Stdout: epoch (integer) on success, empty on failure
-# Return: 0 = found, 1 = absent or malformed (caller must skip removal)
+# Return: 0 = found, 1 = absent or malformed (caller must skip removal / Req 4.4)
 qa_load_reset_time() {
   local issue_number="$1"
+
+  # 1) ローカルファイル優先（Req 3.1, 3.3）。破損ファイルは jq -e が非 0 で抜け、
+  #    フォールバックに進む（Req 4.5: malformed を数値として返さない）。
+  if [ -f "$QUOTA_RESET_STATE_FILE" ]; then
+    local local_epoch
+    local_epoch=$(jq -er --arg num "$issue_number" \
+      '.[$num] | select(type == "number") | floor | tostring' \
+      "$QUOTA_RESET_STATE_FILE" 2>/dev/null)
+    if [[ "$local_epoch" =~ ^[0-9]+$ ]]; then
+      printf '%s' "$local_epoch"
+      return 0
+    fi
+  fi
+
+  # 2) フォールバック: Issue body の hidden marker（移行期 / 本変更デプロイ前に
+  #    永続化済みの Issue 向け / Req 3.2, 3.4）。
   local body
   if ! body=$(gh issue view "$issue_number" --repo "$REPO" --json body --jq '.body' 2>/dev/null); then
     return 1
@@ -843,8 +898,8 @@ watcher が \`${stage_label}\` 実行中に Claude CLI から \`rate_limit_event
 ### 手動介入したい場合
 
 - 即時再開: \`needs-quota-wait\` ラベルを手動で外すと次サイクルで pickup されます
-- quota 起因でないと判断する場合: 当該 Issue body の \`<!-- idd-claude:quota-reset:...:v1 -->\` 行を
-  削除した上で \`needs-quota-wait\` を \`claude-failed\` に手動付け替えしてください
+- quota 起因でないと判断する場合: \`needs-quota-wait\` を \`claude-failed\` に手動付け替えしてください
+  （reset 予定時刻は watcher 環境内のローカルファイルに保持されており、Issue body の編集は不要です）
 
 ---
 
@@ -1005,8 +1060,12 @@ qa_handle_quota_exceeded() {
   iso8601=$(qa_format_iso8601 "$epoch")
 
   # 1. 永続化（失敗してもラベル付与に進む。次 tick で再判定可能）
-  if ! qa_persist_reset_time "$issue_number" "$epoch"; then
-    qa_warn "issue=$issue_number stage=$stage_label reset 永続化に失敗（ラベル付与は継続）"
+  #    NFR 2.1, 2.2: 成功 / 失敗を Issue 番号 + reset epoch 付きで $LOG_DIR ログに残し、
+  #    grep による事後検索を可能にする。
+  if qa_persist_reset_time "$issue_number" "$epoch"; then
+    qa_log "reset persisted issue=#$issue_number stage=$stage_label reset_epoch=$epoch file=$QUOTA_RESET_STATE_FILE"
+  else
+    qa_warn "issue=$issue_number stage=$stage_label reset_epoch=$epoch reset 永続化に失敗（ラベル付与は継続）"
   fi
 
   # 2. ラベル付け替え（claude-claimed / claude-picked-up を除去 → needs-quota-wait 付与。
