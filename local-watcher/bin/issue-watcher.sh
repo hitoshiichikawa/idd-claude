@@ -9189,6 +9189,38 @@ run_impl_pipeline() {
           _pt_remaining_count=$(printf '%s\n' "$_pt_remaining" | wc -l | tr -d '[:space:]')
           pt_log "issue=#${NUMBER} 必須未完了 task=${_pt_remaining_count} 残存 → ready-for-review 遷移を保留し resumable return 0（残: $(printf '%s' "$_pt_remaining" | tr '\n' ' '))" | tee -a "$LOG"
           echo "⏸️ #$NUMBER: per-task ループ終了時に必須未完了 task が ${_pt_remaining_count} 件残存 → ready-for-review へ進めず後続 tick で再開" | tee -a "$LOG"
+          # ── 保留 Issue の再 pickup 可能化 (#198 / Req 1.1, 1.4, NFR 2.1) ──
+          # dispatcher の候補クエリは `-label:"$LABEL_PICKED"`（claude-picked-up）を除外条件に
+          # 持つため、保留時に `claude-picked-up` を残したままだと当該 Issue が二度と pickup
+          # 候補に上がらず impl-resume が再開せず stuck になる（#180 Part 2 の事例）。ここで
+          # `claude-picked-up`（および念のため `claude-claimed`）を除去して bare auto-dev
+          # candidate に戻すことで、次 tick の dispatcher が当該 Issue を再選択 → mode 判定が
+          # 既存 spec/branch を検出して impl-resume を起動 → 残 task を消化する（残 task の
+          # `- [x]` skip による冪等性は既存 impl-resume 機構が担保 / Req 2.1）。
+          #
+          # quota パスとの非干渉 (Req 3.2/3.3): 本保留は `needs-quota-wait` を一切付与しない。
+          # quota 中断は `qa_handle_quota_exceeded` が `needs-quota-wait` を付け
+          # `process_quota_resume` が reset+grace 経過まで待つ別経路であり、本保留はラベル除去
+          # のみで `needs-quota-wait` を触らないため、quota processor の走査対象（needs-quota-wait
+          # のみ）に乗らず二重処理は構造的に発生しない。
+          #
+          # 副作用失敗の扱い (Req 1.4): `gh issue edit` の失敗は warn 吸収して `return 0` を
+          # 維持する（quota ハンドラと同じく副作用失敗で全体を落とさない方針）。失敗時は
+          # `claude-picked-up` が残り当該 Issue は次 tick でも候補に上がらないが、その旨を
+          # ログに残し次 tick で再評価される（人間が手動でラベル除去する余地も残す）。
+          #
+          # 同一 tick 即時再開について (Req 1.1): dispatcher は tick 冒頭に候補スナップショットを
+          # 取得するため、tick 途中の本ラベル除去は当該 tick のキューに影響しない（同一 tick 内
+          # 即時再 claim は構造的に起きず、再開は後続 tick から）。
+          if gh issue edit "$NUMBER" --repo "$REPO" \
+              --remove-label "$LABEL_PICKED" \
+              --remove-label "$LABEL_CLAIMED" >/dev/null 2>&1; then
+            pt_log "issue=#${NUMBER} claude-picked-up を除去し bare auto-dev candidate へ復帰 → 後続 tick で impl-resume 再開" | tee -a "$LOG"
+          else
+            # pt_warn は stderr 出力のため、$LOG への grep 可能な記録は別途 tee で残す（NFR 2.1）
+            pt_warn "issue=#${NUMBER} claude-picked-up 除去に失敗（ラベル残置 → 次 tick で再評価。手動除去で復旧可能）"
+            pt_log "issue=#${NUMBER} WARN claude-picked-up 除去に失敗（ラベル残置 → 次 tick で再評価。手動除去で復旧可能）" | tee -a "$LOG"
+          fi
           return 0
         fi
         # per-task loop 内で逐次 commit + push される規約のため、loop 終了後の HEAD は
