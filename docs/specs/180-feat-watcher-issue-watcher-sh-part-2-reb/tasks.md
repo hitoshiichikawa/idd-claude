@@ -24,7 +24,7 @@
   - _Boundary: Quota-Aware Processor_
   - _Depends: 1_
 
-- [ ] 3. Merge-Queue Processor の抽出
+- [x] 3. Merge-Queue Processor の抽出
   - `merge-queue.sh` を新規作成する
   - `mq_pr_has_label` / `mq_handle_conflict` / `mq_try_rebase_pr` / `process_merge_queue`（L1123〜1424）
     と `mqr_log` / `mqr_warn` / `mqr_error` / `process_merge_queue_recheck`（L2195〜2318）を差分等価で移動する
