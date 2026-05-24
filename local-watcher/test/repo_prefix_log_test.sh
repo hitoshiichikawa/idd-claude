@@ -29,9 +29,13 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
-# #177 Part 1 で低レベル共通ユーティリティ（qa_log 等のロガーを含む）は
-# modules/core_utils.sh へ分離された。関数抽出の探索元に core_utils.sh も含める。
+# #177 Part 1 で低レベル共通ユーティリティ（qa_log / mq_log / pi_log / drr_log 等の
+# ロガーを含む）は modules/core_utils.sh へ分離された。関数抽出の探索元に core_utils.sh も含める。
 CORE_UTILS_SH="$SCRIPT_DIR/../bin/modules/core_utils.sh"
+# #180 Part 2 で merge-queue-recheck 専用ロガー（mqr_log / mqr_warn / mqr_error）は
+# modules/merge-queue.sh へ分離された（core_utils.sh には無く本体由来だったため）。
+# 関数抽出の探索元に merge-queue.sh も含める。
+MERGE_QUEUE_SH="$SCRIPT_DIR/../bin/modules/merge-queue.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
@@ -41,8 +45,12 @@ if [ ! -f "$CORE_UTILS_SH" ]; then
   echo "ERROR: cannot find core_utils.sh at $CORE_UTILS_SH" >&2
   exit 2
 fi
+if [ ! -f "$MERGE_QUEUE_SH" ]; then
+  echo "ERROR: cannot find merge-queue.sh at $MERGE_QUEUE_SH" >&2
+  exit 2
+fi
 
-# issue-watcher.sh から関数 1 つだけを抽出する（normalize_slug_test.sh と同じ awk）。
+# issue-watcher.sh / modules から関数 1 つだけを抽出する（normalize_slug_test.sh と同じ awk）。
 extract_function() {
   local script="$1"
   local fn_name="$2"
@@ -50,7 +58,7 @@ extract_function() {
     $0 == fn { in_fn = 1 }
     in_fn { print }
     in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script" "$CORE_UTILS_SH"
+  ' "$script" "$CORE_UTILS_SH" "$MERGE_QUEUE_SH"
 }
 
 # テスト用に REPO を固定値で上書き（cron 起動時の `REPO=owner/your-repo` を模倣）

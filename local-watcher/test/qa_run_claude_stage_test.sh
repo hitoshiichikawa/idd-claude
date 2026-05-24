@@ -31,6 +31,9 @@ WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #177 Part 1 で低レベル共通ユーティリティ（qa_log 等のロガーを含む）は
 # modules/core_utils.sh へ分離された。関数抽出の探索元に core_utils.sh も含める。
 CORE_UTILS_SH="$SCRIPT_DIR/../bin/modules/core_utils.sh"
+# #180 Part 2 で quota 待機制御プロセッサ（qa_detect_rate_limit / qa_run_claude_stage 等）は
+# modules/quota-aware.sh へ分離された。関数抽出の探索元に quota-aware.sh も含める。
+QUOTA_AWARE_SH="$SCRIPT_DIR/../bin/modules/quota-aware.sh"
 FIXTURE_DIR="$SCRIPT_DIR/fixtures/qa_detect_rate_limit"
 
 if [ ! -f "$WATCHER_SH" ]; then
@@ -39,6 +42,10 @@ if [ ! -f "$WATCHER_SH" ]; then
 fi
 if [ ! -f "$CORE_UTILS_SH" ]; then
   echo "ERROR: cannot find core_utils.sh at $CORE_UTILS_SH" >&2
+  exit 2
+fi
+if [ ! -f "$QUOTA_AWARE_SH" ]; then
+  echo "ERROR: cannot find quota-aware.sh at $QUOTA_AWARE_SH" >&2
   exit 2
 fi
 
@@ -56,7 +63,7 @@ extract_function() {
     $0 == fn { in_fn = 1 }
     in_fn { print }
     in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script" "$CORE_UTILS_SH"
+  ' "$script" "$CORE_UTILS_SH" "$QUOTA_AWARE_SH"
 }
 
 # qa_log / qa_warn / qa_error は qa_run_claude_stage が呼ぶので必ず loaded する
