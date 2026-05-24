@@ -9151,6 +9151,24 @@ run_impl_pipeline() {
           # run_per_task_loop 内で claude-failed 付与済 / 既に Issue コメント済。
           return 1
         fi
+        # ── per-task 全 task 完了ゲート (#194) ──
+        # `run_per_task_loop` の `return 0` は「全 task 消化成功」と「quota 超過等による
+        # 中間早期 return」の双方を含むため、戻り値 0 だけでは全 task 完了を保証できない。
+        # ここで tasks.md を再読込し、必須 task（deferrable `- [ ]*` を除く `- [ ]`）が
+        # 1 件でも残っていれば Reviewer / PR / ready-for-review へ進めず、未完了状態として
+        # `return 0`（resumable）で抜ける。後続 tick の Resume Processor が残り task を消化する。
+        # mark_issue_failed は呼ばない（失敗ではなく中断のため。quota 早期 return と同じ扱い）。
+        # 本ゲートは `_pt_loop_enabled=true` 分岐内にのみ存在し、PER_TASK_LOOP 無効時の
+        # 通常 Developer 経路（else ブランチ）には一切影響しない（Req 1.1, 1.3, 1.4, 1.5, 2.1, NFR 1.1）。
+        local _pt_remaining
+        _pt_remaining=$(pt_extract_pending_tasks "$_pt_tasks_md" || true)
+        if [ -n "$_pt_remaining" ]; then
+          local _pt_remaining_count
+          _pt_remaining_count=$(printf '%s\n' "$_pt_remaining" | wc -l | tr -d '[:space:]')
+          pt_log "issue=#${NUMBER} 必須未完了 task=${_pt_remaining_count} 残存 → ready-for-review 遷移を保留し resumable return 0（残: $(printf '%s' "$_pt_remaining" | tr '\n' ' '))" | tee -a "$LOG"
+          echo "⏸️ #$NUMBER: per-task ループ終了時に必須未完了 task が ${_pt_remaining_count} 件残存 → ready-for-review へ進めず後続 tick で再開" | tee -a "$LOG"
+          return 0
+        fi
         # per-task loop 内で逐次 commit + push される規約のため、loop 終了後の HEAD は
         # 通常 ahead=0。万一 push 漏れがあれば verify_pushed_or_retry が 1 回リトライする。
         if ! verify_pushed_or_retry "stageA-push-missing" "$BRANCH" "Stage A (per-task loop)"; then
