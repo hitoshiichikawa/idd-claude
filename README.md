@@ -73,7 +73,10 @@ idd-claude/
     │   │   ├── core_utils.sh        #   低レベル共通ユーティリティ・ロガー（#177 Part 1）
     │   │   ├── quota-aware.sh       #   クォータ待機制御プロセッサ（#180 Part 2）
     │   │   ├── merge-queue.sh       #   マージキュー制御＋再チェックプロセッサ（#180 Part 2）
-    │   │   └── auto-rebase.sh       #   自動 Rebase プロセッサ（#180 Part 2）
+    │   │   ├── auto-rebase.sh       #   自動 Rebase プロセッサ（#180 Part 2）
+    │   │   ├── promote-pipeline.sh  #   Promote Pipeline ＋ Path Overlap プロセッサ（#181 Part 3）
+    │   │   ├── pr-iteration.sh      #   PR Iteration プロセッサ（#181 Part 3）
+    │   │   └── stage-a-verify.sh    #   Stage A Verify ゲート（#181 Part 3）
     │   └── triage-prompt.tmpl       # Triage フェーズ用プロンプト
     └── LaunchAgents/
         └── com.local.issue-watcher.plist   # macOS launchd 設定
@@ -81,7 +84,8 @@ idd-claude/
 
 > **モジュール構成について**: `issue-watcher.sh` は約 1 万行を超えたため、責務単位で
 > `modules/*.sh` に段階的に分割している（#177 Part 1 で `core_utils.sh`、#180 Part 2 で
-> 3 プロセッサ）。本体は起動時にスクリプトディレクトリ基準（`BASH_SOURCE`）で
+> 3 プロセッサ、#181 Part 3 で `promote-pipeline.sh` / `pr-iteration.sh` /
+> `stage-a-verify.sh` の 3 プロセッサ）。本体は起動時にスクリプトディレクトリ基準（`BASH_SOURCE`）で
 > `modules/` 配下を `source` する。`install.sh` が `local-watcher/bin/modules/*.sh` を
 > `$HOME/bin/modules/` へ冪等配置する。必須モジュールが欠落していると本体は起動時に
 > 欠落名を stderr に出して `exit 1` で安全停止する（silent fail させない）。
