@@ -11,7 +11,7 @@
   - _Requirements: 4.1, 4.2, 4.4, NFR 3.1_
   - _Boundary: Module Loader_
 
-- [ ] 2. Quota-Aware Processor の抽出
+- [x] 2. Quota-Aware Processor の抽出
   - `quota-aware.sh` を新規作成し、冒頭コメント（用途/配置先/依存/セットアップ参照先）を core_utils.sh
     の体裁に揃える。`set` 宣言は持たない
   - `qa_detect_rate_limit` / `qa_run_claude_stage` / `qa_persist_reset_time` / `qa_load_reset_time` /
