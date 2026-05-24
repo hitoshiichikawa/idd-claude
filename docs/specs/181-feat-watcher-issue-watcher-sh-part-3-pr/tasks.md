@@ -2,8 +2,8 @@
 
 > リファクタリングの性質上、**各タスク完了時点で `shellcheck local-watcher/bin/issue-watcher.sh local-watcher/bin/modules/*.sh` と既存全テスト（`local-watcher/test/*.sh` + `tests/local-watcher/*/*.sh`）が緑**を保てる順序で構成している。本 Part は **Part 1（#177）merge 済み**（`modules/` ディレクトリ・モジュールローダ（`REQUIRED_MODULES` 走査ループ）・install.sh の modules コピーが存在）を前提依存とする（design.md「Migration Strategy」）。実態のテスト互換は共通走査ヘルパー（`IDD_SOURCE_FILES` 等）ではなく、各テスト自前の `extract_function` + per-test の source 変数（`*_SH`）方式のため、**各移動タスクは「関数を module へ移動」と「当該関数を抽出するテストの source 変数を移動先へ repoint」をセットで実施**する。移動先 3 モジュール（`.sh` 付き）の `REQUIRED_MODULES` への追加も本 Part のスコープ。移動するのは **4 群の関数定義のみ**で、本体の top-level orchestration 呼び出し配線（`process_promote_pipeline || pp_warn ...` / `process_pr_iteration || pi_warn ...`）は据え置く。ファイル名はハイフン規約（decision 1）。
 
-- [ ] 1. Promote Pipeline + Path Overlap 群の移動（pp_* + po_* + process_promote_pipeline）
-- [ ] 1.1 `pp_*` / `po_*` / `process_promote_pipeline` の関数定義を `modules/promote-pipeline.sh` へ移動する
+- [x] 1. Promote Pipeline + Path Overlap 群の移動（pp_* + po_* + process_promote_pipeline）
+- [x] 1.1 `pp_*` / `po_*` / `process_promote_pipeline` の関数定義を `modules/promote-pipeline.sh` へ移動する
   - 本体（行 2406〜2419 の `pp_log/warn/error`、行 2420〜2975 の `po_*` 群、行 2976〜3697 の `pp_resolve_*`〜`process_promote_pipeline`）から該当関数定義を削除し promote-pipeline.sh へ移設（シグネチャ・本文を 1 文字も変えない）
   - Path Overlap（`po_*`）は独立せず promote-pipeline.sh へ同居（decision 3）。`po_check_dispatch_gate` / `po_apply_awaiting_slot` / `po_clear_awaiting_slot` ほか全 `po_*` を含む
   - **top-level 呼び出し配線 `process_promote_pipeline || pp_warn ...`（行 3701〜3702）は本体 orchestration に残す**（移動しない）
