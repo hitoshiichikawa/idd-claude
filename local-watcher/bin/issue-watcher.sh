@@ -9189,6 +9189,26 @@ run_impl_pipeline() {
           _pt_remaining_count=$(printf '%s\n' "$_pt_remaining" | wc -l | tr -d '[:space:]')
           pt_log "issue=#${NUMBER} 必須未完了 task=${_pt_remaining_count} 残存 → ready-for-review 遷移を保留し resumable return 0（残: $(printf '%s' "$_pt_remaining" | tr '\n' ' '))" | tee -a "$LOG"
           echo "⏸️ #$NUMBER: per-task ループ終了時に必須未完了 task が ${_pt_remaining_count} 件残存 → ready-for-review へ進めず後続 tick で再開" | tee -a "$LOG"
+          # ── 保留前の完了済み task commit を origin に push (#198 欠陥②: push-skip) ──
+          # per-task ループ内に逐次 push は無く、Implementer は commit のみを積む（push は
+          # 本 Stage A 末尾の verify_pushed_or_retry に集約される設計）。従来この保留経路
+          # （return 0）が後段の verify_pushed_or_retry（全完了経路 / 9228 付近）より手前に
+          # あったため、必須未完了のまま保留すると **完了済み task の commit が origin に
+          # push されないまま** 次サイクルの branch 再初期化（impl-resume の
+          # `git checkout -B "$BRANCH" "origin/$BRANCH"`）で失われ、再 pickup されても
+          # task 1 からやり直す無限空転になっていた（#180 Part 2 実測）。ここで保留する前に
+          # verify_pushed_or_retry で完了済み commit を origin に確実に残すことで、次サイクルの
+          # impl-resume が `- [x]` skip で task N+1 から継続でき、直後の再 pickup 可能化
+          # （ラベル除去）とセットで初めて「中断 → 後続 tick で継続 → 完了」が成立する
+          # （Req 1.2, 2.1, NFR 3.1）。
+          #
+          # push リトライにも失敗した場合は verify_pushed_or_retry が mark_issue_failed を
+          # 既発射している（claude-failed 付与 + claude-picked-up / claude-claimed 除去）。
+          # 未 push のまま再 pickup すると空転が再発するため、保留（return 0）ではなく失敗
+          # （return 1）に倒して人間に委ねる。
+          if ! verify_pushed_or_retry "stageA-pt-hold-push-missing" "$BRANCH" "Stage A (per-task loop hold)"; then
+            return 1
+          fi
           # ── 保留 Issue の再 pickup 可能化 (#198 / Req 1.1, 1.4, NFR 2.1) ──
           # dispatcher の候補クエリは `-label:"$LABEL_PICKED"`（claude-picked-up）を除外条件に
           # 持つため、保留時に `claude-picked-up` を残したままだと当該 Issue が二度と pickup
@@ -9223,8 +9243,10 @@ run_impl_pipeline() {
           fi
           return 0
         fi
-        # per-task loop 内で逐次 commit + push される規約のため、loop 終了後の HEAD は
-        # 通常 ahead=0。万一 push 漏れがあれば verify_pushed_or_retry が 1 回リトライする。
+        # per-task loop 内では Implementer が commit のみを積み push しない（push は本 Stage A
+        # に集約する設計）。全 task 完了経路では loop 終了後の HEAD が完了済み commit 分だけ
+        # ahead になっているため、ここで verify_pushed_or_retry が origin へ push する。push
+        # 漏れ時は 1 回リトライし、失敗時は claude-failed 化して return 1 する。
         if ! verify_pushed_or_retry "stageA-push-missing" "$BRANCH" "Stage A (per-task loop)"; then
           return 1
         fi
