@@ -28,10 +28,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #177 Part 1 で低レベル共通ユーティリティ（qa_log 等のロガーを含む）は
+# modules/core_utils.sh へ分離された。関数抽出の探索元に core_utils.sh も含める。
+CORE_UTILS_SH="$SCRIPT_DIR/../bin/modules/core_utils.sh"
 FIXTURE_DIR="$SCRIPT_DIR/fixtures/qa_detect_rate_limit"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$CORE_UTILS_SH" ]; then
+  echo "ERROR: cannot find core_utils.sh at $CORE_UTILS_SH" >&2
   exit 2
 fi
 
@@ -49,7 +56,7 @@ extract_function() {
     $0 == fn { in_fn = 1 }
     in_fn { print }
     in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
+  ' "$script" "$CORE_UTILS_SH"
 }
 
 # qa_log / qa_warn / qa_error は qa_run_claude_stage が呼ぶので必ず loaded する
