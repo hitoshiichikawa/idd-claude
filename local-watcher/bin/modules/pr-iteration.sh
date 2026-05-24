@@ -69,8 +69,8 @@ pi_fetch_candidate_prs() {
 
   # AC 1.2 / 1.3 / 1.4: クライアント側フィルタ（server filter の保険 + head pattern + fork 除外）
   # #35 AC 4.4 / 5.1: design pattern は PR_ITERATION_DESIGN_ENABLED=true のときのみ OR 条件に
-  # 含める。false（既定）なら impl pattern のみで絞り込み、設計 PR は candidate 段階で除外される
-  # （= 本機能導入前と完全同一の挙動）。
+  # 含める。#112 以降デフォルトは true。明示的に false を渡した場合のみ impl pattern だけで
+  # 絞り込み、設計 PR は candidate 段階で除外される（= 設計 PR 拡張 #35 導入前と同一の挙動）。
   echo "$prs_json" | jq \
     --arg impl_pattern "$PR_ITERATION_HEAD_PATTERN" \
     --arg design_pattern "$PR_ITERATION_DESIGN_HEAD_PATTERN" \
@@ -1406,7 +1406,7 @@ pi_run_iteration() {
 #   AC 1.6, 2.1, 2.2, 8.5, 9.1, 9.3, NFR 1.2, NFR 2.3
 # ─────────────────────────────────────────────────────────────────────────────
 process_pr_iteration() {
-  # AC 2.1: opt-in gate
+  # AC 2.1: opt-out gate（#112 以降デフォルト有効。PR_ITERATION_ENABLED=false で無効化）
   if [ "$PR_ITERATION_ENABLED" != "true" ]; then
     return 0
   fi

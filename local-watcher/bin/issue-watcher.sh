@@ -522,8 +522,9 @@ unset _idd_mod _idd_mod_path
   exit 1
 }
 
-# PR Iteration が有効化されている時のみ template の存在を必須化（opt-in gate）。
-# 無効化（既定）時は template 未配置でも watcher 全体を起動できるよう、無条件チェックを避ける。
+# PR Iteration が有効化されている時のみ template の存在を必須化する（#112 以降デフォルト有効）。
+# 明示的に無効化（PR_ITERATION_ENABLED=false）した場合は template 未配置でも watcher 全体を
+# 起動できるよう、無条件チェックを避ける。
 if [ "$PR_ITERATION_ENABLED" = "true" ] && [ ! -f "$ITERATION_TEMPLATE" ]; then
   echo "Error: Iteration テンプレートが見つかりません: $ITERATION_TEMPLATE" >&2
   echo "  install.sh --local 再実行で配置されます。" >&2
@@ -805,7 +806,7 @@ EOF
 # 設計 PR が merged なら ラベル除去 + コメント投稿を順次実行する。
 # AC 1.1 / 1.4 / 2.1 / 2.7 / 4.1 / 4.4 / 4.5 / 5.2 / 5.5 / 6.1 / 6.2 / 6.3 / 7.5
 process_design_review_release() {
-  # AC 1.1 / 1.4 / 7.5: opt-in gate（無効化時は完全スキップ）
+  # AC 1.1 / 1.4 / 7.5: opt-out gate（#112 以降デフォルト有効。無効化時は完全スキップ）
   if [ "$DESIGN_REVIEW_RELEASE_ENABLED" != "true" ]; then
     return 0
   fi

@@ -338,7 +338,7 @@ mqr_error() {
 }
 
 process_merge_queue_recheck() {
-  # AC 1.2 / 1.3 / 3.1 / 3.3: opt-in gate（MERGE_QUEUE_ENABLED とは独立）
+  # AC 1.2 / 1.3 / 3.1 / 3.3: opt-out gate（#112 以降デフォルト有効 / MERGE_QUEUE_ENABLED とは独立）
   if [ "$MERGE_QUEUE_RECHECK_ENABLED" != "true" ]; then
     return 0
   fi
