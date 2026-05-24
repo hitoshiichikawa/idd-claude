@@ -25,8 +25,8 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 5.3, 5.4, 7.2, NFR 1.1_
   - _Boundary: pr-iteration.sh, Entry Point_
 
-- [ ] 3. Stage A Verify 群の移動と独立モジュール新設（sav_* + stage_a_verify_*）
-- [ ] 3.1 `sav_*` / `_sav_*` / `stage_a_verify_*` の関数定義を新規 `modules/stage-a-verify.sh` へ移動しマニフェストに登録する
+- [x] 3. Stage A Verify 群の移動と独立モジュール新設（sav_* + stage_a_verify_*）
+- [x] 3.1 `sav_*` / `_sav_*` / `stage_a_verify_*` の関数定義を新規 `modules/stage-a-verify.sh` へ移動しマニフェストに登録する
   - 本体の 2 非連続領域（Region 1: 行 5527〜5845 = `sav_log/warn/error` / `_sav_cmd_starts_with_keyword` / `stage_a_verify_extract_command` / `_resolve_command` / `_round_path` / `_read_round` / `_bump_round` / `_reset_round`、Region 2: 行 9019〜9184 = `_sav_handle_failure` / `stage_a_verify_run`）を 1 ファイルへ統合移設（シグネチャ・本文を 1 文字も変えない。`source` は全関数を実行前に読み込むため 2 領域を 1 ファイルへ統合しても挙動等価）
   - Stage A Verify は `impl-gates.sh` に集約せず独立分離（decision 2）。`sc_*` / `tc_*` / `stage_checkpoint_*` は本体（または Part 1 の impl-gates.sh）に残し移動しない
   - `_sav_handle_failure → mark_issue_failed`（impl-pipeline）/ `stage_a_verify_run → _sav_handle_failure` の cross-module 呼び出しは、全モジュールが実行前に source されるため挙動不変
