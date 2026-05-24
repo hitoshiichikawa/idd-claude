@@ -73,6 +73,7 @@ LABELS=(
   "st-failed|d73a4a|【Issue 用】 ST failure 検知後 revert 済み（Phase B Promote Pipeline が付与）"
   "awaiting-slot|c5def5|【Issue 用】 hot file 競合予防で同サイクル dispatch を見送り中（Phase E Path Overlap Checker が付与・除去）"
   "blocked|b60205|【Issue 用】 依存 Issue 未 merge により auto-dev 進行不能"
+  "hotfix|d93f0b|hotfix 優先処理対象（Dispatcher が非 hotfix より先に投入）"
 )
 
 echo "📌 idd-claude ラベルを作成します"
