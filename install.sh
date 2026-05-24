@@ -18,9 +18,12 @@
 #                    （ファイルシステムを変更しない。出力分類は実実行時と一致）
 #   --force          .claude/agents/ / .claude/rules/ について、内容差分があれば
 #                    .bak once-only 退避して強制上書き（既存 *.bak は保護）。
-#                    CLAUDE.md は --force 指定時のみ従来挙動（.bak 退避＋ template
-#                    で上書き）。--force なしでは既存 CLAUDE.md は据え置き、
-#                    template を CLAUDE.md.org として並置（差分時のみ）。
+#                    CLAUDE.md は --force だけでは上書きしない（consumer 固有の
+#                    記述を保護するため）。既存 CLAUDE.md は据え置き、template を
+#                    CLAUDE.md.org として並置（差分時のみ）= --force なしと同一挙動。
+#   --force-claude-md  CLAUDE.md を template で明示上書きする（.bak once-only 退避 +
+#                    上書き）。CLAUDE.md.org は作らない。--force と併用すると
+#                    agents/rules も CLAUDE.md も上書きされる。
 #   --no-labels      対象リポジトリ配置時に走る GitHub ラベル自動セットアップを完全に skip
 #                    （`IDD_CLAUDE_SKIP_LABELS=true` env でも同等の opt-out が可能）
 # =============================================================================
@@ -52,6 +55,10 @@ LOCAL_WATCHER_DIR="$SCRIPT_DIR/local-watcher"
 # 冪等性 / dry-run 制御フラグ（後段の引数パースで上書き可能）
 DRY_RUN=false
 FORCE=false
+# CLAUDE.md を template で明示上書きするオプトインフラグ（Issue #208 / Req 2）。
+#   false（既定）: --force の有無に関わらず CLAUDE.md は据え置き + 差分時 .org 並置。
+#   true（--force-claude-md 指定時）: CLAUDE.md.bak once-only 退避 + template 上書き。
+FORCE_CLAUDE_MD=false
 
 # ラベル自動セットアップ opt-out 制御
 #   true: ラベルセットアップを完全に skip（`--no-labels` または
@@ -97,12 +104,16 @@ while [[ $# -gt 0 ]]; do
       FORCE=true
       shift
       ;;
+    --force-claude-md)
+      FORCE_CLAUDE_MD=true
+      shift
+      ;;
     --no-labels)
       SKIP_LABELS=true
       shift
       ;;
     -h|--help)
-      sed -n '3,23p' "$0"
+      sed -n '3,28p' "$0"
       exit 0
       ;;
     *)
@@ -414,26 +425,29 @@ copy_agents_rules() {
 # CLAUDE_MD_ORG_TOUCHED
 #   `copy_claude_md_with_org` が `CLAUDE.md.org` を NEW / OVERWRITE した場合に
 #   "true" を立てるグローバルフラグ（Req 6.1）。配置完了サマリ末尾の merge
-#   ガイドメッセージ表示判定に使う。SKIP / 既存 CLAUDE.md 不在 / `--force`
-#   経路では立てない（Req 6.2）。
+#   ガイドメッセージ表示判定に使う。SKIP / 既存 CLAUDE.md 不在 /
+#   `--force-claude-md` 経路では立てない（Req 6.2）。
 CLAUDE_MD_ORG_TOUCHED=false
 
 # copy_claude_md_with_org <src> <dest>
-#   CLAUDE.md 専用の安全配置ロジック（Issue #87）。
+#   CLAUDE.md 専用の安全配置ロジック（Issue #87 / #208）。
 #   既存 CLAUDE.md が編集済みであることを前提に、template を `.org` として
 #   並置することで「ユーザー記述が主、template は参考」という関係に反転する。
 #
-#   - dest 不在 + FORCE=any                 → NEW（template を CLAUDE.md として配置、.org は作らない）
-#   - dest 存在 + 内容同一                  → SKIP（.org も作らない）
-#   - dest 存在 + 差分あり + FORCE=false:
-#     - dest.org 不在                       → NEW dest.org（template を並置、本体は据え置き）
-#     - dest.org 存在 + 内容同一            → SKIP dest.org
-#     - dest.org 存在 + 差分あり            → OVERWRITE dest.org（最新 template に追従）
-#   - dest 存在 + 差分あり + FORCE=true:
-#     既存 backup_claude_md_once の挙動に委譲（.bak once-only 退避 + template で上書き）。
-#     `.org` は触らない（Req 3.4）。
+#   CLAUDE.md の template 上書きは `--force-claude-md`（FORCE_CLAUDE_MD=true）でのみ
+#   行う。`--force`（FORCE=true）単体では CLAUDE.md を上書きしない（Req 1, 2.4）。
 #
-#   既存 `CLAUDE.md.bak` は本関数では一切触らない（Req 4.1, 4.2）。
+#   - dest 不在 + FORCE_CLAUDE_MD=any        → NEW（template を CLAUDE.md として配置、.org は作らない）
+#   - dest 存在 + 内容同一                   → SKIP（.org も作らない）
+#   - dest 存在 + 差分あり + FORCE_CLAUDE_MD=false:
+#     - dest.org 不在                        → NEW dest.org（template を並置、本体は据え置き）
+#     - dest.org 存在 + 内容同一             → SKIP dest.org
+#     - dest.org 存在 + 差分あり             → OVERWRITE dest.org（最新 template に追従）
+#   - dest 存在 + 差分あり + FORCE_CLAUDE_MD=true:
+#     既存 backup_claude_md_once の挙動に委譲（.bak once-only 退避 + template で上書き）。
+#     `.org` は触らない（Req 2.3）。
+#
+#   既存 `CLAUDE.md.bak` は本関数では一切触らない（Req 4.1, 4.2, 4.3）。
 copy_claude_md_with_org() {
   local src="$1"
   local dest="$2"
@@ -446,12 +460,13 @@ copy_claude_md_with_org() {
     return 1
   fi
 
-  # FORCE 指定時は従来挙動（NFR 1.2 / Req 3.1〜3.4）。
+  # FORCE_CLAUDE_MD 指定時は従来の --force 挙動（明示オプトイン上書き / Req 2）。
   # backup_claude_md_once → copy_template_file 相当のシーケンスを再現するため、
   # 呼び出し側で backup_claude_md_once を先に呼ぶ前提を保ち、本関数では
-  # template で上書きするだけに留める。
-  if [ "$FORCE" = "true" ]; then
-    # `.org` は --force 経路では作らない / 触らない（Req 3.4）
+  # template で上書きするだけに留める。--force 単体（FORCE_CLAUDE_MD=false）では
+  # この分岐に入らず、下の通常経路（据え置き + .org 並置）を通る（Req 1）。
+  if [ "$FORCE_CLAUDE_MD" = "true" ]; then
+    # `.org` は --force-claude-md 経路では作らない / 触らない（Req 2.3）
     local action
     action="$(classify_action "$src" "$dest")"
     case "$action" in
@@ -466,7 +481,7 @@ copy_claude_md_with_org() {
         log_action "SKIP" "$dest" "(identical to template)"
         ;;
       OVERWRITE)
-        log_action "OVERWRITE" "$dest" "(--force)"
+        log_action "OVERWRITE" "$dest" "(--force-claude-md)"
         if [ "$DRY_RUN" = "false" ]; then
           cp "$src" "$dest"
         fi
@@ -475,7 +490,7 @@ copy_claude_md_with_org() {
     return 0
   fi
 
-  # 通常経路（--force なし）
+  # 通常経路（--force-claude-md なし。--force 単体もここを通る / Req 1）
   local action
   action="$(classify_action "$src" "$dest")"
 
@@ -1116,12 +1131,13 @@ if $INSTALL_REPO; then
   echo "📦 対象リポジトリにファイルを配置: $REPO_PATH_ABS"
   REPO_PATH="$REPO_PATH_ABS"
 
-  # CLAUDE.md は Issue #87 で挙動を分岐：
-  #   - `--force` あり: 従来挙動（`.bak` once-only 退避 + template で上書き）
-  #   - `--force` なし: 既存 CLAUDE.md は据え置き、template を `CLAUDE.md.org` として並置
-  # `.bak` once-only 退避は `--force` 経路でのみ意味があるため、その時だけ呼ぶ。
-  # 既存 `CLAUDE.md.bak` は通常経路では一切触らない（Req 4.1, 4.2）。
-  if [ "$FORCE" = "true" ]; then
+  # CLAUDE.md の挙動分岐（Issue #87 / #208）：
+  #   - `--force-claude-md` あり: 明示上書き（`.bak` once-only 退避 + template で上書き）
+  #   - `--force-claude-md` なし: 既存 CLAUDE.md は据え置き、template を `CLAUDE.md.org`
+  #     として並置（`--force` 単体でもこちら / Req 1, 2.4）
+  # `.bak` once-only 退避は `--force-claude-md` 経路でのみ意味があるため、その時だけ呼ぶ。
+  # 既存 `CLAUDE.md.bak` はそれ以外の経路では一切触らない（Req 4.1, 4.2, 4.3）。
+  if [ "$FORCE_CLAUDE_MD" = "true" ]; then
     backup_claude_md_once "$REPO_PATH"
   fi
   copy_claude_md_with_org \
@@ -1184,8 +1200,9 @@ REPO_HINT
        # merge 完了後、必要なら CLAUDE.md.org は削除して構いません
        #   （次回 install で template が更新されていれば再作成されます）
 
-     どうしても template で完全上書きしたい場合は、`./install.sh --repo <path> --force`
+     どうしても template で完全上書きしたい場合は、`./install.sh --repo <path> --force-claude-md`
      を使用してください（既存 CLAUDE.md は CLAUDE.md.bak に once-only 退避されます）。
+     注: `--force` 単体は agents / rules のみを上書きし、CLAUDE.md は据え置きます。
 CLAUDE_MD_ORG_HINT
   fi
 
