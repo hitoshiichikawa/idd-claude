@@ -14,8 +14,8 @@
   - _Requirements: 2.1, 2.2, 2.3, 4.1, 4.2, 4.3, 5.3, 5.4, 7.2, NFR 1.1_
   - _Boundary: promote-pipeline.sh, Entry Point_
 
-- [ ] 2. PR Iteration 群の移動（pi_* + build_recovery_hint + process_pr_iteration）
-- [ ] 2.1 `pi_*` / `build_recovery_hint` / `process_pr_iteration` の関数定義を `modules/pr-iteration.sh` へ移動する
+- [x] 2. PR Iteration 群の移動（pi_* + build_recovery_hint + process_pr_iteration）
+- [x] 2.1 `pi_*` / `build_recovery_hint` / `process_pr_iteration` の関数定義を `modules/pr-iteration.sh` へ移動する
   - 本体（行 3715〜5238。`build_recovery_hint` は行 4325 に同居）から該当関数定義を削除し pr-iteration.sh へ移設（シグネチャ・本文を 1 文字も変えない）
   - **top-level 呼び出し配線 `process_pr_iteration || pi_warn ...`（行 5497）は本体 orchestration に残す**（移動しない）
   - エントリポイントの `REQUIRED_MODULES` マニフェスト（行 488 付近）に `"pr-iteration.sh"` を **`.sh` 付き**で追加
