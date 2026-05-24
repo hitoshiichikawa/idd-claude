@@ -38,8 +38,8 @@
   - _Boundary: stage-a-verify.sh, Entry Point_
   - _Depends: 1.1_
 
-- [ ] 4. 全体結合・差分等価スモークと README 追記
-- [ ] 4.1 全テスト緑・shellcheck 全緑・差分等価スモーク・README 追記を行う
+- [x] 4. 全体結合・差分等価スモークと README 追記
+- [x] 4.1 全テスト緑・shellcheck 全緑・差分等価スモーク・README 追記を行う
   - 全テストスイート緑を確認: `local-watcher/test/*.sh`（12 件）+ `tests/local-watcher/*/*.sh`（3 件）が全て exit 0（Req 6.1 / 6.2）
   - `repo_prefix_log_test.sh` の `pp_log` / `pi_log` / `sav_log` 抽出元 source 変数を移動先 3 module（promote-pipeline / pr-iteration / stage-a-verify）へ repoint し、`[REPO]` prefix が従来どおり検証されて緑（Req 5.3 / 6.3）
   - top-level 呼び出し配線据置の確認: `process_promote_pipeline ||` / `process_pr_iteration ||` が entry point に残り module に含まれないことを grep 確認（Req 4.2 / 5.2）
