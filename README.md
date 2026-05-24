@@ -68,11 +68,25 @@ idd-claude/
 │
 └── local-watcher/                   # ローカル PC に配置するファイル
     ├── bin/
-    │   ├── issue-watcher.sh         # Issue 監視＋Claude Code 起動シェル
+    │   ├── issue-watcher.sh         # Issue 監視＋Claude Code 起動シェル（本体）
+    │   ├── modules/                 # issue-watcher.sh が起動時に source するモジュール群
+    │   │   ├── core_utils.sh        #   低レベル共通ユーティリティ・ロガー（#177 Part 1）
+    │   │   ├── quota-aware.sh       #   クォータ待機制御プロセッサ（#180 Part 2）
+    │   │   ├── merge-queue.sh       #   マージキュー制御＋再チェックプロセッサ（#180 Part 2）
+    │   │   └── auto-rebase.sh       #   自動 Rebase プロセッサ（#180 Part 2）
     │   └── triage-prompt.tmpl       # Triage フェーズ用プロンプト
     └── LaunchAgents/
         └── com.local.issue-watcher.plist   # macOS launchd 設定
 ```
+
+> **モジュール構成について**: `issue-watcher.sh` は約 1 万行を超えたため、責務単位で
+> `modules/*.sh` に段階的に分割している（#177 Part 1 で `core_utils.sh`、#180 Part 2 で
+> 3 プロセッサ）。本体は起動時にスクリプトディレクトリ基準（`BASH_SOURCE`）で
+> `modules/` 配下を `source` する。`install.sh` が `local-watcher/bin/modules/*.sh` を
+> `$HOME/bin/modules/` へ冪等配置する。必須モジュールが欠落していると本体は起動時に
+> 欠落名を stderr に出して `exit 1` で安全停止する（silent fail させない）。
+> 環境変数名・exit code・ログ書式・ラベル遷移・cron 登録文字列は分割前と完全に同一の
+> 差分等価リファクタリングであり、運用者の cron / launchd 設定変更は不要。
 
 ---
 
