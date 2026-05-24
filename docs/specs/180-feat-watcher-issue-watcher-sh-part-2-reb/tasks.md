@@ -35,7 +35,7 @@
   - _Boundary: Merge-Queue Processor_
   - _Depends: 1_
 
-- [ ] 4. Auto-Rebase Processor の抽出
+- [x] 4. Auto-Rebase Processor の抽出
   - `auto-rebase.sh` を新規作成する
   - `ar_fetch_candidates` / `ar_build_prompt` / `ar_run_claude_rebase` / `ar_classify_diff` /
     `ar_apply_mechanical` / `ar_dismiss_all_approvals` / `ar_apply_semantic` / `ar_escalate_to_failed` /
