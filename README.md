@@ -502,9 +502,12 @@ gh api -X PUT repos/owner/repo/branches/main/protection \
 
 ```bash
 # 手動の場合
-mkdir -p ~/bin ~/.issue-watcher/logs
+mkdir -p ~/bin ~/bin/modules ~/.issue-watcher/logs
 cp ~/.idd-claude/local-watcher/bin/issue-watcher.sh  ~/bin/
 cp ~/.idd-claude/local-watcher/bin/triage-prompt.tmpl ~/bin/
+# モジュール（#177 Part 1 以降）: issue-watcher.sh は同階層 modules/ から
+# core_utils.sh 等を source する。欠落すると起動時に exit 1 で停止するため必ずコピーする。
+cp ~/.idd-claude/local-watcher/bin/modules/*.sh ~/bin/modules/
 chmod +x ~/bin/issue-watcher.sh
 ```
 
