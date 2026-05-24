@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. core_utils.sh を新規作成し低レベル共通ユーティリティを移動する
+- [x] 1. core_utils.sh を新規作成し低レベル共通ユーティリティを移動する
   - `local-watcher/bin/modules/core_utils.sh` を新規作成（ファイル冒頭に用途 / 配置先 / 依存 / セットアップ参照先コメント、`set -euo pipefail` は本体側で宣言済みのためモジュールでは関数定義のみ）
   - 低レベルロガー（`qa_log` / `qa_warn` / `qa_error`、`mq_log` 系、`ar_log` 系、`pp_log` 系、`pi_log` 系、`drr_log` 系）を issue-watcher.sh から **移動のみ（cut & paste）** で集約
   - 日付フォーマット `qa_format_iso8601` を移動
