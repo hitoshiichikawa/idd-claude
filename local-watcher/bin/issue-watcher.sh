@@ -5782,27 +5782,55 @@ dr_error() {
 # 空入力・記法非存在では空 stdout を返す（return 0）。
 # 副作用なし（純粋関数）。
 #
-# 検出する記法（`.claude/rules/issue-dependency.md` と整合 / Req 1.1〜1.5, 1.7）:
+# 検出する記法（`.claude/rules/issue-dependency.md` と整合 / Req 4.1, 4.4）:
 #   - canonical: `Depends on: #N` （行頭の `- ` などの list prefix を許容）
 #   - alias 日本語: `前提依存: #N`
 #   - alias 英語慣習: `Blocked by: #N`
 #
 # 1 行に複数の Issue 番号がスペース区切り / カンマ区切りで列挙される場合も対応する
-# （Req 1.4）。`grep -oE '#[0-9]+'` で行内の番号を全列挙し、`sort -u` で uniq 化
-# （Req 1.5）。
+# （Req 4.4）。`grep -oE '#[0-9]+'` で行内の番号を全列挙し、`sort -u -n` で uniq 化
+# （Req 4.4）。
 #
-# 誤検出許容範囲（NFR 1.4）: markdown コードフェンス内・引用ブロック内の
-# 同記法も検出してしまう可能性があるが、本機能のスコープ外（誤検出時は運用者が
-# `blocked` ラベルを手動除去で復旧する設計）。
+# 誤検出防止（Req 4.2, 4.3 / #204）: markdown コードフェンス（``` または ~~~ で
+# 開閉されるブロック）内および引用ブロック（行頭が任意個の空白に続く `>` で始まる行）
+# 内の依存マーカーは実依存として抽出しない。例示目的でコード例・引用に依存記法を
+# 書いた Issue が誤って false-block されるのを防ぐ。これらの行は markdown 前処理
+# （awk）で除去してからマーカーマッチを行う。
 dr_extract_deps() {
   local body="$1"
+
+  # ── markdown 前処理: コードフェンス内・引用ブロック行を除去（Req 4.2, 4.3）──
+  # awk でフェンス開閉をトグル管理し、フェンス内行と引用行（行頭空白 + `>`）を捨てる。
+  # フェンスマーカーは行頭（任意個の空白を許容）の ``` または ~~~ で開始する行。
+  # 言語タグ（```bash 等）や閉じフェンスも同じ判定で扱う（開→閉のトグル）。
+  local filtered
+  filtered=$(printf '%s\n' "$body" | awk '
+    {
+      line = $0
+      # 行頭の空白を除いた先頭部分を取り出してフェンス / 引用を判定する。
+      stripped = line
+      sub(/^[ \t]+/, "", stripped)
+      # コードフェンス開閉トグル（``` または ~~~ で始まる行）。
+      if (stripped ~ /^(```|~~~)/) {
+        in_fence = !in_fence
+        next            # フェンスマーカー行自体も依存抽出の対象外
+      }
+      if (in_fence) {
+        next            # フェンス内の本文行は除外（Req 4.2）
+      }
+      if (stripped ~ /^>/) {
+        next            # 引用ブロック行は除外（Req 4.3）
+      }
+      print line
+    }
+  ')
 
   # 行抽出: canonical + alias の 3 パターン。
   # `-E` で ERE、`-i` は使わず大文字小文字を厳密にし誤検出を減らす（既存運用で
   # `Depends on:` / `Blocked by:` は大文字始まり前提）。`前提依存:` は UTF-8
   # バイト列として直接マッチ（grep -E で安全）。
   local matched_lines
-  matched_lines=$(printf '%s\n' "$body" \
+  matched_lines=$(printf '%s\n' "$filtered" \
     | grep -E '(Depends on:|前提依存:|Blocked by:)' || true)
 
   if [ -z "$matched_lines" ]; then
@@ -5810,7 +5838,7 @@ dr_extract_deps() {
   fi
 
   # 行ごとに `#[0-9]+` を全列挙し、`#` を剥がして数字のみにし uniq 化。
-  # `sort -u -n` で数値昇順 + uniq（出力決定性を確保）。
+  # `sort -u -n` で数値昇順 + uniq（出力決定性を確保 / Req 4.4）。
   printf '%s\n' "$matched_lines" \
     | grep -oE '#[0-9]+' \
     | sed -E 's/^#//' \
