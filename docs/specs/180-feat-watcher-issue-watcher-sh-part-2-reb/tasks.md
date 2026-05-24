@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Module Loader 配線の確立
+- [x] 1. Module Loader 配線の確立
   - `issue-watcher.sh` の Config ブロック直後・最初の関数定義より前に Module Loader ブロックを追加する
   - `SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"` で cwd 非依存にディレクトリ解決する
   - manifest 配列 `( core_utils.sh quota-aware.sh merge-queue.sh auto-rebase.sh )` をループし、各
