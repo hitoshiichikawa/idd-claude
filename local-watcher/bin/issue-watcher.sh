@@ -5782,27 +5782,55 @@ dr_error() {
 # 空入力・記法非存在では空 stdout を返す（return 0）。
 # 副作用なし（純粋関数）。
 #
-# 検出する記法（`.claude/rules/issue-dependency.md` と整合 / Req 1.1〜1.5, 1.7）:
+# 検出する記法（`.claude/rules/issue-dependency.md` と整合 / Req 4.1, 4.4）:
 #   - canonical: `Depends on: #N` （行頭の `- ` などの list prefix を許容）
 #   - alias 日本語: `前提依存: #N`
 #   - alias 英語慣習: `Blocked by: #N`
 #
 # 1 行に複数の Issue 番号がスペース区切り / カンマ区切りで列挙される場合も対応する
-# （Req 1.4）。`grep -oE '#[0-9]+'` で行内の番号を全列挙し、`sort -u` で uniq 化
-# （Req 1.5）。
+# （Req 4.4）。`grep -oE '#[0-9]+'` で行内の番号を全列挙し、`sort -u -n` で uniq 化
+# （Req 4.4）。
 #
-# 誤検出許容範囲（NFR 1.4）: markdown コードフェンス内・引用ブロック内の
-# 同記法も検出してしまう可能性があるが、本機能のスコープ外（誤検出時は運用者が
-# `blocked` ラベルを手動除去で復旧する設計）。
+# 誤検出防止（Req 4.2, 4.3 / #204）: markdown コードフェンス（``` または ~~~ で
+# 開閉されるブロック）内および引用ブロック（行頭が任意個の空白に続く `>` で始まる行）
+# 内の依存マーカーは実依存として抽出しない。例示目的でコード例・引用に依存記法を
+# 書いた Issue が誤って false-block されるのを防ぐ。これらの行は markdown 前処理
+# （awk）で除去してからマーカーマッチを行う。
 dr_extract_deps() {
   local body="$1"
+
+  # ── markdown 前処理: コードフェンス内・引用ブロック行を除去（Req 4.2, 4.3）──
+  # awk でフェンス開閉をトグル管理し、フェンス内行と引用行（行頭空白 + `>`）を捨てる。
+  # フェンスマーカーは行頭（任意個の空白を許容）の ``` または ~~~ で開始する行。
+  # 言語タグ（```bash 等）や閉じフェンスも同じ判定で扱う（開→閉のトグル）。
+  local filtered
+  filtered=$(printf '%s\n' "$body" | awk '
+    {
+      line = $0
+      # 行頭の空白を除いた先頭部分を取り出してフェンス / 引用を判定する。
+      stripped = line
+      sub(/^[ \t]+/, "", stripped)
+      # コードフェンス開閉トグル（``` または ~~~ で始まる行）。
+      if (stripped ~ /^(```|~~~)/) {
+        in_fence = !in_fence
+        next            # フェンスマーカー行自体も依存抽出の対象外
+      }
+      if (in_fence) {
+        next            # フェンス内の本文行は除外（Req 4.2）
+      }
+      if (stripped ~ /^>/) {
+        next            # 引用ブロック行は除外（Req 4.3）
+      }
+      print line
+    }
+  ')
 
   # 行抽出: canonical + alias の 3 パターン。
   # `-E` で ERE、`-i` は使わず大文字小文字を厳密にし誤検出を減らす（既存運用で
   # `Depends on:` / `Blocked by:` は大文字始まり前提）。`前提依存:` は UTF-8
   # バイト列として直接マッチ（grep -E で安全）。
   local matched_lines
-  matched_lines=$(printf '%s\n' "$body" \
+  matched_lines=$(printf '%s\n' "$filtered" \
     | grep -E '(Depends on:|前提依存:|Blocked by:)' || true)
 
   if [ -z "$matched_lines" ]; then
@@ -5810,7 +5838,7 @@ dr_extract_deps() {
   fi
 
   # 行ごとに `#[0-9]+` を全列挙し、`#` を剥がして数字のみにし uniq 化。
-  # `sort -u -n` で数値昇順 + uniq（出力決定性を確保）。
+  # `sort -u -n` で数値昇順 + uniq（出力決定性を確保 / Req 4.4）。
   printf '%s\n' "$matched_lines" \
     | grep -oE '#[0-9]+' \
     | sed -E 's/^#//' \
@@ -5853,34 +5881,112 @@ ${items}
 EOF_DR_COMMENT
 }
 
+# 引数:
+#   $1 = owner（$REPO の owner 部）
+#   $2 = repo 名（$REPO の repo 部）
+#   $3 = 依存 Issue 番号（数字のみ）
+# stdout = `gh api graphql` の生レスポンス（JSON 文字列）。失敗時は stderr 本文。
+# return = gh api graphql の exit code をそのまま返す。
+# 副作用 = なし（呼び出し元がエラーログを担当）。
+#
+# 本ラッパは dr_resolve_one から `gh api graphql` 呼び出しを切り出したもので、
+# 回帰テストが GraphQL レスポンスを mock 注入できるよう薄い indirection を提供する
+# （実 API を叩かずに dr_resolve_one の判定ロジックを検証するため / Req 5.x）。
+# timeout は既存の DRR_GH_TIMEOUT（新規 env var を導入しない / Req 3.5, NFR 3.1）。
+dr_gh_graphql_closed_by() {
+  local owner="$1"
+  local repo_name="$2"
+  local dep_num="$3"
+
+  # GraphQL クエリ: Issue 視点の `closedByPullRequestsReferences` で linked PR の
+  # state を取得する（PR ノードに `state` フィールドは存在するが、`gh issue view
+  # --json closedByPullRequestsReferences` の REST 経路では `merged` フィールドが
+  # 返らないため誤判定していた / 本 bug の根因）。
+  # `includeClosedPrs: true` で CLOSED/MERGED の PR も含めて返させる。
+  # `first: 20` は check_existing_impl_pr と同じく十分なマージン。
+  # shellcheck disable=SC2016  # `$owner` / `$repo` / `$number` は GraphQL 変数記法であり bash 展開ではない（`-F` で値を渡す）
+  local query='query($owner: String!, $repo: String!, $number: Int!) {
+    repository(owner: $owner, name: $repo) {
+      issue(number: $number) {
+        state
+        closedByPullRequestsReferences(first: 20, includeClosedPrs: true) {
+          nodes {
+            number
+            state
+          }
+        }
+      }
+    }
+  }'
+
+  timeout "${DRR_GH_TIMEOUT:-${MERGE_QUEUE_GIT_TIMEOUT:-60}}" \
+    gh api graphql \
+      -f query="$query" \
+      -F owner="$owner" \
+      -F repo="$repo_name" \
+      -F number="$dep_num" 2>&1
+}
+
 # 引数 $1 = 依存 Issue 番号（数字のみ）。
 # stdout = 区分文字列 1 行: "resolved" | "open" | "closed unmerged" | "api error"。
 # return = 常に 0（判定結果は stdout で返す）。
 # 副作用 = API エラー / jq parse 失敗時のみ dr_warn でログ（Req 6.2）。
 #
-# `gh issue view <N> --repo "$REPO" --json state,closedByPullRequestsReferences` を
-# 実行し、`jq` で以下を判定:
-#   - state == "OPEN"  → "open"（unresolved / Req 2.3）
-#   - state == "CLOSED" かつ closedByPullRequestsReferences[].merged のいずれかが
-#     true → "resolved"（Req 2.2）
-#   - state == "CLOSED" かつ上記が全て false / 空配列 → "closed unmerged"（Req 2.4）
-#   - gh / jq 失敗 / 未知の state → "api error"（Req 2.5 / NFR 4.2 安全側）
+# `dr_gh_graphql_closed_by` で Issue の state と
+# `closedByPullRequestsReferences.nodes[].state` を取得し、以下を判定:
+#   - issue.state == "OPEN"  → "open"（unresolved / Req 1.4 / 旧 2.3）
+#   - issue.state == "CLOSED" かつ PR ノードの state に "MERGED" が 1 件以上
+#     → "resolved"（Req 1.1）
+#   - issue.state == "CLOSED" かつ "MERGED" が 0 件（空配列・全 CLOSED 含む）
+#     → "closed unmerged"（Req 1.2, 1.3）
+#   - gh / jq 失敗 / GraphQL errors / 未知の state → "api error"
+#     （Req 2.1, 2.2 / NFR 4.2 安全側）
 #
-# timeout は呼び出し元のサイクル全体タイムアウトに従う（個別 timeout は導入しない:
-# 通常は数秒で帰る + watcher 全体 timeout で吸収）。
+# 旧実装は `gh issue view --json closedByPullRequestsReferences` の PR ノードに
+# 存在しない `.merged` フィールドを参照していたため、merge 済み依存も常に
+# `closed unmerged` と誤判定していた（#204 の根因 / Req 1.5）。
+#
+# timeout は DRR_GH_TIMEOUT に従う（個別の新規 env var は導入しない / Req 3.5）。
 dr_resolve_one() {
   local dep_num="$1"
-  local json
-  if ! json=$(gh issue view "$dep_num" --repo "$REPO" \
-        --json state,closedByPullRequestsReferences 2>&1); then
-    dr_warn "issue=#${dep_num} gh issue view 失敗: ${json}"
+
+  # $REPO は "owner/repo" 形式（既存 watcher 全体の前提）。GraphQL 引数に分解する。
+  local owner repo_name
+  owner="${REPO%%/*}"
+  repo_name="${REPO##*/}"
+  if [ -z "$owner" ] || [ -z "$repo_name" ] || [ "$owner" = "$REPO" ]; then
+    dr_warn "issue=#${dep_num} REPO env が owner/repo 形式でない: ${REPO:-<empty>}"
+    echo "api error"
+    return 0
+  fi
+
+  local response gh_rc
+  response=$(dr_gh_graphql_closed_by "$owner" "$repo_name" "$dep_num") && gh_rc=0 || gh_rc=$?
+
+  if [ "$gh_rc" -ne 0 ]; then
+    dr_warn "issue=#${dep_num} gh api graphql 失敗 (rc=${gh_rc}): ${response}"
+    echo "api error"
+    return 0
+  fi
+
+  # GraphQL は HTTP 200 でも errors を返すケースがあるため明示的に検査する（Req 2.1）。
+  if printf '%s' "$response" | jq -e '.errors // empty | length > 0' >/dev/null 2>&1; then
+    dr_warn "issue=#${dep_num} GraphQL errors を検出"
     echo "api error"
     return 0
   fi
 
   local state
-  if ! state=$(printf '%s' "$json" | jq -r '.state' 2>/dev/null); then
-    dr_warn "issue=#${dep_num} jq parse 失敗（state 取り出し）"
+  if ! state=$(printf '%s' "$response" \
+        | jq -r '.data.repository.issue.state' 2>/dev/null); then
+    dr_warn "issue=#${dep_num} jq parse 失敗（issue.state 取り出し）"
+    echo "api error"
+    return 0
+  fi
+  # state が null（issue ノードが取れていない等の想定外応答）→ 安全側で api error
+  # （Req 2.2: 想定外構造で merge 状態を解釈できない場合）。
+  if [ -z "$state" ] || [ "$state" = "null" ]; then
+    dr_warn "issue=#${dep_num} issue.state が取得できない応答構造（state=${state:-<empty>}）"
     echo "api error"
     return 0
   fi
@@ -5891,13 +5997,20 @@ dr_resolve_one() {
       return 0
       ;;
     CLOSED)
-      # closedByPullRequestsReferences[].merged が true のものを 1 件以上検出すれば
-      # resolved。空配列 or 全 false は closed unmerged（Req 2.2, 2.4）。
+      # closedByPullRequestsReferences.nodes[].state に "MERGED" が 1 件以上あれば
+      # resolved。空配列 or 全て MERGED 以外（CLOSED 等）は closed unmerged
+      # （Req 1.1, 1.2, 1.3）。
       local merged_count
-      if ! merged_count=$(printf '%s' "$json" \
-            | jq '[.closedByPullRequestsReferences[]? | select(.merged == true)] | length' \
+      if ! merged_count=$(printf '%s' "$response" \
+            | jq '[.data.repository.issue.closedByPullRequestsReferences.nodes[]? | select(.state == "MERGED")] | length' \
             2>/dev/null); then
         dr_warn "issue=#${dep_num} jq parse 失敗（closedByPullRequestsReferences 集計）"
+        echo "api error"
+        return 0
+      fi
+      # 想定外応答で集計結果が数値でない場合も安全側で api error（Req 2.2）。
+      if ! [[ "$merged_count" =~ ^[0-9]+$ ]]; then
+        dr_warn "issue=#${dep_num} closedByPullRequestsReferences 集計結果が数値でない: ${merged_count}"
         echo "api error"
         return 0
       fi
