@@ -1193,6 +1193,10 @@ CLAUDE_MD_ORG_HINT
   #   - 配置完了直後にラベルを冪等作成して、初回 cron で claim ラベル付与に
   #     失敗しないようにする
   #   - fail-soft: 失敗・skip しても install 全体は exit 0 で完走する
+  #   - 新ラベルの再 install 伝播（Issue #185）: 直前の copy_template_file で最新の
+  #     idd-claude-labels.sh が再配置されるため、template にラベルが追加された後に
+  #     install.sh を再実行すると setup_repo_labels が全 LABELS をループし、未存在の
+  #     ラベル（awaiting-slot 等）だけを新規作成する。既存ラベルは skip され冪等性を保つ。
   setup_repo_labels "$REPO_PATH"
 
   # 履歴持ち込みの検出と警告（Issue #115）

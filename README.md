@@ -173,6 +173,12 @@ curl -fsSL https://raw.githubusercontent.com/hitoshiichikawa/idd-claude/main/set
   完全コマンドが出力されるので、それをコピペで実行してください
 - **冪等**: 既存ラベルは name / color / description ともに変更されません（既存値は保護）。
   色や説明を上書きしたい場合は手動で `bash .github/scripts/idd-claude-labels.sh --force`
+- **新ラベルの再 install 伝播 (#185)**: template にラベルが追加された後で `install.sh` を
+  再実行すると、最新の `idd-claude-labels.sh` が対象リポジトリへ再配置され、`setup_repo_labels`
+  が全ラベルをループして **未存在のラベルだけを新規作成**します（既存ラベルは skip）。
+  そのため `awaiting-slot` のような後から追加されたラベルも、再 install するだけで既存
+  リポジトリへ確実に伝播します（NFR 1.1 冪等性は維持され、既存ラベルの削除・改名・color 変更は
+  行われません）
 - **`--local` 単独時は走りません**: 対象リポジトリ配置がない場合はラベル処理も発生しません
 - **`--dry-run`**: 実 API 呼び出しせず、これから実行されるコマンドだけを表示します
 
