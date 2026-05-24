@@ -9966,6 +9966,105 @@ check_existing_impl_pr() {
   return 0
 }
 
+# ─── check_open_design_pr (Issue #191 / open design PR ガード) ───
+#
+# 与えられた Issue 番号に対応する head ブランチ `claude/issue-<N>-design-*` の
+# **OPEN な PR** が存在するかを検出し、Dispatcher が当該 Issue を **claim する前**
+# に skip すべきかを判定する。
+#
+# 事故起点の整理（Issue #191 / #180 / PR #184 で実観測）:
+#   design フェーズの Issue が open な design PR を持っているのに保護ラベル
+#   （`awaiting-design-review` / `blocked`）が外れると、watcher が当該 Issue を
+#   再 pickup して design モードを再実行し、PjM が人間レビュー済みの design PR を
+#   クローズして作り直す事故が起きる。既存の check_existing_impl_pr は
+#   `closedByPullRequestsReferences`（impl PR 専用に集約される逆引き field）から
+#   design PR を明示的に ignore する（reason=design-pr-in-closing-refs）ため、
+#   open design PR の存在は再 dispatch を抑止しない。本関数はラベル保護とは独立した
+#   「最後の砦」ガードとして機能する（二重防御 / Req 2）。
+#
+# 入力:  $1 = issue_number（数値）
+# 出力:  exit code で判定結果を返す
+#        - 0 = pickup 続行 OK（open design PR なし）
+#        - 1 = skip すべき（open design PR が存在 / API 失敗 / レート制限 / timeout）
+# 副作用:
+#        - 判定結果を pclp_log / pclp_warn で 1 行ログ出力
+#          （fixed key=value 形式: `issue=#N pr=#P reason=R` / Req 4.1 / 4.2）
+#        - `gh pr list --state open` を `timeout "$DRR_GH_TIMEOUT"` で 1 回呼ぶ
+#          （既定 60 秒 / 既存 DRR と同じ規律 / NFR 1.3）
+#
+# 検出方式（linked 非依存 / Req 1.4）:
+#   既存 drr_find_merged_design_pr (#40 / #80) と同じく head ref で server-side
+#   一次絞り込み → jq の strict prefix で同定。linked か否かに依存しないため、
+#   PjM が `Refs #N`（auto-close キーワードではない）で design PR を作っていても
+#   検出できる。GitHub の text search はトークン分解（"claude" / "issue" / "N" /
+#   "design"）で他 Issue 用 design PR もヒットするため、server-side は候補取得
+#   （noisy）に留め、最終一致は issue 番号 fix の strict prefix
+#   `^claude/issue-<N>-design-` で行う（#19 が #191 を誤検出しない / Req 1.5）。
+#
+# Fail-safe（Req 3.1 / 3.2）: gh pr list 失敗 / timeout / レート制限 / jq parse 失敗は
+#   **すべて skip 扱い**（exit 1）に倒す。検出系の不調を理由にレビュー済み design PR を
+#   破壊するリスクを最小化するため。既存 check_existing_impl_pr の fail-safe 方針と整合。
+#
+# Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.2, 3.1, 3.2, 4.1, 4.2, NFR 1.1, NFR 1.3
+check_open_design_pr() {
+  local issue_number="$1"
+
+  # 入力検証: 空 / 非数値は呼び出し側のミス。fail-safe で skip + error ログ。
+  if [[ ! "$issue_number" =~ ^[1-9][0-9]*$ ]]; then
+    pclp_error "skip issue=#${issue_number:-<empty>} reason=invalid-issue-number-design-guard"
+    return 1
+  fi
+
+  # head pattern を server-side クエリで一次絞り込み（in:head + 規約 prefix）。
+  # noisy な候補取得に留め、最終一致判定は後段の jq の strict prefix で行う。
+  # 複数件マッチを許容するため limit=20（再 design 等で複数 open はまれだが念のため）。
+  local prs_json gh_rc
+  prs_json=$(timeout "${DRR_GH_TIMEOUT:-${MERGE_QUEUE_GIT_TIMEOUT:-60}}" \
+    gh pr list \
+      --repo "$REPO" \
+      --state open \
+      --search "is:pr is:open claude/issue-${issue_number}-design- in:head" \
+      --json number,headRefName \
+      --limit 20 2>&1) && gh_rc=0 || gh_rc=$?
+
+  if [ "$gh_rc" -ne 0 ]; then
+    # レート制限の場合は専用 reason で記録（Req 3.2）。それ以外は generic な失敗。
+    if echo "$prs_json" | grep -qiE 'rate.?limit|RATE_LIMITED|HTTP 429|too many requests'; then
+      pclp_warn "skip issue=#${issue_number} reason=design-pr-probe-rate-limited rc=${gh_rc}"
+    else
+      pclp_warn "skip issue=#${issue_number} reason=design-pr-probe-failed rc=${gh_rc}"
+    fi
+    return 1
+  fi
+
+  # Issue #191: head 名を issue 番号で strict 比較する（server-side の text search は
+  # トークン分解で #19 用 PR が #191 検索にヒットしうるため）。head が
+  # `claude/issue-${N}-design-<slug>` で **厳密に** 始まる open PR のみを同定する
+  # （Req 1.5）。複数件マッチ時は PR 番号最大（= 最新と看做す）を採用。
+  local strict_head_prefix="claude/issue-${issue_number}-design-"
+  local open_pr_number
+  if ! open_pr_number=$(echo "$prs_json" | jq -r \
+      --arg prefix "$strict_head_prefix" \
+      '[(. // [])[]
+        | select((.headRefName // "") | startswith($prefix))
+        | .number
+      ] | sort | last // ""' 2>/dev/null); then
+    # jq parse 失敗も fail-safe で skip 側に倒す（Req 3.1）。
+    pclp_warn "skip issue=#${issue_number} reason=design-pr-probe-jq-parse-error"
+    return 1
+  fi
+
+  if [ -n "$open_pr_number" ]; then
+    # open design PR が存在 → claim せず当該サイクルを skip（Req 1.1 / 1.2 / 2.2）
+    pclp_log "skip issue=#${issue_number} pr=#${open_pr_number} reason=open-design-pr-exists"
+    return 1
+  fi
+
+  # open design PR なし → 後続処理へ進む（Req 1.3 / NFR 1.1）
+  pclp_log "continue issue=#${issue_number} reason=no-open-design-pr"
+  return 0
+}
+
 # ─── _parallel_validate_slots ───
 #
 # PARALLEL_SLOTS が正の整数として解釈できるかを検証する。
@@ -11451,6 +11550,23 @@ _dispatcher_run() {
     # GraphQL 失敗 / レート制限も内部で skip 側に倒される（fail-safe / Req 1.7 / NFR 4.2）。
     # PR 不在の通常運用では exit 0 で素通り = 本機能導入前と完全等価（NFR 1.5）。
     if ! check_existing_impl_pr "$issue_number"; then
+      continue
+    fi
+
+    # ── Open Design PR Guard (Issue #191 Req 1〜4) ──
+    # claim 直前に、対象 Issue 番号に対応する head ブランチ
+    # `claude/issue-<N>-design-*` の OPEN な PR が存在するかを確認し、存在すれば
+    # 当該サイクルを skip する。check_existing_impl_pr が impl PR のみを対象とし
+    # design PR を ignore するため（reason=design-pr-in-closing-refs）、保護ラベル
+    # （awaiting-design-review / blocked）が外れた状態で open design PR を持つ Issue が
+    # 再 pickup され、design モード再実行で PjM が人間レビュー済み design PR を
+    # クローズして作り直す事故（#180 / PR #184）を構造的に防ぐ（二重防御 / Req 2）。
+    # linked 非依存の head ref strict 一致で検出（Req 1.4 / 1.5）。検出失敗 / timeout /
+    # レート制限は内部で skip 側に倒される（fail-safe / Req 3.1 / 3.2）。skip 判定行は
+    # pclp_log/warn で記録済み（Req 4.1 / 4.2）。design PR を持たない通常 Issue では
+    # open design PR 不在で exit 0 = 本機能導入前と完全等価（NFR 1.1）。本ガードは
+    # Issue pickup 経路にのみ作用し、PR 駆動の design PR 反復経路には触れない（Req 5）。
+    if ! check_open_design_pr "$issue_number"; then
       continue
     fi
 
