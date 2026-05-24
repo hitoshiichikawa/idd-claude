@@ -1,0 +1,4 @@
+[
+  { "number": 120, "title": "old hotfix", "body": "", "url": "u120", "labels": [ { "name": "auto-dev" }, { "name": "hotfix" } ] },
+  { "number": 305, "title": "new hotfix", "body": "", "url": "u305", "labels": [ { "name": "auto-dev" }, { "name": "hotfix" } ] }
+]

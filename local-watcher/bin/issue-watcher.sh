@@ -95,6 +95,10 @@ LABEL_AWAITING_SLOT="awaiting-slot"
 # 既存 `needs-decisions`（汎用人間判断要求）とは意味的に独立した運用シグナル
 # （Req 9.1〜9.4）。
 LABEL_BLOCKED="blocked"
+# Issue #200: hotfix 優先ティアを示すラベル。Dispatcher の候補処理順を
+# FIFO（Issue 番号昇順）にしたうえで、本ラベル付き Issue を非 hotfix Issue より
+# 先に投入する 2 段優先のキー。人間が手動付与する運用前提（自動付与なし）。
+LABEL_HOTFIX="hotfix"
 
 # ─── Base branch 設定 (#89) ───
 # watcher 経路（local cron）と Actions 経路の base branch を 1 つの env で切り替える
@@ -6652,14 +6656,59 @@ _dispatcher_run() {
   # PM phase の Dependency Resolver Gate が付与し、人間が依存解消後に手動除去すると
   # 次サイクルで通常 pickup に再合流する（Req 4.1, 4.2）。既存除外ラベルとは独立した
   # 状態遷移を持ち、`needs-decisions` と並列指定する（Req 9.3 / NFR 1.3）。
-  local issues
-  issues=$(gh issue list \
+  #
+  # Issue #200: 候補処理順を FIFO（Issue 番号昇順 = 古いものから）にし、`hotfix`
+  # ラベル付き Issue を非 hotfix より先に投入する 2 段優先を導入する。
+  # `--limit 5`（= 1 サイクルで評価する候補件数上限）の意味は据え置く（Req 3.3）が、
+  # 単純に「created-desc で 5 件切り出してから並べ替え」だと最も古い Issue や
+  # 6 件目以降の hotfix を取りこぼす（Req 3.1 / 3.2）。これを避けるため:
+  #   1) hotfix ティアを `sort:created-asc`（古いもの優先）で別クエリ取得し、
+  #   2) 非 hotfix を含む全候補も `sort:created-asc` で取得する
+  # 両クエリの除外フィルタ・取得フィールドは従来と完全同一。各クエリで `--limit` 件
+  # ずつ取ることで、各ティアの「最も古い候補の先頭」が limit 切り出しから漏れない。
+  # 取得後は jq で hotfix ティア優先 + 各ティア内 Issue 番号昇順に安定ソートし、
+  # number で dedup したうえで先頭から $DISPATCH_LIMIT 件に切り詰める（NFR 2.1）。
+  local search_filter="-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_STAGED_FOR_RELEASE\" -label:\"$LABEL_BLOCKED\""
+  # 1 サイクルで投入対象として評価する候補件数の上限（本機能導入前と同一の既定 5）。
+  local DISPATCH_LIMIT=5
+
+  local hotfix_issues all_issues
+  # (1) hotfix ティア: created-asc で取得（最も古い hotfix を limit 切り出しで失わない）
+  hotfix_issues=$(gh issue list \
+    --repo "$REPO" \
+    --label "$LABEL_TRIGGER" \
+    --label "$LABEL_HOTFIX" \
+    --state open \
+    --search "$search_filter sort:created-asc" \
+    --json number,title,body,url,labels \
+    --limit "$DISPATCH_LIMIT")
+  # (2) 全候補（hotfix / 非 hotfix 混在）: created-asc で取得（最も古い Issue を失わない）
+  all_issues=$(gh issue list \
     --repo "$REPO" \
     --label "$LABEL_TRIGGER" \
     --state open \
-    --search "-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_STAGED_FOR_RELEASE\" -label:\"$LABEL_BLOCKED\"" \
+    --search "$search_filter sort:created-asc" \
     --json number,title,body,url,labels \
-    --limit 5)
+    --limit "$DISPATCH_LIMIT")
+
+  # 両クエリ結果を結合し、hotfix ティア優先 + 各ティア内 Issue 番号昇順で安定ソート、
+  # number で dedup して先頭 $DISPATCH_LIMIT 件に切り詰める。
+  # - `.labels` 欠落 / null や label 配列に hotfix 名が無い候補は安全側で非 hotfix 扱い（Req 2.4）。
+  # - hotfix ティアを 0、非 hotfix を 1 とし、(tier, number) の昇順で並べることで
+  #   Req 2.1 / 2.2 / 2.3（hotfix 先行・同一ティア内 number 昇順）を満たす。
+  local issues
+  issues=$(jq -c -n \
+    --argjson limit "$DISPATCH_LIMIT" \
+    --arg hotfix "$LABEL_HOTFIX" \
+    --slurpfile hf <(printf '%s' "$hotfix_issues") \
+    --slurpfile al <(printf '%s' "$all_issues") '
+    ([ $hf[0][]?, $al[0][]? ])
+    | map(. + { _is_hotfix: ((.labels // []) | map(.name) | index($hotfix) != null) })
+    | unique_by(.number)
+    | sort_by([ (if ._is_hotfix then 0 else 1 end), .number ])
+    | .[0:$limit]
+    | map(del(._is_hotfix))
+  ')
 
   local count
   count=$(echo "$issues" | jq 'length')

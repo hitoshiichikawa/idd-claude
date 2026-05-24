@@ -1,0 +1,7 @@
+[
+  { "number": 50,  "title": "oldest normal",       "body": "", "url": "u50",  "labels": [ { "name": "auto-dev" } ] },
+  { "number": 120, "title": "old hotfix",           "body": "", "url": "u120", "labels": [ { "name": "auto-dev" }, { "name": "hotfix" } ] },
+  { "number": 201, "title": "normal mid",           "body": "", "url": "u201", "labels": [ { "name": "auto-dev" } ] },
+  { "number": 202, "title": "no labels key",        "body": "", "url": "u202" },
+  { "number": 203, "title": "null labels",          "body": "", "url": "u203", "labels": null }
+]
