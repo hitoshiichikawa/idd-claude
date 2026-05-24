@@ -56,7 +56,7 @@
   - _Boundary: Module Installer_
   - _Depends: 2, 3, 4_
 
-- [ ] 6. 既存テストの抽出元追従修正
+- [x] 6. 既存テストの抽出元追従修正
   - `qa_run_claude_stage_test.sh`: `qa_log`/`qa_warn`/`qa_error` を core_utils.sh から、
     `qa_detect_rate_limit`/`qa_run_claude_stage` を quota-aware.sh から抽出するよう `extract_function` の参照先を変更する
   - `verify_pushed_or_retry_test.sh`: `qa_log`/`qa_warn`/`qa_error` を core_utils.sh から抽出、
