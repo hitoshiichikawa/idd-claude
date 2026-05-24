@@ -47,7 +47,7 @@
   - _Boundary: Auto-Rebase Processor_
   - _Depends: 1_
 
-- [ ] 5. install.sh によるモジュール配置
+- [x] 5. install.sh によるモジュール配置
   - ローカル配置ブロック（L1224 付近、本体 `*.sh` 配置の直後）に
     `copy_glob_to_homebin "$LOCAL_WATCHER_DIR/bin/modules" "*.sh" "$HOME/bin/modules" --executable` を追加する
   - 既存 `copy_glob_to_homebin` 経由で冪等 SKIP・差分上書き保護・dry-run 列挙・実行権限付与・sudo 不要を担保すること（新規ロジックは書かない）
