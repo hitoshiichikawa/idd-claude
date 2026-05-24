@@ -20,14 +20,22 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #181 Part 3 で PR Iteration Processor の関数群（pi_resolve_max_rounds /
+# pi_read_no_progress_streak ほか）は modules/pr-iteration.sh へ切り出された。
+# 抽出元を本体から pr-iteration.sh へ repoint する。
+PR_ITERATION_SH="$SCRIPT_DIR/../bin/modules/pr-iteration.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
   exit 2
 fi
+if [ ! -f "$PR_ITERATION_SH" ]; then
+  echo "ERROR: cannot find pr-iteration.sh at $PR_ITERATION_SH" >&2
+  exit 2
+fi
 
-# 既存テストと同じイディオム: issue-watcher.sh から 1 関数だけを awk で切り出して
-# eval で読み込む。issue-watcher.sh のトップレベル副作用は回避する。
+# 既存テストと同じイディオム: 対象スクリプトから 1 関数だけを awk で切り出して
+# eval で読み込む。トップレベル副作用は回避する。
 extract_function() {
   local script="$1"
   local fn_name="$2"
@@ -45,9 +53,9 @@ pi_log()   { echo "LOG: $*" >&2; }
 pi_error() { echo "ERR: $*" >&2; }
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "pi_resolve_max_rounds")"
+eval "$(extract_function "$PR_ITERATION_SH" "pi_resolve_max_rounds")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "pi_read_no_progress_streak")"
+eval "$(extract_function "$PR_ITERATION_SH" "pi_read_no_progress_streak")"
 
 if ! declare -F pi_resolve_max_rounds >/dev/null; then
   echo "ERROR: pi_resolve_max_rounds not loaded" >&2
@@ -226,7 +234,7 @@ echo ""
 # round counter 読み出しが no-progress-streak 拡張で壊れていないことを確認
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "pi_read_round_counter")"
+eval "$(extract_function "$PR_ITERATION_SH" "pi_read_round_counter")"
 
 if ! declare -F pi_read_round_counter >/dev/null; then
   echo "ERROR: pi_read_round_counter not loaded" >&2
@@ -281,7 +289,7 @@ assert_eq "Req 4.4: 新 marker → 新 marker の更新も同 regex で動作" \
 
 # 既存 pi_read_last_run の regex は streak 付き marker でも last-run 値のみ拾う
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "pi_read_last_run")"
+eval "$(extract_function "$PR_ITERATION_SH" "pi_read_last_run")"
 
 if ! declare -F pi_read_last_run >/dev/null; then
   echo "ERROR: pi_read_last_run not loaded" >&2

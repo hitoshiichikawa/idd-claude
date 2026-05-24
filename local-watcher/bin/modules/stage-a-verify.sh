@@ -1,0 +1,510 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# stage-a-verify.sh — watcher の Stage A Verify ゲートモジュール
+#
+# 用途:
+#   issue-watcher.sh から切り出した Stage A Verify Module (#125) の関数定義を集約する。
+#   Stage A（Developer 実装）完了直前に tasks.md 末尾の build/test/lint コマンド（verify
+#   タスク）を watcher 自身が REPO_DIR で独立再実行し、Developer の自己申告のみで build
+#   不通が Stage A を通過するのを防ぐゲート。STAGE_A_VERIFY_ENABLED で gate。
+#   - sav_log / sav_warn / sav_error           : `stage-a-verify:` prefix logger
+#   - _sav_cmd_starts_with_keyword             : verify keyword 行頭一致判定
+#   - stage_a_verify_extract_command           : tasks.md 末尾走査 + keyword 一致抽出
+#   - stage_a_verify_resolve_command           : STAGE_A_VERIFY_COMMAND escape hatch + 抽出の合成
+#   - stage_a_verify_round_path / _read_round / _bump_round / _reset_round
+#                                              : sidecar による round counter 永続化
+#   - _sav_handle_failure                      : round=1 差し戻し / round=2 escalate
+#   - stage_a_verify_run                       : 統合ランナー（戻り値 0=pass / 1=差し戻し / 2=claude-failed）
+#
+# 分割の経緯（#181 design.md decision 2）:
+#   Part 1 境界マップは Stage A Verify を impl-gates.sh へ集約する想定だったが、Issue #181
+#   のスコープは stage_a_verify_run / sav_* のみで sc_*（Stage Checkpoint）/ tc_*（Tasks Count）
+#   は対象外のため、独立モジュール stage-a-verify.sh として分離する。元コードでは
+#   sav_* は 2 つの非連続領域（Region 1: logger〜reset_round / Region 2: _sav_handle_failure /
+#   stage_a_verify_run）に分かれていたが、source は全関数を実行前に読み込むため 1 ファイルへ
+#   統合しても挙動は等価（元コードの「順序維持」コメントは可読性配慮でランタイム要件ではない）。
+#
+# 配置先:
+#   $HOME/bin/modules/stage-a-verify.sh（install.sh が local-watcher/bin/modules/ から配置する）
+#
+# 依存:
+#   - 本モジュールは issue-watcher.sh 本体から `source` される前提（単体起動しない）。
+#   - `set -euo pipefail` は本体側で宣言済みのため、本モジュールでは宣言せず関数定義のみを持つ。
+#   - グローバル変数（$REPO / $REPO_DIR / $SPEC_DIR_REL / $LOG_DIR / $NUMBER /
+#     $STAGE_A_VERIFY_ENABLED / $STAGE_A_VERIFY_COMMAND / $STAGE_A_VERIFY_TIMEOUT 等）は
+#     本体冒頭の Config ブロックで定義済み。bash の遅延束縛により呼び出し時に解決される。
+#   - cross-module 呼び出し: _sav_handle_failure → mark_issue_failed（impl-pipeline 系 / 本体）。
+#     stage_a_verify_run → _sav_handle_failure。いずれも run_impl_pipeline 実行前に全モジュールが
+#     source されるため、呼び出し時点で定義済みであり挙動不変。
+#   - call site（run_impl_pipeline 内の stage_a_verify_run）は本体に残置する。
+#   - 外部 CLI: gh / git。
+#
+# セットアップ参照先:
+#   - 設計: docs/specs/181-feat-watcher-issue-watcher-sh-part-3-pr/design.md（decision 2）
+#   - 機能設計: docs/specs/125-feat-watcher-stage-a-tasks-md-verify-bui/design.md
+
+# stage-a-verify 専用ロガー（既存 qa_log と同形式 / Issue #119 規約）。
+# 行頭 `[YYYY-MM-DD HH:MM:SS] [$REPO] stage-a-verify:` の 3 段 prefix を維持し、
+# `grep '\[.*\] stage-a-verify:'` で全件抽出可能（NFR 4.1, NFR 4.2）。
+sav_log() {
+  echo "[$(date '+%F %T')] [$REPO] stage-a-verify: $*"
+}
+sav_warn() {
+  echo "[$(date '+%F %T')] [$REPO] stage-a-verify: WARN: $*" >&2
+}
+sav_error() {
+  echo "[$(date '+%F %T')] [$REPO] stage-a-verify: ERROR: $*" >&2
+}
+
+# ─── _sav_cmd_starts_with_keyword ───
+#
+# 抽出した shell コマンド ($1) が verify keyword 集合のいずれかで「行頭一致」
+# するかを確認する。`stage_a_verify_run` の Gate 3 として `stage_a_verify_extract_command`
+# 側の strict 抽出に対する defense-in-depth として使う（#160 Req 5.3）。
+#
+# 注: keyword 集合の Single Source of Truth は `stage_a_verify_extract_command`
+#     内の awk script に渡される `_SAV_KEYWORDS` である。本関数の keyword リストは
+#     当該定義と **完全一致** している必要があり、追加時は両方を更新すること
+#     （tasks-generation.md の design.md「Components and Interfaces /
+#     stage_a_verify_extract_command」を参照）。
+#     抽出関数側で既に行頭一致を保証しているため、本関数のチェックが SKIPPED に
+#     倒すケースは「将来抽出関数の挙動が緩んだ場合のセーフティネット」と
+#     「将来の caller 拡張」を想定したもの。
+#
+# 入力: $1 = 抽出済み shell コマンド文字列
+# 戻り値: 0 = いずれかの keyword で開始 / 1 = 一致しない（= SKIPPED 候補）
+_sav_cmd_starts_with_keyword() {
+  local cmd="$1"
+  case "$cmd" in
+    "./gradlew"*) return 0 ;;
+    "gradle "*) return 0 ;;
+    "mvn "*) return 0 ;;
+    "npm test"*) return 0 ;;
+    "npm run"*) return 0 ;;
+    "npm ci"*) return 0 ;;
+    "pnpm "*) return 0 ;;
+    "yarn "*) return 0 ;;
+    "cargo "*) return 0 ;;
+    "go test"*) return 0 ;;
+    "go build"*) return 0 ;;
+    "go vet"*) return 0 ;;
+    "pytest"*) return 0 ;;
+    "python -m pytest"*) return 0 ;;
+    "python -m unittest"*) return 0 ;;
+    "make test"*) return 0 ;;
+    "make build"*) return 0 ;;
+    "make check"*) return 0 ;;
+    "make verify"*) return 0 ;;
+    "bundle exec"*) return 0 ;;
+    "rake "*) return 0 ;;
+    "dotnet test"*) return 0 ;;
+    "dotnet build"*) return 0 ;;
+    "shellcheck"*) return 0 ;;
+    "actionlint"*) return 0 ;;
+    "tox "*) return 0 ;;
+    "swift test"*) return 0 ;;
+    "swift build"*) return 0 ;;
+  esac
+  return 1
+}
+
+# ─── stage_a_verify_extract_command ───
+#
+# `tasks.md` を 1 パスで走査し、抽出キーワード集合に一致した行のうち
+# **末尾（ファイル末尾に最も近いもの）** 1 行を stdout に出力する（Req 1.1, 1.2）。
+# 抽出は言語非依存な文字列パターンのみで行う（AST 解析しない、Req 1.5 / NFR 2.1）。
+#
+# 入力: 環境変数 REPO_DIR / SPEC_DIR_REL
+# 戻り値: 0 = 抽出成功 / 1 = 一致なし or tasks.md 不在
+# stdout: 抽出した shell コマンド 1 行（成功時のみ）
+#
+# 抽出キーワード集合は design.md「Components and Interfaces /
+# stage_a_verify_extract_command」で確定したもの。新言語追加時はここに 1 行追加する
+# だけで対応可能。未対応言語は `STAGE_A_VERIFY_COMMAND` env で escape する。
+stage_a_verify_extract_command() {
+  local tasks_path="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+  [ -f "$tasks_path" ] || return 1
+
+  # 言語非依存 keyword 集合。1 行 1 keyword で空白区切り（awk 内で再分割）。
+  # 各 keyword は「行に部分一致したら verify タスクとみなす」最小単位。
+  #   - `./gradlew` / `gradle ` / `mvn ` : JVM 系 build tool
+  #   - `npm test` / `npm run` / `npm ci` / `pnpm ` / `yarn ` : Node.js 系
+  #     （`npm install` は依存解決なので含めない）
+  #   - `cargo ` : Rust
+  #   - `go test` / `go build` / `go vet` : Go
+  #   - `pytest` / `python -m pytest` / `python -m unittest` : Python
+  #   - `make test` / `make build` / `make check` / `make verify` : make（target 限定）
+  #   - `bundle exec` / `rake ` : Ruby
+  #   - `dotnet test` / `dotnet build` : .NET
+  #   - `shellcheck` / `actionlint` : shell 系プロジェクト（idd-claude 自身を含む）
+  #   - `tox ` : Python tox
+  #   - `swift test` / `swift build` : Swift
+  local _SAV_KEYWORDS
+  _SAV_KEYWORDS=$'./gradlew\n'
+  _SAV_KEYWORDS+=$'gradle \n'
+  _SAV_KEYWORDS+=$'mvn \n'
+  _SAV_KEYWORDS+=$'npm test\n'
+  _SAV_KEYWORDS+=$'npm run\n'
+  _SAV_KEYWORDS+=$'npm ci\n'
+  _SAV_KEYWORDS+=$'pnpm \n'
+  _SAV_KEYWORDS+=$'yarn \n'
+  _SAV_KEYWORDS+=$'cargo \n'
+  _SAV_KEYWORDS+=$'go test\n'
+  _SAV_KEYWORDS+=$'go build\n'
+  _SAV_KEYWORDS+=$'go vet\n'
+  _SAV_KEYWORDS+=$'pytest\n'
+  _SAV_KEYWORDS+=$'python -m pytest\n'
+  _SAV_KEYWORDS+=$'python -m unittest\n'
+  _SAV_KEYWORDS+=$'make test\n'
+  _SAV_KEYWORDS+=$'make build\n'
+  _SAV_KEYWORDS+=$'make check\n'
+  _SAV_KEYWORDS+=$'make verify\n'
+  _SAV_KEYWORDS+=$'bundle exec\n'
+  _SAV_KEYWORDS+=$'rake \n'
+  _SAV_KEYWORDS+=$'dotnet test\n'
+  _SAV_KEYWORDS+=$'dotnet build\n'
+  _SAV_KEYWORDS+=$'shellcheck\n'
+  _SAV_KEYWORDS+=$'actionlint\n'
+  _SAV_KEYWORDS+=$'tox \n'
+  _SAV_KEYWORDS+=$'swift test\n'
+  _SAV_KEYWORDS+=$'swift build'
+
+  # awk 1 パス走査で「直近で keyword に一致した行」を変数 last に保持し、
+  # ファイル末尾まで読んだら最後の保持値を出力する（= 末尾に最も近い 1 行、
+  # Req 1.2 / #160 Req 1.3, 2.2, 2.3）。O(N) 線形時間（NFR 3.1 / #160 NFR 2.1）。
+  #
+  # #160 修正: backtick で囲まれたインラインコードスパン（`...`）が行内にあり、
+  #   その中身が keyword に一致した場合、**スパン内の中身のみ** を抽出する
+  #   （Req 1.1）。散文 + backtick で書かれた verify 行（例: `- lint 緑:
+  #   \`./gradlew :app:lintDebug\` で新規 error なし`）が exit 127 を起こす
+  #   regression（#125 で導入）を解消する。
+  #   同一行に複数のインラインコードスパンが存在する場合は、最初に keyword に
+  #   一致したスパンの中身を採用（Req 1.2）。
+  #   行内に backtick がペアで存在せず、行全体が keyword に部分一致した場合は
+  #   従来通り「装飾除去後の行全体」を採用する（Req 2.1 / 後方互換）。
+  #   複数行 fenced code block（` ``` ` フェンスで囲まれた範囲）内の行は
+  #   抽出対象から除外する（Req 3.1）。
+  # 装飾 strip:
+  #   - 行頭の "- " / "  - " / "  - [ ] " 等の markdown bullet と list checkbox
+  #   - 行頭 / 行末の空白
+  # 抽出結果は装飾を除いたコマンド本体のみ（後段の `bash -c` で実行可能な形）。
+  local result
+  result=$(awk -v kws="$_SAV_KEYWORDS" '
+    BEGIN {
+      n = split(kws, ARR, "\n")
+      last = ""
+      in_fence = 0
+    }
+    {
+      raw = $0
+      # 複数行 fenced code block の境界判定（行頭 ``` で開閉、言語タグ任意）。
+      # in_fence 状態の行は keyword マッチ対象から除外する（#160 Req 3.1, 3.2）。
+      if (raw ~ /^[[:space:]]*```/) {
+        in_fence = (in_fence == 0) ? 1 : 0
+        next
+      }
+      if (in_fence) { next }
+
+      line = raw
+      # markdown bullet / checkbox / アスタリスク（deferrable 印）の装飾除去
+      sub(/^[[:space:]]+/, "", line)
+      sub(/^-[[:space:]]+/, "", line)
+      sub(/^\[[[:space:]xX]\]\*?[[:space:]]+/, "", line)
+      sub(/^[0-9]+(\.[0-9]+)*[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+
+      # インラインコードスパン抽出（#160 Req 1.1, 1.2）:
+      #   バッククォートで囲まれた中身を順に走査し、最初に keyword に**行頭一致**
+      #   したスパンの中身を採用する。
+      #   #160 round=2 (Req 5.3): `index(candidate, kw) > 0` だと
+      #   `cd app && ./gradlew test` のように冒頭が keyword 以外のスパンも
+      #   採用してしまい、`bash -c "cd app && ..."` が走って意図せず副作用を起こす
+      #   恐れがあるため `== 1` （= 行頭一致）に厳格化する。span の冒頭が keyword
+      #   で始まらない場合は当該 span を抽出対象から外し、次の span を走査する。
+      span_hit = 0
+      span_content = ""
+      tail = line
+      while (1) {
+        p1 = index(tail, "`")
+        if (p1 == 0) { break }
+        rest = substr(tail, p1 + 1)
+        p2 = index(rest, "`")
+        if (p2 == 0) { break }
+        candidate = substr(rest, 1, p2 - 1)
+        for (i = 1; i <= n; i++) {
+          kw = ARR[i]
+          if (kw == "") continue
+          if (index(candidate, kw) == 1) {
+            span_content = candidate
+            span_hit = 1
+            break
+          }
+        }
+        if (span_hit) { break }
+        tail = substr(rest, p2 + 1)
+      }
+      if (span_hit) {
+        last = span_content
+        next
+      }
+
+      # backtick 無し / backtick はあるが keyword 不一致の場合は、装飾除去後の
+      # 行全体が keyword で**行頭一致**するか判定する（#160 Req 2.1 後方互換 +
+      # Req 5.3）。
+      # ただし line に backtick がペアで含まれる場合は「散文+backtick で keyword は
+      # スパン外にしか出現しない」ケース（#160 の本丸 regression）なので行全体採用
+      # は誤動作を起こす。よって backtick ペアが存在する場合は line fallback を
+      # 行わず、当該行を抽出候補から除外する（Req 1.4 / Req 5.1）。
+      # #160 round=2 (Req 5.3): 部分一致 `index(...) > 0` だと
+      # `lint を実行する` のような散文の "lint" を `./gradlew :app:lintDebug`
+      # 等とマッチさせる可能性があるため、行頭一致 `index(...) == 1` に厳格化する。
+      # 既存 12 fixture はいずれも装飾除去後の行頭が keyword で始まるため挙動不変。
+      bt_count = gsub(/`/, "`", line)
+      if (bt_count >= 2) { next }
+
+      for (i = 1; i <= n; i++) {
+        kw = ARR[i]
+        if (kw == "") continue
+        if (index(line, kw) == 1) {
+          last = line
+          break
+        }
+      }
+    }
+    END {
+      if (last != "") print last
+    }
+  ' "$tasks_path")
+
+  [ -n "$result" ] || return 1
+  printf '%s\n' "$result"
+}
+
+# ─── stage_a_verify_resolve_command ───
+#
+# `STAGE_A_VERIFY_COMMAND` env が非空ならそれを最優先で採用し（escape hatch、
+# Req 4.4 / NFR 2.2）、空ならば `stage_a_verify_extract_command` を呼ぶ。
+#
+# 入力: 環境変数 STAGE_A_VERIFY_COMMAND / REPO_DIR / SPEC_DIR_REL
+# 戻り値: 0 = 解決成功 / 1 = SKIPPED (env 空 + tasks.md 抽出不能)
+# stdout: 解決した shell コマンド 1 行（成功時のみ）
+stage_a_verify_resolve_command() {
+  if [ -n "${STAGE_A_VERIFY_COMMAND:-}" ]; then
+    printf '%s\n' "$STAGE_A_VERIFY_COMMAND"
+    return 0
+  fi
+  local cmd
+  cmd=$(stage_a_verify_extract_command) || return 1
+  [ -n "$cmd" ] || return 1
+  printf '%s\n' "$cmd"
+}
+
+# ─── stage_a_verify_round_path ───
+#
+# round counter sidecar の絶対パスを stdout に出す。Issue ごとに spec dir 配下に
+# `.stage-a-verify-round` という dotfile を 1 つ置く設計（design.md「Components
+# and Interfaces / stage_a_verify_round_path」採用案）。worktree slot ごとの
+# `$REPO_DIR` が自然に slot 隔離を担保する。
+#
+# 入力: 環境変数 REPO_DIR / SPEC_DIR_REL
+# stdout: 絶対パス（必ず 1 行）
+stage_a_verify_round_path() {
+  printf '%s\n' "$REPO_DIR/$SPEC_DIR_REL/.stage-a-verify-round"
+}
+
+# ─── stage_a_verify_read_round ───
+#
+# round counter を stdout に整数で出す。ファイル不在は "0"（未失敗）。
+# 不正な内容（非数値）は安全側で "0" にフォールバック。
+#
+# 入力: 環境変数 REPO_DIR / SPEC_DIR_REL
+# stdout: 整数 1 行 ("0" / "1" / "2" 等)
+# 戻り値: 0（read は失敗しない設計）
+stage_a_verify_read_round() {
+  local path
+  path=$(stage_a_verify_round_path)
+  local val=""
+  if [ -f "$path" ]; then
+    val=$(head -n1 "$path" 2>/dev/null | tr -d '[:space:]')
+  fi
+  if [[ "$val" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$val"
+  else
+    printf '%s\n' "0"
+  fi
+}
+
+# ─── stage_a_verify_bump_round ───
+#
+# round counter を 1 増やして永続化する。不在からの初回呼び出しは "1" を書く。
+# 書き込み失敗（disk full / permission denied 等）は sav_error で警告し、
+# 呼び出し元（_sav_handle_failure）は read_round の結果が 0 のままになるので
+# 差し戻し挙動（round=1）に倒れる安全側設計。
+#
+# 戻り値: 0 = 書き込み成功 / 1 = 書き込み失敗
+stage_a_verify_bump_round() {
+  local path cur next
+  path=$(stage_a_verify_round_path)
+  cur=$(stage_a_verify_read_round)
+  next=$((cur + 1))
+  # spec dir 自体が存在しない場合は SKIPPED 経路で呼ばれていないはずだが、念のため mkdir -p
+  mkdir -p "$(dirname "$path")" 2>/dev/null || true
+  if ! printf '%d\n' "$next" > "$path" 2>/dev/null; then
+    sav_error "round counter 書き込みに失敗 path=$path next=$next"
+    return 1
+  fi
+  return 0
+}
+
+# ─── stage_a_verify_reset_round ───
+#
+# round counter sidecar を削除する。SUCCESS / claude-failed escalate 後に呼ぶ。
+# 不在時は no-op（rm -f の挙動に従う）。
+stage_a_verify_reset_round() {
+  local path
+  path=$(stage_a_verify_round_path)
+  rm -f "$path" 2>/dev/null || true
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 以下は元 issue-watcher.sh では Region 2（mark_issue_failed 定義後の位置）に
+# 置かれていた失敗ハンドラ / 統合ランナー。#181 Part 3 で Region 1 と 1 モジュールへ
+# 統合した（source-before-execution により定義順序はランタイム挙動へ影響しない）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── _sav_handle_failure ───
+#
+# stage_a_verify_run の失敗パス共通処理。round counter を bump し、
+# round=1 なら Developer 差し戻し（Issue コメント投稿 + return 1）、
+# round=2 以降なら mark_issue_failed 経由で claude-failed 化（return 2）。
+# `needs-iteration` ラベルは Issue 側には付与しない既存契約（NFR 1.2）を維持。
+#
+# 入力:
+#   $1 = kind ("timeout" | "exit")
+#   $2 = detail (timeout 秒 | exit code)
+# 戻り値:
+#   1 = Developer 差し戻し（次 tick で stage-a-verify 再評価）
+#   2 = claude-failed 付与済み（watcher 退出）
+_sav_handle_failure() {
+  local kind="$1"
+  local detail="$2"
+  stage_a_verify_bump_round || sav_error "round counter 書き込みに失敗（差し戻し挙動を強制）"
+  local round
+  round=$(stage_a_verify_read_round)
+  case "$round" in
+    1)
+      sav_log "round=1 outcome=needs-iteration (Developer 差し戻し)"
+      # round=1 差し戻しコメント。`needs-iteration` ラベルは PR 専用契約であり
+      # Issue 側には付与しない（NFR 1.2 / 既存 L2860 / L5989 契約）。次 tick で
+      # Stage Checkpoint が START_STAGE=B を返しても、Stage B 開始前の
+      # stage-a-verify ゲートで再評価される（design.md「stage-a-verify と
+      # Stage Checkpoint の協調」参照）。
+      local comment_body
+      comment_body="🔁 stage-a-verify が失敗しました（round=1 / ${kind}=${detail}）。
+
+\`tasks.md\` 末尾の verify タスク（build/test/lint）を watcher が REPO_DIR で独立再実行したところ、exit code が 0 以外でした。
+
+- 検出されたコマンドの実行結果はログ \`${LOG:-(unknown)}\` を参照
+- 次サイクルで Developer が再実装し、Stage B 開始前に stage-a-verify が再評価されます
+- 修正後に \`./gradlew\` / \`npm test\` 等のローカル成功を確認してから commit/push してください
+
+本機能の詳細: README「Stage A Verify Gate (#125)」節 / Issue #125"
+      gh issue comment "$NUMBER" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1 || \
+        sav_warn "gh issue comment 投稿に失敗（差し戻し挙動は継続）"
+      return 1
+      ;;
+    *)
+      sav_log "round=$round outcome=claude-failed (escalate to human)"
+      stage_a_verify_reset_round
+      local extra_body
+      extra_body="stage-a-verify（\`tasks.md\` 末尾 verify タスクの独立再実行）が連続 ${round} 回失敗しました（${kind}=${detail}）。
+
+- 検出コマンドの実行結果はログ \`${LOG:-(unknown)}\` を参照
+- \`tasks.md\` 末尾の build/test/lint コマンドをローカルで通してから \`claude-failed\` を外してください
+- 一時的に gate を skip したい場合は cron / launchd 側で \`STAGE_A_VERIFY_ENABLED=false\` を渡してください（Req 4.1 / NFR 1.1）
+
+本機能の詳細: README「Stage A Verify Gate (#125)」節 / Issue #125"
+      mark_issue_failed "stageA-verify" "$extra_body"
+      return 2
+      ;;
+  esac
+}
+
+# ─── stage_a_verify_run ───
+#
+# Stage A Verify Module の統合ランナー。`run_impl_pipeline` の Stage A 成功直後・
+# Stage B 開始直前から 1 度だけ呼ばれる。
+#
+# 入力 (環境変数経由):
+#   REPO / REPO_DIR / SPEC_DIR_REL / NUMBER / LOG
+#   STAGE_A_VERIFY_ENABLED / STAGE_A_VERIFY_TIMEOUT / STAGE_A_VERIFY_COMMAND
+# 戻り値:
+#   0 = SUCCESS / SKIPPED / DISABLED → Stage A 完全完了として続行
+#   1 = FAILED (round=1) → 差し戻し済、次 tick で再試行
+#   2 = FAILED (round=2 以降) → mark_issue_failed 済（claude-failed 付与）、watcher 退出
+# 副作用:
+#   - cron.log / $LOG に 1 行以上の `[$REPO] stage-a-verify:` ログ（NFR 4.1）
+#   - round counter sidecar の read/bump/reset
+#   - 失敗時に gh issue comment（round=1 差し戻し / round=2 は mark_issue_failed が発火）
+#
+# 不変条件:
+#   - 1 回の呼び出しで `stage-a-verify:` 行を必ず 1 行以上出力（NFR 4.1）
+#   - 抽出した cmd は `bash -c` に **そのまま**渡し、watcher 側で `&&` / `||` / `;` を
+#     解釈しない（Req 1.3）
+stage_a_verify_run() {
+  # ── Gate 1: DISABLED ──
+  # `STAGE_A_VERIFY_ENABLED=false` 明示時のみ skip（`=false` 厳密一致、Req 4.1 /
+  # NFR 1.1）。`:-true` で `unset` も既定有効として扱う。
+  if [ "${STAGE_A_VERIFY_ENABLED:-true}" = "false" ]; then
+    sav_log "DISABLED reason=env-opt-out"
+    return 0
+  fi
+
+  # ── Gate 2: SKIPPED（解決できない / 一致なし）──
+  local cmd
+  if ! cmd=$(stage_a_verify_resolve_command); then
+    sav_log "SKIPPED reason=no-verify-task-in-tasks-md"
+    return 0
+  fi
+
+  # ── Gate 3: SKIPPED（抽出した cmd が keyword で開始しない）──
+  # `stage_a_verify_extract_command` 側で行頭一致を保証しているが、defense-in-depth
+  # として実行直前にも確認する（#160 Req 5.3）。`STAGE_A_VERIFY_COMMAND` env による
+  # escape hatch 経路（Req 4.1）は運用者が明示指定した値なので本チェックを bypass する。
+  if [ -z "${STAGE_A_VERIFY_COMMAND:-}" ]; then
+    if ! _sav_cmd_starts_with_keyword "$cmd"; then
+      sav_log "SKIPPED reason=cmd-does-not-start-with-keyword cmd=$(printf '%q' "$cmd")"
+      return 0
+    fi
+  fi
+
+  # ── Execute ──
+  local _timeout="${STAGE_A_VERIFY_TIMEOUT:-600}"
+  # cmd の shell エスケープは printf %q で安全側に倒し、ログ復元性を確保する。
+  sav_log "EXEC issue=#${NUMBER:-?} timeout=${_timeout}s cmd=$(printf '%q' "$cmd")"
+  local rc=0
+  # subshell `(cd && ...)` で cwd を REPO_DIR に隔離（NFR 5.1）。
+  # `timeout --kill-after=10 "$_timeout"` で暴走を時間でも遮断し、タイムアウト到達時は
+  # 子孫プロセスも SIGKILL する（NFR 5.2）。
+  (cd "$REPO_DIR" && timeout --kill-after=10 "$_timeout" bash -c "$cmd") \
+      >> "$LOG" 2>&1 || rc=$?
+
+  # ── 結果分岐 ──
+  case "$rc" in
+    0)
+      sav_log "SUCCESS exit=0"
+      stage_a_verify_reset_round
+      return 0
+      ;;
+    124)
+      sav_warn "TIMEOUT timeout=${_timeout}s exit=124"
+      _sav_handle_failure "timeout" "$_timeout"
+      return $?
+      ;;
+    *)
+      sav_warn "FAILED exit=$rc"
+      _sav_handle_failure "exit" "$rc"
+      return $?
+      ;;
+  esac
+}

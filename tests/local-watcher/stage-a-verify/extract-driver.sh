@@ -18,11 +18,13 @@ set -euo pipefail
 # 自身の場所から repo root を解決する（呼び出し元 cwd に依存しない）。
 _DRV_DIR="$(cd "$(dirname "$0")" && pwd)"
 _REPO_ROOT="$(cd "$_DRV_DIR/../../.." && pwd)"
-_WATCHER_SH="$_REPO_ROOT/local-watcher/bin/issue-watcher.sh"
+# #181 Part 3 で Stage A Verify Module の関数群（stage_a_verify_extract_command ほか）は
+# modules/stage-a-verify.sh へ切り出された。抽出元を本体から stage-a-verify.sh へ repoint する。
+_STAGE_A_VERIFY_SH="$_REPO_ROOT/local-watcher/bin/modules/stage-a-verify.sh"
 _FIXTURE_DIR="$_DRV_DIR/fixtures"
 
-if [ ! -f "$_WATCHER_SH" ]; then
-  echo "ERROR: watcher script not found at $_WATCHER_SH" >&2
+if [ ! -f "$_STAGE_A_VERIFY_SH" ]; then
+  echo "ERROR: stage-a-verify.sh not found at $_STAGE_A_VERIFY_SH" >&2
   exit 2
 fi
 if [ ! -d "$_FIXTURE_DIR" ]; then
@@ -30,7 +32,7 @@ if [ ! -d "$_FIXTURE_DIR" ]; then
   exit 2
 fi
 
-# watcher 本体を source するとメイン処理が走るため、対象関数だけを抽出して source する。
+# module を source するとロガー定義等も読み込まれるため、対象関数だけを抽出して source する。
 # `stage_a_verify_extract_command()` から最初の単独 `^}` までを切り出す。
 _EXTRACTED=$(mktemp -t sav-extract-XXXXXX.sh)
 trap 'rm -f "$_EXTRACTED"' EXIT
@@ -38,10 +40,10 @@ awk '
   /^stage_a_verify_extract_command\(\) \{/ { found = 1 }
   found { print }
   found && /^\}$/ { exit }
-' "$_WATCHER_SH" > "$_EXTRACTED"
+' "$_STAGE_A_VERIFY_SH" > "$_EXTRACTED"
 
 if ! [ -s "$_EXTRACTED" ]; then
-  echo "ERROR: stage_a_verify_extract_command を $_WATCHER_SH から抽出できませんでした" >&2
+  echo "ERROR: stage_a_verify_extract_command を $_STAGE_A_VERIFY_SH から抽出できませんでした" >&2
   exit 2
 fi
 
