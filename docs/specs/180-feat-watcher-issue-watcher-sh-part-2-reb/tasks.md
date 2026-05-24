@@ -68,7 +68,7 @@
   - _Boundary: Test Harness_
   - _Depends: 2, 3_
 
-- [ ] 7. 静的解析・スモーク検証と README 更新
+- [x] 7. 静的解析・スモーク検証と README 更新
   - `shellcheck local-watcher/bin/issue-watcher.sh local-watcher/bin/modules/*.sh install.sh` 警告ゼロ
   - cron-like 最小 PATH で Loader がモジュールを解決して起動できること、dry run で `処理対象の Issue なし` 正常終了、
     モジュール欠落時に欠落名 stderr + exit 1 を確認する
