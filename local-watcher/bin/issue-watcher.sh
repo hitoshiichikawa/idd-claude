@@ -482,7 +482,10 @@ command -v timeout >/dev/null 2>&1 || {
 # 配置先解決は $HOME 直書きせず BASH_SOURCE 基準にし、開発 repo 直実行（local-watcher/bin/）と
 # インストール後（$HOME/bin/）の双方で同一ロジックが効くようにする。
 IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/modules"
-REQUIRED_MODULES=( "core_utils.sh" )
+# source 順序は機能的に任意（bash の遅延束縛で前方参照は呼び出し時に解決される）が、
+# 可読性のため最も低レベルな core_utils.sh を先頭に置き、以降は #180 Part 2 で切り出した
+# 3 プロセッサ（quota-aware / merge-queue / auto-rebase）を並べる。
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
