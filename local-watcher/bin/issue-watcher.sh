@@ -500,8 +500,9 @@ unset _idd_mod _idd_mod_path
   exit 1
 }
 
-# PR Iteration が有効化されている時のみ template の存在を必須化（opt-in gate）。
-# 無効化（既定）時は template 未配置でも watcher 全体を起動できるよう、無条件チェックを避ける。
+# PR Iteration が有効化されている時のみ template の存在を必須化する（#112 以降デフォルト有効）。
+# 明示的に無効化（PR_ITERATION_ENABLED=false）した場合は template 未配置でも watcher 全体を
+# 起動できるよう、無条件チェックを避ける。
 if [ "$PR_ITERATION_ENABLED" = "true" ] && [ ! -f "$ITERATION_TEMPLATE" ]; then
   echo "Error: Iteration テンプレートが見つかりません: $ITERATION_TEMPLATE" >&2
   echo "  install.sh --local 再実行で配置されます。" >&2
@@ -2225,7 +2226,7 @@ mqr_error() {
 }
 
 process_merge_queue_recheck() {
-  # AC 1.2 / 1.3 / 3.1 / 3.3: opt-in gate（MERGE_QUEUE_ENABLED とは独立）
+  # AC 1.2 / 1.3 / 3.1 / 3.3: opt-out gate（#112 以降デフォルト有効 / MERGE_QUEUE_ENABLED とは独立）
   if [ "$MERGE_QUEUE_RECHECK_ENABLED" != "true" ]; then
     return 0
   fi
@@ -3689,8 +3690,8 @@ pi_fetch_candidate_prs() {
 
   # AC 1.2 / 1.3 / 1.4: クライアント側フィルタ（server filter の保険 + head pattern + fork 除外）
   # #35 AC 4.4 / 5.1: design pattern は PR_ITERATION_DESIGN_ENABLED=true のときのみ OR 条件に
-  # 含める。false（既定）なら impl pattern のみで絞り込み、設計 PR は candidate 段階で除外される
-  # （= 本機能導入前と完全同一の挙動）。
+  # 含める。#112 以降デフォルトは true。明示的に false を渡した場合のみ impl pattern だけで
+  # 絞り込み、設計 PR は candidate 段階で除外される（= 設計 PR 拡張 #35 導入前と同一の挙動）。
   echo "$prs_json" | jq \
     --arg impl_pattern "$PR_ITERATION_HEAD_PATTERN" \
     --arg design_pattern "$PR_ITERATION_DESIGN_HEAD_PATTERN" \
@@ -5026,7 +5027,7 @@ pi_run_iteration() {
 #   AC 1.6, 2.1, 2.2, 8.5, 9.1, 9.3, NFR 1.2, NFR 2.3
 # ─────────────────────────────────────────────────────────────────────────────
 process_pr_iteration() {
-  # AC 2.1: opt-in gate
+  # AC 2.1: opt-out gate（#112 以降デフォルト有効。PR_ITERATION_ENABLED=false で無効化）
   if [ "$PR_ITERATION_ENABLED" != "true" ]; then
     return 0
   fi
@@ -5292,7 +5293,7 @@ EOF
 # 設計 PR が merged なら ラベル除去 + コメント投稿を順次実行する。
 # AC 1.1 / 1.4 / 2.1 / 2.7 / 4.1 / 4.4 / 4.5 / 5.2 / 5.5 / 6.1 / 6.2 / 6.3 / 7.5
 process_design_review_release() {
-  # AC 1.1 / 1.4 / 7.5: opt-in gate（無効化時は完全スキップ）
+  # AC 1.1 / 1.4 / 7.5: opt-out gate（#112 以降デフォルト有効。無効化時は完全スキップ）
   if [ "$DESIGN_REVIEW_RELEASE_ENABLED" != "true" ]; then
     return 0
   fi
