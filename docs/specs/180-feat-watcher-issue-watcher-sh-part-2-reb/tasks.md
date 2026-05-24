@@ -77,7 +77,7 @@
   - _Boundary: Module Loader, Module Installer_
   - _Depends: 5, 6_
 
-- [ ]* 7.1 モジュール欠落 fail-fast の専用回帰テスト追加（deferrable）
+- [x]* 7.1 モジュール欠落 fail-fast の専用回帰テスト追加（deferrable）
   - `modules/quota-aware.sh` を退避して起動し、欠落名を含む stderr + exit 1 を機械検証する小テストを追加
   - 既存テスト追従（タスク 6）を優先し、本タスクは余力がある場合に実施
   - _Requirements: 4.4, NFR 3.1_
