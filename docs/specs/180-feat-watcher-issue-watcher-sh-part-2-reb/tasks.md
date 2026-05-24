@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Module Loader 配線の確立
+- [x] 1. Module Loader 配線の確立
   - `issue-watcher.sh` の Config ブロック直後・最初の関数定義より前に Module Loader ブロックを追加する
   - `SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"` で cwd 非依存にディレクトリ解決する
   - manifest 配列 `( core_utils.sh quota-aware.sh merge-queue.sh auto-rebase.sh )` をループし、各
@@ -11,7 +11,7 @@
   - _Requirements: 4.1, 4.2, 4.4, NFR 3.1_
   - _Boundary: Module Loader_
 
-- [ ] 2. Quota-Aware Processor の抽出
+- [x] 2. Quota-Aware Processor の抽出
   - `quota-aware.sh` を新規作成し、冒頭コメント（用途/配置先/依存/セットアップ参照先）を core_utils.sh
     の体裁に揃える。`set` 宣言は持たない
   - `qa_detect_rate_limit` / `qa_run_claude_stage` / `qa_persist_reset_time` / `qa_load_reset_time` /
@@ -24,7 +24,7 @@
   - _Boundary: Quota-Aware Processor_
   - _Depends: 1_
 
-- [ ] 3. Merge-Queue Processor の抽出
+- [x] 3. Merge-Queue Processor の抽出
   - `merge-queue.sh` を新規作成する
   - `mq_pr_has_label` / `mq_handle_conflict` / `mq_try_rebase_pr` / `process_merge_queue`（L1123〜1424）
     と `mqr_log` / `mqr_warn` / `mqr_error` / `process_merge_queue_recheck`（L2195〜2318）を差分等価で移動する
@@ -35,7 +35,7 @@
   - _Boundary: Merge-Queue Processor_
   - _Depends: 1_
 
-- [ ] 4. Auto-Rebase Processor の抽出
+- [x] 4. Auto-Rebase Processor の抽出
   - `auto-rebase.sh` を新規作成する
   - `ar_fetch_candidates` / `ar_build_prompt` / `ar_run_claude_rebase` / `ar_classify_diff` /
     `ar_apply_mechanical` / `ar_dismiss_all_approvals` / `ar_apply_semantic` / `ar_escalate_to_failed` /
@@ -47,7 +47,7 @@
   - _Boundary: Auto-Rebase Processor_
   - _Depends: 1_
 
-- [ ] 5. install.sh によるモジュール配置
+- [x] 5. install.sh によるモジュール配置
   - ローカル配置ブロック（L1224 付近、本体 `*.sh` 配置の直後）に
     `copy_glob_to_homebin "$LOCAL_WATCHER_DIR/bin/modules" "*.sh" "$HOME/bin/modules" --executable` を追加する
   - 既存 `copy_glob_to_homebin` 経由で冪等 SKIP・差分上書き保護・dry-run 列挙・実行権限付与・sudo 不要を担保すること（新規ロジックは書かない）
@@ -56,7 +56,7 @@
   - _Boundary: Module Installer_
   - _Depends: 2, 3, 4_
 
-- [ ] 6. 既存テストの抽出元追従修正
+- [x] 6. 既存テストの抽出元追従修正
   - `qa_run_claude_stage_test.sh`: `qa_log`/`qa_warn`/`qa_error` を core_utils.sh から、
     `qa_detect_rate_limit`/`qa_run_claude_stage` を quota-aware.sh から抽出するよう `extract_function` の参照先を変更する
   - `verify_pushed_or_retry_test.sh`: `qa_log`/`qa_warn`/`qa_error` を core_utils.sh から抽出、
@@ -68,7 +68,7 @@
   - _Boundary: Test Harness_
   - _Depends: 2, 3_
 
-- [ ] 7. 静的解析・スモーク検証と README 更新
+- [x] 7. 静的解析・スモーク検証と README 更新
   - `shellcheck local-watcher/bin/issue-watcher.sh local-watcher/bin/modules/*.sh install.sh` 警告ゼロ
   - cron-like 最小 PATH で Loader がモジュールを解決して起動できること、dry run で `処理対象の Issue なし` 正常終了、
     モジュール欠落時に欠落名 stderr + exit 1 を確認する
@@ -77,7 +77,7 @@
   - _Boundary: Module Loader, Module Installer_
   - _Depends: 5, 6_
 
-- [ ]* 7.1 モジュール欠落 fail-fast の専用回帰テスト追加（deferrable）
+- [x]* 7.1 モジュール欠落 fail-fast の専用回帰テスト追加（deferrable）
   - `modules/quota-aware.sh` を退避して起動し、欠落名を含む stderr + exit 1 を機械検証する小テストを追加
   - 既存テスト追従（タスク 6）を優先し、本タスクは余力がある場合に実施
   - _Requirements: 4.4, NFR 3.1_
