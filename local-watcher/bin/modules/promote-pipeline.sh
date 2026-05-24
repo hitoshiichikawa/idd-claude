@@ -432,12 +432,17 @@ po_apply_awaiting_slot() {
   local overlap_json="$2"
   local holders_map_json="${3:-}"
 
-  # ラベル付与（冪等。既付与でも error にならない）
-  if ! gh issue edit "$issue_number" --repo "$REPO" \
+  # ラベル付与（冪等。既付与でも error にならない）。
+  # #187: ラベル付与に失敗しても early return せず、警告ログを残した上で sticky comment
+  # 投稿へ処理を継続する。これによりラベルが付与できなかったケースでも「なぜ Issue が
+  # 止まっているか」を Issue 上のコメントから読み取れるようにする（Req 1.1 / 1.2 / 3.1）。
+  # コメント投稿/更新はラベル付与の成否に依存せず必ず試行する。
+  if gh issue edit "$issue_number" --repo "$REPO" \
       --add-label "$LABEL_AWAITING_SLOT" >/dev/null 2>&1; then
-    return 1
+    po_log "awaiting-slot added candidate=#${issue_number}"
+  else
+    po_warn "issue=#${issue_number} awaiting-slot ラベル付与に失敗（見送り理由コメントの投稿は継続）"
   fi
-  po_log "awaiting-slot added candidate=#${issue_number}"
 
   # sticky comment 本文の組み立て
   # holders_map_json が与えられた場合は表形式（| 重複 path | 保持中の Issue |）で
