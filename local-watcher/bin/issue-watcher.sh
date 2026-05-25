@@ -1206,6 +1206,111 @@ stage_checkpoint_resolve_resume_point() {
   return 0
 }
 
+# ─── stage_c_existing_pr_guard ───
+#
+# Stage C の PR 作成処理へ進む直前に、同一 head ブランチの既存 impl PR を
+# 「再確認」する冪等ガード（Issue #212）。サイクル開始時の
+# `stage_checkpoint_resolve_resume_point` による 1 回限りの観測では、同一サイクル内で
+# Stage A の worker が越境して PR を作成したケースを検出できないため、PR 作成段階でも
+# 既存 PR を再観測して二重 PR を防ぐ（Req 1.4 / NFR 2.1）。
+#
+# 本ガードは Stage Checkpoint モジュールの観測ヘルパ `stage_checkpoint_find_impl_pr` を
+# 再利用し、`STAGE_CHECKPOINT_ENABLED=true`（#112 以降の既定）時のみ有効化する。
+# `true` 以外（明示 opt-out その他の任意の値）では本関数は副作用を一切持たず、即座に
+# 「作成方向へ進む」を意味する return 1 を返す（Req 1.2 / NFR 1.2）。
+#
+# 状態別の挙動（Req 2 / 3 / 4 / 6）:
+#   - OPEN   → 新規作成抑止。判定根拠を sc_log で出力。Issue コメントは投稿しない。return 0
+#   - MERGED → 着地済みとみなし停止。判定根拠を sc_log で出力。Issue コメントなし。return 0
+#   - CLOSED → 新規作成抑止 + needs-decisions 付与 + Issue コメント 1 件投稿
+#              （claude-failed は付与しない）。return 0
+#   - none (rc=1) → 従来どおり PR 作成へ進む。return 1
+#   - gh API エラー (rc=2) → 警告ログ（二重 PR の可能性を含む）を出して作成方向へ
+#              フォールバック。return 1（既存 resolve_resume_point の API エラー fallback と同方針）
+#
+# 入力: 環境変数 STAGE_CHECKPOINT_ENABLED / NUMBER / BRANCH / REPO / LOG /
+#       LABEL_NEEDS_DECISIONS（既存）
+# 副作用:
+#   - $LOG への sc_log / sc_warn 出力（NFR 3.1 / 3.2）
+#   - CLOSED 検出時のみ gh issue edit --add-label / gh issue comment（fail-open）
+# 戻り値:
+#   0 = 既存 PR を検出し新規作成を抑止した（呼び出し側は return 0 で pipeline を停止する）
+#   1 = 既存 PR なし / gate off / gh API エラー → 従来どおり PR 作成へ進む
+stage_c_existing_pr_guard() {
+  # gate: STAGE_CHECKPOINT_ENABLED=true（既定）時のみ実行。`=true` 以外では本ガードを
+  # 1 行も実行せず作成方向へ抜ける（Req 1.2 / NFR 1.2）。`:-true` で unset も既定有効扱い。
+  if [ "${STAGE_CHECKPOINT_ENABLED:-true}" != "true" ]; then
+    return 1
+  fi
+
+  local pr_info pr_rc
+  pr_info=$(stage_checkpoint_find_impl_pr 2>/dev/null) && pr_rc=0 || pr_rc=$?
+
+  case "$pr_rc" in
+    1)
+      # 既存 PR なし → 従来どおり PR 作成へ進む（Req 5.1）。本機能導入前と挙動不変。
+      return 1
+      ;;
+    2)
+      # gh API エラー → 既存有無を確定できない。作成方向へフォールバック（Req 6.2）。
+      # 二重 PR の可能性を含む警告を残す（Req 6.1 / 6.3 / NFR 3.2）。
+      sc_warn "Stage C 既存 PR 再確認が gh API エラー → 作成方向へフォールバック（二重 PR の可能性あり / issue=#$NUMBER branch=$BRANCH）" >> "$LOG"
+      sc_log "stage-c-guard: existing-impl-pr=unknown reason=gh-api-error fallback=create" >> "$LOG"
+      return 1
+      ;;
+  esac
+
+  # pr_rc=0: 既存 impl PR を検出。`<pr_number>,<state>` を分解する（Req 1.3）。
+  local pr_number pr_state
+  pr_number="${pr_info%%,*}"
+  pr_state="${pr_info##*,}"
+
+  case "$pr_state" in
+    OPEN)
+      # Req 2.1/2.2/2.3/2.4: 新規作成抑止 + return 0。ログのみ、Issue コメントなし。
+      sc_log "stage-c-guard: existing-impl-pr=$pr_info state=OPEN action=skip-create reason=reuse-open-pr (issue=#$NUMBER branch=$BRANCH)" >> "$LOG"
+      return 0
+      ;;
+    MERGED)
+      # Req 3.1/3.2/3.3/3.4: 着地済みとみなし停止。ログのみ、Issue コメントなし。
+      sc_log "stage-c-guard: existing-impl-pr=$pr_info state=MERGED action=skip-create reason=already-merged (issue=#$NUMBER branch=$BRANCH)" >> "$LOG"
+      return 0
+      ;;
+    CLOSED)
+      # Req 4.1〜4.5: 新規作成抑止 + needs-decisions 付与 + Issue コメント 1 件。
+      # claude-failed は付与しない（mark_issue_failed を使わない）。
+      sc_log "stage-c-guard: existing-impl-pr=$pr_info state=CLOSED action=skip-create+needs-decisions reason=human-closed (issue=#$NUMBER branch=$BRANCH)" >> "$LOG"
+      local guard_body
+      guard_body="🛑 自動処理を中止しました（既存 impl PR が CLOSED 済み / Issue #212 冪等ガード）。
+
+- 対象 Issue: #${NUMBER:-?}
+- 検出した既存 impl PR: #${pr_number}（状態: CLOSED）
+- head ブランチ: \`${BRANCH}\`
+
+同一 head ブランチに対する impl PR が既に CLOSED されているため、Stage C での
+新規 PR 作成を抑止しました。人間が意図的に close した PR を自動再生成して運用判断を
+上書きしないための安全側の停止です。
+
+### 次の手順
+
+1. 既存 PR #${pr_number} を再オープンするか、改めて手動で対応するか判断してください
+2. 自動処理を再開してよい場合は、本 Issue から \`${LABEL_NEEDS_DECISIONS}\` ラベルを
+   外してください（次サイクルで再評価されます）"
+      gh issue edit "$NUMBER" --repo "$REPO" \
+        --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1 || true
+      gh issue comment "$NUMBER" --repo "$REPO" --body "$guard_body" >/dev/null 2>&1 || true
+      return 0
+      ;;
+    *)
+      # 想定外の state（find_impl_pr の select で除外されるはずだが防御的に扱う）。
+      # 既存有無を確定できないとみなし作成方向へフォールバック（Req 6.2 と同方針）。
+      sc_warn "Stage C 既存 PR 再確認で想定外の state='$pr_state'（pr_info='$pr_info'）→ 作成方向へフォールバック（issue=#$NUMBER branch=$BRANCH）" >> "$LOG"
+      sc_log "stage-c-guard: existing-impl-pr=$pr_info state=unexpected fallback=create" >> "$LOG"
+      return 1
+      ;;
+  esac
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Tasks Count Gate Module (#147) — Architect 完了直後の tasks.md 件数ガード
 #
@@ -4794,6 +4899,16 @@ run_impl_pipeline() {
 
   # ── Stage C: PjM (PR 作成) ──
   echo "--- Stage C 実行（PjM / PR 作成）---" >> "$LOG"
+  # Issue #212: PR 作成処理へ進む直前に同一 head ブランチの既存 impl PR を再確認する
+  # 冪等ガード。サイクル開始時の resolve_resume_point とは別に、同一サイクル内で Stage A
+  # が越境して PR を作成したケースを検出して二重 PR を防ぐ（Req 1.4 / NFR 2.1）。
+  # `STAGE_CHECKPOINT_ENABLED=true`（既定）時のみ実行（Req 1.2 / NFR 1.2）。
+  # return 0（既存 PR 検出で作成抑止）の場合のみ pipeline を成功停止する。OPEN/MERGED は
+  # 既存 TERMINAL_OK と同一の return 0、CLOSED はガード内で needs-decisions 付与済み。
+  if stage_c_existing_pr_guard; then
+    echo "✅ #$NUMBER: 既存 impl PR を検出（Stage C 冪等ガード）→ 新規 PR 作成を抑止して停止" | tee -a "$LOG"
+    return 0
+  fi
   # Issue #96 Req 1.5: PR 作成段階に進む前に BASE_BRANCH 実値が空でないことを検証する
   if ! _assert_base_branch_resolved; then
     echo "❌ #$NUMBER: Stage C 中断（BASE_BRANCH 未解決）→ claude-failed" | tee -a "$LOG"
