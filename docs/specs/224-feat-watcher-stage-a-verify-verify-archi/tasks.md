@@ -15,7 +15,7 @@
   - _Boundary: stage_a_verify_extract_verify_block_
 
 - [ ] 2. resolve 順序の 4 段連鎖化と source ログ（stage-a-verify.sh）
-- [ ] 2.1 `stage_a_verify_resolve_command` を 4 段 fallback 連鎖へ変更する
+- [x] 2.1 `stage_a_verify_resolve_command` を 4 段 fallback 連鎖へ変更する
   - 第 1 段 `extract_verify_block` 成功 → 採用（source=structured-block）し以降を試さない（短絡）
   - 第 2 段 `STAGE_A_VERIFY_COMMAND` 非空 → 採用（source=env-command）
   - 第 3 段 `extract_command`（heuristic）成功 → 採用（source=heuristic）
