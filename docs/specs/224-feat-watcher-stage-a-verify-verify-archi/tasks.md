@@ -64,8 +64,8 @@
   - _Boundary: design-review-gate rule_
   - _Depends: 3.1_
 
-- [ ] 5. README へ解決順序と escape hatch 位置づけを文書化
-- [ ] 5.1 README の「Stage A Verify Gate (#125)」節を更新する
+- [x] 5. README へ解決順序と escape hatch 位置づけを文書化
+- [x] 5.1 README の「Stage A Verify Gate (#125)」節を更新する
   - 解決順序「構造化ブロック → STAGE_A_VERIFY_COMMAND → heuristic → SKIPPED」を追記
   - 構造化ブロックを第一手段として説明し、env を散文誤認回避の固定用途 escape hatch と位置づけ
   - env var 表の `STAGE_A_VERIFY_COMMAND` 用途文言を「最優先で実行」から「ブロック不在時に参照する固定 escape hatch」へ修正し migration note を併記
