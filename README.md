@@ -3106,6 +3106,12 @@ working tree のみに存在する未 commit ファイル / main にしか存在
 判定根拠は `stage-checkpoint:` prefix のログに 1 ブロックで出力され、
 `grep stage-checkpoint $HOME/.issue-watcher/logs/...` で機械抽出できます。
 
+> **Stage C PR 作成直前の再確認ガード（#212）**: サイクル開始時の上記判定に加え、Stage C が
+> PR 作成へ進む直前にも同一 head ブランチの既存 impl PR を再確認します（`STAGE_CHECKPOINT_ENABLED=true`
+> 時のみ）。同一サイクル内で Stage A が越境して PR を作成した場合の二重 PR を防ぐ多重防御で、
+> OPEN / MERGED 検出時はログのみ残して停止（return 0）、CLOSED 検出時は `needs-decisions` 付与 +
+> Issue コメント 1 件で人間判断に委ね、既存 PR が無い通常ケースは従来どおり PR を 1 本作成します。
+
 ### 環境変数
 
 | 変数 | デフォルト | 推奨 | 用途 |
