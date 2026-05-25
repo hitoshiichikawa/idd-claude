@@ -3239,7 +3239,7 @@ build_dev_prompt_a() {
 
 **重要**: 本ステージでは PR 作成（project-manager サブエージェント）を行わないこと。
 Developer 完了後、独立 context の Reviewer サブエージェントが起動して AC / test / boundary を
-独立レビューします。Reviewer の approve 後にオーケストレーターが PjM を起動して PR を作成します。
+独立レビューします。本ステージのゴールは impl-notes.md の保存までです。後段の Reviewer / PjM 起動・PR 作成は watcher が別ステージで行うため、本ステージでは一切起動・実行しないでください。
 EOF
 )
       ;;
@@ -3256,7 +3256,7 @@ EOF
 
 **重要**: 本ステージでは PR 作成（project-manager サブエージェント）を行わないこと。
 Developer 完了後、独立 context の Reviewer サブエージェントが起動して AC / test / boundary を
-独立レビューします。Reviewer の approve 後にオーケストレーターが PjM を起動して PR を作成します。
+独立レビューします。本ステージのゴールは impl-notes.md の保存までです。後段の Reviewer / PjM 起動・PR 作成は watcher が別ステージで行うため、本ステージでは一切起動・実行しないでください。
 EOF
 )
       ;;
@@ -3324,7 +3324,7 @@ EOF
   fi
 
   cat <<EOF
-あなたはこのリポジトリの Claude Code オーケストレーターです。
+あなたは Stage A（PM + Developer）担当のサブオーケストレーターです。本ステージの責務は PM 要件定義と Developer 実装・コミットに限定されます。
 以下の Issue を ${flow_label} のフローで進めてください。
 
 ## 対象 Issue
@@ -3348,6 +3348,7 @@ ${steps}
 - 既存のテストを壊さないこと
 - 不明点は推測せず、impl-notes.md の「確認事項」セクションに列挙すること
 - **PR は作成しないこと**（次の Reviewer ステージで独立レビューを受けます）
+- **reviewer / project-manager サブエージェントを起動しないこと**（後段ステージで watcher が起動します）
 ${resume_section}
 EOF
 }
