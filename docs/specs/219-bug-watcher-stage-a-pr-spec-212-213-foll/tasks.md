@@ -72,13 +72,13 @@
   - _Boundary: run_impl_pipeline, spec_artifacts_completeness_guard_
   - _Depends: 5.1_
 
-- [ ] 6. README 更新と検証
-- [ ] 6.1 README「Stage Checkpoint (#68)」節に越境観測 + spec 完全性保証を追記
+- [x] 6. README 更新と検証
+- [x] 6.1 README「Stage Checkpoint (#68)」節に越境観測 + spec 完全性保証を追記
   - #212 ガード説明（L3109 近傍）の後に Stage A 越境観測（`stage-a-crossing:` ログ）と spec 完全性保証（`spec-completeness:` ログ・docs-only 補完 PR・補完不能時 needs-decisions）を追記
   - 新規 env var を足さず `STAGE_CHECKPOINT_ENABLED` 相乗りである旨、`=false` で本機能導入前と完全同一である旨を明記（NFR 1.1, 1.2）
   - 「オプション機能一覧」表（L1186 付近）の記述整合
   - _Requirements: 2.5, 3.5, NFR 1.1, NFR 1.2_
-- [ ]* 6.2 スモークテスト fixture と検証手順の整備
+- [x]* 6.2 スモークテスト fixture と検証手順の整備
   - `docs/specs/219-*/test-fixtures/spec-complete/`（標準構成充足）と `spec-incomplete-merged/`（impl-notes.md のみ / #216 再現）を作成
   - shellcheck 警告ゼロ、dry run（対象なしで `処理対象の Issue なし` 正常終了）、`STAGE_CHECKPOINT_ENABLED=false` 経路で `stage-a-crossing:` / `spec-completeness:` ログが 1 行も出ないことを確認
   - _Requirements: 3.4, 3.5, NFR 1.1_
