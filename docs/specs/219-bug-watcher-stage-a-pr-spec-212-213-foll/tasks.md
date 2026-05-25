@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Stage A プロンプト責務限定強化（C1 / R1）
+- [x] 1. Stage A プロンプト責務限定強化（C1 / R1）
 - [x] 1.1 `build_dev_prompt_a` のフロー全体提示表現を排除し責務を PM+Developer に限定
   - L3242 / L3259 の「Reviewer の approve 後にオーケストレーターが PjM を起動して PR を作成します」を削除または「本ステージのゴールは impl-notes.md 保存まで。後段の Reviewer / PjM 起動・PR 作成は watcher が別ステージで行うため本ステージでは一切起動・実行しない」へ置換（design.md Decision D1）
   - L3327 の主語「Claude Code オーケストレーター」を「Stage A（PM + Developer）担当のサブオーケストレーター」へ弱め、design-less impl 経路（tasks.md 不在の Stage A fallback）でも同一の限定表現が適用されるようにする
