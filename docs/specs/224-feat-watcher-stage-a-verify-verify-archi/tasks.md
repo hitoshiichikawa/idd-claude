@@ -14,7 +14,7 @@
   - _Requirements: 1.1, 1.4, 1.5, NFR 3.1, NFR 3.2, NFR 4.1_
   - _Boundary: stage_a_verify_extract_verify_block_
 
-- [ ] 2. resolve 順序の 4 段連鎖化と source ログ（stage-a-verify.sh）
+- [x] 2. resolve 順序の 4 段連鎖化と source ログ（stage-a-verify.sh）
 - [x] 2.1 `stage_a_verify_resolve_command` を 4 段 fallback 連鎖へ変更する
   - 第 1 段 `extract_verify_block` 成功 → 採用（source=structured-block）し以降を試さない（短絡）
   - 第 2 段 `STAGE_A_VERIFY_COMMAND` 非空 → 採用（source=env-command）
@@ -27,7 +27,7 @@
   - _Boundary: stage_a_verify_resolve_command_
   - _Depends: 1.1_
 
-- [ ] 2.2 構造化ブロック由来コマンドの Gate 3 bypass を `stage_a_verify_run` に組み込む
+- [x] 2.2 構造化ブロック由来コマンドの Gate 3 bypass を `stage_a_verify_run` に組み込む
   - resolve が解決手段をモジュールスコープ変数（`_SAV_RESOLVED_SOURCE`）へ記録
   - `stage_a_verify_run` の Gate 3 を「env 非空 または source=structured-block」のとき bypass に拡張
   - heuristic 経路の defense-in-depth（keyword 行頭一致）は従来どおり維持
