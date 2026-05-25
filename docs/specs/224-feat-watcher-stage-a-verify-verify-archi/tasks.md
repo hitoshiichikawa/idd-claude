@@ -53,8 +53,8 @@
   - _Boundary: architect.md_
   - _Depends: 3.1_
 
-- [ ] 4. design-review-gate に well-formed Mechanical Check を追加
-- [ ] 4.1 `.claude/rules/design-review-gate.md` に「verify block well-formed check」節を追加する (P)
+- [x] 4. design-review-gate に well-formed Mechanical Check を追加
+- [x] 4.1 `.claude/rules/design-review-gate.md` に「verify block well-formed check」節を追加する (P)
   - 既存 Mechanical Checks（Budget overflow / checkbox enforcement）と同じ節構造で追加
   - well-formed 判定（センチネル存在 / 直後 fence / fence 閉じ / 中身非空）を参照実装として明記し、モジュール側 awk と同一基準である旨の相互参照を置く
   - malformed 検出時は違反報告し確定前修正を促す（最大 2 パス）
