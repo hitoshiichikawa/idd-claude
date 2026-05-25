@@ -37,7 +37,7 @@
   - _Depends: 2.1_
 
 - [ ] 3. tasks-generation ルールへ構造化 verify ブロック規約を追加
-- [ ] 3.1 `.claude/rules/tasks-generation.md` に「構造化 verify ブロック」節を追加する
+- [x] 3.1 `.claude/rules/tasks-generation.md` に「構造化 verify ブロック」節を追加する
   - センチネル `<!-- stage-a-verify -->` + 直後 fence の canonical 書式を定義
   - 中身は散文ではなく実行可能コマンド（複数行 / `&&` 可）であることを要求
   - 既存 checkbox 規約・numeric ID 階層規約と非干渉（ブロックはタスク行でなく count/checkbox regex に非マッチ）であることを明記
