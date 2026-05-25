@@ -4249,6 +4249,31 @@ handle_partial_status() {
 #   全モジュールが run_impl_pipeline 実行前に source されるため挙動不変。
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─── stage_a_verify_round1_defer ───
+#
+# stage-a-verify round=1 差し戻し時に、当該 Issue を再 pickup 可能な bare auto-dev
+# candidate へ戻すためのラベル除去を行う（Issue #219）。`claude-picked-up` を残すと
+# dispatcher の候補クエリ（`-label:"$LABEL_PICKED"`）から除外され二度と再 pickup されず
+# stuck になるため、per-task hold (#198) と同様に claude-picked-up / claude-claimed を
+# 除去して次 tick の再 pickup → Stage Checkpoint resume → stage-a-verify 再評価
+# （round=2 escalate への前進）を成立させる。round counter sidecar は呼び出し側で
+# 温存されるため、次回失敗で round=2 → claude-failed に進む。
+#
+# 入力 (環境変数経由): NUMBER / REPO / LOG / LABEL_PICKED / LABEL_CLAIMED
+# 副作用: gh issue edit（ラベル除去） / $LOG への grep 可能なログ 1 行
+# 戻り値: 0 = ラベル除去成功 / 1 = gh 失敗（fail-open。呼び出し側は return 3 を維持し、
+#         ラベル残置の旨を警告ログに残す。手動除去で復旧可能）
+stage_a_verify_round1_defer() {
+  if gh issue edit "$NUMBER" --repo "$REPO" \
+      --remove-label "$LABEL_PICKED" \
+      --remove-label "$LABEL_CLAIMED" >/dev/null 2>&1; then
+    echo "[$(date '+%F %T')] stage-a-verify: round=1 差し戻し: claude-picked-up 除去 → bare auto-dev candidate へ復帰（次 tick 再 pickup / issue=#$NUMBER）" >> "$LOG"
+    return 0
+  fi
+  echo "[$(date '+%F %T')] stage-a-verify: WARN: round=1 差し戻しで claude-picked-up 除去に失敗（ラベル残置 → 次 tick で候補に上がらない恐れ / 手動除去で復旧可能 / issue=#$NUMBER）" >> "$LOG"
+  return 1
+}
+
 # ─── run_impl_pipeline ───
 #
 # impl / impl-resume モードの Stage 状態機械を実装する。
@@ -4280,8 +4305,9 @@ handle_partial_status() {
 #   （START_STAGE=B|C）でも本ブロックを通すため、Stage Checkpoint resume 経由のフロー
 #   でも gate が機能する。`STAGE_A_VERIFY_ENABLED=false` 明示時は stage_a_verify_run
 #   が即 return 0 して本機能導入前と user-observable に完全同一の挙動になる
-#   （Req 4.1 / NFR 1.1）。失敗時は round=1 で Developer 差し戻し（return 1）、
-#   round=2 で claude-failed escalate（return 1、内部で mark_issue_failed 済）。
+#   （Req 4.1 / NFR 1.1）。失敗時は round=1 で Developer 差し戻し（**return 3 / 再 pickup
+#   可能な保留・claude-failed 未付与**, Issue #219）、round=2 で claude-failed escalate
+#   （return 1、内部で mark_issue_failed 済）。
 #
 # 入力 (環境変数経由): NUMBER, TITLE, BODY, URL, BRANCH, MODE, SPEC_DIR_REL, LOG, REPO,
 #                      DEV_MODEL, DEV_MAX_TURNS, REVIEWER_MODEL, REVIEWER_MAX_TURNS,
@@ -4290,7 +4316,9 @@ handle_partial_status() {
 #                      STAGE_A_VERIFY_COMMAND (#125)
 # 戻り値:
 #   0 = pipeline 成功（Stage C も成功 / PR 作成済み）または TERMINAL_OK 相当の停止
-#   1 = Stage A / A' / B / B' / C / stage-a-verify いずれかで失敗 → claude-failed 既に付与済み
+#   3 = 再 pickup 可能な保留（stage-a-verify round=1 差し戻し / Issue #219）。claude-failed
+#       未付与・claude-picked-up 除去済みで次 tick に再評価される
+#   1 = Stage A / A' / B / B' / C / stage-a-verify round=2 いずれかで失敗 → claude-failed 既に付与済み
 run_impl_pipeline() {
   local prompt_a prompt_redo prompt_c
   local rev_rc
@@ -4614,17 +4642,32 @@ run_impl_pipeline() {
   # gate が機能する（design.md「stage-a-verify と Stage Checkpoint の協調」参照）。
   # `STAGE_A_VERIFY_ENABLED=false` 明示時は stage_a_verify_run が即 return 0 して
   # 本機能導入前と user-observable に完全同一の挙動になる（Req 4.1 / NFR 1.1）。
-  # `stage_a_verify_run` の戻り値 0/1/2 を `run_impl_pipeline` の従来契約
-  # （0 = 成功 / 1 = 失敗）にマップする（NFR 1.3）。round=2 escalate (戻り値 2)
-  # 時は内部で `mark_issue_failed` が発火済みなので外部観測上は claude-failed。
+  # `stage_a_verify_run` の戻り値 0/1/2 を `run_impl_pipeline` の戻り値契約にマップする
+  # （NFR 1.3）:
+  #   - 0 = SUCCESS / SKIPPED / DISABLED → 続行
+  #   - 1 = round=1 差し戻し → run_impl_pipeline は **3（再 pickup 可能な保留）** を返す。
+  #         claude-failed は付与されておらず、ここで claude-picked-up / claude-claimed を
+  #         除去して次 tick の再 pickup を成立させる（Issue #219）。
+  #   - 2 = round=2 escalate → 内部で `mark_issue_failed` 発火済み（claude-failed）。
+  #         run_impl_pipeline は従来どおり 1（失敗）を返す。
   local _sav_rc=0
   stage_a_verify_run || _sav_rc=$?
   case "$_sav_rc" in
     0)
       : ;;  # SUCCESS / SKIPPED / DISABLED → 続行
     1)
-      echo "🔁 #$NUMBER: stage-a-verify 失敗（round=1）→ Developer 差し戻し（次 tick で再試行）" | tee -a "$LOG"
-      return 1
+      # stage-a-verify round=1 差し戻し（次 tick で再評価）。`claude-picked-up` を残すと
+      # dispatcher の候補クエリ（`-label:"$LABEL_PICKED"`）から除外され二度と再 pickup
+      # されず stuck になる（per-task hold #198 と同根 / Issue #219）。ここで
+      # claude-picked-up / claude-claimed を除去して bare auto-dev candidate へ復帰させ、
+      # 次 tick の再 pickup → Stage Checkpoint resume → stage-a-verify 再評価
+      # （round=2 escalate への前進）を成立させる。round counter sidecar は温存するため、
+      # 次回失敗で round=2 → claude-failed に進む。戻り値 3 は呼び出し側で「再 pickup 可能な
+      # 保留」として扱われ、虚偽の「claude-failed 付与済み」ログを出さない。
+      echo "🔁 #$NUMBER: stage-a-verify 失敗（round=1）→ Developer 差し戻し（claude-picked-up 除去 / 次 tick で再評価）" | tee -a "$LOG"
+      # claude-picked-up を除去して再 pickup 可能化（fail-open: 除去失敗でも保留は維持）。
+      stage_a_verify_round1_defer || true
+      return 3
       ;;
     2)
       echo "❌ #$NUMBER: stage-a-verify 連続 2 回失敗 → claude-failed" | tee -a "$LOG"
@@ -6769,16 +6812,33 @@ EOF
         ;;
     esac
   else
-    # impl / impl-resume → Reviewer ゲートを含む stage 分割パイプラインへ
-    if run_impl_pipeline; then
-      echo "✅ #$NUMBER: $MODE 完了（Reviewer ゲート通過 / PR 作成済み）" | tee -a "$LOG"
-      slot_log "$MODE 完了（PR 作成済み）"
-      return 0
-    else
-      echo "❌ #$NUMBER: $MODE 失敗（claude-failed 付与済み）" | tee -a "$LOG"
-      slot_log "$MODE 失敗（claude-failed 付与済み）"
-      return 1
-    fi
+    # impl / impl-resume → Reviewer ゲートを含む stage 分割パイプラインへ。
+    # run_impl_pipeline の戻り値契約:
+    #   0 = 完了 / 良性停止（quota → needs-quota-wait / partial / Stage Checkpoint TERMINAL_OK）
+    #   3 = 再 pickup 可能な保留（stage-a-verify round=1 差し戻し / Issue #219）。
+    #       claude-failed は未付与で claude-picked-up も除去済み → 次 tick で再評価される。
+    #   その他非 0 = 失敗。各 stage 内で `mark_issue_failed` 発火済み（claude-failed 付与済み）。
+    local _impl_rc=0
+    run_impl_pipeline || _impl_rc=$?
+    case "$_impl_rc" in
+      0)
+        echo "✅ #$NUMBER: $MODE 完了（Reviewer ゲート通過 / PR 作成済み）" | tee -a "$LOG"
+        slot_log "$MODE 完了（PR 作成済み）"
+        return 0
+        ;;
+      3)
+        # stage-a-verify round=1 差し戻し。claude-failed は付与されておらず、
+        # 虚偽の「claude-failed 付与済み」を出さない（Issue #219 fix）。
+        echo "⏸️ #$NUMBER: $MODE 保留（stage-a-verify 差し戻し / claude-failed 未付与 / 次 tick で再評価）" | tee -a "$LOG"
+        slot_log "$MODE 保留（stage-a-verify 差し戻し / 次 tick 再評価）"
+        return 0
+        ;;
+      *)
+        echo "❌ #$NUMBER: $MODE 失敗（claude-failed 付与済み）" | tee -a "$LOG"
+        slot_log "$MODE 失敗（claude-failed 付与済み）"
+        return 1
+        ;;
+    esac
   fi
 }
 

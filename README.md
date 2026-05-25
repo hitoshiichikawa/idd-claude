@@ -3209,14 +3209,23 @@ flowchart TD
     X1 -->|SKIPPED no-verify-task| OK2[Stage A 完了 + SKIPPED ログ]
     X1 -->|exit 0| OK3[Stage A 完了 + SUCCESS ログ]
     X1 -->|exit 非 0 or timeout| F{stage-a-verify round}
-    F -->|round=1| NI[Issue コメントで Developer 差し戻し]
+    F -->|round=1| NI[Issue コメント + claude-picked-up 除去で再 pickup 可能化]
     F -->|round=2| FAIL[claude-failed ラベル付与 → 人間に委ねる]
-    NI --> RET[return 1 / 次 tick で Stage Checkpoint 経由 再評価]
+    NI --> RET[return 3 保留 / 次 tick で再 pickup → Stage Checkpoint 経由 再評価]
     FAIL --> RET2[return 1 / watcher 当該 Issue 処理打ち切り]
     OK1 --> SB[Stage B round=1]
     OK2 --> SB
     OK3 --> SB
 ```
+
+> **round=1 差し戻し時の再 pickup 可能化（#219）**: round=1 失敗時、watcher は Issue から
+> `claude-picked-up` / `claude-claimed` を除去して bare auto-dev candidate へ戻します。
+> dispatcher の候補クエリは `-label:"claude-picked-up"` を除外条件に持つため、これを残すと
+> 当該 Issue が二度と再 pickup されず「次 tick で再評価」が成立しないためです（round counter
+> sidecar は温存され、次回失敗で round=2 → `claude-failed` に進む）。本経路では
+> `claude-failed` は付与されず、`run_impl_pipeline` は「再 pickup 可能な保留」を表す
+> 戻り値 3 を返します（slot ログは「保留（stage-a-verify 差し戻し / 次 tick 再評価）」と記録し、
+> 誤った「claude-failed 付与済み」は出力しません）。
 
 ### 環境変数
 
