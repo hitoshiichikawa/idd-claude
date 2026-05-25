@@ -67,13 +67,24 @@ export REPO TC_WARN_LOWER TC_WARN_UPPER TC_ESCALATE_LOWER
 # ── 期待値テーブル ──
 # fixture 名（basename） → "<expected_count>:<expected_classification>"
 # classification は normal / warn / escalate の 3 値のいずれか。
+#
+# #216: tc_count_tasks は最上位 numeric ID の未完了タスクのみを計数する正準 regex
+# `^- \[ \]\*? [0-9]+\. ` に整合した。tasks-7/8/10/11/empty は最上位・未完了のみで
+# 構成されるため件数不変。tasks-mixed-checkbox.md は子タスク・完了 `[x]` を含むため、
+# 全 checkbox 計上の旧値 8（→warn）から最上位・未完了のみの 4（→normal）に変わる。
 declare -A _TC_EXPECTED=(
   ["tasks-7.md"]="7:normal"
   ["tasks-8.md"]="8:warn"
   ["tasks-10.md"]="10:warn"
   ["tasks-11.md"]="11:escalate"
   ["tasks-empty.md"]="0:normal"
-  ["tasks-mixed-checkbox.md"]="8:warn"
+  # 旧計数（全 checkbox 計上）なら 8:warn。canonical（最上位・未完了のみ）で 4:normal。
+  # 子 1.1/1.2/2.1・完了 5./完了 deferrable 2.1 を除外し、最上位未完了 1./2.(deferrable)/3./4. の 4 件。
+  ["tasks-mixed-checkbox.md"]="4:normal"
+  # #216 回帰ロック: feedman #41 を模した「最上位 7 + 子多数 + 完了数件」fixture。
+  # 旧計数（全 checkbox）なら 15、canonical（最上位・未完了のみ）なら 7。
+  # 子タスク除外・完了 [x] 除外を明示的にロックする。
+  ["tasks-toplevel-vs-flat.md"]="7:normal"
 )
 
 _pass=0
