@@ -75,8 +75,8 @@
   - _Boundary: README_
   - _Depends: 2.1_
 
-- [ ] 6. fixture + smoke script による抽出ロジックの境界回帰確認
-- [ ] 6.1 `test-fixtures/` と smoke script を追加し抽出ロジックを回帰確認する
+- [x] 6. fixture + smoke script による抽出ロジックの境界回帰確認
+- [x] 6.1 `test-fixtures/` と smoke script を追加し抽出ロジックを回帰確認する
   - 8 fixture を追加（well-formed / multiline / lang-tag / multiple / no-fence / unclosed / empty / no-block-heuristic）
   - smoke script で各 fixture の期待抽出コマンドと return code を assert（#131/#160 慣習踏襲）
   - 既存 #160 heuristic fixture が同一結果を返す回帰（NFR 1.1）を smoke で確認
