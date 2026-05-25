@@ -616,6 +616,177 @@ po_clear_awaiting_slot() {
   return 0
 }
 
+# ─── Phase E: Busy-Cycle Wait Visibility — state dir resolver (#228 Req 3 / NFR 4) ───
+# 多忙サイクル待ちの「連続見送り tick 数」を永続化するローカル state ディレクトリを返す。
+# GitHub API を一切呼ばずローカルファイルだけで継続 tick 数を数えるため、in-flight 列挙
+# 回数・edit_paths 読み出し回数を本機能導入前から増やさない（NFR 4.1 / 4.2）。
+#
+# 配置: $LOG_DIR/busy-wait-state/（LOG_DIR は repo ごとに分離済み = repo 間で衝突しない）
+# Stdout: state ディレクトリの絶対パス
+# Return: 0 always（mkdir 失敗は呼び出し側が tee せず継続。state 不能でも dispatch は阻害しない）
+po_busy_wait_state_dir() {
+  local dir="${LOG_DIR:-$HOME/.issue-watcher/logs}/busy-wait-state"
+  mkdir -p "$dir" >/dev/null 2>&1 || true
+  printf '%s' "$dir"
+}
+
+# ─── Phase E: Busy-Cycle Wait Visibility — tick counter (#228 Req 3.1 / 3.2 / 3.4 / NFR 4) ───
+# candidate Issue について「dispatch を見送った連続サイクル数」を 1 増やし、累計を返す。
+# ローカル state ファイル（issue-<N>.tick）に整数を持つだけで GitHub API は呼ばない。
+# 既存値が非数値 / 欠落 / 不正なら 0 とみなしてから +1 する（fail-safe）。
+#
+# Args: $1 = candidate issue number
+# Stdout: 加算後の連続見送り tick 数（>= 1）
+# Return: 0 always
+po_busy_wait_tick() {
+  local issue_number="$1"
+  local dir
+  dir=$(po_busy_wait_state_dir)
+  local f="${dir}/issue-${issue_number}.tick"
+  local cur=0
+  if [ -f "$f" ]; then
+    cur=$(cat "$f" 2>/dev/null || echo 0)
+    # 非数値混入 fail-safe（途中で壊れたファイル / 手動編集等）
+    case "$cur" in
+      ''|*[!0-9]*) cur=0 ;;
+    esac
+  fi
+  local next=$((cur + 1))
+  printf '%s' "$next" > "$f" 2>/dev/null || true
+  printf '%s' "$next"
+  return 0
+}
+
+# ─── Phase E: Busy-Cycle Wait Visibility — tick reset (#228 Req 3.3 / NFR 4) ───
+# candidate Issue の連続見送り tick state を 0 へリセット（state ファイル削除）する。
+# dispatch に成功した / 見送り要因が解消したサイクルで呼び、次に再び見送られたときは
+# tick を 1 から数え直す（transient と継続待機を区別する / Req 3.3 / 3.4）。
+#
+# Args: $1 = candidate issue number
+# Return: 0 always（ファイル不在でも error にしない / 冪等）
+po_busy_wait_reset() {
+  local issue_number="$1"
+  local dir
+  dir=$(po_busy_wait_state_dir)
+  rm -f "${dir}/issue-${issue_number}.tick" >/dev/null 2>&1 || true
+  return 0
+}
+
+# ─── Phase E: Busy-Cycle Wait Visibility — signal apply (#228 Req 3.1〜3.2 / 4.1〜4.2 / 5.3) ───
+# 多忙サイクル待ちが可視化閾値を超えた Issue へ、待機中である旨の sticky comment を
+# post / update し `awaiting-slot` ラベルを付与する。冪等性のため専用 marker
+# <!-- idd-claude:busy-wait:v1 --> 付きコメントを 1 件に集約する（既存
+# awaiting-slot:v1 / edit-paths:v1 marker とは別管理 = 既存マーカー契約不変 / Req 5.3）。
+# ラベル付与失敗でも sticky comment 投稿は継続する（Req 1.4 と同方針）。
+#
+# Args: $1 = candidate issue number
+#       $2 = 連続見送り tick 数（本文へ埋め込む）
+#       $3 = 待機理由テキスト（"全 slot 使用中" 等。本文へ埋め込む）
+# Return: 0 = apply OK / 1 = 致命的失敗（呼び出し側 warn）
+po_apply_busy_wait_signal() {
+  local issue_number="$1"
+  local tick_count="$2"
+  local reason="${3:-空き slot 不足}"
+
+  # ラベル付与（冪等。既付与でも error にならない）。失敗しても sticky comment 投稿へ継続。
+  if gh issue edit "$issue_number" --repo "$REPO" \
+      --add-label "$LABEL_AWAITING_SLOT" >/dev/null 2>&1; then
+    po_log "busy-wait awaiting-slot added candidate=#${issue_number} ticks=${tick_count}"
+  else
+    po_warn "issue=#${issue_number} busy-wait awaiting-slot ラベル付与に失敗（可視化コメントの投稿は継続）"
+  fi
+
+  local marker="<!-- idd-claude:busy-wait:v1 -->"
+  local body
+  body=$(cat <<EOF
+## ⏳ Dispatch 待機中（多忙サイクル待ち / Phase E）
+
+本 Issue は dispatch 候補として評価されましたが、${reason}のため ${tick_count} サイクル連続で
+slot へ投入できず待機しています（path-overlap 由来の見送りではありません）。
+
+- 待機理由: ${reason}
+- 連続見送りサイクル数: ${tick_count}
+
+先行 Issue の処理が完了して空き slot が生まれた次サイクルで本 Issue は通常 dispatch に戻り、
+本コメントが付与した \`awaiting-slot\` ラベルは自動除去されます。手動介入は不要です。
+
+詳細は README の「Path Overlap Checker (Phase E)」節「多忙サイクル待ちの可視化」を参照してください。
+
+${marker}
+EOF
+)
+
+  # sticky 化: 既存 marker 付きコメントを検索 → あれば PATCH、無ければ新規 create
+  # （cron tick ごとのノイズ累積を抑制 / Req 4.1 / 4.2 / NFR 2.1）。
+  local comments_json
+  if ! comments_json=$(gh issue view "$issue_number" --repo "$REPO" --json comments 2>/dev/null); then
+    gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+    return 0
+  fi
+  local existing_url
+  existing_url=$(echo "$comments_json" | jq -r '
+    (.comments // [])
+    | map(select(.body | contains("<!-- idd-claude:busy-wait:v1 -->")))
+    | .[0].url // ""
+  ' 2>/dev/null || echo "")
+  local existing_comment_id=""
+  if [ -n "$existing_url" ]; then
+    existing_comment_id=$(printf '%s' "$existing_url" \
+      | sed -nE 's/.*#issuecomment-([0-9]+)$/\1/p')
+  fi
+  if [ -n "$existing_comment_id" ]; then
+    gh api -X PATCH "/repos/${REPO}/issues/comments/${existing_comment_id}" \
+      -f body="$body" >/dev/null 2>&1 || true
+  else
+    gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+# ─── Phase E: Busy-Cycle Wait Visibility — orchestrator (#228 Req 3.1〜3.4 / 5.1 / 5.2) ───
+# dispatcher の busy-wait 経路（候補が全 gate を通過したが空き slot を確保できず当該
+# サイクルの dispatch を見送った地点）から呼ぶ。連続見送り tick を 1 増やし、可視化閾値
+# （PATH_OVERLAP_BUSY_WAIT_THRESHOLD）に達したら可視化シグナルを残す。閾値未満では
+# シグナルを残さない（transient 抑制 / Req 3.4 / NFR 1.1）。
+#
+# opt-in gate（Req 5.1 / 5.2）: PATH_OVERLAP_CHECK="true" 厳密一致のときのみ動作する。
+# それ以外（未設定 / off / 不正値）は state ファイルも作らず即 return 0 = 本機能導入前と
+# 完全に同一挙動（ローカル state も GitHub 状態も一切変更しない）。
+#
+# Args: $1 = candidate issue number
+#       $2 = 待機理由テキスト（省略時 "空き slot 不足"）
+# Return: 0 always（dispatch 経路を阻害しない）
+po_check_busy_wait() {
+  local candidate="$1"
+  local reason="${2:-空き slot 不足}"
+
+  # Req 5.1 / 5.2: opt-in gate（厳密一致 "true" のみ通す）。off 時は state も作らない。
+  [ "${PATH_OVERLAP_CHECK:-off}" = "true" ] || return 0
+
+  # 閾値の正規化: 0 / 空 / 非数値は安全側（連投しない）で既定 5 にフォールバック。
+  local threshold="${PATH_OVERLAP_BUSY_WAIT_THRESHOLD:-5}"
+  case "$threshold" in
+    ''|*[!0-9]*) threshold=5 ;;
+  esac
+  [ "$threshold" -ge 1 ] 2>/dev/null || threshold=5
+
+  # 連続見送り tick を 1 増やす（ローカル state のみ / GitHub API は呼ばない / NFR 4）。
+  local ticks
+  ticks=$(po_busy_wait_tick "$candidate")
+
+  if [ "$ticks" -ge "$threshold" ]; then
+    # NFR 3.1: 1 行ログに連続見送り tick 数・閾値・理由を含める。
+    po_log "busy-wait visible candidate=#${candidate} ticks=${ticks} threshold=${threshold} reason=${reason}"
+    if ! po_apply_busy_wait_signal "$candidate" "$ticks" "$reason"; then
+      po_warn "issue=#${candidate} busy-wait 可視化シグナルの付与に失敗（次サイクルで再評価）"
+    fi
+  else
+    # 閾値未満は transient とみなしシグナルを残さない（Req 3.4 / NFR 1.1）。
+    po_log "busy-wait pending candidate=#${candidate} ticks=${ticks} threshold=${threshold} (閾値未満のため可視化なし)"
+  fi
+  return 0
+}
+
 # ─── Phase E: Dispatcher Integration Point (#18 Req 1.1〜1.4 / 5.x / 6.x / 12.2) ───
 # _dispatcher_run の candidate ループ内、check_existing_impl_pr 通過直後・
 # _dispatcher_find_free_slot 呼び出し前に挿入する gate 関数。
