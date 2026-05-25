@@ -12,7 +12,7 @@
   - _Requirements: 1.1, 2.1, 3.1, 3.2, 3.3, 4.1, NFR 1.1_
   - _Boundary: po_resolve_holder_labels_
 
-- [ ] 2. `po_collect_inflight_issues` を holder ラベル集合引数で動的クエリ化する
+- [x] 2. `po_collect_inflight_issues` を holder ラベル集合引数で動的クエリ化する
   - 第 2 引数 `holder_labels`（CSV）を追加し、default を現行 7 ラベル集合に固定する
   - `search_query` を holder_labels CSV から動的に `label:"X" OR ...` 形式で組み立てる
   - 引数省略時に組み立てるクエリが現行固定クエリと**文字列一致**することを保証する（後方互換ゼロ差分）
