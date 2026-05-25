@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. 構造化 verify ブロック抽出関数の新設（stage-a-verify.sh）
+- [x] 1. 構造化 verify ブロック抽出関数の新設（stage-a-verify.sh）
 - [x] 1.1 `stage_a_verify_extract_verify_block` を新設し、センチネル直後 fence を厳密パースする
   - センチネル `<!-- stage-a-verify -->` のアンカー行検出（trim 後の厳密一致）
   - アンカー直後（空行スキップ後）の最初の非空行が fence 開始でなければ malformed → return 1
