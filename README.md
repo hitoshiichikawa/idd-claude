@@ -1728,7 +1728,7 @@ Path Overlap Checker は、以下のいずれかのラベルを持つ open Issue
 - `ready-for-review`
 - `needs-iteration`
 - `needs-rebase`
-- `staged-for-release`
+- `staged-for-release`（**base 相対**。下記「holder ラベル集合の base 相対化」参照）
 
 逆に以下のラベルを持つ Issue は in-flight に含めません（Req 4.2）:
 
@@ -1737,6 +1737,32 @@ Path Overlap Checker は、以下のいずれかのラベルを持つ open Issue
 
 候補 Issue 自身は in-flight 比較集合から除外され（Req 4.3）、同一 repo の Issue のみが
 集合対象となります（Req 4.4）。
+
+### holder ラベル集合の base 相対化（#221）
+
+holder（in-flight 集合）の本質は「dispatch 先の base ブランチにまだ取り込まれていない作業」
+です。`staged-for-release` は「`develop` に merge 済み・`main` 到達待ち」（multi-branch 運用専用）
+を意味するため、**dispatch base=`develop` の文脈ではその作業は既に `develop` へ統合済み**であり
+holder から除外できます。そこで Path Overlap Checker は holder ラベル集合を **呼び出し
+コンテキストと branch 設定に応じて決定**します（#221）:
+
+| 文脈 | `BASE_BRANCH` vs `PROMOTION_TARGET_BRANCH` | holder 集合 | `staged-for-release` |
+|---|---|---|---|
+| dispatch | 異なる（multi-branch / gitflow） | 6 ラベル | **除外**（develop 統合済みは holder から外す） |
+| dispatch | 同一（single-branch） | 7 ラベル（full） | 維持（運用上付与されないためゼロ差分） |
+| promote target=`main` | （不問） | 7 ラベル（full） | 維持（まだ `main` に無い in-flight 集合） |
+| 判定不能（不明 context 等） | （不問） | 7 ラベル（full） | 維持（fail-safe / 安全側） |
+
+- **single-branch（`main` only）運用ではゼロ差分**: `staged-for-release` が運用上付与されない
+  ため、`BASE_BRANCH == PROMOTION_TARGET_BRANCH` のとき full 集合を使い、本機能導入前と
+  同一の in-flight 集合 / `awaiting-slot` 判定になります（後方互換）。
+- **gitflow 運用ガイド**: `BASE_BRANCH=develop`（かつ `PROMOTION_TARGET_BRANCH=main`）の
+  multi-branch 運用では、完了して `staged-for-release` を付与したまま open に残った Issue が、
+  同一 top-level path を編集する新規 Issue を不要に `awaiting-slot` へ落とすことがなくなります。
+  この base 相対化は `BASE_BRANCH` / `PROMOTION_TARGET_BRANCH` の設定にのみ連動し、新規の
+  環境変数・フラグは追加しません（Phase B / #89 と同じ 2 変数で multi-branch を判定）。
+- `staged-for-release` 自体の付与運用（誰がいつ付けるか）は本機能のスコープ外で、既存運用
+  （「Issue ラベル一覧」「staged-for-release 状態遷移」節）を前提とします。
 
 ### 自然解消の流れ
 
@@ -1756,6 +1782,9 @@ grep 'path-overlap: overlap detected' $HOME/.issue-watcher/logs/<repo-slug>/*.lo
 
 # awaiting-slot 付与・除去
 grep 'path-overlap: awaiting-slot' $HOME/.issue-watcher/logs/<repo-slug>/*.log
+
+# holder 集合の base 相対除外（#221 / NFR 3.1。multi-branch dispatch でのみ出力）
+grep 'path-overlap: holder-set' $HOME/.issue-watcher/logs/<repo-slug>/*.log
 ```
 
 各イベントで以下の 1 行ログが必ず出力されます（Req 8.1〜8.3）:
@@ -1764,6 +1793,14 @@ grep 'path-overlap: awaiting-slot' $HOME/.issue-watcher/logs/<repo-slug>/*.log
 path-overlap: overlap detected candidate=#<N> paths=<comma-separated>
 path-overlap: awaiting-slot added candidate=#<N>
 path-overlap: awaiting-slot cleared candidate=#<N> (overlap empty)
+```
+
+dispatch 文脈で holder 集合から `staged-for-release` を除外した場合（multi-branch 運用）は、
+除外を判別可能な以下のログが出力されます（#221 / NFR 3.1）。single-branch 運用や除外が
+発生しない場合は出力されません（ゼロ差分）:
+
+```
+path-overlap: holder-set context=dispatch excluded=staged-for-release base=<BASE_BRANCH>
 ```
 
 ### dogfood 確認手順
