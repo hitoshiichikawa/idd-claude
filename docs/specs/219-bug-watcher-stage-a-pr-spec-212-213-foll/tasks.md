@@ -10,8 +10,8 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, NFR 1.1_
   - _Boundary: build_dev_prompt_a_
 
-- [ ] 2. Stage A 完了直後の越境観測関数（C2 / R2）
-- [ ] 2.1 `stage_a_crossing_probe` を Stage Checkpoint Module 内に新規追加
+- [x] 2. Stage A 完了直後の越境観測関数（C2 / R2）
+- [x] 2.1 `stage_a_crossing_probe` を Stage Checkpoint Module 内に新規追加
   - `stage_c_existing_pr_guard`（L1312）直後に配置。`STAGE_CHECKPOINT_ENABLED != "true"`（`:-true`）で即 return 0（Req 2.5 / NFR 1.1）
   - `stage_checkpoint_find_impl_pr` を再利用し rc=0/1/2 を分岐（rc=2 API エラーは sc_warn + 越境未検出として継続）
   - 検出時のみ `sc_log "stage-a-crossing: detected pr=#<N> state=<S> branch=<BRANCH> issue=#<NUMBER>"` を出力（PR 番号と head ブランチを判定根拠に / Req 2.2, 2.3, NFR 3.1）
@@ -19,7 +19,7 @@
   - 常に return 0（pipeline を止めない / NFR 1.4）
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, NFR 1.1, NFR 1.4, NFR 1.5, NFR 3.1_
   - _Boundary: stage_a_crossing_probe_
-- [ ] 2.2 `run_impl_pipeline` の Stage A 完了直後に `stage_a_crossing_probe` 呼び出しを挿入
+- [x] 2.2 `run_impl_pipeline` の Stage A 完了直後に `stage_a_crossing_probe` 呼び出しを挿入
   - 通常 Developer 経路（L4473 の「Stage A 完了」直後）と per-task loop 経路（L4435 直後）の 2 箇所に挿入
   - 呼び出し結果のグローバル変数を pipeline スコープで保持し C3 が読めるようにする（既存 START_STAGE と同パターン）
   - 戻り値を無視せず、観測が pipeline の return 値を変えないことを確認
