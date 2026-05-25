@@ -27,8 +27,8 @@
   - _Boundary: run_impl_pipeline, stage_a_crossing_probe_
   - _Depends: 2.1_
 
-- [ ] 3. spec 成果物欠落の検出補助関数（C3 補助 / R3.4）
-- [ ] 3.1 `_spec_missing_artifacts` を新規追加
+- [x] 3. spec 成果物欠落の検出補助関数（C3 補助 / R3.4）
+- [x] 3.1 `_spec_missing_artifacts` を新規追加
   - `$REPO_DIR/$SPEC_DIR_REL` 配下の `requirements.md` / `review-notes.md` の branch HEAD tracked 欠落種別を stdout 列挙（read-only / `git ls-tree --name-only HEAD` 判定、`stage_checkpoint_has_impl_notes` を踏襲）
   - design.md / tasks.md は補完対象外だが検査ログには記録する旨を関数コメントに明記（design.md Data Models）
   - `sc_log "spec-completeness: missing=<...> dir=<SPEC_DIR_REL>"` を出力（Req 3.4 / NFR 3.2）
