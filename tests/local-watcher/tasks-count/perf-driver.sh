@@ -30,13 +30,15 @@ trap 'rm -rf "$_TMP"' EXIT
 
 # ── 1 MB 程度の tasks.md を生成 ──
 # 1 行あたり ~60 byte 程度の task 行を 20000 行生成すると 1.2〜1.3 MB になる。
-# numeric ID 階層を散らして regex の最悪ケース（子タスクが多い）に近づける。
+# #216 で canonical regex（最上位 numeric ID の未完了のみ計数）に整合したため、
+# regex が実際にマッチする最上位タスク行（`- [ ] $i. ...`）を生成して計数経路の
+# 最悪ケースを計測する（旧版は子タスク `$i.$sub` を生成しており新 regex では
+# 全行非マッチ＝count=0 になっていた）。
 {
   echo "# Implementation Plan (perf fixture)"
   echo
   for i in $(seq 1 20000); do
-    sub=$((i % 7 + 1))
-    echo "- [ ] $i.$sub Task number $i.$sub with padding text padding padding"
+    echo "- [ ] $i. Task number $i with padding text padding padding"
   done
 } > "$_TMP/tasks.md"
 

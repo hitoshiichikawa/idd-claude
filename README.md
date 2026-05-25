@@ -3384,10 +3384,31 @@ local watcher の `design` モード（PM → Architect → PjM）は Architect 
 | 8〜10 件 | `warn` | Issue に警告コメント 1 件投稿。後続フェーズは通常進行（Req 2.2） |
 | 11 件以上 | `escalate` | `needs-decisions` ラベル付与 + エスカレーションコメント投稿。Developer 自動起動が抑止される（Req 2.3, 2.4） |
 
-カウント対象は `tasks.md` の **checkbox 形式タスク行**（`- [ ]` / `- [x]` / `- [ ]*` /
-`- [x]*` のいずれかで始まり numeric 階層 ID を持つ行）。親タスク（`- [ ] 1. ...`）と
-子タスク（`- [ ] 1.1 ...`）は **フラット展開**して 1 件として数え、`(P)` マーカーの
-有無も区別しません（Req 1.3, 1.4）。
+カウント対象は `tasks.md` の **最上位 numeric ID の未完了タスク行**のみです。具体的には
+正準 regex `^- \[ \]\*? [0-9]+\. ` に一致する行 —— 行頭が `- [ ]`（未完了）または
+`- [ ]*`（最上位 deferrable）で始まり、整数 ID + `.` + 半角スペースが続く行（例:
+`- [ ] 1. ...` / `- [ ]* 3. ...`）—— が計数されます。以下は **計数対象外**です:
+
+- 子タスク（小数階層 ID `- [ ] 1.1 ...` 等）: `[0-9]+\. ` が整数 + `.` + 空白を要求するため不一致
+- 完了済みタスク（`- [x]` / `- [x]*`）: 残作業ベースで数えるため除外
+- `(P)` 並列マーカーの有無は計数に影響しません
+
+この計数規約の **正準**は Architect 側の
+[`.claude/rules/design-review-gate.md`](.claude/rules/design-review-gate.md) の
+「Budget overflow check（tasks.md 件数）」節（同一 regex `^- \[ \]\*? [0-9]+\. `）です。
+harness（`tc_count_tasks`）はその正準に厳密一致させ、同一 `tasks.md` に対して Architect の
+Budget overflow check と同一件数を返します（#216）。両者は別実行基盤（bash / LLM ルール）の
+ため共有コードを持てず、同一 regex を双方に明記して相互参照することでドリフトを防いでいます。
+
+> **migration note（#216）**: 旧実装（#147 時点）は全 checkbox 行（子タスク・完了
+> `- [x]`・deferrable を含む）をフラット展開して計上していました。#216 で上記正準計数に
+> 整合させたため、**子タスクや完了済みタスクを多く含む一部の Issue は判定が escalate →
+> warn / normal に移ります**。これは Architect が「budget 内（≤10 最上位）」と確定した
+> 設計を harness が「≥11（全 checkbox）」と誤って escalate していた二重計上を解消する
+> **意図した挙動変化**です。閾値（`TC_WARN_LOWER`=8 / `TC_WARN_UPPER`=10 /
+> `TC_ESCALATE_LOWER`=11）・env var 名・エスカレーションコメントの識別マーカー文字列
+> （`<!-- idd-claude:tasks-count-overflow ... -->`）・exit code 意味・ラベル遷移契約は
+> **いずれも不変**です。`TC_ENABLED=false`（opt-out）時の挙動も本機能導入前と完全に同一です。
 
 ### 環境変数
 
