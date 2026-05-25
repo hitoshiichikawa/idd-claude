@@ -33,7 +33,7 @@
   - _Boundary: po_check_dispatch_gate_
   - _Depends: 1, 2_
 
-- [ ] 4. holder ラベル集合決定のユニット/スモークテストを追加する
+- [x] 4. holder ラベル集合決定のユニット/スモークテストを追加する
   - `docs/specs/221-feat-watcher-path-overlap-holder-base-de/test-fixtures/test-holder-labels.sh` を新設
   - `po_resolve_holder_labels` を dispatch×multi-branch / dispatch×single-branch / promote / 不明 context の 4 ケースで検証
   - `po_collect_inflight_issues` の引数省略時 search_query が現行固定クエリと文字列一致することを検証
