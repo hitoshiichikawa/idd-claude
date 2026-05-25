@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. holder ラベル集合決定関数 `po_resolve_holder_labels` を新設する
+- [x] 1. holder ラベル集合決定関数 `po_resolve_holder_labels` を新設する
   - `promote-pipeline.sh` に `po_resolve_holder_labels` 関数を追加する（`$1=context`）
   - `dispatch` × multi-branch（`BASE_BRANCH != PROMOTION_TARGET_BRANCH`）→ `staged-for-release` を除いた 6 ラベル CSV
   - `dispatch` × single-branch（`BASE_BRANCH == PROMOTION_TARGET_BRANCH`）→ full 7 ラベル CSV（ゼロ差分）
