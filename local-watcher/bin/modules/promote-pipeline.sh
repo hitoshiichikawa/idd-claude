@@ -199,6 +199,53 @@ po_load_edit_paths() {
   echo "$validated"
 }
 
+# ─── Phase E: Holder Label Set Resolver (#221 Req 1.1 / 2.1 / 3.1〜3.3 / 4.1 / NFR1.1) ───
+# 呼び出しコンテキストと branch 設定から、in-flight holder とみなすラベル集合を CSV で返す。
+# holder の本質は「dispatch 先 base ブランチにまだ取り込まれていない作業」であるため、
+# multi-branch（gitflow）運用の dispatch 文脈では develop 統合済みの `staged-for-release` を
+# holder から除外する。それ以外（promote / single-branch / 判定不能）は full 集合を返す。
+#
+# holder 集合決定の真理値表（design.md D3）:
+#   context    | BASE_BRANCH vs PROMOTION_TARGET_BRANCH | 返す集合
+#   dispatch   | != （multi-branch / gitflow）          | 6 ラベル（staged-for-release 除外）… Req 1.1
+#   dispatch   | == （single-branch）                   | 7 ラベル（full / ゼロ差分）       … NFR 1.1
+#   promote    | （不問）                               | 7 ラベル（full / SfR 維持）        … Req 2.1
+#   不明な値    | （不問）                               | 7 ラベル（full / fail-safe）       … Req 4.1
+#
+# invariants: 返す CSV は常に 6 基本ラベル
+#   claude-claimed / claude-picked-up / awaiting-design-review / ready-for-review /
+#   needs-iteration / needs-rebase
+# を含む（NFR 1.2）。コンテキストで変動するのは `staged-for-release` の有無のみ。
+#
+# Args:
+#   $1 = context（"dispatch" | "promote"）
+# Stdout: holder ラベル CSV（空白なしカンマ区切り。dispatch×multi-branch では
+#         staged-for-release を含まない）
+# Return: 0 always（判定不能でも full 集合を返す fail-safe / Req 4.1）
+po_resolve_holder_labels() {
+  local context="${1:-}"
+
+  # 6 基本ラベルは常時集合内（NFR 1.2 invariant）。`$LABEL_*` 定数は本体 Config ブロックで
+  # 束縛済みだが、未束縛時にも安全側へ倒すため `:-` で既定リテラルへ fallback する。
+  local base_labels
+  base_labels="${LABEL_CLAIMED:-claude-claimed},${LABEL_PICKED:-claude-picked-up},${LABEL_AWAITING_DESIGN:-awaiting-design-review},${LABEL_READY:-ready-for-review},${LABEL_NEEDS_ITERATION:-needs-iteration},${LABEL_NEEDS_REBASE:-needs-rebase}"
+
+  # full 集合 = 6 基本ラベル + staged-for-release（ラベル文字列はハードコード重複させず
+  # `$LABEL_STAGED_FOR_RELEASE` 定数を参照する / task 明記）。
+  local staged_label="${LABEL_STAGED_FOR_RELEASE:-staged-for-release}"
+  local full_labels="${base_labels},${staged_label}"
+
+  # dispatch かつ multi-branch（BASE_BRANCH != PROMOTION_TARGET_BRANCH）のみ
+  # staged-for-release を除外する。それ以外は full 集合（fail-safe / 安全側）。
+  if [ "$context" = "dispatch" ] && [ "${BASE_BRANCH:-main}" != "${PROMOTION_TARGET_BRANCH:-main}" ]; then
+    echo "$base_labels"
+    return 0
+  fi
+
+  echo "$full_labels"
+  return 0
+}
+
 # ─── Phase E: In-Flight Collector (#18 Req 4.1〜4.4 / 5.3 / 8.1) ───
 # 現サイクルの in-flight Issue（候補自身を除く）を gh で 1 回列挙し、各 Issue の
 # edit_paths を読み出して **union 配列**と **path → holder Issue 番号配列の map**
