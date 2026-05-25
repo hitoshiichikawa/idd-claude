@@ -46,6 +46,9 @@ Architect が `design.md` を書き終える前に、このゲートに従って
 - **tasks.md checkbox enforcement check**: tasks.md のすべてのタスク行が checkbox 形式
   （`- [ ]` または `- [ ]*`）で開始することを機械的に確認する（後述「tasks.md checkbox
   enforcement check」節を参照）
+- **verify block well-formed check**: tasks.md に構造化 verify ブロック（センチネル
+  `<!-- stage-a-verify -->` + 直後 fence）がある場合、それが well-formed か（直後 fence /
+  fence 閉じ / 中身非空）を機械的に確認する（後述「verify block well-formed check」節を参照）
 
 ### Budget overflow check（tasks.md 件数）
 
@@ -160,6 +163,59 @@ ID 末尾の `.` あり [`- [ ] 1. <名前>`]、子タスクは末尾の `.` な
 - 既存 deferrable テストタスク表記 `- [ ]*` は有効な checkbox 形式として扱う（違反として
   報告しない）
 - ≤ 10 件の正常ケースを含む Budget overflow check の挙動は変化しない
+
+### verify block well-formed check
+
+`tasks.md` に **構造化 verify ブロック**（stage-a-verify gate #125 / #224 の input 契約。
+センチネル `<!-- stage-a-verify -->` + 直後 fenced code block）が含まれる場合、それが
+well-formed であるかを機械的に確認します。本チェックは malformed なブロックが Developer
+フェーズまで持ち越され、watcher の実行時に黙って fallback（env / heuristic / SKIPPED）へ
+後退してしまう事故を、設計確定前に検出するためのものです（Req 5.1, 5.2）。
+
+#### well-formed 判定（参照実装）
+
+ブロックが well-formed であるとは、以下をすべて満たすことです（モジュール側 awk
+`stage_a_verify_extract_verify_block`（`local-watcher/bin/modules/stage-a-verify.sh`）の
+抽出基準と **同一**。両者は別実行基盤のため共有コードを持てず、同一基準の明記と相互参照で
+ドリフトを防いでいます。判定基準を変更する場合は本節とモジュール側 awk の双方を同期更新する
+こと）:
+
+1. **センチネル存在**: 行を trim した結果が厳密に `<!-- stage-a-verify -->` に一致する
+   アンカー行が存在する（前後空白許容、行内の他テキスト不可）
+2. **直後性 / 直後 fence**: アンカー行の次行以降で空行を任意個スキップした後の最初の非空行が
+   fence 開始（trim 後 ` ``` ` 始まり）である（fence 以外の非空行が先に来たら malformed）
+3. **fence 閉じ**: fence が次の ` ``` ` 行で閉じている（EOF まで閉じなければ malformed）
+4. **中身非空**: fence 内が trim 後すべて空ではない（空ブロックは malformed）
+5. **複数ブロック**: 上記を満たす最初のアンカー + fence のみを採用（決定論）
+
+書式規約の散文側正本は [`tasks-generation.md`](./tasks-generation.md) の「構造化 verify ブロック」
+節です（本節と同一の well-formed 条件に依拠）。
+
+#### 検証手順
+
+1. Architect は `tasks.md` ドラフトの確定直前に、センチネル `<!-- stage-a-verify -->` の有無を
+   走査する
+2. センチネルが存在する場合、上記 well-formed 判定 1〜4 を目視 / 機械的に確認する
+3. malformed（直後 fence なし / fence 未クローズ / 中身空）を検出した場合、**違反として報告**し、
+   確定前に well-formed な書式へ修正する（既存ゲートと同じ最大 2 パス）
+4. センチネルが存在しない（ブロックを宣言していない）spec は、本 well-formed 判定の対象外
+   （後述 Req 5.3 の warn とは別レイヤ）
+
+#### verify 対象あり + ブロック/env 両無の扱い（Req 5.3）
+
+verify 対象（build/test/lint）を持つはずのプロジェクトで、構造化 verify ブロックも
+`STAGE_A_VERIFY_COMMAND` も存在しない場合、本チェックは **warn 止まり**（reject しない）と
+します。design-less impl（tasks.md 不在の #204 等）や verify 不要 spec（純ドキュメント変更等）を
+誤って reject しないための安全側設計です。Architect は warn を受けて構造化ブロックの宣言を
+検討しますが、宣言しないことを理由に確定をブロックしません。
+
+#### 適用範囲（後方互換性）
+
+- 本チェックの対象は **Architect が新規に生成・編集する `tasks.md`** に限定する
+- 既に main に merge 済みで構造化 verify ブロックを持たない既存 spec を **遡及的な違反として
+  報告しない**（Req 5.4、retrofit は本 rule のスコープ外）
+- 構造化 verify ブロックを持たない spec は従来どおり env / ヒューリスティック / SKIPPED に
+  fallback するため、本チェック導入により既存挙動は変化しない（NFR 1.1）
 
 ### `/goal` による自動ループ運用（Claude Code v2.1.139+）
 

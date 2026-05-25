@@ -10,7 +10,8 @@
 #   - sav_log / sav_warn / sav_error           : `stage-a-verify:` prefix logger
 #   - _sav_cmd_starts_with_keyword             : verify keyword 行頭一致判定
 #   - stage_a_verify_extract_command           : tasks.md 末尾走査 + keyword 一致抽出
-#   - stage_a_verify_resolve_command           : STAGE_A_VERIFY_COMMAND escape hatch + 抽出の合成
+#   - stage_a_verify_extract_verify_block       : tasks.md センチネル付き構造化 verify ブロックの厳密パース抽出
+#   - stage_a_verify_resolve_command           : 構造化ブロック → env → heuristic → SKIPPED の 4 段 fallback 連鎖
 #   - stage_a_verify_round_path / _read_round / _bump_round / _reset_round
 #                                              : sidecar による round counter 永続化
 #   - _sav_handle_failure                      : round=1 差し戻し / round=2 escalate
@@ -280,23 +281,241 @@ stage_a_verify_extract_command() {
   printf '%s\n' "$result"
 }
 
+# ─── stage_a_verify_extract_verify_block ───
+#
+# `tasks.md` のセンチネル付き構造化 verify ブロックから、verify コマンドを
+# 決定論的に抽出する純関数（Req 1.1, 1.4, 1.5 / NFR 3.1, NFR 3.2, NFR 4.1）。
+# 散文をコマンドと誤認するヒューリスティック抽出（#160/#219/#221 で誤発火）を
+# 構造的に避けるための input 契約パス。本関数はヒューリスティック抽出
+# （stage_a_verify_extract_command）とは抽出基準が根本的に異なる
+# （行頭 keyword 一致 vs センチネル + fence 構造）ため、既存 awk を拡張せず
+# 独立関数として分離する（design.md「Components and Interfaces」）。
+#
+# 入力: 環境変数 REPO_DIR / SPEC_DIR_REL
+# 戻り値: 0 = well-formed ブロック抽出成功 / 1 = ブロック無し or malformed or tasks.md 不在
+# stdout: 抽出したコマンド（成功時のみ。複数行は改行・インデント込みで保持）
+#
+# パース規約（design.md「パース規約（決定論化の詳細）」と同一基準）:
+#   - センチネル: 行を trim した結果が厳密に `<!-- stage-a-verify -->` に一致する行を
+#     アンカー行とする（前後空白許容、行内の他テキストは不可）。
+#   - 直後性: アンカー行の次行以降で空行を任意個スキップした後の最初の非空行が
+#     fence 開始（trim 後 ``` で始まる）であること。fence 以外の非空行が先に来たら
+#     malformed → return 1。
+#   - fence 言語タグ（```sh / ```bash 等）は読み飛ばし、タグ自体は中身に含めない。
+#   - fence 終了: 次に現れる trim 後 ``` 行で閉じる。EOF まで閉じなければ malformed。
+#   - 中身: fence 開始行と終了行の間の全行。trim 後すべて空なら malformed（空ブロック扱い）。
+#     非空なら元の改行・インデントを保持して出力（`&&` 連結や複数行コマンドの意味を壊さない）。
+#   - 複数ブロック: 上記を満たす最初のアンカー + fence のみ採用し、以降は無視（決定論）。
+#
+# 副作用なし（tasks.md を書き換えない、NFR 3.2）。同一入力に同一結果（NFR 3.1）。
+stage_a_verify_extract_verify_block() {
+  local tasks_path="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+  [ -f "$tasks_path" ] || return 1
+
+  # awk 1 パス走査で「最初の well-formed アンカー + fence」を状態機械で抽出する。
+  # state 遷移:
+  #   0 = アンカー未検出。trim 後が厳密にセンチネルの行を見つけたら state=1。
+  #   1 = アンカー検出済・fence 開始待ち。空行はスキップ。最初の非空行が fence 開始
+  #       （trim 後 ``` で始まる）なら state=2、それ以外の非空行なら malformed として
+  #       打ち切り（done=1 のまま中身を出さず終了 → END で return 1 相当）。
+  #   2 = fence 内・中身収集中。trim 後 ``` の行で閉じて done=1。閉じる前に EOF なら
+  #       未クローズ → 中身を出さない。fence 内の各行は raw のまま buf に蓄積する
+  #       （元の改行・インデントを保持、Req 1.4）。
+  # closed=1 かつ 中身が trim 後非空のときのみ buf を改行込みで出力する。
+  # 一致した最初のブロックで done=1 とし、以降は state=0 のまま何もしない（決定論）。
+  local result
+  result=$(awk '
+    BEGIN {
+      state = 0       # 0=アンカー待ち / 1=fence 開始待ち / 2=fence 内
+      done_flag = 0   # 最初のブロックを処理し終えたら 1（以降は無視）
+      closed = 0      # fence が閉じたか
+      nonblank = 0    # fence 中身に非空行が 1 行でもあったか
+      buf = ""        # fence 中身バッファ（raw を改行区切りで蓄積）
+      buf_n = 0       # buf に積んだ行数
+    }
+    {
+      if (done_flag) { next }
+
+      raw = $0
+      # trim（行頭行末の空白除去）した判定用文字列を作る。
+      t = raw
+      sub(/^[[:space:]]+/, "", t)
+      sub(/[[:space:]]+$/, "", t)
+
+      if (state == 0) {
+        # アンカー行検出（trim 後の厳密一致）。行内の他テキストは不可。
+        if (t == "<!-- stage-a-verify -->") {
+          state = 1
+        }
+        next
+      }
+
+      if (state == 1) {
+        # アンカー直後の空行は任意個スキップ。
+        if (t == "") { next }
+        # 最初の非空行が fence 開始でなければ malformed → 打ち切り。
+        if (t ~ /^```/) {
+          state = 2
+          next
+        }
+        done_flag = 1   # malformed。中身を出さずに以降を無視。
+        next
+      }
+
+      if (state == 2) {
+        # fence 終了行（trim 後 ``` で開始）で閉じる。言語タグは開始行のみに付く
+        # 想定だが、終了行は単独の ``` が canonical。trim 後 ``` 始まりで閉じる。
+        if (t ~ /^```/) {
+          closed = 1
+          done_flag = 1
+          next
+        }
+        # fence 内の中身は raw のまま蓄積（元の改行・インデントを保持、Req 1.4）。
+        if (t != "") { nonblank = 1 }
+        if (buf_n == 0) { buf = raw } else { buf = buf "\n" raw }
+        buf_n++
+        next
+      }
+    }
+    END {
+      # well-formed 条件: fence が閉じ、かつ中身に非空行が 1 行以上ある。
+      if (closed && nonblank) {
+        printf "%s\n", buf
+      }
+    }
+  ' "$tasks_path")
+
+  [ -n "$result" ] || return 1
+  printf '%s\n' "$result"
+}
+
+# ─── _SAV_RESOLVED_SOURCE ───
+#
+# 直近の `stage_a_verify_resolve_command` がどの解決手段でコマンドを確定したかを
+# 記録するモジュールスコープ変数（design.md「Decision: source の stage_a_verify_run
+# への伝達方法」採用案）。値域: structured-block / env-command / heuristic / 空（未解決）。
+# `stage_a_verify_run` の Gate 3 bypass 判定が参照する。resolve 呼び出しの度に冒頭で
+# 初期化され、前回呼び出しの残値で誤判定しない（NFR 3.1）。
+#
+# 注意（サブシェル境界）: `stage_a_verify_run` は resolve を command substitution
+# （`cmd=$(stage_a_verify_resolve_command)`）で呼ぶため、サブシェル内で代入した
+# `_SAV_RESOLVED_SOURCE` は親（run）のプロセスへ伝播しない。そこで resolve は確定した
+# source を round counter と同じ流儀の sidecar（`.stage-a-verify-source`）へも書き出し、
+# run 側は `_sav_read_resolved_source` でそれを読み戻して Gate 3 判定に使う。モジュール変数
+# 代入（同一プロセス内呼び出し用）と sidecar 書き出し（サブシェル越え用）を併用することで、
+# 設計の「source をモジュールスコープで共有する」意図をサブシェル境界でも成立させる。
+_SAV_RESOLVED_SOURCE=""
+
+# ─── _sav_source_path ───
+#
+# source sidecar の絶対パスを stdout に出す。round counter sidecar
+# （`stage_a_verify_round_path`）と同じ spec dir 配下に `.stage-a-verify-source` を置く。
+# worktree slot ごとの `$REPO_DIR` が自然に slot 隔離を担保する。
+#
+# 入力: 環境変数 REPO_DIR / SPEC_DIR_REL
+# stdout: 絶対パス（必ず 1 行）
+_sav_source_path() {
+  printf '%s\n' "$REPO_DIR/$SPEC_DIR_REL/.stage-a-verify-source"
+}
+
+# ─── _sav_set_resolved_source ───
+#
+# 解決手段名 ($1) をモジュール変数 `_SAV_RESOLVED_SOURCE` と source sidecar の双方へ記録する。
+# モジュール変数は同一プロセス内呼び出し用、sidecar は command substitution のサブシェル
+# 境界を越えて `stage_a_verify_run`（親プロセス）へ source を伝える用途。sidecar 書き込み
+# 失敗は致命ではない（Gate 3 が heuristic 同様の defense-in-depth に倒れるだけ）ため警告に留める。
+#
+# 入力: $1 = 解決手段名（structured-block / env-command / heuristic）
+_sav_set_resolved_source() {
+  _SAV_RESOLVED_SOURCE="$1"
+  local path
+  path=$(_sav_source_path)
+  mkdir -p "$(dirname "$path")" 2>/dev/null || true
+  printf '%s\n' "$1" > "$path" 2>/dev/null || \
+    sav_warn "source sidecar 書き込みに失敗 path=$path source=$1（Gate 3 bypass 判定が defense-in-depth に倒れます）"
+}
+
+# ─── _sav_read_resolved_source ───
+#
+# source sidecar から直近の解決手段名を stdout に出す。不在 / 読み取り不能なら空文字。
+# `stage_a_verify_run` が Gate 3 bypass 判定のために読む（サブシェル越えの source 共有）。
+#
+# 入力: 環境変数 REPO_DIR / SPEC_DIR_REL
+# stdout: 解決手段名 1 行（不在時は空）
+_sav_read_resolved_source() {
+  local path
+  path=$(_sav_source_path)
+  if [ -f "$path" ]; then
+    head -n1 "$path" 2>/dev/null | tr -d '[:space:]'
+  fi
+}
+
+# ─── _sav_reset_resolved_source ───
+#
+# source sidecar を削除する。resolve 冒頭で前回値をクリアし、未解決（SKIPPED）時に
+# 古い source が残って次回 run の Gate 3 判定を誤らせないようにする。不在時は no-op。
+_sav_reset_resolved_source() {
+  local path
+  path=$(_sav_source_path)
+  rm -f "$path" 2>/dev/null || true
+}
+
 # ─── stage_a_verify_resolve_command ───
 #
-# `STAGE_A_VERIFY_COMMAND` env が非空ならそれを最優先で採用し（escape hatch、
-# Req 4.4 / NFR 2.2）、空ならば `stage_a_verify_extract_command` を呼ぶ。
+# verify コマンドを 4 段の fallback 連鎖で決定論的に解決する（design.md「Components and
+# Interfaces / stage_a_verify_resolve_command」/ Req 2）。解決順序:
+#   1. 構造化 verify ブロック（stage_a_verify_extract_verify_block 成功）→ source=structured-block
+#   2. `STAGE_A_VERIFY_COMMAND` env 非空 → source=env-command（散文誤認回避の固定 escape hatch）
+#   3. ヒューリスティック抽出（stage_a_verify_extract_command 成功）→ source=heuristic
+#   4. いずれも不可 → return 1（SKIPPED, Req 2.3）
+# 各段で解決した手段名を `_SAV_RESOLVED_SOURCE` に記録し、`sav_log` で `source=<手段>` の
+# 1 行を stderr に出す（NFR 2.1）。stdout はコマンド本体のみに保つ（複数行コマンドを
+# そのまま返せるよう、source ログは stdout に混ぜない）。
+#
+# 構造化ブロックを env の上に置くため、ブロックを持たない既存 spec は第 1 段を素通りし
+# env（設定済みなら）または heuristic に到達 → 本機能導入前と user-observable に同一
+# （NFR 1.1）。design-less impl（tasks.md 不在）は第 1/第 3 段が return 1 となり、結果として
+# 既存の env→SKIPPED 順序に一致する（Req 2.5）。
 #
 # 入力: 環境変数 STAGE_A_VERIFY_COMMAND / REPO_DIR / SPEC_DIR_REL
-# 戻り値: 0 = 解決成功 / 1 = SKIPPED (env 空 + tasks.md 抽出不能)
-# stdout: 解決した shell コマンド 1 行（成功時のみ）
+# 戻り値: 0 = 解決成功 / 1 = SKIPPED（いずれの手段でも解決不能）
+# stdout: 解決した shell コマンド（成功時のみ。構造化ブロック由来は複数行を改行込みで保持）
+# stderr: source=<structured-block|env-command|heuristic> の 1 行（sav_log 経由、NFR 2.1）
+# 副作用: モジュールスコープ変数 _SAV_RESOLVED_SOURCE を設定する
 stage_a_verify_resolve_command() {
+  # 前回呼び出しの残値で Gate 3 bypass を誤判定しないよう、毎回冒頭で初期化する
+  # （モジュール変数 + sidecar の双方）。
+  _SAV_RESOLVED_SOURCE=""
+  _sav_reset_resolved_source
+
+  local cmd
+
+  # ── 第 1 段: 構造化 verify ブロック（input 契約・最優先） ──
+  if cmd=$(stage_a_verify_extract_verify_block); then
+    _sav_set_resolved_source "structured-block"
+    sav_log "resolve source=structured-block" >&2
+    printf '%s\n' "$cmd"
+    return 0
+  fi
+
+  # ── 第 2 段: STAGE_A_VERIFY_COMMAND env（固定 escape hatch） ──
   if [ -n "${STAGE_A_VERIFY_COMMAND:-}" ]; then
+    _sav_set_resolved_source "env-command"
+    sav_log "resolve source=env-command" >&2
     printf '%s\n' "$STAGE_A_VERIFY_COMMAND"
     return 0
   fi
-  local cmd
-  cmd=$(stage_a_verify_extract_command) || return 1
-  [ -n "$cmd" ] || return 1
-  printf '%s\n' "$cmd"
+
+  # ── 第 3 段: ヒューリスティック抽出（後方互換 fallback） ──
+  if cmd=$(stage_a_verify_extract_command) && [ -n "$cmd" ]; then
+    _sav_set_resolved_source "heuristic"
+    sav_log "resolve source=heuristic" >&2
+    printf '%s\n' "$cmd"
+    return 0
+  fi
+
+  # ── いずれも不可: SKIPPED ──
+  return 1
 }
 
 # ─── stage_a_verify_round_path ───
@@ -466,12 +685,20 @@ stage_a_verify_run() {
     sav_log "SKIPPED reason=no-verify-task-in-tasks-md"
     return 0
   fi
+  # resolve は command substitution のサブシェルで実行されるため、サブシェル内で代入した
+  # `_SAV_RESOLVED_SOURCE` は親（run）へ伝播しない。resolve が併せて書き出した source sidecar
+  # を読み戻して Gate 3 判定に使う（サブシェル越えの source 共有、design.md Decision 採用案）。
+  local resolved_source
+  resolved_source=$(_sav_read_resolved_source)
 
   # ── Gate 3: SKIPPED（抽出した cmd が keyword で開始しない）──
-  # `stage_a_verify_extract_command` 側で行頭一致を保証しているが、defense-in-depth
-  # として実行直前にも確認する（#160 Req 5.3）。`STAGE_A_VERIFY_COMMAND` env による
-  # escape hatch 経路（Req 4.1）は運用者が明示指定した値なので本チェックを bypass する。
-  if [ -z "${STAGE_A_VERIFY_COMMAND:-}" ]; then
+  # heuristic 経路の `stage_a_verify_extract_command` 側で行頭一致を保証しているが、
+  # defense-in-depth として実行直前にも確認する（#160 Req 5.3）。bypass 条件:
+  #   - `STAGE_A_VERIFY_COMMAND` env が非空（運用者が明示指定した escape hatch 経路、Req 4.1）
+  #   - 構造化ブロック由来（source=structured-block）。Architect が設計 PR で人間レビュー済みの
+  #     input 契約であり、env 経路と同じ信頼境界として Gate 3 を免除する（#224 Req 3.1 /
+  #     design.md「Decision: source の stage_a_verify_run への伝達方法」採用案）
+  if [ -z "${STAGE_A_VERIFY_COMMAND:-}" ] && [ "$resolved_source" != "structured-block" ]; then
     if ! _sav_cmd_starts_with_keyword "$cmd"; then
       sav_log "SKIPPED reason=cmd-does-not-start-with-keyword cmd=$(printf '%q' "$cmd")"
       return 0
