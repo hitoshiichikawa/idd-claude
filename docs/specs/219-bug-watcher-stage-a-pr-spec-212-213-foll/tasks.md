@@ -53,8 +53,8 @@
   - _Requirements: 3.3, NFR 2.2, NFR 3.2_
   - _Boundary: _spec_escalate_incomplete_
 
-- [ ] 5. 完全性保証 orchestrator と pipeline 結線（C3 / R3, R4）
-- [ ] 5.1 `spec_artifacts_completeness_guard` を新規追加
+- [x] 5. 完全性保証 orchestrator と pipeline 結線（C3 / R3, R4）
+- [x] 5.1 `spec_artifacts_completeness_guard` を新規追加
   - `STAGE_CHECKPOINT_ENABLED != "true"` で即 return 0（NFR 1.1）
   - `_spec_missing_artifacts` が空（標準構成充足）なら追加処理なしで return 0（Req 3.1, 3.5）
   - `stage_checkpoint_find_impl_pr` で state を取得し、MERGED かつ req/review 欠落のときのみ `_spec_create_docs_pr` を起動、失敗時は `_spec_escalate_incomplete` へフォールバック（Req 3.2, 3.3）
@@ -64,7 +64,7 @@
   - _Requirements: 3.1, 3.2, 3.3, 3.5, 4.1, 4.2, 4.3, NFR 1.1, NFR 1.4_
   - _Boundary: spec_artifacts_completeness_guard, _spec_missing_artifacts, _spec_create_docs_pr, _spec_escalate_incomplete_
   - _Depends: 3.1, 4.1, 4.2_
-- [ ] 5.2 `run_impl_pipeline` 末尾に `spec_artifacts_completeness_guard` 呼び出しを結線
+- [x] 5.2 `run_impl_pipeline` 末尾に `spec_artifacts_completeness_guard` 呼び出しを結線
   - Stage C 冪等ガード停止経路（L4931 の return 0 直前）と Stage C 成功経路（L4972 の return 0 直前）に挿入し、#213 ガードの後段独立経路として配置（Req 4.1）
   - `stage_c_existing_pr_guard` は一切変更しない（退行防止）
   - 完全性保証が pipeline の return 値（成功 0）を変えないことを確認
