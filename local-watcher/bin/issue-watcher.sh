@@ -1311,6 +1311,360 @@ stage_c_existing_pr_guard() {
   esac
 }
 
+# ─── stage_a_crossing_probe ───
+#
+# Stage A 完了直後に、当該 head ブランチに紐づく先行 impl PR の有無を観測し、存在すれば
+# 「越境（Stage A worker が制約に反して PR を作成した）」として記録して後段の spec 成果物
+# 完全性チェック（spec_artifacts_completeness_guard）へグローバル変数で引き継ぐ（Issue #219
+# Req 2）。#212 の `stage_c_existing_pr_guard` が Stage C 直前で行う再確認より「早い時点
+# （Stage A 完了直後）」で越境を検出することが目的であり、PR の close / ラベル付与等の
+# 副作用は一切持たない read-only 観測（Req 2 のスコープ）。
+#
+# 本関数は Stage Checkpoint モジュールの観測ヘルパ `stage_checkpoint_find_impl_pr` を
+# 再利用し、`STAGE_CHECKPOINT_ENABLED=true`（#112 以降の既定）時のみ有効化する。
+# `true` 以外（明示 opt-out その他の任意の値）では本関数は 1 行も実行せず即 return 0 する。
+# このとき検出フラグも set せず、本修正導入前と完全に同一の挙動を保つ（Req 2.5 / NFR 1.1）。
+#
+# 入力: 環境変数 STAGE_CHECKPOINT_ENABLED / NUMBER / BRANCH / REPO / LOG
+# 副作用:
+#   - $LOG への sc_log / sc_warn 出力（検出時のみ sc_log / NFR 3.1）
+#   - グローバル変数 STAGE_A_CROSSING_DETECTED（yes/no）/ STAGE_A_CROSSING_PR（PR 番号 or 空）
+#     の set（gate off 時は set しない）
+# 戻り値: 常に 0（観測は pipeline を止めない / NFR 1.4）
+stage_a_crossing_probe() {
+  # gate: STAGE_CHECKPOINT_ENABLED=true（既定）時のみ実行。`=true` 以外では本観測を
+  # 1 行も実行せず即 return 0（Req 2.5 / NFR 1.1）。`:-true` で unset も既定有効扱い。
+  if [ "${STAGE_CHECKPOINT_ENABLED:-true}" != "true" ]; then
+    return 0
+  fi
+
+  local pr_info pr_rc
+  pr_info=$(stage_checkpoint_find_impl_pr 2>/dev/null) && pr_rc=0 || pr_rc=$?
+
+  case "$pr_rc" in
+    0)
+      # 先行 impl PR を検出 = Stage A 越境。`<pr_number>,<state>` を分解する（Req 2.3）。
+      local pr_number pr_state
+      pr_number="${pr_info%%,*}"
+      pr_state="${pr_info##*,}"
+      STAGE_A_CROSSING_DETECTED="yes"
+      STAGE_A_CROSSING_PR="$pr_number"
+      # 検出時のみ越境を既存ログ書式で記録（PR 番号と head ブランチを判定根拠に / Req 2.2, 2.3, NFR 3.1）。
+      sc_log "stage-a-crossing: detected pr=#${pr_number} state=${pr_state} branch=${BRANCH} issue=#${NUMBER}" >> "$LOG"
+      ;;
+    1)
+      # 先行 PR なし → 越境なし（通常フロー）。本修正導入前と挙動不変。
+      STAGE_A_CROSSING_DETECTED="no"
+      STAGE_A_CROSSING_PR=""
+      ;;
+    *)
+      # gh API エラー → 越境有無を確定できない。安全側（越境未検出）として継続し
+      # 二重処理を生まない。警告を残す（NFR 3.1 / silent fail を作らない）。
+      sc_warn "Stage A 越境観測が gh API エラー（rc=$pr_rc）→ 越境未検出として継続（issue=#$NUMBER branch=$BRANCH）" >> "$LOG"
+      STAGE_A_CROSSING_DETECTED="no"
+      STAGE_A_CROSSING_PR=""
+      ;;
+  esac
+  return 0
+}
+
+# ─── _spec_missing_artifacts ───
+#
+# spec ディレクトリ（$REPO_DIR/$SPEC_DIR_REL）配下の必須成果物のうち、branch HEAD tracked
+# で欠落しているものの種別を stdout に列挙する read-only 検査関数（Issue #219 Req 3.4）。
+# 判定は `stage_checkpoint_has_impl_notes` と同じく `git ls-tree --name-only HEAD -- <path>`
+# を用い、working tree のみに存在し未 commit のファイルは欠落扱いとする。
+#
+# 本機能の補完対象は `requirements.md` / `review-notes.md` の 2 種に限定する（Req 3.2）。
+# design.md / tasks.md は設計 PR で別途 main に merge される成果物であり、impl 経路の
+# 越境補完では docs commit で機械再構築できないため **補完対象外** とする。ただし検査
+# ログには design 系の不足も `missing-design` として記録し、人間が grep で観測できるように
+# する（design.md Data Models / 検査は記録するが補完しない）。
+#
+# 入力: 引数 $1 = spec_dir_rel（省略時は環境変数 SPEC_DIR_REL）/ 環境変数 REPO_DIR / LOG
+# stdout: 補完対象の欠落種別をスペース区切りで列挙（例: `requirements review`）。欠落なしなら空。
+# 戻り値: 常に 0
+# 副作用: $LOG への sc_log 出力（不足検出時のみ / Req 3.4 / NFR 3.2）
+_spec_missing_artifacts() {
+  local spec_dir_rel="${1:-$SPEC_DIR_REL}"
+  local missing=""
+  local missing_log=""
+
+  # 補完対象（requirements.md / review-notes.md）の欠落判定。
+  local f key
+  for f in requirements:requirements.md review:review-notes.md; do
+    key="${f%%:*}"
+    local fname="${f##*:}"
+    local rel="$spec_dir_rel/$fname"
+    local out
+    out=$(git -C "$REPO_DIR" ls-tree --name-only HEAD -- "$rel" 2>/dev/null || true)
+    if [ -z "$out" ]; then
+      missing="${missing:+$missing }$key"
+    fi
+  done
+
+  # design 系（design.md / tasks.md）は補完対象外だが検査ログには記録する。
+  local d dkey dfname drel dout design_missing=""
+  for d in design:design.md tasks:tasks.md; do
+    dkey="${d%%:*}"
+    dfname="${d##*:}"
+    drel="$spec_dir_rel/$dfname"
+    dout=$(git -C "$REPO_DIR" ls-tree --name-only HEAD -- "$drel" 2>/dev/null || true)
+    if [ -z "$dout" ]; then
+      design_missing="${design_missing:+$design_missing }$dkey"
+    fi
+  done
+
+  # 検査ログ（不足を検出したときのみ。補完対象 + 補完対象外の design 系を併記 / Req 3.4 / NFR 3.2）。
+  if [ -n "$missing" ] || [ -n "$design_missing" ]; then
+    missing_log="missing=${missing:-none}"
+    [ -n "$design_missing" ] && missing_log="$missing_log missing-design=${design_missing}"
+    sc_log "spec-completeness: $missing_log dir=$spec_dir_rel" >> "$LOG"
+  fi
+
+  # 補完対象のみを stdout へ（design 系は補完対象外のため出力しない / Req 3.2）。
+  [ -n "$missing" ] && printf '%s' "$missing"
+  return 0
+}
+
+# ─── _spec_create_docs_pr ───
+#
+# spec 成果物の欠落を解消する docs-only の補完追従 PR を作成する（Issue #219 Req 3.2 /
+# 4.2 / 4.3 / Decision D2 / D3）。impl PR とは別系統の head ブランチ
+# `claude/issue-<NUMBER>-docs-<SLUG>` を使うことで、#213 の MERGED ガード（`--head $BRANCH`
+# 判定）と衝突せず、新規 impl PR を二重に作らない（Req 4.3）。
+#
+# 冪等性（NFR 2.1 / 2.2）: 作成前に `gh pr list --head <docs-branch> --state all` で既存の
+# docs 補完 PR を再観測し、あれば作成しない。
+#
+# 入力: 引数 $1 = missing（_spec_missing_artifacts の出力。例: `requirements review`）/
+#       環境変数 NUMBER / SLUG / BRANCH / REPO / REPO_DIR / SPEC_DIR_REL / BASE_BRANCH / LOG
+# 戻り値: 0 = 補完 PR 作成成功 or 既存 docs PR を検出してスキップ（冪等）/
+#         1 = gh pr create 失敗（呼び出し側はエスカレーションへフォールバック）
+# 副作用: docs-only branch への commit + push + gh pr create（失敗時 sc_warn）
+_spec_create_docs_pr() {
+  local missing="$1"
+  local docs_branch="claude/issue-${NUMBER}-docs-${SLUG}"
+
+  # 冪等ガード: 既存の docs 補完 PR があれば作成しない（NFR 2.1 / 2.2）。
+  local existing_docs_pr
+  existing_docs_pr=$(gh pr list --repo "$REPO" --head "$docs_branch" --state all \
+                     --json number --limit 1 2>/dev/null \
+                     | jq -r '.[0].number // empty' 2>/dev/null || true)
+  if [ -n "$existing_docs_pr" ]; then
+    sc_log "spec-completeness: action=docs-pr result=skip-existing pr=#${existing_docs_pr} branch=${docs_branch} issue=#${NUMBER}" >> "$LOG"
+    return 0
+  fi
+
+  # docs-only branch を base から切る（impl ブランチとは別系統 / Req 4.3）。
+  # 失敗は補完不能としてエスカレーションへフォールバックさせる。
+  if ! git -C "$REPO_DIR" checkout -B "$docs_branch" "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
+    sc_warn "spec-completeness: docs-only branch 作成失敗（branch=$docs_branch base=origin/$BASE_BRANCH issue=#$NUMBER）→ エスカレーションへ" >> "$LOG"
+    return 1
+  fi
+
+  # 不足している requirements.md / review-notes.md のみを最小限の placeholder で補完する。
+  # 内容は spec パスと不足種別のみ（実値の機密情報を埋め込まない / Security Considerations）。
+  local spec_abs="$REPO_DIR/$SPEC_DIR_REL"
+  mkdir -p "$spec_abs"
+  local added=""
+  local m
+  for m in $missing; do
+    case "$m" in
+      requirements)
+        if [ ! -f "$spec_abs/requirements.md" ]; then
+          {
+            echo "# Requirements Document"
+            echo ""
+            echo "> このファイルは spec 成果物完全性保証（Issue #219 / spec-completeness）により"
+            echo "> 自動補完された placeholder です。先行 impl PR が requirements.md を含まないまま"
+            echo "> MERGED されたため、spec ディレクトリの標準構成を満たす目的で作成されました。"
+            echo "> 元の要件定義が別途存在する場合は、人間がこのファイルを正規の内容へ更新してください。"
+          } > "$spec_abs/requirements.md"
+          added="${added:+$added }requirements.md"
+        fi
+        ;;
+      review)
+        if [ ! -f "$spec_abs/review-notes.md" ]; then
+          {
+            echo "# Review Notes"
+            echo ""
+            echo "> このファイルは spec 成果物完全性保証（Issue #219 / spec-completeness）により"
+            echo "> 自動補完された placeholder です。先行 impl PR が review-notes.md を含まないまま"
+            echo "> MERGED されたため、spec ディレクトリの標準構成を満たす目的で作成されました。"
+            echo "> 元のレビュー記録が別途存在する場合は、人間がこのファイルを正規の内容へ更新してください。"
+          } > "$spec_abs/review-notes.md"
+          added="${added:+$added }review-notes.md"
+        fi
+        ;;
+    esac
+  done
+
+  if [ -z "$added" ]; then
+    # 追加対象が無い（既に working tree 上に存在）→ 作成不要として成功扱い。
+    sc_log "spec-completeness: action=docs-pr result=nothing-to-add dir=$SPEC_DIR_REL issue=#${NUMBER}" >> "$LOG"
+    return 0
+  fi
+
+  git -C "$REPO_DIR" add "$SPEC_DIR_REL" >/dev/null 2>&1 || true
+  if ! git -C "$REPO_DIR" commit -m "docs(specs): #${NUMBER} の不足成果物を補完（spec-completeness）" >/dev/null 2>&1; then
+    sc_warn "spec-completeness: docs-only commit 失敗（issue=#$NUMBER added=$added）→ エスカレーションへ" >> "$LOG"
+    return 1
+  fi
+  if ! git -C "$REPO_DIR" push -u origin "$docs_branch" >/dev/null 2>&1; then
+    sc_warn "spec-completeness: docs-only push 失敗（branch=$docs_branch issue=#$NUMBER）→ エスカレーションへ" >> "$LOG"
+    return 1
+  fi
+
+  # docs-only PR を作成（base は BASE_BRANCH を明示 / #96 踏襲。ready-for-review は付与しない / Req 4.3）。
+  local pr_body
+  pr_body="🤖 spec 成果物完全性保証（Issue #219 / spec-completeness）による docs-only 補完 PR です。
+
+- 対象 Issue: #${NUMBER}
+- 対象 spec ディレクトリ: \`${SPEC_DIR_REL}\`
+- 補完したファイル: ${added}
+
+先行 impl PR が上記成果物を含まないまま MERGED されたため、spec ディレクトリの
+標準構成（requirements.md / review-notes.md / impl-notes.md）を満たす目的で
+不足分を補完しました。本 PR は impl PR とは別系統の docs-only 追従 PR です
+（\`ready-for-review\` は付与していません。内容を確認のうえ人間が merge してください）。"
+  if ! gh pr create --repo "$REPO" \
+        --base "$BASE_BRANCH" \
+        --head "$docs_branch" \
+        --title "docs(specs): #${NUMBER} の不足成果物を補完（spec-completeness）" \
+        --body "$pr_body" >/dev/null 2>&1; then
+    sc_warn "spec-completeness: gh pr create 失敗（branch=$docs_branch base=$BASE_BRANCH issue=#$NUMBER）→ エスカレーションへ" >> "$LOG"
+    return 1
+  fi
+  sc_log "spec-completeness: action=docs-pr result=created branch=${docs_branch} base=${BASE_BRANCH} added=${added} dir=${SPEC_DIR_REL} issue=#${NUMBER}" >> "$LOG"
+  return 0
+}
+
+# ─── _spec_escalate_incomplete ───
+#
+# spec 成果物の欠落を watcher が自動で解消できないとき（docs-only 補完 PR 作成失敗等）に、
+# 人間が判別可能な形でエスカレーションする（Issue #219 Req 3.3 / Decision D4）。`needs-decisions`
+# ラベル付与 + Issue コメント 1 件を発射する。#212 の過剰通知回避方針（補完成功時はログのみ）
+# と整合し、本関数は **補完不能時のみ** 呼ばれる。
+#
+# 冪等性（NFR 2.2）: `needs-decisions` が既付与なら Issue コメントを再投稿しない。`gh` 系の
+# 副作用は `|| true` で fail-open（既存 `_slug_mismatch_escalate` / Stage C CLOSED 分岐と同方針）。
+#
+# 入力: 引数 $1 = missing / 環境変数 NUMBER / REPO / SPEC_DIR_REL / LABEL_NEEDS_DECISIONS / LOG
+# 戻り値: 常に 0
+# 副作用: gh issue edit --add-label / gh issue comment（既付与時はコメントを抑止）
+_spec_escalate_incomplete() {
+  local missing="$1"
+
+  # 冪等: needs-decisions が既付与ならコメントを再投稿しない（同一サイクル再実行・複数 slot で重複しない）。
+  local label_json existing_label_match=""
+  if label_json=$(gh issue view "$NUMBER" --repo "$REPO" --json labels 2>/dev/null); then
+    existing_label_match=$(echo "$label_json" \
+      | jq -r --arg L "$LABEL_NEEDS_DECISIONS" '.labels[]? | select(.name == $L) | .name' 2>/dev/null \
+      || true)
+  fi
+
+  if [ -n "$existing_label_match" ]; then
+    sc_log "spec-completeness: action=escalate result=skip-already-needs-decisions missing=${missing:-?} dir=${SPEC_DIR_REL} issue=#${NUMBER}" >> "$LOG"
+    return 0
+  fi
+
+  local body
+  body="🛑 spec 成果物の自動補完に失敗しました（Issue #219 / spec-completeness）。
+
+- 対象 Issue: #${NUMBER}
+- 対象 spec ディレクトリ: \`${SPEC_DIR_REL}\`
+- 不足している成果物: ${missing:-?}
+
+先行 impl PR が MERGED 済みで、上記成果物が spec ディレクトリに不足しています。
+docs-only 補完追従 PR の自動作成に失敗したため、人間判断に委ねます。
+
+### 次の手順
+
+1. 不足している成果物（${missing:-?}）を \`${SPEC_DIR_REL}\` 配下へ手動で補完してください
+2. 補完後、本 Issue から \`${LABEL_NEEDS_DECISIONS}\` ラベルを外してください（次サイクルで再評価されます）"
+
+  gh issue edit "$NUMBER" --repo "$REPO" \
+    --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1 || true
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+  sc_log "spec-completeness: action=escalate result=needs-decisions missing=${missing:-?} dir=${SPEC_DIR_REL} issue=#${NUMBER}" >> "$LOG"
+  return 0
+}
+
+# ─── spec_artifacts_completeness_guard ───
+#
+# pipeline 最終局面で、main 着地後の spec ディレクトリが標準構成（requirements.md /
+# review-notes.md / impl-notes.md）を満たすことを保証する orchestrator（Issue #219 Req 3 / 4）。
+# 越境有無やどのステージが PR を作ったかに関わらず、先行 impl PR が MERGED 済みで req/review が
+# 欠落しているケース（#216 で実発生）に対し docs-only 補完追従 PR を 1 本だけ作成し、補完不能
+# なら 1 回だけエスカレーションする。
+#
+# #213 ガードとの非干渉（Req 4.1）: 本関数は `stage_c_existing_pr_guard` を呼ばず、その後段に
+# 置かれる。MERGED ガードの「新規 impl PR 抑止」は維持され、本関数は impl PR を作らず
+# docs-only PR のみ作成する（Req 4.2 / 4.3）。MERGED 以外（OPEN/CLOSED/none）では補完を
+# 起動しない（OPEN は通常フローで review-notes が commit され、CLOSED は #213 ガードが既に
+# エスカレーション済み、none は本来の Stage C 経路 / Req 4.1）。
+#
+# `STAGE_CHECKPOINT_ENABLED=true`（既定）時のみ有効化する。`=true` 以外では 1 行も実行せず
+# 即 return 0 し、本修正導入前と完全に同一の挙動を保つ（Req 3.5 / NFR 1.1）。
+#
+# 入力: 環境変数 STAGE_CHECKPOINT_ENABLED / NUMBER / SLUG / BRANCH / REPO / REPO_DIR /
+#       SPEC_DIR_REL / BASE_BRANCH / LABEL_NEEDS_DECISIONS / LOG /
+#       STAGE_A_CROSSING_DETECTED（stage_a_crossing_probe が set / Req 2.4 引き継ぎ）
+# 戻り値: 常に 0（pipeline 最終結果を変えない / NFR 1.4）
+# 副作用: docs-only 補完 PR 1 本 or needs-decisions+コメント or 無し
+spec_artifacts_completeness_guard() {
+  # gate: STAGE_CHECKPOINT_ENABLED=true（既定）時のみ実行（Req 3.5 / NFR 1.1）。
+  if [ "${STAGE_CHECKPOINT_ENABLED:-true}" != "true" ]; then
+    return 0
+  fi
+
+  # 標準構成の充足判定（補完対象 = requirements / review の欠落種別）。
+  local missing
+  missing=$(_spec_missing_artifacts "$SPEC_DIR_REL")
+  if [ -z "$missing" ]; then
+    # 標準構成を既に満たす → 追加処理なしで return 0（Req 3.1, 3.5 / NFR 1.1）。
+    return 0
+  fi
+
+  # Req 2.4 引き継ぎ: stage_a_crossing_probe が set した越境検出フラグを判定根拠ログに含める
+  # （越境有無に関わらず欠落があれば完全性保証は動くが、越境起因の欠落を grep で識別可能にする）。
+  local crossing_note="crossing=${STAGE_A_CROSSING_DETECTED:-no}"
+  [ "${STAGE_A_CROSSING_DETECTED:-no}" = "yes" ] && crossing_note="$crossing_note crossing-pr=#${STAGE_A_CROSSING_PR:-?}"
+
+  # 先行 impl PR の state を取得（補完起動条件の判定 / Req 3.2）。
+  local pr_info pr_rc pr_state="(none)"
+  pr_info=$(stage_checkpoint_find_impl_pr 2>/dev/null) && pr_rc=0 || pr_rc=$?
+  case "$pr_rc" in
+    0) pr_state="${pr_info##*,}" ;;
+    1) pr_state="(none)" ;;
+    *)
+      # gh API エラー → state 不明。誤補完で二重 PR を作るより安全側に倒し、補完を起動せず
+      # 警告を残して return 0。次サイクルで再評価される（Error Handling）。
+      sc_warn "spec-completeness: 先行 impl PR の state 取得が gh API エラー（rc=$pr_rc）→ 補完を起動せず継続（missing=$missing dir=$SPEC_DIR_REL issue=#$NUMBER）" >> "$LOG"
+      sc_log "spec-completeness: action=none reason=gh-api-error missing=${missing} dir=${SPEC_DIR_REL} ${crossing_note} issue=#${NUMBER}" >> "$LOG"
+      return 0
+      ;;
+  esac
+
+  case "$pr_state" in
+    MERGED)
+      # MERGED かつ req/review 欠落 → docs-only 補完追従 PR を起動。失敗時はエスカレーションへ
+      # フォールバック（Req 3.2, 3.3）。impl PR は作らない（Req 4.2）。
+      sc_log "spec-completeness: trigger=merged missing=${missing} dir=${SPEC_DIR_REL} ${crossing_note} issue=#${NUMBER}" >> "$LOG"
+      if ! _spec_create_docs_pr "$missing"; then
+        _spec_escalate_incomplete "$missing"
+      fi
+      ;;
+    *)
+      # MERGED 以外（OPEN/CLOSED/none）は補完を起動しない（#213 ガード非干渉 / Req 4.1）。
+      # 補完対象外として記録のみ（過剰通知回避 / Decision D4）。
+      sc_log "spec-completeness: action=none reason=not-merged state=${pr_state} missing=${missing} dir=${SPEC_DIR_REL} ${crossing_note} issue=#${NUMBER}" >> "$LOG"
+      ;;
+  esac
+  return 0
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Tasks Count Gate Module (#147) — Architect 完了直後の tasks.md 件数ガード
 #
@@ -4299,6 +4653,14 @@ run_impl_pipeline() {
   # 値を上書きする。`=false` 明示時は "A" 固定で本機能導入前と完全一致
   # （Req 3.2 / NFR 1.1）。
   local START_STAGE="A"
+  # Issue #219 Req 2.4: Stage A 完了直後の越境観測（stage_a_crossing_probe）が set し、
+  # pipeline 末尾の spec_artifacts_completeness_guard へ引き継ぐ越境検出フラグ。既存
+  # START_STAGE と同じく run_impl_pipeline スコープで保持する（Data Models）。set/read は
+  # 別途定義された関数間の dynamic scope 経由のため SC2034 を抑制する（START_STAGE と同様）。
+  # shellcheck disable=SC2034
+  local STAGE_A_CROSSING_DETECTED="no"
+  # shellcheck disable=SC2034
+  local STAGE_A_CROSSING_PR=""
 
   # Stage Checkpoint Resume (#68): START_STAGE を resolve_resume_point で上書き。
   # `STAGE_CHECKPOINT_ENABLED=false` 明示時は本ブロックを skip し START_STAGE="A"
@@ -4434,6 +4796,12 @@ run_impl_pipeline() {
           return 1
         fi
         echo "✅ #$NUMBER: Stage A 完了（per-task loop）" | tee -a "$LOG"
+        # ── Stage A 越境観測 (#219 Req 2) ──
+        # Stage A 完了直後に当該 head ブランチの先行 impl PR を観測し、越境を検出・記録して
+        # 後段の spec_artifacts_completeness_guard へグローバル変数で引き継ぐ。read-only 観測
+        # で常に return 0（pipeline を止めない / NFR 1.4）。`STAGE_CHECKPOINT_ENABLED != true`
+        # では 1 行も実行されず本修正導入前と完全等価（Req 2.5 / NFR 1.1）。
+        stage_a_crossing_probe
         # ── Partial Status Gate (#148) ──
         # Developer が impl-notes.md 末尾に `STATUS: partial_*` を出力した場合は
         # Reviewer 起動を skip して needs-decisions エスカレーションする。status 行不在
@@ -4472,6 +4840,11 @@ run_impl_pipeline() {
               return 1
             fi
             echo "✅ #$NUMBER: Stage A 完了" | tee -a "$LOG"
+            # ── Stage A 越境観測 (#219 Req 2) ──
+            # 通常 Developer 経路の Stage A 完了直後に先行 impl PR を観測し、越境を検出・記録
+            # して後段の spec_artifacts_completeness_guard へ引き継ぐ。read-only / 常に return 0
+            # （NFR 1.4）。gate off では 1 行も実行されない（Req 2.5 / NFR 1.1）。
+            stage_a_crossing_probe
             # ── Partial Status Gate (#148) ──
             # 通常 Developer 経路 (PM + Developer / 単一 Implementer) の Stage A 完了直後
             # に impl-notes.md の `STATUS:` 行を検出し、partial を 1st-class に処理する。
@@ -4930,6 +5303,12 @@ run_impl_pipeline() {
   # 既存 TERMINAL_OK と同一の return 0、CLOSED はガード内で needs-decisions 付与済み。
   if stage_c_existing_pr_guard; then
     echo "✅ #$NUMBER: 既存 impl PR を検出（Stage C 冪等ガード）→ 新規 PR 作成を抑止して停止" | tee -a "$LOG"
+    # ── spec 成果物完全性保証 (#219 Req 3 / 4) ──
+    # #213 ガードが OPEN/MERGED/CLOSED で停止したケースを後段の独立経路として捕捉し、
+    # MERGED 先行 PR + req/review 欠落のときだけ docs-only 補完追従 PR を起動する。
+    # stage_c_existing_pr_guard は一切変更せず、その後段で呼ぶことで Req 4.1 退行を防ぐ。
+    # 常に return 0（pipeline 最終結果を変えない / NFR 1.4）。gate off では無効（Req 3.5 / NFR 1.1）。
+    spec_artifacts_completeness_guard
     return 0
   fi
   # Issue #96 Req 1.5: PR 作成段階に進む前に BASE_BRANCH 実値が空でないことを検証する
@@ -4970,6 +5349,11 @@ run_impl_pipeline() {
         # Req 4.3 / Issue #108 Req 3.4 / Issue #110 Req 3.6: 主経路 1 回目即時成功
         # でも代替経路救済でも、呼び出し側の成功ログは共通（外形互換）
         echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み (${_stagec_pr_url})" | tee -a "$LOG"
+        # ── spec 成果物完全性保証 (#219 Req 3 / 4) ──
+        # Stage C で新規 impl PR を作った通常成功ケースも通過点として完全性を最終確認する。
+        # 標準構成を満たしていれば追加処理なしで return 0（design-full impl の通常成功は
+        # ここで早期 return 相当 / Req 3.5 / NFR 1.1）。常に return 0（NFR 1.4）。
+        spec_artifacts_completeness_guard
         return 0
       fi
       # Req 4.2 / 4.4 / Issue #108 Req 2.1 / Issue #110 Req 2.3 / 2.4:
