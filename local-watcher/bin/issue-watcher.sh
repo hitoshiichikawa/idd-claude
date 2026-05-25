@@ -1348,17 +1348,38 @@ tc_error() {
 
 # ─── tc_count_tasks ───
 #
-# `tasks.md` 1 ファイルからタスク行件数を整数で返す純粋関数（Req 1.1〜1.4 / NFR 3.1）。
+# `tasks.md` 1 ファイルからタスク件数を整数で返す純粋関数
+# （Req 1.1〜1.5 / #216 / NFR 2.1）。
 #
-# count 抽出 regex (POSIX 互換 ERE): `^- \[[ x]\]\*? [0-9]+(\.[0-9]+)*\.? `
-#   - 4 種 checkbox（未完了 `- [ ]` / 完了 `- [x]` / deferrable `- [ ]*` /
-#     完了 deferrable `- [x]*`）を許容（Req 1.2）
-#   - numeric 階層 ID（`1` / `1.1` / `2.1.3` 等）+ 半角スペースを必須
-#   - 親タスク末尾 `.` を `\.?` でオプショナル化（`- [ ] 1. <名前>` /
-#     `- [ ] 1.1 <名前>` 両対応）
-#   - 既存 `design-review-gate.md` の checkbox enforcement 判定パターンと同一規約
-#   - 子タスク（小数階層 ID）・`(P)` マーカーは regex から見て区別されないため、
-#     それぞれ 1 件として数える（Req 1.3 / 1.4 を構造的に保証）
+# === 正準計数の所在（#216）===
+# 本関数の計数規約の **正準** は Architect 側の `design-review-gate.md`
+# 「Budget overflow check（tasks.md 件数）」節（count 抽出 regex
+# `^- \[ \]\*? [0-9]+\. `）である。harness（本関数）はその正準 regex に
+# **厳密一致**させ、同一 tasks.md に対し Architect の Budget overflow check と
+# 同一件数を返す（Req 1.5）。両所は別実行基盤（bash / LLM ルール）のため共有
+# コードを持てず、同一 regex を双方に明記して相互参照する形でドリフトを防ぐ
+# （Req 3.1 / 3.2）。正準を変更する場合は **必ず `design-review-gate.md` を先に**
+# 更新し、本コメント・regex を追従させること。
+#
+# count 抽出 regex (POSIX 互換 ERE): `^- \[ \]\*? [0-9]+\. `
+#   - **最上位 numeric ID の未完了タスク行のみ**を計数する（Req 1.1）:
+#       行頭 `- [ ]`（未完了）または `- [ ]*`（最上位 deferrable）で始まり、
+#       整数 ID + `.` + 半角スペースが続く行（例: `- [ ] 1. <名前>` /
+#       `- [ ]* 3. <名前>`）。
+#   - **子タスク（小数階層 ID `1.1` 等）を除外**（Req 1.2）: `[0-9]+\. ` は整数 +
+#     `.` + 空白を要求するため、`1.1` は `.` の直後が空白でなく不一致。
+#   - **完了済みタスク（`- [x]` / `- [x]*`）を除外**（Req 1.3）: checkbox 部を
+#     `\[ \]`（半角スペース 1 つ）に固定するため、`[x]` には一致しない。
+#   - **最上位 deferrable `- [ ]*` は計数に含む**（Req 1.4）: `\]\*?` の `\*?` が
+#     アスタリスクを許容する。正準 regex の一致挙動に厳密一致させる方針
+#     （design-review-gate.md 散文との関係は impl-notes.md「確認事項」参照）。
+#   - `(P)` 並列マーカーの有無は ID 直後の語以降に現れるため計数に影響しない。
+#
+# 旧実装（〜#147）は `^- \[[ x]\]\*? [0-9]+(\.[0-9]+)*\.? ` で全 checkbox 行
+# （子・完了・deferrable を含む）を計上していたが、#216 で上記正準 regex に整合
+# させ、Architect が「budget 内（≤10 最上位）」と確定した設計を harness が
+# 「≥11（全 checkbox）」と誤って escalate する二重計上を解消した。閾値
+# （TC_WARN_LOWER / TC_WARN_UPPER / TC_ESCALATE_LOWER）は不変（Req 2.4）。
 #
 # 入力: 第 1 引数 = tasks.md の絶対パス
 # 戻り値: 0 = 抽出成功（stdout に件数 0 以上の整数 1 行）/ 1 = ファイル不在
@@ -1368,8 +1389,9 @@ tc_count_tasks() {
   [ -f "$tasks_path" ] || return 1
   # grep -cE: マッチ行数（件数）を 1 行で stdout に書き出す。マッチ 0 件でも
   # `--count` モードは 0 を返して exit 1 になるため、`|| true` で吸収する。
+  # regex は design-review-gate.md の Budget overflow check と同一（#216）。
   local count
-  count=$(grep -cE '^- \[[ x]\]\*? [0-9]+(\.[0-9]+)*\.? ' "$tasks_path" 2>/dev/null || true)
+  count=$(grep -cE '^- \[ \]\*? [0-9]+\. ' "$tasks_path" 2>/dev/null || true)
   # 空文字（読み取り失敗）の場合は安全側に 0 を返す
   echo "${count:-0}"
 }
@@ -1520,9 +1542,9 @@ tc_post_warning_comment() {
   fi
   local body
   body=$(cat <<EOF
-⚠️ **Tasks Count Gate (harness, #147)**: tasks.md のタスク件数が警告レンジに該当しています
+⚠️ **Tasks Count Gate (harness, #147)**: tasks.md の最上位・未完了タスク件数が警告レンジに該当しています
 
-- 検知件数: **${count} 件**
+- 検知件数: **${count} 件**（最上位 numeric ID の未完了タスクのみ。子タスク \`1.1\` / 完了済み \`- [x]\` は計数対象外。#216 で Architect の Budget overflow check 計数と整合）
 - 適用閾値: ${TC_WARN_LOWER} 件以上 ${TC_WARN_UPPER} 件以下で警告（参考: ≥ ${TC_ESCALATE_LOWER} 件で Developer 自動起動抑止）
 - 本コメントは通知のみで、**後続フェーズ（Developer 自動起動）は通常通り進行します**
 
@@ -1567,9 +1589,9 @@ tc_post_escalation_comment() {
   fi
   local body
   body=$(cat <<EOF
-🚫 **Tasks Count Gate (harness, #147)**: tasks.md のタスク件数が **エスカレーション閾値**を超えています
+🚫 **Tasks Count Gate (harness, #147)**: tasks.md の最上位・未完了タスク件数が **エスカレーション閾値**を超えています
 
-- 検知件数: **${count} 件**
+- 検知件数: **${count} 件**（最上位 numeric ID の未完了タスクのみ。子タスク \`1.1\` / 完了済み \`- [x]\` は計数対象外。#216 で Architect の Budget overflow check 計数と整合）
 - 適用閾値: ${TC_ESCALATE_LOWER} 件以上でエスカレーション（参考: ${TC_WARN_LOWER}〜${TC_WARN_UPPER} 件は警告のみ）
 - **抑止された後続フェーズ**: Developer 自動起動 / impl-resume（\`needs-decisions\` ラベルにより watcher Issue 候補抽出から除外されます）
 - 根拠: KeyNest 3 事例で 10 件超の tasks.md は Developer Round 1 で PR 作成まで完走しない確率が高く、turn budget 超過によるキャッシュトークン浪費が観測されています
