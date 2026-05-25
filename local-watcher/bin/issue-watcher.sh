@@ -335,6 +335,18 @@ TC_ESCALATE_LOWER="${TC_ESCALATE_LOWER:-11}"
 # 詳細は docs/specs/18-phase-e-triage-path-overlap-hot-file/design.md を参照。
 PATH_OVERLAP_CHECK="${PATH_OVERLAP_CHECK:-off}"
 
+# ─── Phase E: 多忙サイクル待ちの可視化閾値 (#228 Req 3 / NFR 1) ───
+# 後続 Issue が空き slot 不足（自インスタンスの全 slot busy / 別インスタンス稼働で
+# 全 slot lock 中）により dispatch を見送られた状態が「連続 N cron tick」継続したら、
+# 待機中である旨の可視化シグナル（awaiting-slot ラベル + 専用 sticky comment）を残す。
+# 一過性（transient / 数 tick で解消）な待機ではコメントを残さずノイズを抑制する
+# （Req 3.4 / NFR 1.1）。本機能は PATH_OVERLAP_CHECK=true のときのみ有効で、未設定 /
+# off / 不正値では一切動かない（Req 5.1 / 5.2）。
+# 単位は cron tick 数（経過時間ではなく「見送りが観測された連続サイクル数」）。閾値は
+# ノイズ抑制側に倒した保守的な既定値。cron 間隔 */2 分なら 5 tick ≒ 10 分相当。
+# 0 / 空 / 非数値は安全側で既定値 5 へフォールバックする（誤設定で連投しない）。
+PATH_OVERLAP_BUSY_WAIT_THRESHOLD="${PATH_OVERLAP_BUSY_WAIT_THRESHOLD:-5}"
+
 # ─── Phase 2: Per-task TDD Implementation Loop 設定 (#21) ───
 # 新規 opt-in 機能。明示的に `=true` を指定したときだけ Stage A 内で per-task ループ
 # （task 1 件ごとに fresh Implementer + fresh Reviewer を起動）に分岐する（Req 1.2）。
@@ -7490,7 +7502,22 @@ _dispatcher_run() {
     done
 
     if [ -z "$slot" ]; then
+      # ── Phase E: 多忙サイクル待ちの可視化 (#228 Req 3.1〜3.2 / 3.4 / 5.1 / 5.2) ──
+      # 候補が全 gate を通過したが空き slot を確保できず当該サイクルの dispatch を
+      # 見送った（自インスタンス全 slot busy / 別インスタンス稼働で全 slot lock 中）。
+      # PATH_OVERLAP_CHECK=true のときのみ連続見送り tick を数え、可視化閾値を超えたら
+      # 待機中シグナル（awaiting-slot + 専用 sticky comment）を残す。off / 不正値では
+      # po_check_busy_wait が即 return 0 = 本機能導入前と完全に同一挙動（ローカル
+      # state も GitHub 状態も変更しない / NFR 1.1）。dispatch 経路は阻害しない。
+      po_check_busy_wait "$issue_number" "空き slot 不足（先行 Issue 処理中 / 別インスタンス稼働）" || true
       continue
+    fi
+
+    # dispatch に成功する見込み（空き slot を確保）。多忙サイクル待ちの連続見送り
+    # tick state をリセットし、次に再び見送られたときは 1 から数え直す（#228 Req 3.3）。
+    # off 時は state ファイル自体が存在しないため no-op（冪等）。
+    if [ "${PATH_OVERLAP_CHECK:-off}" = "true" ]; then
+      po_busy_wait_reset "$issue_number"
     fi
 
     # ── claim（claude-claimed ラベル付与）──
