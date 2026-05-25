@@ -10,6 +10,7 @@
 #   - sav_log / sav_warn / sav_error           : `stage-a-verify:` prefix logger
 #   - _sav_cmd_starts_with_keyword             : verify keyword 行頭一致判定
 #   - stage_a_verify_extract_command           : tasks.md 末尾走査 + keyword 一致抽出
+#   - stage_a_verify_extract_verify_block       : tasks.md センチネル付き構造化 verify ブロックの厳密パース抽出
 #   - stage_a_verify_resolve_command           : STAGE_A_VERIFY_COMMAND escape hatch + 抽出の合成
 #   - stage_a_verify_round_path / _read_round / _bump_round / _reset_round
 #                                              : sidecar による round counter 永続化
@@ -273,6 +274,114 @@ stage_a_verify_extract_command() {
     }
     END {
       if (last != "") print last
+    }
+  ' "$tasks_path")
+
+  [ -n "$result" ] || return 1
+  printf '%s\n' "$result"
+}
+
+# ─── stage_a_verify_extract_verify_block ───
+#
+# `tasks.md` のセンチネル付き構造化 verify ブロックから、verify コマンドを
+# 決定論的に抽出する純関数（Req 1.1, 1.4, 1.5 / NFR 3.1, NFR 3.2, NFR 4.1）。
+# 散文をコマンドと誤認するヒューリスティック抽出（#160/#219/#221 で誤発火）を
+# 構造的に避けるための input 契約パス。本関数はヒューリスティック抽出
+# （stage_a_verify_extract_command）とは抽出基準が根本的に異なる
+# （行頭 keyword 一致 vs センチネル + fence 構造）ため、既存 awk を拡張せず
+# 独立関数として分離する（design.md「Components and Interfaces」）。
+#
+# 入力: 環境変数 REPO_DIR / SPEC_DIR_REL
+# 戻り値: 0 = well-formed ブロック抽出成功 / 1 = ブロック無し or malformed or tasks.md 不在
+# stdout: 抽出したコマンド（成功時のみ。複数行は改行・インデント込みで保持）
+#
+# パース規約（design.md「パース規約（決定論化の詳細）」と同一基準）:
+#   - センチネル: 行を trim した結果が厳密に `<!-- stage-a-verify -->` に一致する行を
+#     アンカー行とする（前後空白許容、行内の他テキストは不可）。
+#   - 直後性: アンカー行の次行以降で空行を任意個スキップした後の最初の非空行が
+#     fence 開始（trim 後 ``` で始まる）であること。fence 以外の非空行が先に来たら
+#     malformed → return 1。
+#   - fence 言語タグ（```sh / ```bash 等）は読み飛ばし、タグ自体は中身に含めない。
+#   - fence 終了: 次に現れる trim 後 ``` 行で閉じる。EOF まで閉じなければ malformed。
+#   - 中身: fence 開始行と終了行の間の全行。trim 後すべて空なら malformed（空ブロック扱い）。
+#     非空なら元の改行・インデントを保持して出力（`&&` 連結や複数行コマンドの意味を壊さない）。
+#   - 複数ブロック: 上記を満たす最初のアンカー + fence のみ採用し、以降は無視（決定論）。
+#
+# 副作用なし（tasks.md を書き換えない、NFR 3.2）。同一入力に同一結果（NFR 3.1）。
+stage_a_verify_extract_verify_block() {
+  local tasks_path="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+  [ -f "$tasks_path" ] || return 1
+
+  # awk 1 パス走査で「最初の well-formed アンカー + fence」を状態機械で抽出する。
+  # state 遷移:
+  #   0 = アンカー未検出。trim 後が厳密にセンチネルの行を見つけたら state=1。
+  #   1 = アンカー検出済・fence 開始待ち。空行はスキップ。最初の非空行が fence 開始
+  #       （trim 後 ``` で始まる）なら state=2、それ以外の非空行なら malformed として
+  #       打ち切り（done=1 のまま中身を出さず終了 → END で return 1 相当）。
+  #   2 = fence 内・中身収集中。trim 後 ``` の行で閉じて done=1。閉じる前に EOF なら
+  #       未クローズ → 中身を出さない。fence 内の各行は raw のまま buf に蓄積する
+  #       （元の改行・インデントを保持、Req 1.4）。
+  # closed=1 かつ 中身が trim 後非空のときのみ buf を改行込みで出力する。
+  # 一致した最初のブロックで done=1 とし、以降は state=0 のまま何もしない（決定論）。
+  local result
+  result=$(awk '
+    BEGIN {
+      state = 0       # 0=アンカー待ち / 1=fence 開始待ち / 2=fence 内
+      done_flag = 0   # 最初のブロックを処理し終えたら 1（以降は無視）
+      closed = 0      # fence が閉じたか
+      nonblank = 0    # fence 中身に非空行が 1 行でもあったか
+      buf = ""        # fence 中身バッファ（raw を改行区切りで蓄積）
+      buf_n = 0       # buf に積んだ行数
+    }
+    {
+      if (done_flag) { next }
+
+      raw = $0
+      # trim（行頭行末の空白除去）した判定用文字列を作る。
+      t = raw
+      sub(/^[[:space:]]+/, "", t)
+      sub(/[[:space:]]+$/, "", t)
+
+      if (state == 0) {
+        # アンカー行検出（trim 後の厳密一致）。行内の他テキストは不可。
+        if (t == "<!-- stage-a-verify -->") {
+          state = 1
+        }
+        next
+      }
+
+      if (state == 1) {
+        # アンカー直後の空行は任意個スキップ。
+        if (t == "") { next }
+        # 最初の非空行が fence 開始でなければ malformed → 打ち切り。
+        if (t ~ /^```/) {
+          state = 2
+          next
+        }
+        done_flag = 1   # malformed。中身を出さずに以降を無視。
+        next
+      }
+
+      if (state == 2) {
+        # fence 終了行（trim 後 ``` で開始）で閉じる。言語タグは開始行のみに付く
+        # 想定だが、終了行は単独の ``` が canonical。trim 後 ``` 始まりで閉じる。
+        if (t ~ /^```/) {
+          closed = 1
+          done_flag = 1
+          next
+        }
+        # fence 内の中身は raw のまま蓄積（元の改行・インデントを保持、Req 1.4）。
+        if (t != "") { nonblank = 1 }
+        if (buf_n == 0) { buf = raw } else { buf = buf "\n" raw }
+        buf_n++
+        next
+      }
+    }
+    END {
+      # well-formed 条件: fence が閉じ、かつ中身に非空行が 1 行以上ある。
+      if (closed && nonblank) {
+        printf "%s\n", buf
+      }
     }
   ' "$tasks_path")
 
