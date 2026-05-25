@@ -42,7 +42,7 @@
   - _Boundary: po_resolve_holder_labels, po_collect_inflight_issues_
   - _Depends: 1, 2_
 
-- [ ] 5. README に base 相対 holder と gitflow 運用ガイドを追記する
+- [x] 5. README に base 相対 holder と gitflow 運用ガイドを追記する
   - 「Path Overlap Checker (Phase E)」節「in-flight 集合の定義」に base 相対化の注記（dispatch base=develop では staged-for-release 除外 / promote target=main では維持）を追加
   - gitflow 運用ガイド（`staged-for-release` と Phase E holder の関係 / `BASE_BRANCH` 設定との連動）を追記
   - NFR3 の除外ログ（`holder-set context=dispatch excluded=staged-for-release`）の grep 例を観測ログ節に追記
