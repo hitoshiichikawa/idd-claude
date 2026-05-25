@@ -199,6 +199,88 @@ po_load_edit_paths() {
   echo "$validated"
 }
 
+# ─── Phase E: Holder Label Set Resolver (#221 Req 1.1 / 2.1 / 3.1〜3.3 / 4.1 / NFR1.1) ───
+# 呼び出しコンテキストと branch 設定から、in-flight holder とみなすラベル集合を CSV で返す。
+# holder の本質は「dispatch 先 base ブランチにまだ取り込まれていない作業」であるため、
+# multi-branch（gitflow）運用の dispatch 文脈では develop 統合済みの `staged-for-release` を
+# holder から除外する。それ以外（promote / single-branch / 判定不能）は full 集合を返す。
+#
+# holder 集合決定の真理値表（design.md D3）:
+#   context    | BASE_BRANCH vs PROMOTION_TARGET_BRANCH | 返す集合
+#   dispatch   | != （multi-branch / gitflow）          | 6 ラベル（staged-for-release 除外）… Req 1.1
+#   dispatch   | == （single-branch）                   | 7 ラベル（full / ゼロ差分）       … NFR 1.1
+#   promote    | （不問）                               | 7 ラベル（full / SfR 維持）        … Req 2.1
+#   不明な値    | （不問）                               | 7 ラベル（full / fail-safe）       … Req 4.1
+#
+# invariants: 返す CSV は常に 6 基本ラベル
+#   claude-claimed / claude-picked-up / awaiting-design-review / ready-for-review /
+#   needs-iteration / needs-rebase
+# を含む（NFR 1.2）。コンテキストで変動するのは `staged-for-release` の有無のみ。
+#
+# Args:
+#   $1 = context（"dispatch" | "promote"）
+# Stdout: holder ラベル CSV（空白なしカンマ区切り。dispatch×multi-branch では
+#         staged-for-release を含まない）
+# Return: 0 always（判定不能でも full 集合を返す fail-safe / Req 4.1）
+po_resolve_holder_labels() {
+  local context="${1:-}"
+
+  # 6 基本ラベルは常時集合内（NFR 1.2 invariant）。`$LABEL_*` 定数は本体 Config ブロックで
+  # 束縛済みだが、未束縛時にも安全側へ倒すため `:-` で既定リテラルへ fallback する。
+  local base_labels
+  base_labels="${LABEL_CLAIMED:-claude-claimed},${LABEL_PICKED:-claude-picked-up},${LABEL_AWAITING_DESIGN:-awaiting-design-review},${LABEL_READY:-ready-for-review},${LABEL_NEEDS_ITERATION:-needs-iteration},${LABEL_NEEDS_REBASE:-needs-rebase}"
+
+  # full 集合 = 6 基本ラベル + staged-for-release（ラベル文字列はハードコード重複させず
+  # `$LABEL_STAGED_FOR_RELEASE` 定数を参照する / task 明記）。
+  local staged_label="${LABEL_STAGED_FOR_RELEASE:-staged-for-release}"
+  local full_labels="${base_labels},${staged_label}"
+
+  # dispatch かつ multi-branch（BASE_BRANCH != PROMOTION_TARGET_BRANCH）のみ
+  # staged-for-release を除外する。それ以外は full 集合（fail-safe / 安全側）。
+  if [ "$context" = "dispatch" ] && [ "${BASE_BRANCH:-main}" != "${PROMOTION_TARGET_BRANCH:-main}" ]; then
+    echo "$base_labels"
+    return 0
+  fi
+
+  echo "$full_labels"
+  return 0
+}
+
+# ─── Phase E: Label OR-clause Builder (#221 Req 1.2 / 4.2 / NFR 1.1) ───
+# holder ラベル CSV を `gh issue list --search` 用の OR clause
+# `label:"X" OR label:"Y" OR ...` へ組み立てる。空要素・前後空白は除去し、
+# 有効ラベルが 1 つも無ければ空文字列を返す（caller が full 集合へ fallback / Req 4.2）。
+#
+# 重要（#221 NFR 1.1 ゼロ差分）: 現行 7 ラベル CSV を与えた場合の出力は
+#   label:"claude-claimed" OR label:"claude-picked-up" OR label:"awaiting-design-review"
+#   OR label:"ready-for-review" OR label:"needs-iteration" OR label:"needs-rebase"
+#   OR label:"staged-for-release"
+# と完全一致し、これを (...) で挟んだ search_query が現行固定クエリと文字列一致する。
+#
+# Args: $1 = holder labels CSV
+# Stdout: OR clause 文字列（有効ラベル 0 件なら空文字列）
+# Return: 0 always
+po_build_label_or_clause() {
+  local csv="${1:-}"
+  local clause=""
+  local elem
+  # CSV をカンマで分割。各要素の前後空白を除去し、空要素はスキップする。
+  local IFS=','
+  for elem in $csv; do
+    # 前後の空白（スペース / タブ）を除去
+    elem="${elem#"${elem%%[![:space:]]*}"}"
+    elem="${elem%"${elem##*[![:space:]]}"}"
+    [ -z "$elem" ] && continue
+    if [ -z "$clause" ]; then
+      clause="label:\"${elem}\""
+    else
+      clause="${clause} OR label:\"${elem}\""
+    fi
+  done
+  printf '%s' "$clause"
+  return 0
+}
+
 # ─── Phase E: In-Flight Collector (#18 Req 4.1〜4.4 / 5.3 / 8.1) ───
 # 現サイクルの in-flight Issue（候補自身を除く）を gh で 1 回列挙し、各 Issue の
 # edit_paths を読み出して **union 配列**と **path → holder Issue 番号配列の map**
@@ -221,27 +303,39 @@ po_load_edit_paths() {
 # `po_load_edit_paths` を 1 回呼ぶのは従来同様で、その戻り値から union と holders map
 # を同時に構築するだけ。candidate 側の `po_load_edit_paths` も 1 回のまま。
 #
-# in-flight 判定ラベル（Req 4.1）:
-#   claude-claimed, claude-picked-up, awaiting-design-review, ready-for-review,
-#   needs-iteration, needs-rebase, staged-for-release
-# 除外（Req 4.2）: st-failed, awaiting-slot
+# in-flight 判定ラベル（Req 4.1）: 第 2 引数 holder_labels（CSV）で与えられる集合を使う。
+#   default（引数省略時）= 現行 7 ラベル集合 #221 NFR 1.1 ゼロ差分:
+#     claude-claimed, claude-picked-up, awaiting-design-review, ready-for-review,
+#     needs-iteration, needs-rebase, staged-for-release
+#   dispatch×multi-branch 文脈では呼び出し側が staged-for-release を除いた 6 ラベル
+#   集合を渡す（#221 Req 1.2 / 1.4）。
+# 除外（Req 4.2）: st-failed, awaiting-slot（集合非依存で固定維持）
 # 候補自身を除外（Req 4.3）、同 repo のみ（Req 4.4: --repo "$REPO" 固定）
 #
-# Args: $1 = candidate issue number
+# Args:
+#   $1 = candidate issue number
+#   $2 = holder labels CSV（省略時 default = 現行 7 ラベル集合 / 後方互換 #221 NFR 1.1）
 # Stdout: JSON object `{"union": [...], "holders": {path: [issue#, ...]}}`
 # Return: 0 = 列挙 OK / 1 = gh API 失敗（caller は fail-open で empty 扱い + warn）
 po_collect_inflight_issues() {
   local candidate="$1"
+  # #221 task 2: holder ラベル集合を第 2 引数で受ける。default は現行 7 ラベル集合に
+  # 固定（引数を渡さない既存呼び出し = single-branch 運用は現行クエリと完全一致 / NFR 1.1）。
+  local holder_labels="${2:-claude-claimed,claude-picked-up,awaiting-design-review,ready-for-review,needs-iteration,needs-rebase,staged-for-release}"
 
-  # 7 ラベルのいずれかを持ち、`st-failed` / `awaiting-slot` を持たない open Issue を
-  # OR 検索で抽出する。`gh issue list --label A --label B` は AND になるため、
-  # `--search 'label:A OR label:B OR ...'` 形式を使う（既存 Phase B / Phase D が同形式
-  # を採用済）。
+  # 与えられた CSV を `label:"X" OR label:"Y" OR ...` 形式へ動的に組み立てる。
+  # `gh issue list --label A --label B` は AND になるため `--search 'label:A OR ...'`
+  # 形式を使う（既存 Phase B / Phase D が同形式を採用済）。
+  # fail-safe（#221 Req 4.2）: CSV が空 / 不正で有効ラベルが 1 つも得られない場合は
+  # full 7 ラベル集合へ fallback する（holder から誤って外さない安全側）。
+  local label_clause
+  label_clause=$(po_build_label_or_clause "$holder_labels")
+  if [ -z "$label_clause" ]; then
+    label_clause=$(po_build_label_or_clause "claude-claimed,claude-picked-up,awaiting-design-review,ready-for-review,needs-iteration,needs-rebase,staged-for-release")
+  fi
+
   local search_query
-  search_query=$(cat <<EOF
-is:open is:issue (label:"claude-claimed" OR label:"claude-picked-up" OR label:"awaiting-design-review" OR label:"ready-for-review" OR label:"needs-iteration" OR label:"needs-rebase" OR label:"staged-for-release") -label:"st-failed" -label:"awaiting-slot"
-EOF
-)
+  search_query="is:open is:issue (${label_clause}) -label:\"st-failed\" -label:\"awaiting-slot\""
   local issues_json
   if ! issues_json=$(gh issue list --repo "$REPO" \
       --search "$search_query" \
@@ -544,10 +638,24 @@ po_check_dispatch_gate() {
   local cand_paths
   cand_paths=$(po_load_edit_paths "$candidate")
 
+  # #221 task 3: dispatch 文脈の holder ラベル集合を解決する（Req 1.1 / 3.1）。
+  # multi-branch（gitflow）運用では staged-for-release を除外した 6 ラベル、
+  # single-branch / 判定不能では full 7 ラベル集合（fail-safe）。
+  local holder_labels full_labels
+  holder_labels=$(po_resolve_holder_labels "dispatch")
+  full_labels=$(po_resolve_holder_labels "promote")
+  # NFR 3.1: 解決集合が full と異なる（staged-for-release を除外した）場合のみ
+  # 除外を判別可能にログ出力する。full と一致する場合（single-branch 等）は
+  # ログを出さない（ゼロ差分 / NFR 1.1 を壊さない）。
+  if [ "$holder_labels" != "$full_labels" ]; then
+    po_log "holder-set context=dispatch excluded=${LABEL_STAGED_FOR_RELEASE:-staged-for-release} base=${BASE_BRANCH:-main}"
+  fi
+
   # in-flight union + holders map を取得（Req 4.1〜4.4 / 5.3 / 8.1）。
+  # 解決済み holder 集合を注入する（#221 Req 1.1 / 1.3）。
   # 失敗時は fail-open で claim 続行
   local inflight_obj
-  if ! inflight_obj=$(po_collect_inflight_issues "$candidate"); then
+  if ! inflight_obj=$(po_collect_inflight_issues "$candidate" "$holder_labels"); then
     po_warn "issue=#${candidate} in-flight 列挙に失敗、本サイクルは overlap 判定を skip して claim 続行"
     return 0
   fi
