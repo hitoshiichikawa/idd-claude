@@ -35,8 +35,8 @@
   - _Requirements: 3.4, NFR 3.2_
   - _Boundary: _spec_missing_artifacts_
 
-- [ ] 4. docs-only 補完追従 PR とエスカレーション（C3 補助 / R3.2, R3.3, R4）
-- [ ] 4.1 `_spec_create_docs_pr` を新規追加（docs-only 補完追従 PR）
+- [x] 4. docs-only 補完追従 PR とエスカレーション（C3 補助 / R3.2, R3.3, R4）
+- [x] 4.1 `_spec_create_docs_pr` を新規追加（docs-only 補完追従 PR）
   - head `claude/issue-<NUMBER>-docs-<SLUG>`（impl ブランチと別系統 / impl PR と区別 / Req 4.3）、base `$BASE_BRANCH`（`--base` 明示 / #96 踏襲）
   - 不足している requirements.md / review-notes.md のみを最小 commit（`docs(specs): #<NUMBER> の不足成果物を補完（spec-completeness）`）
   - 作成前に `gh pr list --head <docs-branch> --state all` で既存 docs PR を再観測し、あれば作成しない（NFR 2.1 / NFR 2.2 冪等）
@@ -45,7 +45,7 @@
   - `sc_log "spec-completeness: action=docs-pr ..."` を出力（NFR 3.2）
   - _Requirements: 3.2, 4.2, 4.3, NFR 2.1, NFR 2.2, NFR 3.2_
   - _Boundary: _spec_create_docs_pr_
-- [ ] 4.2 `_spec_escalate_incomplete` を新規追加（補完不能時のエスカレーション）
+- [x] 4.2 `_spec_escalate_incomplete` を新規追加（補完不能時のエスカレーション）
   - 補完不能時のみ `needs-decisions` 付与 + Issue コメント 1 件（design.md Decision D4 / #212 過剰通知回避方針と整合）
   - `needs-decisions` 既付与チェックでコメント冪等化（同一サイクル再実行・複数 slot で重複しない / NFR 2.2）
   - `gh issue edit/comment` は `|| true` で fail-open（既存 `_slug_mismatch_escalate` / Stage C CLOSED 分岐と同方針）
