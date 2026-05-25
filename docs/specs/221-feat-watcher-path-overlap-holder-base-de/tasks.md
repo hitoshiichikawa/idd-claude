@@ -24,7 +24,7 @@
   - _Boundary: po_collect_inflight_issues_
   - _Depends: 1_
 
-- [ ] 3. `po_check_dispatch_gate` から dispatch 文脈の holder 集合を注入し NFR3 ログを出す
+- [x] 3. `po_check_dispatch_gate` から dispatch 文脈の holder 集合を注入し NFR3 ログを出す
   - `po_resolve_holder_labels "dispatch"` で集合を解決し `po_collect_inflight_issues "$candidate" "$holder_labels"` に渡す
   - 解決集合が full と異なる（staged-for-release 除外）場合に `po_log` で除外を判別可能に出力（例: `holder-set context=dispatch excluded=staged-for-release base=<branch>`）
   - 関数シグネチャ（`$1 candidate`, `$2 labels_json`）は不変に保ち issue-watcher.sh L7025 を変更しない
