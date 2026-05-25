@@ -1,0 +1,84 @@
+# Implementation Plan
+
+- [ ] 1. Stage A プロンプト責務限定強化（C1 / R1）
+- [ ] 1.1 `build_dev_prompt_a` のフロー全体提示表現を排除し責務を PM+Developer に限定
+  - L3242 / L3259 の「Reviewer の approve 後にオーケストレーターが PjM を起動して PR を作成します」を削除または「本ステージのゴールは impl-notes.md 保存まで。後段の Reviewer / PjM 起動・PR 作成は watcher が別ステージで行うため本ステージでは一切起動・実行しない」へ置換（design.md Decision D1）
+  - L3327 の主語「Claude Code オーケストレーター」を「Stage A（PM + Developer）担当のサブオーケストレーター」へ弱め、design-less impl 経路（tasks.md 不在の Stage A fallback）でも同一の限定表現が適用されるようにする
+  - 制約節に「reviewer / project-manager サブエージェントを起動しないこと」を明記（既存の「PR は作成しないこと」は維持）
+  - impl / impl-resume 双方の steps に適用するが、tasks.md ありの Developer 実装内容は変えない（NFR 1.1）
+  - shellcheck 警告ゼロを確認
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, NFR 1.1_
+  - _Boundary: build_dev_prompt_a_
+
+- [ ] 2. Stage A 完了直後の越境観測関数（C2 / R2）
+- [ ] 2.1 `stage_a_crossing_probe` を Stage Checkpoint Module 内に新規追加
+  - `stage_c_existing_pr_guard`（L1312）直後に配置。`STAGE_CHECKPOINT_ENABLED != "true"`（`:-true`）で即 return 0（Req 2.5 / NFR 1.1）
+  - `stage_checkpoint_find_impl_pr` を再利用し rc=0/1/2 を分岐（rc=2 API エラーは sc_warn + 越境未検出として継続）
+  - 検出時のみ `sc_log "stage-a-crossing: detected pr=#<N> state=<S> branch=<BRANCH> issue=#<NUMBER>"` を出力（PR 番号と head ブランチを判定根拠に / Req 2.2, 2.3, NFR 3.1）
+  - グローバル変数 `STAGE_A_CROSSING_DETECTED`（yes/no）/ `STAGE_A_CROSSING_PR` を set（Req 2.4）
+  - 常に return 0（pipeline を止めない / NFR 1.4）
+  - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, NFR 1.1, NFR 1.4, NFR 1.5, NFR 3.1_
+  - _Boundary: stage_a_crossing_probe_
+- [ ] 2.2 `run_impl_pipeline` の Stage A 完了直後に `stage_a_crossing_probe` 呼び出しを挿入
+  - 通常 Developer 経路（L4473 の「Stage A 完了」直後）と per-task loop 経路（L4435 直後）の 2 箇所に挿入
+  - 呼び出し結果のグローバル変数を pipeline スコープで保持し C3 が読めるようにする（既存 START_STAGE と同パターン）
+  - 戻り値を無視せず、観測が pipeline の return 値を変えないことを確認
+  - _Requirements: 2.1, 2.4, NFR 1.4_
+  - _Boundary: run_impl_pipeline, stage_a_crossing_probe_
+  - _Depends: 2.1_
+
+- [ ] 3. spec 成果物欠落の検出補助関数（C3 補助 / R3.4）
+- [ ] 3.1 `_spec_missing_artifacts` を新規追加
+  - `$REPO_DIR/$SPEC_DIR_REL` 配下の `requirements.md` / `review-notes.md` の branch HEAD tracked 欠落種別を stdout 列挙（read-only / `git ls-tree --name-only HEAD` 判定、`stage_checkpoint_has_impl_notes` を踏襲）
+  - design.md / tasks.md は補完対象外だが検査ログには記録する旨を関数コメントに明記（design.md Data Models）
+  - `sc_log "spec-completeness: missing=<...> dir=<SPEC_DIR_REL>"` を出力（Req 3.4 / NFR 3.2）
+  - _Requirements: 3.4, NFR 3.2_
+  - _Boundary: _spec_missing_artifacts_
+
+- [ ] 4. docs-only 補完追従 PR とエスカレーション（C3 補助 / R3.2, R3.3, R4）
+- [ ] 4.1 `_spec_create_docs_pr` を新規追加（docs-only 補完追従 PR）
+  - head `claude/issue-<NUMBER>-docs-<SLUG>`（impl ブランチと別系統 / impl PR と区別 / Req 4.3）、base `$BASE_BRANCH`（`--base` 明示 / #96 踏襲）
+  - 不足している requirements.md / review-notes.md のみを最小 commit（`docs(specs): #<NUMBER> の不足成果物を補完（spec-completeness）`）
+  - 作成前に `gh pr list --head <docs-branch> --state all` で既存 docs PR を再観測し、あれば作成しない（NFR 2.1 / NFR 2.2 冪等）
+  - impl PR と区別するため `ready-for-review` は付与しない。新規 impl PR を作らない（Req 4.2）
+  - `gh pr create` 失敗時は sc_warn + 非 0 を返し呼び出し側がエスカレーションへフォールバック
+  - `sc_log "spec-completeness: action=docs-pr ..."` を出力（NFR 3.2）
+  - _Requirements: 3.2, 4.2, 4.3, NFR 2.1, NFR 2.2, NFR 3.2_
+  - _Boundary: _spec_create_docs_pr_
+- [ ] 4.2 `_spec_escalate_incomplete` を新規追加（補完不能時のエスカレーション）
+  - 補完不能時のみ `needs-decisions` 付与 + Issue コメント 1 件（design.md Decision D4 / #212 過剰通知回避方針と整合）
+  - `needs-decisions` 既付与チェックでコメント冪等化（同一サイクル再実行・複数 slot で重複しない / NFR 2.2）
+  - `gh issue edit/comment` は `|| true` で fail-open（既存 `_slug_mismatch_escalate` / Stage C CLOSED 分岐と同方針）
+  - `sc_log "spec-completeness: action=escalate ..."` を出力（NFR 3.2）
+  - _Requirements: 3.3, NFR 2.2, NFR 3.2_
+  - _Boundary: _spec_escalate_incomplete_
+
+- [ ] 5. 完全性保証 orchestrator と pipeline 結線（C3 / R3, R4）
+- [ ] 5.1 `spec_artifacts_completeness_guard` を新規追加
+  - `STAGE_CHECKPOINT_ENABLED != "true"` で即 return 0（NFR 1.1）
+  - `_spec_missing_artifacts` が空（標準構成充足）なら追加処理なしで return 0（Req 3.1, 3.5）
+  - `stage_checkpoint_find_impl_pr` で state を取得し、MERGED かつ req/review 欠落のときのみ `_spec_create_docs_pr` を起動、失敗時は `_spec_escalate_incomplete` へフォールバック（Req 3.2, 3.3）
+  - MERGED 以外（OPEN/CLOSED/none）は補完を起動しない（#213 ガード非干渉 / Req 4.1）
+  - gh API エラー時は補完を起動せず sc_warn + return 0（誤補完による二重 PR を回避 / 安全側）
+  - 常に return 0（pipeline 最終結果を変えない / NFR 1.4）
+  - _Requirements: 3.1, 3.2, 3.3, 3.5, 4.1, 4.2, 4.3, NFR 1.1, NFR 1.4_
+  - _Boundary: spec_artifacts_completeness_guard, _spec_missing_artifacts, _spec_create_docs_pr, _spec_escalate_incomplete_
+  - _Depends: 3.1, 4.1, 4.2_
+- [ ] 5.2 `run_impl_pipeline` 末尾に `spec_artifacts_completeness_guard` 呼び出しを結線
+  - Stage C 冪等ガード停止経路（L4931 の return 0 直前）と Stage C 成功経路（L4972 の return 0 直前）に挿入し、#213 ガードの後段独立経路として配置（Req 4.1）
+  - `stage_c_existing_pr_guard` は一切変更しない（退行防止）
+  - 完全性保証が pipeline の return 値（成功 0）を変えないことを確認
+  - _Requirements: 3.1, 4.1, NFR 1.4_
+  - _Boundary: run_impl_pipeline, spec_artifacts_completeness_guard_
+  - _Depends: 5.1_
+
+- [ ] 6. README 更新と検証
+- [ ] 6.1 README「Stage Checkpoint (#68)」節に越境観測 + spec 完全性保証を追記
+  - #212 ガード説明（L3109 近傍）の後に Stage A 越境観測（`stage-a-crossing:` ログ）と spec 完全性保証（`spec-completeness:` ログ・docs-only 補完 PR・補完不能時 needs-decisions）を追記
+  - 新規 env var を足さず `STAGE_CHECKPOINT_ENABLED` 相乗りである旨、`=false` で本機能導入前と完全同一である旨を明記（NFR 1.1, 1.2）
+  - 「オプション機能一覧」表（L1186 付近）の記述整合
+  - _Requirements: 2.5, 3.5, NFR 1.1, NFR 1.2_
+- [ ]* 6.2 スモークテスト fixture と検証手順の整備
+  - `docs/specs/219-*/test-fixtures/spec-complete/`（標準構成充足）と `spec-incomplete-merged/`（impl-notes.md のみ / #216 再現）を作成
+  - shellcheck 警告ゼロ、dry run（対象なしで `処理対象の Issue なし` 正常終了）、`STAGE_CHECKPOINT_ENABLED=false` 経路で `stage-a-crossing:` / `spec-completeness:` ログが 1 行も出ないことを確認
+  - _Requirements: 3.4, 3.5, NFR 1.1_
