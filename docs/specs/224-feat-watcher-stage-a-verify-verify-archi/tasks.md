@@ -36,7 +36,7 @@
   - _Boundary: stage_a_verify_run, stage_a_verify_resolve_command_
   - _Depends: 2.1_
 
-- [ ] 3. tasks-generation ルールへ構造化 verify ブロック規約を追加
+- [x] 3. tasks-generation ルールへ構造化 verify ブロック規約を追加
 - [x] 3.1 `.claude/rules/tasks-generation.md` に「構造化 verify ブロック」節を追加する
   - センチネル `<!-- stage-a-verify -->` + 直後 fence の canonical 書式を定義
   - 中身は散文ではなく実行可能コマンド（複数行 / `&&` 可）であることを要求
@@ -46,7 +46,7 @@
   - _Requirements: 4.1, 4.3, 4.4, 1.3, 3.1_
   - _Boundary: tasks-generation rule_
 
-- [ ] 3.2 `.claude/agents/architect.md` の tasks.md テンプレに verify ブロック宣言手順を追記 (P)
+- [x] 3.2 `.claude/agents/architect.md` の tasks.md テンプレに verify ブロック宣言手順を追記 (P)
   - tasks.md テンプレ節に構造化 verify ブロックの宣言例を追加
   - Developer はブロックを書き換えない / 矛盾は PR「確認事項」で指摘する信頼モデルを明記
   - _Requirements: 4.2, 3.2, 3.3_
