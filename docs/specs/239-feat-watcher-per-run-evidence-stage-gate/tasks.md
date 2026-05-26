@@ -25,7 +25,7 @@
   - _Requirements: 1.1, 1.3, 1.5, NFR 1.1, NFR 4.1_
   - _Boundary: run-summary.sh_
 
-- [ ] 3. mode 確定箇所への `rs_set_mode` 記録差し込み
+- [x] 3. mode 確定箇所への `rs_set_mode` 記録差し込み
   - `_slot_run_issue` の MODE 確定箇所（impl-resume / skip-triage→impl / design / impl 各分岐）に `rs_set_mode` を 1 行ずつ差し込む
   - design モードでは Reviewer 非該当の既定 `reviewer=n/a` が維持されることを確認
   - _Requirements: 1.2, 3.5, NFR 1.2_
