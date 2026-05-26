@@ -2524,6 +2524,49 @@ chmod +x /tmp/slot-init.sh
 SLOT_INIT_HOOK=/tmp/slot-init.sh PARALLEL_SLOTS=2 $HOME/bin/issue-watcher.sh
 ```
 
+### gitignore 運用 repo への `.claude/` 注入（auto-detect / Issue #237）
+
+watcher は各 slot worktree を `git reset --hard origin/<branch>` ＋ `git clean -fdx` で
+強制リセットしてから agent を起動します。このため `.claude/` を **gitignore して
+足場を public repo に出さない運用**の repo では、`.claude/` が commit されておらず
+reset 後の worktree に `.claude/agents` `.claude/rules` が現れず、agent がルール・
+定義を読めない degraded 状態に陥っていました。
+
+これを解消するため、watcher は **worktree reset 完了後・`SLOT_INIT_HOOK` / agent 起動前**の
+タイミングで、`.claude/` の有無を自動判定（auto-detect）して注入します。
+
+| 項目 | 仕様 |
+|---|---|
+| 起動タイミング | per-slot worktree の `git reset --hard origin/<branch> && git clean -fdx` 直後・`SLOT_INIT_HOOK` / Claude 起動前 |
+| 注入条件 | worktree に `.claude/` が **無い** かつ REPO_DIR（`install.sh --repo` が管理するローカルクローン）に `.claude/` が **有る** ときのみ注入する |
+| 注入元 | REPO_DIR（`$REPO_DIR/.claude`）。`install.sh --repo` が最新化したローカルの `.claude/` をコピーする |
+| 注入手段 | `cp -a`（mode / timestamps / symlink を保持。実行権限・シンボリックリンクを壊さない） |
+| 注入対象 | `.claude/` ディレクトリのみ（`.github/scripts/idd-claude-labels.sh` 等の足場ファイルは注入しない） |
+| commit 扱い | 注入した `.claude/` は worktree でも gitignore 対象のまま。watcher は git add / commit しない（gitignore 運用の意図を維持） |
+| 失敗時挙動 | **fail-open**。注入に失敗しても warn ログを出すのみで reset → agent 起動サイクルは継続し、当該 Issue を注入失敗のみで `claude-failed` にしない |
+| env gate | **なし**（auto-detect 方式）。外部サービス呼び出しではなくローカルファイルコピーのため opt-in gate は不要 |
+
+**consumer 側の前提**: gitignore 運用 repo で本機能を活かすには、REPO_DIR
+（watcher が処理するローカルクローン）の `.claude/` を **`install.sh --repo /path/to/repo`**
+で最新化しておいてください。watcher は注入元 `.claude/` の **内容生成・更新は行いません**
+（それは `install.sh` の責務）。注入元に `.claude/` が無い場合は何もしません（NO-OP）。
+
+**後方互換（tracked 運用 repo は NO-OP）**: `.claude/` を commit している tracked 運用 repo
+（idd-claude 自身 / feedman / altpocket 等）では、reset 後の worktree に `.claude/` が
+**必ず存在する**ため auto-detect により注入は走らず、本機能導入前と外形的に同一の
+振る舞い（reset → agent 起動）を保ちます。新規 env var の追加も無く、既存の env var 名・
+ラベル遷移・exit code・ログ書式・worktree reset 契約（`reset --hard` → `clean -fdx` の順序、
+#180 / #198 の data-loss 防止方針）はいずれも変更していません。
+
+注入の実行・スキップ（NO-OP）・失敗は slot 運用ログ（`slot-<N>-<M>-<TS>.log`）から判別できます:
+
+```bash
+# 注入が走ったサイクルを探す
+grep '.claude を REPO_DIR から worktree へ注入' $HOME/.issue-watcher/logs/<owner>-<repo>/*.log
+# 注入失敗（warn）を探す
+grep '.claude の注入に失敗' $HOME/.issue-watcher/logs/<owner>-<repo>/*.log
+```
+
 ### ログ出力
 
 並列実行中もログを slot 単位で追跡できるよう、Dispatcher と各 Slot Worker は識別 prefix 付きで
