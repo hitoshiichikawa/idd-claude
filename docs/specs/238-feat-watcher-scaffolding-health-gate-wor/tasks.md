@@ -14,7 +14,7 @@
   - `set -euo pipefail` は宣言しない（本体側で宣言済み・関数定義のみ）
   - _Requirements: 1.1, 1.5, 3.1, 5.1, 5.3, NFR 1.1, NFR 5.1_
 
-- [ ] 2. preflight gate と可視シグナルを実装し本体 call site / Config / module source を結線
+- [x] 2. preflight gate と可視シグナルを実装し本体 call site / Config / module source を結線
 - [x] 2.1 可視シグナル `_sh_emit_visibility_signal` と gate `sh_preflight_gate` を実装
   - `_sh_emit_visibility_signal`（$1=欠落サマリ）: `gh issue comment "$NUMBER" --repo "$REPO"` で
     投稿。本文に機械可読マーカー `<!-- scaffolding-health:missing -->` を埋め、投稿前に
