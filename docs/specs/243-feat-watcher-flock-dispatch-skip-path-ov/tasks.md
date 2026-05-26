@@ -8,7 +8,7 @@
   - _Requirements: 4.1, 6.5, NFR 1.1_
   - _Boundary: Config 追加（issue-watcher.sh）_
 
-- [ ] 2. 可視化オーケストレータと内部ヘルパーを promote-pipeline.sh に追加
+- [x] 2. 可視化オーケストレータと内部ヘルパーを promote-pipeline.sh に追加
 - [x] 2.1 `po__visibility_evaluate_candidate` を追加（1 候補の read-only overlap 評価コア）
   - `po_check_dispatch_gate` 近傍（801-879 行付近）に追加。既存 po_* のシグネチャは変更しない
   - `po_load_edit_paths` → `po_collect_inflight_issues`（`po_resolve_holder_labels` で holder 集合解決）→ `po_compute_overlap` → overlap>0 かつ未付与なら `po_apply_awaiting_slot`、overlap=0 かつ既付与なら `po_clear_awaiting_slot`
