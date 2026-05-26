@@ -4756,9 +4756,15 @@ run_impl_pipeline() {
       if [ "$_pt_loop_enabled" = "true" ]; then
         echo "--- Stage A 実行（$MODE / per-task loop / PER_TASK_LOOP_ENABLED=true）---" >> "$LOG"
         if ! run_per_task_loop; then
+          # run サマリ: Stage A は実行された（claude-failed 終端でも stage は走った / Req 2.1）。
+          rs_record_stage A
+          rs_scan_degraded_log "$LOG"
           # run_per_task_loop 内で claude-failed 付与済 / 既に Issue コメント済。
           return 1
         fi
+        # run サマリ: Stage A（per-task loop）実行を記録し degraded 兆候を反映（Req 2.1, 6.x）。
+        rs_record_stage A
+        rs_scan_degraded_log "$LOG"
         # ── per-task 全 task 完了ゲート (#194) ──
         # `run_per_task_loop` の `return 0` は「全 task 消化成功」と「quota 超過等による
         # 中間早期 return」の双方を含むため、戻り値 0 だけでは全 task 完了を保証できない。
@@ -4870,6 +4876,10 @@ run_impl_pipeline() {
             --output-format stream-json \
             --verbose \
             >> "$LOG" 2>&1 || _qa_rc_a=$?
+        # run サマリ: Stage A（通常 Developer 経路）実行を記録し degraded 兆候を反映
+        # （quota 99 / 失敗 * でも claude 起動は試みられたため stage は走った / Req 2.1, 6.x）。
+        rs_record_stage A
+        rs_scan_degraded_log "$LOG"
         case "$_qa_rc_a" in
           0)
             # Issue #106 Req 1: Stage A 成功宣言の前にローカル HEAD が origin に到達しているか
@@ -4985,6 +4995,9 @@ run_impl_pipeline() {
           --output-format stream-json \
           --verbose \
           >> "$LOG" 2>&1 || _qa_rc_bl=$?
+      # run サマリ: Stage A'（BLOCKED 経路 Developer 再起動）実行を記録（Req 2.1, 6.x）。
+      rs_record_stage "A'"
+      rs_scan_degraded_log "$LOG"
       case "$_qa_rc_bl" in
         0)
           rm -f "$_qa_reset_file_bl"
@@ -5039,6 +5052,14 @@ run_impl_pipeline() {
   #         run_impl_pipeline は従来どおり 1（失敗）を返す。
   local _sav_rc=0
   stage_a_verify_run || _sav_rc=$?
+  # ── run サマリ: stage-a-verify 結果記録（#239 task 5 / Req 4.1, 4.2, 4.3） ──
+  # `stage_a_verify_run` が露出する `_SAV_LAST_OUTCOME`（success / skip / disabled /
+  # round1 / round2）を `rs_record_sav` に渡し run サマリの `stage-a-verify=` を確定する。
+  # 戻り値 0 は SUCCESS / SKIPPED / DISABLED を区別できないため outcome 変数を使う。
+  # 変数代入のみの副作用（戻り値常に 0）で `_sav_rc` の case 分岐・ラベル遷移・exit code に
+  # 影響しない（NFR 1.1, 1.2）。run-summary.sh は本体 REQUIRED_MODULES で source 済みのため
+  # task 3 の rs_set_mode と同じく bare 呼び出し（空入力時は no-op で既定 n/a を維持）。
+  rs_record_sav "${_SAV_LAST_OUTCOME:-}"
   case "$_sav_rc" in
     0)
       : ;;  # SUCCESS / SKIPPED / DISABLED → 続行
@@ -5067,6 +5088,10 @@ run_impl_pipeline() {
     A|B)
       rev_rc=0
       run_reviewer_stage 1 || rev_rc=$?
+      # run サマリ: Stage B（Reviewer round=1）実行を記録し degraded 兆候を反映（Req 2.1, 6.x）。
+      # Reviewer verdict / round の記録は task 6 の責務。ここは stage 記録のみ。
+      rs_record_stage B
+      rs_scan_degraded_log "$LOG"
       case $rev_rc in
         0)
           # Issue #106 Req 3: Stage B (Reviewer round=1 approve) 完了直後に push 状態 verify。
@@ -5109,6 +5134,10 @@ run_impl_pipeline() {
               --output-format stream-json \
               --verbose \
               >> "$LOG" 2>&1 || _qa_rc_aredo=$?
+          # run サマリ: Stage A'（Reviewer reject 差し戻し Developer 再実行）実行を記録
+          # （Req 2.1, 6.x）。
+          rs_record_stage "A'"
+          rs_scan_degraded_log "$LOG"
           case "$_qa_rc_aredo" in
             0)
               # Issue #106 Req 2: Stage A' 成功宣言の前にローカル HEAD が origin に到達して
@@ -5149,6 +5178,10 @@ run_impl_pipeline() {
           # ── Stage B (round=2): Reviewer 最終回 ──
           rev_rc=0
           run_reviewer_stage 2 || rev_rc=$?
+          # run サマリ: Stage B'（Reviewer round=2 最終回）実行を記録し degraded 兆候を反映
+          # （Req 2.1, 6.x）。Reviewer verdict / round の記録は task 6 の責務。
+          rs_record_stage "B'"
+          rs_scan_degraded_log "$LOG"
           case $rev_rc in
             0)
               # Issue #106 Req 3: Stage B (Reviewer round=2 approve) 完了直後の push 状態 verify。
@@ -5387,6 +5420,11 @@ run_impl_pipeline() {
       --output-format stream-json \
       --verbose \
       >> "$LOG" 2>&1 || _qa_rc_c=$?
+  # run サマリ: Stage C（PjM / PR 作成）実行を記録し degraded 兆候を反映（Req 2.1, 6.x）。
+  # 既存 PR ガード（stage_c_existing_pr_guard）で PjM 起動前に early return したケースでは
+  # PjM が走らないため本行に到達せず Stage C は記録されない（実際に走った stage のみ / Req 2.1）。
+  rs_record_stage C
+  rs_scan_degraded_log "$LOG"
   case "$_qa_rc_c" in
     0)
       # Issue #104 Bug 3 / Req 4.1〜4.4: claude RC=0 + quota 検出なし時点では
