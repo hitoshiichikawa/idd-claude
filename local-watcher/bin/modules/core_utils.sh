@@ -265,6 +265,32 @@ _worktree_reset() {
 # 戻り値: 常に 0（fail-open。注入失敗で _slot_run_issue を倒さない / Req 3.2, 3.3）
 # 副作用: 条件成立時に $2/.claude を $1/.claude の内容で作成する（commit はしない）
 #
+# worktree の最終 scaffolding 状態を run サマリへ記録する薄いヘルパ（Issue #239）。
+#
+# `_worktree_inject_claude` の各 return パス直前で呼び、worktree に
+# `.claude/agents` `.claude/rules` の両 dir が実体として揃っているかを判定して
+# `rs_set_scaffolding ok|missing` を記録する。注入元 `.claude/` 不在 / cp 失敗の
+# rm 後はどちらも両 dir 不在 → missing、tracked 運用 / cp 成功は実体を見て判定する。
+#
+# 引数:
+#   $1 = 判定対象 worktree 絶対パス
+# 戻り値: 常に 0（fail-open。記録失敗で _worktree_inject_claude / _slot_run_issue を
+#         倒さない / NFR 4.1）
+# 副作用: rs_set_scaffolding による run サマリ用状態変数代入のみ（標準出力に何も足さない）
+#
+# Req 5.1, 5.2, 5.3, NFR 1.2, NFR 4.1
+_worktree_record_scaffolding() {
+  local wt="$1"
+  # run-summary.sh 未 source の文脈でも注入処理を倒さない fail-open ガード（NFR 4.1）。
+  command -v rs_set_scaffolding >/dev/null 2>&1 || return 0
+  if [ -d "$wt/.claude/agents" ] && [ -d "$wt/.claude/rules" ]; then
+    rs_set_scaffolding ok || true
+  else
+    rs_set_scaffolding missing || true
+  fi
+  return 0
+}
+
 # Req 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 4.4, NFR 3.1
 _worktree_inject_claude() {
   local src_repo_dir="$1"
@@ -273,10 +299,12 @@ _worktree_inject_claude() {
   # NO-OP 条件 1（Req 2.1）: worktree に既に `.claude/` がある = tracked 運用 repo。
   # 上書きせず即 return（auto-detect による既存挙動非変更 / 冪等性 Req 4.1 も担保）。
   if [ -e "$wt/.claude" ]; then
+    _worktree_record_scaffolding "$wt"
     return 0
   fi
   # NO-OP 条件 2（Req 2.2）: 注入元 REPO_DIR に `.claude/` が無い → 何もしない。
   if [ ! -d "$src_repo_dir/.claude" ]; then
+    _worktree_record_scaffolding "$wt"
     return 0
   fi
 
@@ -285,6 +313,7 @@ _worktree_inject_claude() {
   # `cp -a` で mode / timestamps / symlink を保持（Req 4 / rsync は依存 CLI 保証外）。
   if cp -a "$src_repo_dir/.claude" "$wt/" 2>/dev/null; then
     slot_log ".claude を REPO_DIR から worktree へ注入 (src=$src_repo_dir/.claude)"
+    _worktree_record_scaffolding "$wt"
     return 0
   fi
 
@@ -293,6 +322,7 @@ _worktree_inject_claude() {
   # 不完全状態を温存しうるため、ベストエフォートで除去してから継続する。
   rm -rf "$wt/.claude" 2>/dev/null || true
   slot_warn ".claude の注入に失敗しました（継続します / src=$src_repo_dir/.claude）"
+  _worktree_record_scaffolding "$wt"
   return 0
 }
 
