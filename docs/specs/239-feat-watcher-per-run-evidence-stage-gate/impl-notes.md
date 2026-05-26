@@ -107,6 +107,33 @@
     勝手に増やさず未記録とした。round=3 は Debugger 経路の稀ケースで、stages enum 拡張が
     必要なら別途 PM/Architect 判断（確認事項参照）。
 
+### Task 6（Reviewer 起動・verdict・round と最終遷移の記録差し込み）
+
+- **採用方針**: `run_reviewer_stage` の 6 return 直前に `rs_record_reviewer` を、最終遷移 5 箇所
+  （claude-failed / hold / ready-for-review / needs-iteration）に `rs_set_result` を bare 呼び出しで差し込む。
+- **重要な判断**:
+  - `run_reviewer_stage` の return マッピングは design.md L293-298 通り: 0→`independent approve`、
+    1→`independent reject`、99→`independent quota`、2（claude-exit-nonzero / parse-failed /
+    unknown-result の 3 箇所）→`degraded "" "$round"`。`rs_record_reviewer` の degraded は verdict 引数を
+    空文字 `""` で渡す（run-summary.sh L154-176 実装と design.md L427-429 fixture 例に厳密一致）。round は
+    関数冒頭 `local round="$1"` をそのまま渡す。
+  - **needs-iteration の上書き**: Reviewer reject 終端（reviewer-reject2 / reviewer-reject3）は
+    `mark_issue_failed` 経由で claude-failed ラベルが付与される。`mark_issue_failed` 内に
+    `rs_set_result claude-failed` を入れたため、reject 終端では `mark_issue_failed` の**直後**に
+    `rs_set_result needs-iteration` を置いて上書きし、「Reviewer 判定起因の差し戻しループ打ち切り終端」を
+    needs-iteration として区別する（tasks.md task 6 を正本に採用）。stage 失敗等その他の `mark_issue_failed`
+    呼び出しは claude-failed のまま。
+  - **既存 PR ガード成功には result を入れない**: `stage_c_existing_pr_guard` 成功（OPEN/MERGED/CLOSED いずれも
+    return 0）は「PR 作成成功し ready-for-review へ向かう終端」に該当せず、CLOSED は needs-decisions 遷移のため、
+    一律 ready-for-review 記録は誤り。result enum に「既存 PR 再利用」値がないため、ガード成功パスには
+    `rs_set_result` を差し込まず既定 unknown を維持した（新規 PR 作成成功 L5481 のみ ready-for-review）。確認事項参照。
+  - **hold = stage-a-verify round=1 defer**: design.md L59-60 の「round=1 defer（保留）」は stage-a-verify の
+    `return 3`（`stage_a_verify_round1_defer`）終端を指す。Reviewer reject round=1 は同一サイクル内で Stage A'→round=2 へ
+    進み「次サイクルへ defer する保留」は存在しないため、hold は stage-a-verify round=1 defer に対応づけた。確認事項参照。
+- **残存課題（次 task=7/8 に影響する事項）**: なし（task 7=README / task 8=fixture は本 task の記録配線と独立。
+  fixture は `rs_record_reviewer independent approve 1` / `degraded "" 1` / `rs_set_result needs-iteration` 等を
+  source 直接呼びで検証する想定で、本 task の本体配線に依存しない）。
+
 ## 確認事項
 
 - **Debugger 経路の Stage A''/B''（round=3）の run サマリ扱い**: design.md の `stages` enum
@@ -116,6 +143,29 @@
   Ap/Bp までの記録に留まる（degraded スキャンは各 stage 完了時に累積実行されるため errors は
   反映される）。これが許容範囲か、stages enum に A''/B'' 相当を追加すべきかは PM/Architect の
   判断事項。本 task では spec を書き換えず現状の enum に従った。
+
+- **（task 6）Reviewer reject 終端の result が claude-failed か needs-iteration か**: tasks.md task 6 は
+  「Reviewer reject 終端（差し戻しループ打ち切りで needs-iteration になる終端）→ `rs_set_result needs-iteration`」と
+  指示する一方、実装上 reviewer-reject2 / reviewer-reject3 終端は `mark_issue_failed` 経由で
+  `claude-failed` ラベルが付与される（Req 7.2「claude-failed で終了した場合は claude-failed として記録」と表面上
+  競合）。本 task では tasks.md を正本とし、`mark_issue_failed`（claude-failed 記録）の直後に
+  `rs_set_result needs-iteration` を置いて上書きし、reject 起因の終端を needs-iteration、その他 stage 失敗を
+  claude-failed として区別した（design.md result enum が両値を別途定義していることと整合）。この区別が
+  運用意図と一致するか（ラベルは claude-failed だが run サマリ result は needs-iteration という乖離が許容されるか）は
+  PM/Architect の判断事項。spec は書き換えていない。
+
+- **（task 6）既存 PR ガード成功（`stage_c_existing_pr_guard`）の result**: 同ガードは OPEN/MERGED/CLOSED いずれも
+  return 0 を返し、CLOSED は needs-decisions に遷移する。tasks.md task 6 の「Stage C 成功（PR 作成成功し
+  ready-for-review へ向かう終端）」に既存 PR 検出抑止は厳密には該当せず、CLOSED ケースを一律 ready-for-review に
+  するのは誤りのため、ガード成功パスには `rs_set_result` を差し込まず既定 unknown を維持した（新規 PR 作成成功のみ
+  ready-for-review）。result enum に「既存 PR 再利用」「needs-decisions」値がないため OPEN/MERGED 検出抑止時は
+  result=unknown のまま emit される。enum 拡張要否は PM/Architect の判断事項。
+
+- **（task 6）hold（保留）の対応箇所**: design.md L59-60 は「round=1 defer（保留）」を hold の対象とするが、
+  これが stage-a-verify round=1 defer か Reviewer reject round=1 かが文面では曖昧。実装を精査した結果、
+  「claude-failed を付けず次 tick で再 pickup する保留（return 3）」は stage-a-verify round=1 defer のみであり、
+  Reviewer reject round=1 は同一サイクル内で round=2 へ前進するため保留ではない。よって hold は
+  stage-a-verify round=1 defer（`stage_a_verify_round1_defer` → `return 3`）に対応づけた。
 
 ## 受入基準カバレッジ（task 4 範囲）
 
