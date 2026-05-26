@@ -3229,15 +3229,31 @@ working tree のみに存在する未 commit ファイル / main にしか存在
 |---|---|---|---|---|---|
 | × | × | - | × | A | 通常通り Stage A から実行 |
 | × | ○ | (any) | × | A | INCONSISTENT 検出 → 安全側で Stage A 再実行 |
-| ○ | × | - | × | B | Stage A スキップ → Reviewer から再実行（NFR 3.1） |
-| ○ | ○ | (RESULT 行欠落) | × | B | parse 失敗 → Stage B から再実行 |
+| ○ | × | - | × | A | **tasks.md に残必須タスクあり** → per-task ループ再開（#251） |
+| ○ | × | - | × | B | tasks.md 全タスク完了 / tasks.md 不在 → Reviewer から再実行（NFR 3.1） |
+| ○ | ○ | (RESULT 行欠落) | × | A | **tasks.md に残必須タスクあり** → per-task ループ再開（#251） |
+| ○ | ○ | (RESULT 行欠落) | × | B | tasks.md 全タスク完了 / tasks.md 不在 → Stage B から再実行 |
 | ○ | ○ | `approve` | × | C | Stage A / B スキップ → PjM のみ実行（NFR 3.2） |
 | ○ | ○ | `reject` (round=1) | × | A | 中断と判断、Stage A から再実行（D-3 fallback） |
 | ○ | ○ | `reject` (round=2) | × | TERMINAL_FAILED | `claude-failed` 化して人間に委ねる |
 | (any) | (any) | (any) | ○ | TERMINAL_OK | 自動進行を停止（ラベル不変） |
 
+> **per-task ループ残タスク再開（#251）**: per-task ループ (#21) は task 完了ごとに
+> `impl-notes.md` を commit するため、task 1 完了時点で `impl-notes.md` が tracked になります。
+> 従来は「impl-notes 有 / review-notes 無（または RESULT 行欠落）」を一律 `START_STAGE=B`
+> （Stage A skip）と判定していたため、残タスクがあっても per-task ループが二度と起動せず
+> 残タスクが永久に消化されない不具合がありました。#251 以降は、この **impl-notes 有 /
+> review-notes 無の B 分岐に限って** `tasks.md` の残必須タスク（deferrable `- [ ]*` を除く
+> `- [ ]`）を read-only で確認し、1 件以上残っていれば `START_STAGE=A` を選んで per-task
+> ループを再開します（ログ `reason=pending-tasks-remain count=N`）。全タスク完了済み /
+> `tasks.md` 不在（design-less impl）の場合は従来どおり `START_STAGE=B` のままで、`approve`
+> （C）/ `reject`（round 分岐）系の判定には一切介入しません。`tasks.md` の編集・commit・push
+> は行わない read-only 判定です。
+
 判定根拠は `stage-checkpoint:` prefix のログに 1 ブロックで出力され、
-`grep stage-checkpoint $HOME/.issue-watcher/logs/...` で機械抽出できます。
+`grep stage-checkpoint $HOME/.issue-watcher/logs/...` で機械抽出できます。残必須タスクによる
+Stage A 再開時は `decision: START_STAGE=A reason=pending-tasks-remain count=N` の行で件数まで
+追跡できます。
 
 > **Stage C PR 作成直前の再確認ガード（#212）**: サイクル開始時の上記判定に加え、Stage C が
 > PR 作成へ進む直前にも同一 head ブランチの既存 impl PR を再確認します（`STAGE_CHECKPOINT_ENABLED=true`

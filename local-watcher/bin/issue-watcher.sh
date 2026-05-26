@@ -1106,8 +1106,11 @@ stage_checkpoint_find_impl_pr() {
 #   既存 PR あり                                      → TERMINAL_OK
 #   impl-notes 無 / review-notes 有 (任意)            → A (INCONSISTENT, Req 5.1)
 #   impl-notes 無 / review-notes 無                   → A (Req 2.2)
-#   impl-notes 有 / review-notes 無                   → B (Req 2.3)
-#   impl-notes 有 / review-notes parse 失敗            → B (Req 4.3)
+#   impl-notes 有 / review-notes 無 / tasks.md 残必須あり → A (#251, per-task ループ再開)
+#   impl-notes 有 / review-notes 無 / tasks.md 残必須なし → B (Req 2.3)
+#   impl-notes 有 / review-notes 無 / tasks.md 不在    → B (Req 2.3, design-less impl)
+#   impl-notes 有 / review-notes parse 失敗 / tasks.md 残必須あり → A (#251)
+#   impl-notes 有 / review-notes parse 失敗 / tasks.md 残必須なし → B (Req 4.3)
 #   impl-notes 有 / RESULT=approve                     → C (Req 2.4)
 #   impl-notes 有 / RESULT=reject (round=2 と推定)     → TERMINAL_FAILED (Req 2.5)
 #   impl-notes 有 / RESULT=reject (round=1 と推定)     → A (D-3, INCONSISTENT 扱い)
@@ -1210,9 +1213,43 @@ stage_checkpoint_resolve_resume_point() {
   # ここから has_impl=yes 系
   case "$rev_rc" in
     2)
-      # review-notes 不在 or 解釈不能 → Stage B から再実行 (Req 2.3, 4.3)
-      START_STAGE="B"
-      sc_log "decision: START_STAGE=B reason=impl-notes-only-or-review-unparsed" >> "$LOG"
+      # review-notes 不在 or 解釈不能（従来 Stage B から再実行 / Req 2.3, 4.3）。
+      # ただし per-task ループ (#21) は task 完了ごとに impl-notes.md を commit するため、
+      # task 1 完了時点で impl-notes.md が tracked になる。残必須タスクがあるのに従来
+      # ロジックで Stage B を選ぶと per-task ループが二度と起動せず残タスクが永久に消化
+      # されない（#251）。そこで本 B 分岐に限り tasks.md の残必須タスクを確認し、残って
+      # いれば Stage A（per-task ループ）を再開させる（Req 1, Req 5）。
+      # 介入は本 rev_rc=2 分岐に限定し、approve(C) / reject(round で分岐) には介入しない（Req 3）。
+      local sc_tasks_md="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+      if [ ! -f "$sc_tasks_md" ]; then
+        # tasks.md 不在（design-less impl）→ 残タスク判定をスキップし従来どおり B（Req 4）。
+        START_STAGE="B"
+        sc_log "decision: START_STAGE=B reason=impl-notes-only-or-review-unparsed" >> "$LOG"
+      else
+        # tasks.md あり → 残必須タスク（deferrable `- [ ]*` を除く `- [ ]`）を抽出（NFR 3.2）。
+        # 内部エラー時は安全側として Stage A へフォールバックさせるため、抽出失敗を捕捉する（NFR 3.1）。
+        local sc_pending sc_extract_rc=0
+        sc_pending=$(pt_extract_pending_tasks "$sc_tasks_md") || sc_extract_rc=$?
+        if [ "$sc_extract_rc" -ne 0 ]; then
+          # pt_extract_pending_tasks は tasks.md 不在で return 1 を返すが、上の [ -f ] で
+          # 分離済みのため、ここに来るのは想定外の内部エラー。安全側で Stage A 再実行（NFR 3.1）。
+          # shellcheck disable=SC2034
+          START_STAGE="A"
+          sc_warn "pending task 抽出失敗 (rc=$sc_extract_rc) → safe fallback: START_STAGE=A" >> "$LOG"
+          sc_log "decision: START_STAGE=A reason=pending-extract-error" >> "$LOG"
+        elif [ -n "$sc_pending" ]; then
+          # 残必須タスクが 1 件以上 → per-task ループ再開のため Stage A を選ぶ（Req 1）。
+          local sc_pending_count
+          sc_pending_count=$(printf '%s\n' "$sc_pending" | wc -l | tr -d '[:space:]')
+          # shellcheck disable=SC2034
+          START_STAGE="A"
+          sc_log "decision: START_STAGE=A reason=pending-tasks-remain count=$sc_pending_count" >> "$LOG"
+        else
+          # 残必須タスク 0 件 → 全タスク完了済み per-task impl は従来どおり Stage B（Req 2）。
+          START_STAGE="B"
+          sc_log "decision: START_STAGE=B reason=impl-notes-only-or-review-unparsed" >> "$LOG"
+        fi
+      fi
       ;;
     0)
       # approve → Stage C (Req 2.4)
