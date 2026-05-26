@@ -525,17 +525,72 @@ stage_a_verify_resolve_command() {
   return 1
 }
 
+# ─── _sav_state_dir ───
+#
+# round counter を置く永続化先ベースディレクトリを stdout に出す（#246）。
+# 旧実装は worktree 配下（`$REPO_DIR/$SPEC_DIR_REL/`）に置いていたが、毎サイクル
+# 冒頭の worktree reset（`git reset --hard` + `git clean -fdx`）で untracked/ignored
+# が消去されるため counter も消え、連続失敗時に round が毎回 1 にリセットされて
+# round=2（escalate）へ到達しない無限 round=1 ループが発生していた（#238/#239/#243）。
+#
+# これを避けるため、永続化先を **worktree 外**（`$HOME/.issue-watcher/` 配下、LOG_DIR
+# と同流儀の `$HOME/.issue-watcher/<種別>/$REPO_SLUG`）へ移す。`$HOME/.issue-watcher/`
+# は `$REPO_DIR` の外なので `git clean -fdx` の対象外＝worktree reset で消えない。
+# テスト容易性のため新規 optional env var `STAGE_A_VERIFY_STATE_DIR` で base を上書き
+# 可能にする（既定付き / 既存 env var 名と非衝突）。
+#
+# REPO_SLUG が未設定の場合は REPO から防御的に派生し silent fail を避ける（CLAUDE.md 規約）。
+#
+# 入力: 環境変数 STAGE_A_VERIFY_STATE_DIR（任意） / REPO_SLUG（任意） / REPO（fallback 用）
+# stdout: 絶対パス（必ず 1 行 / 末尾スラッシュなし）
+_sav_state_dir() {
+  local repo_slug="${REPO_SLUG:-}"
+  if [ -z "$repo_slug" ]; then
+    # REPO_SLUG 未設定時は REPO（owner/name）から派生。REPO も無ければ "_unknown"。
+    repo_slug="$(printf '%s' "${REPO:-_unknown}" | tr '/' '-')"
+  fi
+  printf '%s\n' "${STAGE_A_VERIFY_STATE_DIR:-$HOME/.issue-watcher/state/$repo_slug}"
+}
+
+# ─── _sav_round_key ───
+#
+# round counter を Issue 番号 + branch で一意化するキーを stdout に出す（#246 / Req 3.x）。
+# branch にはスラッシュ（`claude/issue-246-impl-...`）が含まれるためファイル名に使えるよう
+# 非英数字（`/` 含む）を `-` へサニタイズする。BRANCH 不在時は SLUG、それも無ければ
+# SPEC_DIR_REL 由来へ防御的にフォールバックし silent fail を避ける。
+#
+# 入力: 環境変数 NUMBER / BRANCH（任意） / SLUG（任意） / SPEC_DIR_REL（任意）
+# stdout: ファイル名に使えるキー文字列（必ず 1 行）
+_sav_round_key() {
+  local number="${NUMBER:-0}"
+  local ref="${BRANCH:-}"
+  if [ -z "$ref" ]; then
+    ref="${SLUG:-}"
+  fi
+  if [ -z "$ref" ]; then
+    # SPEC_DIR_REL（docs/specs/<N>-<slug>）の basename から派生。
+    ref="$(basename "${SPEC_DIR_REL:-_nobranch}")"
+  fi
+  # 英数字・ドット・アンダースコア・ハイフン以外を `-` へサニタイズ（`/` 含む）。
+  local sanitized
+  sanitized="$(printf '%s' "$ref" | tr -c 'A-Za-z0-9._-' '-')"
+  printf '%s\n' "${number}-${sanitized}"
+}
+
 # ─── stage_a_verify_round_path ───
 #
-# round counter sidecar の絶対パスを stdout に出す。Issue ごとに spec dir 配下に
-# `.stage-a-verify-round` という dotfile を 1 つ置く設計（design.md「Components
-# and Interfaces / stage_a_verify_round_path」採用案）。worktree slot ごとの
-# `$REPO_DIR` が自然に slot 隔離を担保する。
+# round counter ファイルの絶対パスを stdout に出す。永続化先は worktree 外の
+# state dir（`_sav_state_dir`）配下に Issue 番号 + branch で一意化したキー
+# （`_sav_round_key`）で `<key>.stage-a-verify-round` を 1 つ置く（#246）。
+# worktree slot / repo 隔離は state dir の REPO_SLUG と key の branch が担保する。
 #
-# 入力: 環境変数 REPO_DIR / SPEC_DIR_REL
+# 入力: 環境変数 STAGE_A_VERIFY_STATE_DIR / REPO_SLUG / REPO / NUMBER / BRANCH / SLUG
 # stdout: 絶対パス（必ず 1 行）
 stage_a_verify_round_path() {
-  printf '%s\n' "$REPO_DIR/$SPEC_DIR_REL/.stage-a-verify-round"
+  local base key
+  base=$(_sav_state_dir)
+  key=$(_sav_round_key)
+  printf '%s\n' "$base/$key.stage-a-verify-round"
 }
 
 # ─── stage_a_verify_read_round ───
