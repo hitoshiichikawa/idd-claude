@@ -38,7 +38,7 @@
   - _Boundary: run-summary.sh_
   - _Depends: 1.2_
 
-- [ ] 5. stage 実行と stage-a-verify 結果の記録差し込み（run_impl_pipeline）
+- [x] 5. stage 実行と stage-a-verify 結果の記録差し込み（run_impl_pipeline）
   - Stage A / A'(Ap) / B / B'(Bp) / C の各実行直後に `rs_record_stage` を差し込む
   - stage-a-verify call site の戻り値分岐（success / round1 / round2 / skip / disabled）に `rs_record_sav` を差し込む（`sav_log` 出力フォーマットは変更しない）
   - 各 stage 完了直後に `rs_scan_degraded_log "$LOG"` を呼び degraded 兆候を反映
