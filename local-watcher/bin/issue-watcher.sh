@@ -519,8 +519,9 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # source 順序は機能的に任意（bash の遅延束縛で前方参照は呼び出し時に解決される）が、
 # 可読性のため最も低レベルな core_utils.sh を先頭に置き、以降は #180 Part 2 で切り出した
 # 3 プロセッサ（quota-aware / merge-queue / auto-rebase）、#181 Part 3 で切り出した
-# 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べる。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "stage-a-verify.sh" )
+# 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
+# #239 で追加した per-run evidence サマリ（run-summary.sh）を置く。
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "stage-a-verify.sh" "run-summary.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -6772,6 +6773,16 @@ _slot_run_issue() {
   exec > >(tee -a "$SLOT_LOG") 2>&1
 
   slot_log "Worker 起動 (LOG=$LOG SLOT_LOG=$SLOT_LOG)"
+
+  # ── per-run evidence サマリの初期化と終端 emit 配線（#239 / Req 1.1, 1.3, 1.5） ──
+  # rs_init で per-slot 状態変数を既定値にし、Issue 番号を確定。EXIT trap は本サブシェル
+  # スコープローカルであり、dispatcher トップレベルの INT/TERM trap とは別境界（trap は
+  # サブシェルでリセットされる）。worktree-ensure 失敗等の早期 return / set -e 異常終了 /
+  # 正常 return のいずれの終端でも 1 回だけ rs_emit が発火し run-summary 行を 1 行吐く。
+  # fail-open（|| true）で emit 失敗がサブシェルの exit code を変えない（NFR 4.1）。
+  rs_init
+  rs_set_issue "$NUMBER"
+  trap 'rs_emit || true' EXIT
 
   # ── Worktree 初期化（per-slot 永続 worktree）──
   local WT
