@@ -19,3 +19,13 @@
   - 候補列挙の除外句（`vis_search_filter`）は design.md の設計判断どおり `_dispatcher_run` の `local search_filter` を共有せず本関数内で自前再構築した。除外集合に処理中ラベル（`LABEL_CLAIMED` / `LABEL_PICKED`）を含めることで Req 2.4 を構造的に保証する。`flock -n 201` 取得失敗時は `route=flock-skip visibility skipped` 抑止ログを出し（Req 4.2）、全エラー経路で fd close + `return 0` の fail-open とした（NFR 3.2 / NFR 1.1）。
   - shellcheck はこの追加で新規警告ゼロ（`.shellcheckrc` 導入済みで baseline もクリーン）。`bash -n` 構文チェックも pass。
 - **残存課題**: task 3（`issue-watcher.sh` の flock skip ブロック 578-582 行への `po_run_flock_skip_visibility || true` フック挿入）が本関数の唯一の呼び出し元として未着手。task 4（`test-flock-skip-visibility.sh` スモーク）/ task 5（README）も未着手。これらは別の fresh Implementer 起動で消化される。tasks.md の stage-a-verify ブロックは task 4 で作成される test スクリプトを参照するため、本起動の検証は shellcheck のみで実施した。
+
+### Task 3
+
+- **採用方針**: `issue-watcher.sh` の flock skip ブロック（`flock -n 200 || { ... }` の失敗ブロック内）に、既存スキップログ出力後 / `exit 0` 直前で `if [ "${PATH_OVERLAP_CHECK:-off}" = "true" ]; then po_run_flock_skip_visibility || true; fi` フックを挿入した（design.md「State transition（flock skip ブロック）」節の canonical どおり）。
+- **重要な判断**:
+  - 実際の flock skip ブロックは task 1 の config 行追加により design.md 記載の 578-582 行から **584-588 行へ +6 シフト**していたが、ブロックの内容（`exec 200>"$LOCK_FILE"` / `flock -n 200 || { echo "...スキップ"; exit 0 }`）は design canonical と一致していたため、行番号差は無視して内容一致で安全に編集できた。
+  - 既存スキップログ（`echo "[$(date '+%F %T')] 他のインスタンスが実行中のためスキップ"`）は書式不変で温存（Req 6.5）。フックは flock 失敗ブロック内にのみ置き、flock 成功時の通常 dispatch 経路（`cd "$REPO_DIR"` 以降）には一切介入しないため、Req 1.4 / NFR 1.2（通常経路非介入）が制御フローとして構造的に保証される。
+  - `exit 0` の値・意味は不変（NFR 1.1）。`PATH_OVERLAP_CHECK` が off/未設定/不正値のときは gate に入らず従来と完全一致（Req 6.1/6.2）。`|| true` で `po_run_flock_skip_visibility` の戻り値に関わらず exit 0 を維持（NFR 3.2 と二重防御）。
+  - shellcheck はこの追加で新規警告ゼロ（`git stash` で baseline 比較 → diff なしを確認）。`bash -n` 構文チェックも pass。
+- **残存課題**: task 4（`test-flock-skip-visibility.sh` スモーク作成）/ task 5（README 更新）が未着手。本フックにより `po_run_flock_skip_visibility` の唯一の呼び出し元が結線されたため、task 4 のスモークは opt-in gate / 専用ロック多重起動抑止 / 候補クエリの claim 除外を mock で検証可能になる。tasks.md の stage-a-verify ブロックは task 4 で作成される test スクリプトを参照するため、本起動の検証は shellcheck + bash -n のみで実施した（test スクリプトはまだ存在せず本 task のスコープ外）。
