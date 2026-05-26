@@ -18,7 +18,7 @@
   - _Requirements: 1.1, 1.4, 8.1, 8.2, 8.3, NFR 1.3, NFR 2.1, NFR 4.1_
   - _Boundary: run-summary.sh_
 
-- [ ] 2. 本体への source 追加と EXIT trap による終端 emit 配線
+- [x] 2. 本体への source 追加と EXIT trap による終端 emit 配線
   - `issue-watcher.sh` 冒頭の modules source ブロックに `run-summary.sh` を追加（glob source なら不要を確認）
   - `_slot_run_issue` 冒頭（Issue メタデータ抽出直後）で `rs_init` → `rs_set_issue "$NUMBER"` → `trap 'rs_emit || true' EXIT` を仕込む
   - dispatcher の INT/TERM trap・既存サブシェル EXIT trap と非干渉であること（既存 EXIT trap 不在を grep 確認、存在時は chain）
