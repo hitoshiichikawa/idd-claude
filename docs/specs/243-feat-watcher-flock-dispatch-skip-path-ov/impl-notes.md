@@ -29,3 +29,13 @@
   - `exit 0` の値・意味は不変（NFR 1.1）。`PATH_OVERLAP_CHECK` が off/未設定/不正値のときは gate に入らず従来と完全一致（Req 6.1/6.2）。`|| true` で `po_run_flock_skip_visibility` の戻り値に関わらず exit 0 を維持（NFR 3.2 と二重防御）。
   - shellcheck はこの追加で新規警告ゼロ（`git stash` で baseline 比較 → diff なしを確認）。`bash -n` 構文チェックも pass。
 - **残存課題**: task 4（`test-flock-skip-visibility.sh` スモーク作成）/ task 5（README 更新）が未着手。本フックにより `po_run_flock_skip_visibility` の唯一の呼び出し元が結線されたため、task 4 のスモークは opt-in gate / 専用ロック多重起動抑止 / 候補クエリの claim 除外を mock で検証可能になる。tasks.md の stage-a-verify ブロックは task 4 で作成される test スクリプトを参照するため、本起動の検証は shellcheck + bash -n のみで実施した（test スクリプトはまだ存在せず本 task のスコープ外）。
+
+### Task 4
+
+- **採用方針**: `test-fixtures/test-flock-skip-visibility.sh` を新規作成し、#221 の `test-holder-labels.sh` の慣習（module を直接 source / 本体 Config 相当の global 束縛 / gh 関数スタブ / PASS/FAIL カウントで非 0 exit）を踏襲して `po_run_flock_skip_visibility` の純ロジックを mock gh 環境で検証した（実 API・ネットワークに触れない）。
+- **重要な判断**:
+  - 各検証ケースの assert 文字列は推測せず実装の実書式に厳密一致させた。抑止ログは `po_run_flock_skip_visibility` の実ログ `route=flock-skip visibility skipped`、除外句は `vis_search_filter` の実書式 `-label:"claude-claimed"` / `-label:"claude-picked-up"`、候補列挙は `--label auto-dev --state open` を grep して assert している。
+  - 多重起動抑止ケースは別 fd（210）で同一 lock file（`PATH_OVERLAP_VISIBILITY_LOCK_FILE`）を `flock -n 210` 保持した状態で関数を呼び、関数内の `flock -n 201` を確実に失敗させる構成とした。flock 非解決環境では検証不能なので冒頭で `command -v flock` を確認し未解決時は SKIP（exit 0）する（CI/cron 最小 PATH への配慮）。
+  - 差分等価（NFR 1.1）は「opt-in off では本体 flock skip フックが `po_run_flock_skip_visibility` を呼ばない（=副作用ゼロ）」ことと「関数を直接呼んでも off/未設定/不正値では gh を 1 度も呼ばず return 0」の両面で検証した。mock gh は全 argv を `gh-calls.log` に記録し、状態変更系（`--add-label` / `--remove-label` / `issue comment` / `api -X PATCH`）の不在を grep で確認している。
+  - 自己完結性: `mktemp -d` の一時 dir と lock file を `trap ... EXIT` で cleanup し、self-hosting 環境を汚さない。再実行で壊れない冪等構成。shellcheck はこのファイルで警告ゼロ（`SC2034` / `SC2317` は source 経由の間接参照ゆえファイル冒頭で明示 disable）。
+- **残存課題**: task 5（README の Path Overlap Checker (Phase E) 節への flock skip 可視化サブ節追記 / env var 表への `PATH_OVERLAP_VISIBILITY_LOCK_FILE` 追記 / Migration Note）が未着手。本 task の test は実装側（task 2/3）の挙動を検証するもので、README ドキュメントの正確性は別途 task 5 で担保される。
