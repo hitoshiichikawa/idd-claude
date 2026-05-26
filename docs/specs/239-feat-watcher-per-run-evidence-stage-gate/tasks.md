@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. run-summary.sh モジュールの新規作成（状態コレクタ + emitter）
+- [x] 1. run-summary.sh モジュールの新規作成（状態コレクタ + emitter）
 - [x] 1.1 `run-summary.sh` の骨格と logger / 状態変数初期化を実装
   - `local-watcher/bin/modules/run-summary.sh` を新規作成（ファイル冒頭コメントで用途 / 配置先 / 依存 / セットアップ参照先を明記）
   - `RUN_SUMMARY_*` サブシェルスコープ変数群と `rs_init`（既定値セット）を実装
