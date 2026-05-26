@@ -31,7 +31,7 @@
   - _Requirements: 1.2, 3.5, NFR 1.2_
   - _Boundary: run-summary.sh_
 
-- [ ] 4. scaffolding 検査結果の記録差し込み（core_utils.sh）
+- [x] 4. scaffolding 検査結果の記録差し込み（core_utils.sh）
   - `_worktree_inject_claude` に、worktree の `.claude/agents` `.claude/rules` 有無判定結果を `rs_set_scaffolding ok|missing` で記録する 1 行を追加（既存 scaffolding 検査結果の流用 / Req 5.3）
   - fail-open（記録失敗で注入処理 / `_slot_run_issue` を倒さない）
   - _Requirements: 5.1, 5.2, 5.3, NFR 1.2, NFR 4.1_
