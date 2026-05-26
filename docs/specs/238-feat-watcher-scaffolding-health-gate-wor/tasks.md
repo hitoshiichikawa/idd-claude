@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. scaffolding-health.sh モジュール骨格と logger / 検査純関数を作成
+- [x] 1. scaffolding-health.sh モジュール骨格と logger / 検査純関数を作成
 - [x] 1.1 新規モジュール `scaffolding-health.sh` を作成し logger と検査純関数を実装
   - `local-watcher/bin/modules/scaffolding-health.sh` を新規作成。ファイル冒頭コメントに
     「用途 / 配置先（`$HOME/bin/modules/scaffolding-health.sh`）/ 依存 / セットアップ参照先」を
