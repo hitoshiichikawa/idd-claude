@@ -12,7 +12,7 @@
   - `rs_scan_degraded_log` を実装（`$LOG` を `grep -q` で走査し degraded 兆候パターンで errors=yes。パターン集合をモジュール内定数で SSoT 化）
   - _Requirements: 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 3.4, 3.5, 4.1, 4.2, 4.3, 5.1, 5.2, 6.1, 6.2, 6.3, 7.1, 7.2, NFR 1.2, NFR 3.1_
   - _Boundary: run-summary.sh_
-- [ ] 1.3 `rs_emit`（終端 1 行整形 emitter）を実装
+- [x] 1.3 `rs_emit`（終端 1 行整形 emitter）を実装
   - 固定 prefix `[ts] [$REPO] run-summary:` + key=value 固定順（issue mode stages reviewer stage-a-verify scaffolding errors result）で 1 行 echo
   - `RUN_SUMMARY_ENABLED=false` 時は即 return 0（無効化）。内部を `|| true` 相当で fail-open 化し exit code を変えない
   - _Requirements: 1.1, 1.4, 8.1, 8.2, 8.3, NFR 1.3, NFR 2.1, NFR 4.1_
