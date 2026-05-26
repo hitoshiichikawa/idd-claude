@@ -406,6 +406,22 @@ stage_a_verify_extract_verify_block() {
 # 設計の「source をモジュールスコープで共有する」意図をサブシェル境界でも成立させる。
 _SAV_RESOLVED_SOURCE=""
 
+# ─── _SAV_LAST_OUTCOME（run サマリ用 outcome 露出 / #239 task 5） ───
+#
+# 直近の `stage_a_verify_run` がどの outcome で抜けたかを記録するモジュールスコープ変数。
+# 値域: success / skip / disabled / round1 / round2 / 空（未実行）。`stage_a_verify_run` は
+# call site（run_impl_pipeline）と同一プロセスで呼ばれる（command substitution ではない）
+# ため、ここに代入した値は call site から読める（_SAV_RESOLVED_SOURCE のサブシェル境界問題は
+# resolve が command substitution で呼ばれることに起因するもので、run 自体には当てはまらない）。
+# call site は本変数を読み `rs_record_sav` に渡して run サマリの `stage-a-verify=` を確定する。
+#
+# 設計意図: stage_a_verify_run の戻り値（0/1/2）だけでは success/skip/disabled の 3 状態
+# （いずれも return 0）を区別できないため（Req 4.2 が skip/disabled の明示を要求）、戻り値
+# 契約を変えずに outcome を別チャネル（本変数）で露出する。`sav_log` の既存出力フォーマット・
+# 既存ログ行は一切変更しない（NFR 1.1）。本変数は変数代入のみの副作用で、ラベル遷移 / exit
+# code / 既存ログ行に影響しない（NFR 1.2）。
+_SAV_LAST_OUTCOME=""
+
 # ─── _sav_source_path ───
 #
 # source sidecar の絶対パスを stdout に出す。round counter sidecar
@@ -733,11 +749,14 @@ _sav_handle_failure() {
 #   - 抽出した cmd は `bash -c` に **そのまま**渡し、watcher 側で `&&` / `||` / `;` を
 #     解釈しない（Req 1.3）
 stage_a_verify_run() {
+  # run サマリ用 outcome（#239 task 5）。各 return 直前で確定する。
+  _SAV_LAST_OUTCOME=""
   # ── Gate 1: DISABLED ──
   # `STAGE_A_VERIFY_ENABLED=false` 明示時のみ skip（`=false` 厳密一致、Req 4.1 /
   # NFR 1.1）。`:-true` で `unset` も既定有効として扱う。
   if [ "${STAGE_A_VERIFY_ENABLED:-true}" = "false" ]; then
     sav_log "DISABLED reason=env-opt-out"
+    _SAV_LAST_OUTCOME="disabled"
     return 0
   fi
 
@@ -747,6 +766,7 @@ stage_a_verify_run() {
   local cmd
   if ! cmd=$(stage_a_verify_resolve_command); then
     sav_log "SKIPPED reason=no-verify-task-in-tasks-md"
+    _SAV_LAST_OUTCOME="skip"
     return 0
   fi
   # resolve は command substitution のサブシェルで実行されるため、サブシェル内で代入した
@@ -765,6 +785,7 @@ stage_a_verify_run() {
   if [ -z "${STAGE_A_VERIFY_COMMAND:-}" ] && [ "$resolved_source" != "structured-block" ]; then
     if ! _sav_cmd_starts_with_keyword "$cmd"; then
       sav_log "SKIPPED reason=cmd-does-not-start-with-keyword cmd=$(printf '%q' "$cmd")"
+      _SAV_LAST_OUTCOME="skip"
       return 0
     fi
   fi
@@ -785,17 +806,30 @@ stage_a_verify_run() {
     0)
       sav_log "SUCCESS exit=0"
       stage_a_verify_reset_round
+      _SAV_LAST_OUTCOME="success"
       return 0
       ;;
     124)
       sav_warn "TIMEOUT timeout=${_timeout}s exit=124"
-      _sav_handle_failure "timeout" "$_timeout"
-      return $?
+      local _hf_rc=0
+      _sav_handle_failure "timeout" "$_timeout" || _hf_rc=$?
+      # _sav_handle_failure 戻り値（1=round1 差し戻し / 2=round2 escalate）を run サマリ
+      # outcome へマップ（Req 4.3）。戻り値はそのまま伝搬し既存契約を変えない（NFR 1.2）。
+      case "$_hf_rc" in
+        1) _SAV_LAST_OUTCOME="round1" ;;
+        2) _SAV_LAST_OUTCOME="round2" ;;
+      esac
+      return "$_hf_rc"
       ;;
     *)
       sav_warn "FAILED exit=$rc"
-      _sav_handle_failure "exit" "$rc"
-      return $?
+      local _hf_rc=0
+      _sav_handle_failure "exit" "$rc" || _hf_rc=$?
+      case "$_hf_rc" in
+        1) _SAV_LAST_OUTCOME="round1" ;;
+        2) _SAV_LAST_OUTCOME="round2" ;;
+      esac
+      return "$_hf_rc"
       ;;
   esac
 }

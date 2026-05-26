@@ -539,8 +539,9 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # source 順序は機能的に任意（bash の遅延束縛で前方参照は呼び出し時に解決される）が、
 # 可読性のため最も低レベルな core_utils.sh を先頭に置き、以降は #180 Part 2 で切り出した
 # 3 プロセッサ（quota-aware / merge-queue / auto-rebase）、#181 Part 3 で切り出した
-# 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べる。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "stage-a-verify.sh" "scaffolding-health.sh" )
+# 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
+# #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）を置く。
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -4207,11 +4208,15 @@ run_reviewer_stage() {
       qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label_rv" "$_qa_epoch_rv"
       rm -f "$_qa_reset_file_rv"
       rv_log "round=$round result=quota-exceeded → needs-quota-wait" >> "$LOG"
+      # run サマリ: Reviewer quota（独立 context で起動したが quota 超過 / Req 3.1, 3.3）
+      rs_record_reviewer independent quota "$round"
       return 99
       ;;
     *)
       rm -f "$_qa_reset_file_rv"
       rv_log "round=$round result=error reason=claude-exit-nonzero" >> "$LOG"
+      # run サマリ: Reviewer degraded（claude 異常終了で verdict 取得不能 / Req 3.4）
+      rs_record_reviewer degraded "" "$round"
       return 2
       ;;
   esac
@@ -4220,6 +4225,8 @@ run_reviewer_stage() {
   local parsed
   if ! parsed=$(parse_review_result "$notes_path"); then
     rv_log "round=$round result=error reason=parse-failed" >> "$LOG"
+    # run サマリ: Reviewer degraded（parse 失敗で verdict 取得不能 / Req 3.4）
+    rs_record_reviewer degraded "" "$round"
     return 2
   fi
 
@@ -4231,14 +4238,20 @@ run_reviewer_stage() {
   case "$result" in
     approve)
       rv_log "round=$round result=approve verified=$targets" >> "$LOG"
+      # run サマリ: Reviewer approve（独立 context で起動し verdict 取得 / Req 3.1, 3.2, 3.3）
+      rs_record_reviewer independent approve "$round"
       return 0
       ;;
     reject)
       rv_log "round=$round result=reject categories=$categories targets=$targets" >> "$LOG"
+      # run サマリ: Reviewer reject（独立 context で起動し verdict 取得 / Req 3.1, 3.2, 3.3）
+      rs_record_reviewer independent reject "$round"
       return 1
       ;;
     *)
       rv_log "round=$round result=error reason=unknown-result" >> "$LOG"
+      # run サマリ: Reviewer degraded（RESULT 欠落で verdict 取得不能 / Req 3.4）
+      rs_record_reviewer degraded "" "$round"
       return 2
       ;;
   esac
@@ -4520,6 +4533,11 @@ verify_stagec_pr_or_retry() {
 mark_issue_failed() {
   local stage="$1"
   local extra_body="$2"
+
+  # run サマリ: 最終遷移を claude-failed として記録（Req 7.1, 7.2）。変数代入のみの副作用で
+  # ラベル遷移 / exit code / 既存ログ行に影響しない（NFR 1.1, 1.2）。REQUIRED_MODULES で
+  # run-summary.sh が source 済みのため bare 呼び出し（task 5 learning 準拠 / set -e 安全）。
+  rs_set_result claude-failed
 
   # Issue #52: 通常経路では Stage A 開始時点で Issue は claude-picked-up のみ持つ
   # （Slot Runner が Triage 通過時に claude-claimed → claude-picked-up に付け替え済）。
@@ -4808,9 +4826,15 @@ run_impl_pipeline() {
       if [ "$_pt_loop_enabled" = "true" ]; then
         echo "--- Stage A 実行（$MODE / per-task loop / PER_TASK_LOOP_ENABLED=true）---" >> "$LOG"
         if ! run_per_task_loop; then
+          # run サマリ: Stage A は実行された（claude-failed 終端でも stage は走った / Req 2.1）。
+          rs_record_stage A
+          rs_scan_degraded_log "$LOG"
           # run_per_task_loop 内で claude-failed 付与済 / 既に Issue コメント済。
           return 1
         fi
+        # run サマリ: Stage A（per-task loop）実行を記録し degraded 兆候を反映（Req 2.1, 6.x）。
+        rs_record_stage A
+        rs_scan_degraded_log "$LOG"
         # ── per-task 全 task 完了ゲート (#194) ──
         # `run_per_task_loop` の `return 0` は「全 task 消化成功」と「quota 超過等による
         # 中間早期 return」の双方を含むため、戻り値 0 だけでは全 task 完了を保証できない。
@@ -4922,6 +4946,10 @@ run_impl_pipeline() {
             --output-format stream-json \
             --verbose \
             >> "$LOG" 2>&1 || _qa_rc_a=$?
+        # run サマリ: Stage A（通常 Developer 経路）実行を記録し degraded 兆候を反映
+        # （quota 99 / 失敗 * でも claude 起動は試みられたため stage は走った / Req 2.1, 6.x）。
+        rs_record_stage A
+        rs_scan_degraded_log "$LOG"
         case "$_qa_rc_a" in
           0)
             # Issue #106 Req 1: Stage A 成功宣言の前にローカル HEAD が origin に到達しているか
@@ -5037,6 +5065,9 @@ run_impl_pipeline() {
           --output-format stream-json \
           --verbose \
           >> "$LOG" 2>&1 || _qa_rc_bl=$?
+      # run サマリ: Stage A'（BLOCKED 経路 Developer 再起動）実行を記録（Req 2.1, 6.x）。
+      rs_record_stage "A'"
+      rs_scan_degraded_log "$LOG"
       case "$_qa_rc_bl" in
         0)
           rm -f "$_qa_reset_file_bl"
@@ -5091,6 +5122,14 @@ run_impl_pipeline() {
   #         run_impl_pipeline は従来どおり 1（失敗）を返す。
   local _sav_rc=0
   stage_a_verify_run || _sav_rc=$?
+  # ── run サマリ: stage-a-verify 結果記録（#239 task 5 / Req 4.1, 4.2, 4.3） ──
+  # `stage_a_verify_run` が露出する `_SAV_LAST_OUTCOME`（success / skip / disabled /
+  # round1 / round2）を `rs_record_sav` に渡し run サマリの `stage-a-verify=` を確定する。
+  # 戻り値 0 は SUCCESS / SKIPPED / DISABLED を区別できないため outcome 変数を使う。
+  # 変数代入のみの副作用（戻り値常に 0）で `_sav_rc` の case 分岐・ラベル遷移・exit code に
+  # 影響しない（NFR 1.1, 1.2）。run-summary.sh は本体 REQUIRED_MODULES で source 済みのため
+  # task 3 の rs_set_mode と同じく bare 呼び出し（空入力時は no-op で既定 n/a を維持）。
+  rs_record_sav "${_SAV_LAST_OUTCOME:-}"
   case "$_sav_rc" in
     0)
       : ;;  # SUCCESS / SKIPPED / DISABLED → 続行
@@ -5104,6 +5143,10 @@ run_impl_pipeline() {
       # 次回失敗で round=2 → claude-failed に進む。戻り値 3 は呼び出し側で「再 pickup 可能な
       # 保留」として扱われ、虚偽の「claude-failed 付与済み」ログを出さない。
       echo "🔁 #$NUMBER: stage-a-verify 失敗（round=1）→ Developer 差し戻し（claude-picked-up 除去 / 次 tick で再評価）" | tee -a "$LOG"
+      # run サマリ: 最終遷移を hold（保留 = claude-failed を付けず次 tick で再 pickup する
+      # round=1 defer）として記録（design.md L59-60「round=1 defer（保留）」/ Req 7.1）。
+      # 変数代入のみで return 3 の保留契約・ラベル除去・exit code に影響しない（NFR 1.1, 1.2）。
+      rs_set_result hold
       # claude-picked-up を除去して再 pickup 可能化（fail-open: 除去失敗でも保留は維持）。
       stage_a_verify_round1_defer || true
       return 3
@@ -5119,6 +5162,10 @@ run_impl_pipeline() {
     A|B)
       rev_rc=0
       run_reviewer_stage 1 || rev_rc=$?
+      # run サマリ: Stage B（Reviewer round=1）実行を記録し degraded 兆候を反映（Req 2.1, 6.x）。
+      # Reviewer verdict / round の記録は task 6 の責務。ここは stage 記録のみ。
+      rs_record_stage B
+      rs_scan_degraded_log "$LOG"
       case $rev_rc in
         0)
           # Issue #106 Req 3: Stage B (Reviewer round=1 approve) 完了直後に push 状態 verify。
@@ -5161,6 +5208,10 @@ run_impl_pipeline() {
               --output-format stream-json \
               --verbose \
               >> "$LOG" 2>&1 || _qa_rc_aredo=$?
+          # run サマリ: Stage A'（Reviewer reject 差し戻し Developer 再実行）実行を記録
+          # （Req 2.1, 6.x）。
+          rs_record_stage "A'"
+          rs_scan_degraded_log "$LOG"
           case "$_qa_rc_aredo" in
             0)
               # Issue #106 Req 2: Stage A' 成功宣言の前にローカル HEAD が origin に到達して
@@ -5201,6 +5252,10 @@ run_impl_pipeline() {
           # ── Stage B (round=2): Reviewer 最終回 ──
           rev_rc=0
           run_reviewer_stage 2 || rev_rc=$?
+          # run サマリ: Stage B'（Reviewer round=2 最終回）実行を記録し degraded 兆候を反映
+          # （Req 2.1, 6.x）。Reviewer verdict / round の記録は task 6 の責務。
+          rs_record_stage "B'"
+          rs_scan_degraded_log "$LOG"
           case $rev_rc in
             0)
               # Issue #106 Req 3: Stage B (Reviewer round=2 approve) 完了直後の push 状態 verify。
@@ -5343,6 +5398,12 @@ run_impl_pipeline() {
 2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
 3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
                     mark_issue_failed "reviewer-reject3" "$reject_body3"
+                    # run サマリ: Reviewer reject による差し戻しループ打ち切り終端を
+                    # needs-iteration として記録（Req 7.1）。mark_issue_failed が記録した
+                    # claude-failed を、Reviewer 判定起因の終端として needs-iteration に
+                    # 上書きする（design.md result enum / tasks.md task 6 を正本とする）。
+                    # 変数代入のみで claude-failed ラベル遷移・exit code は不変（NFR 1.1, 1.2）。
+                    rs_set_result needs-iteration
                     return 1
                     ;;
                   *)
@@ -5376,6 +5437,12 @@ run_impl_pipeline() {
 2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
 3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
                 mark_issue_failed "reviewer-reject2" "$reject_body"
+                # run サマリ: Reviewer 2 回連続 reject による差し戻しループ打ち切り終端を
+                # needs-iteration として記録（Req 7.1）。mark_issue_failed が記録した
+                # claude-failed を、Reviewer 判定起因の終端として needs-iteration に
+                # 上書きする（design.md result enum / tasks.md task 6 を正本とする）。
+                # 変数代入のみで claude-failed ラベル遷移・exit code は不変（NFR 1.1, 1.2）。
+                rs_set_result needs-iteration
                 return 1
               fi
               ;;
@@ -5439,6 +5506,11 @@ run_impl_pipeline() {
       --output-format stream-json \
       --verbose \
       >> "$LOG" 2>&1 || _qa_rc_c=$?
+  # run サマリ: Stage C（PjM / PR 作成）実行を記録し degraded 兆候を反映（Req 2.1, 6.x）。
+  # 既存 PR ガード（stage_c_existing_pr_guard）で PjM 起動前に early return したケースでは
+  # PjM が走らないため本行に到達せず Stage C は記録されない（実際に走った stage のみ / Req 2.1）。
+  rs_record_stage C
+  rs_scan_degraded_log "$LOG"
   case "$_qa_rc_c" in
     0)
       # Issue #104 Bug 3 / Req 4.1〜4.4: claude RC=0 + quota 検出なし時点では
@@ -5457,6 +5529,9 @@ run_impl_pipeline() {
         # Req 4.3 / Issue #108 Req 3.4 / Issue #110 Req 3.6: 主経路 1 回目即時成功
         # でも代替経路救済でも、呼び出し側の成功ログは共通（外形互換）
         echo "✅ #$NUMBER: Stage C 完了 / PR 作成済み (${_stagec_pr_url})" | tee -a "$LOG"
+        # run サマリ: Stage C 成功（impl PR 作成 → ready-for-review へ向かう終端 / Req 7.1）。
+        # 変数代入のみで PR 作成 / ラベル遷移 / exit code に影響しない（NFR 1.1, 1.2）。
+        rs_set_result ready-for-review
         # ── spec 成果物完全性保証 (#219 Req 3 / 4) ──
         # Stage C で新規 impl PR を作った通常成功ケースも通過点として完全性を最終確認する。
         # 標準構成を満たしていれば追加処理なしで return 0（design-full impl の通常成功は
@@ -5908,6 +5983,10 @@ slot_error() {
 _slot_mark_failed() {
   local stage="$1"
   local extra="$2"
+  # run サマリ: 最終遷移を claude-failed として記録（Req 7.1, 7.2）。worktree / Hook / Triage
+  # 失敗等の早期終端からも呼ばれるが、_slot_run_issue 冒頭で rs_init 済（task 2 配線）。変数
+  # 代入のみで既存ラベル遷移 / exit code / 既存ログ行に影響しない（NFR 1.1, 1.2 / set -e 安全）。
+  rs_set_result claude-failed
   gh issue edit "$NUMBER" --repo "$REPO" \
     --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" >/dev/null 2>&1 || true
   local hostname_val
@@ -6826,6 +6905,16 @@ _slot_run_issue() {
 
   slot_log "Worker 起動 (LOG=$LOG SLOT_LOG=$SLOT_LOG)"
 
+  # ── per-run evidence サマリの初期化と終端 emit 配線（#239 / Req 1.1, 1.3, 1.5） ──
+  # rs_init で per-slot 状態変数を既定値にし、Issue 番号を確定。EXIT trap は本サブシェル
+  # スコープローカルであり、dispatcher トップレベルの INT/TERM trap とは別境界（trap は
+  # サブシェルでリセットされる）。worktree-ensure 失敗等の早期 return / set -e 異常終了 /
+  # 正常 return のいずれの終端でも 1 回だけ rs_emit が発火し run-summary 行を 1 行吐く。
+  # fail-open（|| true）で emit 失敗がサブシェルの exit code を変えない（NFR 4.1）。
+  rs_init
+  rs_set_issue "$NUMBER"
+  trap 'rs_emit || true' EXIT
+
   # ── Worktree 初期化（per-slot 永続 worktree）──
   local WT
   WT="$(_worktree_path "$IDD_SLOT_NUMBER")"
@@ -6971,10 +7060,12 @@ _slot_run_issue() {
   if $HAS_EXISTING_SPEC; then
     echo "✅ #$NUMBER: 設計レビュー済み（spec dir あり） → impl-resume モード" | tee -a "$LOG"
     MODE="impl-resume"
+    rs_set_mode impl-resume
   elif echo "$LABELS" | grep -qx "$LABEL_SKIP_TRIAGE"; then
     echo "skip-triage ラベルがあるため Triage をスキップ → impl モード" | tee -a "$LOG"
     ARCHITECT_REASON="Triage をスキップ（軽微な変更扱い）"
     MODE="impl"
+    rs_set_mode impl
   else
     # ── Dependency Resolver Gate (Issue #146) ──
     # Triage 起動直前に Issue 本文の前提依存（canonical `Depends on:` /
@@ -7107,9 +7198,11 @@ _slot_run_issue() {
 
     if [ "$NEEDS_ARCHITECT" = "true" ]; then
       MODE="design"
+      rs_set_mode design
       echo "🎨 #$NUMBER: Architect 必要 → design モード（理由: $ARCHITECT_REASON）" | tee -a "$LOG"
     else
       MODE="impl"
+      rs_set_mode impl
       echo "✅ #$NUMBER: Triage 通過（Architect 不要） → impl モード" | tee -a "$LOG"
     fi
   fi
