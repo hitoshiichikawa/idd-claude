@@ -28,7 +28,7 @@
   - _Boundary: po_run_flock_skip_visibility_
   - _Depends: 1.1, 2.1_
 
-- [ ] 3. flock skip ブロックに可視化フックを挿入
+- [x] 3. flock skip ブロックに可視化フックを挿入
 - [x] 3.1 `issue-watcher.sh` の flock skip ブロック（578-582 行）を修正
   - 既存スキップログ（`echo "...スキップ"`）は書式不変で残す（Req 6.5）
   - 既存ログ出力後 / `exit 0` 直前に `if [ "${PATH_OVERLAP_CHECK:-off}" = "true" ]; then po_run_flock_skip_visibility || true; fi` を挿入
