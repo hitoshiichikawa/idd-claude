@@ -49,7 +49,7 @@
   - _Boundary: test-flock-skip-visibility.sh_
   - _Depends: 2.2, 3.1_
 
-- [ ] 5. README を更新
+- [x] 5. README を更新
 - [x] 5.1 Path Overlap Checker (Phase E) 節に flock skip 可視化を追記
   - flock skip 経路の可視化サブ節を追加（opt-in / 専用ロック多重起動抑止 / read+label/comment のみ / 経路識別子ログ）
   - 1801-1806 行付近の「別インスタンス稼働（flock skip）時の対象範囲」注記を本機能導入後の挙動へ更新
