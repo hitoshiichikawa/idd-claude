@@ -113,6 +113,8 @@ Reviewer / PjM）は、以下の方針で **内部思考言語と出力言語を
 
 - `shellcheck local-watcher/bin/*.sh install.sh setup.sh .github/scripts/*.sh` — 警告ゼロを目指す
 - `actionlint .github/workflows/*.yml` — workflow YAML の検査
+- `diff -r .claude/agents repo-template/.claude/agents` — root↔repo-template の agents の byte 一致検証（差分が出たら二重管理規約違反。片系統だけ更新したドリフトを検出する）
+- `diff -r .claude/rules repo-template/.claude/rules` — root↔repo-template の rules の byte 一致検証（差分が出たら二重管理規約違反。片系統だけ更新したドリフトを検出する）
 
 ### 手動スモークテスト（変更した成果物ごとに実施）
 
