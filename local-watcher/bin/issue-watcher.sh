@@ -4258,20 +4258,13 @@ verify_pushed_or_retry() {
   fi
 
   if [ "$push_rc" -eq 0 ]; then
-    # ── リトライ成功（Req 4.2, 4.3）──
+    # ── リトライ成功（Req 1.1, 1.2, 1.3, 1.4）──
+    # #248: 成功時の Issue コメント投稿は誤検知ノイズ（ahead>0 は commit-only 設計の
+    # 正常状態）となるため抑止する。監査トレーサビリティは $LOG の単一 info 行に
+    # Issue 番号 / stage 識別子 / branch / 復旧 commit 数を機械可読フィールドとして
+    # 含めて担保する（Req 2.1〜2.4 / NFR 3.1）。「push 漏れ」原因示唆文言は出さない。
     qa_warn "${stage_label} auto-push retry SUCCESS: ahead=${ahead_count} issue=#${NUMBER:-?} branch=${branch} stage_id=${stage_id}"
-    echo "[$(date '+%F %T')] ${stage_label} 自動 push リトライ成功 ahead=${ahead_count} → 継続" >> "$LOG"
-
-    # Issue コメント投稿（NFR 2.2: Issue 番号 / stage 識別子 / branch / commit 数を含める）
-    local comment_body
-    comment_body="⚠️ Issue #${NUMBER:-?} の ${stage_label} 完了直後に未 push commit を検出し、自動 push リトライで復旧しました。
-
-- 対象 stage : \`${stage_id}\`
-- 対象 branch: \`${branch}\`
-- 復旧 commit 数: ${ahead_count}
-
-サブエージェント（Developer / Reviewer）の push 漏れ等が根本原因の可能性があります。詳細は watcher ログ \`${LOG}\` を確認してください。"
-    gh issue comment "${NUMBER}" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1 || true
+    echo "[$(date '+%F %T')] ${stage_label} 自動 push リトライ成功 → 継続 issue=#${NUMBER:-?} stage_id=${stage_id} branch=${branch} recovered_commits=${ahead_count}" >> "$LOG"
 
     if [ -n "$push_stderr_tmp" ]; then rm -f "$push_stderr_tmp" 2>/dev/null || true; fi
     return 0
