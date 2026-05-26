@@ -1,7 +1,7 @@
 # Implementation Plan
 
 - [ ] 1. 可視化専用ロックの config を本体へ追加
-- [ ] 1.1 `issue-watcher.sh` に `PATH_OVERLAP_VISIBILITY_LOCK_FILE` を定義
+- [x] 1.1 `issue-watcher.sh` に `PATH_OVERLAP_VISIBILITY_LOCK_FILE` を定義
   - `LOG_DIR` 定義（370 行付近）より後ろに `PATH_OVERLAP_VISIBILITY_LOCK_FILE="${PATH_OVERLAP_VISIBILITY_LOCK_FILE:-${LOG_DIR}/flock-skip-visibility.lock}"` を追加
   - env override 可能・既定無害値（`PATH_OVERLAP_CHECK=off` 環境では未参照）であることをコメントで明記
   - 既存 env var 名・順序・書式を変更しない（後方互換）
