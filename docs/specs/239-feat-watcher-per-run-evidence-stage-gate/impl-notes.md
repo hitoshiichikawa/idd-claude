@@ -56,3 +56,30 @@
 - **残存課題（次 task に影響する事項）**: なし（task 4 以降の scaffolding / stage / reviewer /
   result の記録差し込みは本 task と独立。`rs_set_mode` の配線完了により mode value は全 4 分岐で
   確定する）。
+
+### Task 4（scaffolding 記録差し込み: core_utils.sh）
+
+- **採用方針**: `core_utils.sh` に薄いヘルパ `_worktree_record_scaffolding(wt)` を追加し、
+  `_worktree_inject_claude` の 4 つの return パス直前に 1 行ずつ差し込んで `rs_set_scaffolding ok|missing`
+  を記録する。
+- **重要な判断**:
+  - 注入元 `.claude/` 不在 / cp 失敗の rm 後はいずれも両 dir 不在 → missing、tracked 運用 / cp 成功は
+    実体を見て判定するため、worktree の `$wt/.claude/{agents,rules}` 両 dir 実体判定を 4 パス共通で
+    使う（既存 scaffolding 検査結果の流用 / Req 5.3）。これで 4 return パスすべてで正しい結果になる。
+  - `command -v rs_set_scaffolding` の fail-open ガードで run-summary.sh 未 source の文脈でも注入処理を
+    倒さない（NFR 4.1）。`set -e` 下でも `rs_set_scaffolding ... || true` と常時 `return 0` で吸収。
+  - `rs_set_scaffolding` は run サマリ用の状態変数代入のみで標準出力に何も足さないため、既存
+    slot_log / slot_warn の文言・cp / rm の挙動・順序・戻り値・exit code は不変（NFR 1.1, 1.2）。
+- **残存課題（次 task=5/6 に影響する事項）**: なし（scaffolding 記録は stage / sav / reviewer / result の
+  記録差し込みと独立。本 task で `RUN_SUMMARY_SCAFFOLDING` は全注入経路で ok/missing に確定する）。
+
+## 受入基準カバレッジ（task 4 範囲）
+
+- **Req 5.1 / 5.2（scaffolding 有無の記録）**: `_worktree_record_scaffolding` が `$wt/.claude/agents`
+  `$wt/.claude/rules` 両 dir 実体を判定し `rs_set_scaffolding ok|missing` を記録。一時 worktree で
+  両 dir あり→ok / 片方のみ→missing / `.claude` 不在→missing を smoke test で確認済み。
+- **Req 5.3（既存 scaffolding 検査結果の流用）**: 4 return パス共通の dir 実体判定で流用。
+- **NFR 1.2（既存挙動非変更）**: 記録は変数代入のみで slot_log / slot_warn / cp / rm の挙動・戻り値不変。
+- **NFR 4.1（fail-open）**: `command -v` ガードで run-summary.sh 未 source 時も rc=0 を smoke test で確認済み。
+
+STATUS: complete
