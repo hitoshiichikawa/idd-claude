@@ -878,6 +878,160 @@ po_check_dispatch_gate() {
   return 0  # claim 続行
 }
 
+# ─── #243: flock skip 経路 path-overlap 可視化 — 候補評価コア ───
+# 1 候補について read-only の overlap 評価を行い、検出時 apply / 解消時 clear を呼ぶ。
+# po_check_dispatch_gate の overlap 判定部分（809-878 行）と同一の関数・引数・規約を
+# 用い、評価ロジックの分岐を作らない（Req 7.1 / 7.2）。dispatch 固有の return（0=続行
+# / 1=skip）は持たず、戻り値は呼び出し側の warn 判定にのみ使う。
+#
+# claim / dispatch / worktree・slot・dispatch ロックを取得せず、状態変更は
+# awaiting-slot ラベルと sticky comment の付与・除去・更新のみ（read＋label/comment）。
+#
+# Args: $1 = candidate issue number, $2 = candidate labels JSON
+# Preconditions: cd "$REPO_DIR" 済み、可視化専用 flock 保持中。
+# Return: 0 = 評価完了 / 1 = 評価中に警告（呼び出し側が warn ログを出す）
+po__visibility_evaluate_candidate() {
+  local candidate="$1"
+  local labels_json="$2"
+
+  # 候補の edit_paths を sticky から読む（marker 不在は空配列扱い / Req 7.1）
+  local cand_paths
+  cand_paths=$(po_load_edit_paths "$candidate")
+
+  # dispatch 文脈と同一の holder ラベル集合を解決する（通常経路と同一規約 / Req 7.1）。
+  # multi-branch（gitflow）運用では staged-for-release を除外、single-branch / 判定不能
+  # では full 集合（fail-safe）。
+  local holder_labels
+  holder_labels=$(po_resolve_holder_labels "dispatch")
+
+  # in-flight union + holders map を read-only で取得（Req 2.3 / 7.1）。失敗時は
+  # 当該候補のみ skip して warn 判定へ返す（fail-open / NFR 3.2）。
+  local inflight_obj
+  if ! inflight_obj=$(po_collect_inflight_issues "$candidate" "$holder_labels"); then
+    return 1
+  fi
+  local inflight_paths inflight_holders
+  inflight_paths=$(echo "$inflight_obj" | jq -c '.union // []' 2>/dev/null || echo '[]')
+  inflight_holders=$(echo "$inflight_obj" | jq -c '.holders // {}' 2>/dev/null || echo '{}')
+
+  # overlap 計算（通常経路と同一 / Req 7.1）
+  local overlap overlap_count
+  overlap=$(po_compute_overlap "$cand_paths" "$inflight_paths")
+  overlap_count=$(echo "$overlap" | jq 'length' 2>/dev/null || echo 0)
+
+  # 現状の awaiting-slot ラベル付与状態（既存 labels_json から抽出）
+  local has_awaiting
+  has_awaiting=$(echo "$labels_json" \
+    | jq -r --arg lbl "$LABEL_AWAITING_SLOT" \
+        '[.[].name] | index($lbl) // empty' 2>/dev/null || echo "")
+
+  if [ "$overlap_count" -gt 0 ]; then
+    # overlap 検出ログ（候補番号・overlap path を識別可能に出力 / NFR 4.1）→
+    # awaiting-slot 付与（未付与時のみ / Req 1.2 / 1.3 / 5.3）。通常経路と同一の
+    # sticky comment 出力形式（marker awaiting-slot:v1 の冪等更新 / Req 5.1 / 5.2 / 7.2）。
+    local overlap_holders_map holders_for_log paths_for_log
+    overlap_holders_map=$(po_resolve_overlap_holders "$overlap" "$inflight_holders")
+    holders_for_log=$(po_format_holders_for_log "$overlap_holders_map")
+    paths_for_log=$(echo "$overlap" | jq -r 'join(",")')
+    if [ -n "$holders_for_log" ]; then
+      po_log "route=flock-skip overlap detected candidate=#${candidate} paths=${paths_for_log} holders=${holders_for_log}"
+    else
+      po_log "route=flock-skip overlap detected candidate=#${candidate} paths=${paths_for_log} holders=-"
+    fi
+    if [ -z "$has_awaiting" ]; then
+      if ! po_apply_awaiting_slot "$candidate" "$overlap" "$overlap_holders_map"; then
+        po_warn "route=flock-skip issue=#${candidate} awaiting-slot 付与 / コメント投稿に失敗（次サイクルで再評価）"
+        return 1
+      fi
+    fi
+    return 0
+  fi
+
+  # overlap 空: 既付与なら自然解消（通常サイクルと共有の clear / Req 3.1）
+  if [ -n "$has_awaiting" ]; then
+    if ! po_clear_awaiting_slot "$candidate"; then
+      po_warn "route=flock-skip issue=#${candidate} awaiting-slot 除去に失敗（次サイクルで再試行）"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# ─── #243: flock skip 経路 path-overlap 可視化 — オーケストレータ ───
+# flock skip コンテキストで dispatch を伴わない path-overlap 可視化パスを 1 サイクル
+# 実行する。専用 flock 取得 → 候補列挙（claim 除外）→ 候補ごとに既存 po_* で overlap
+# 評価 → awaiting-slot＋sticky comment 付与（overlap あり）/ 除去（overlap なし & 既付与）。
+#
+# claim / dispatch / worktree・slot・dispatch ロックを取得しない（Req 2.1 / 2.2）。
+# 状態変更操作はラベル付与・除去・sticky comment の post/update のみ（read＋label/comment）。
+# 必ず return 0（呼び出し側の set -e 下でも watcher を異常終了させない / NFR 3.2 / NFR 1.1）。
+#
+# Args: なし（global $REPO / $REPO_DIR / $LOG_DIR / $PATH_OVERLAP_CHECK /
+#       $PATH_OVERLAP_VISIBILITY_LOCK_FILE / $LABEL_* / $BASE_BRANCH /
+#       $PROMOTION_TARGET_BRANCH に依存）。
+# Stdout/Stderr: po_log / po_warn による 1 行ログ（経路識別子 route=flock-skip を含む）。
+# Return: 0 always
+po_run_flock_skip_visibility() {
+  # ① opt-in gate（二重防御 / Req 6.1）。呼び出し側でも gate するが fail-safe に再確認。
+  [ "${PATH_OVERLAP_CHECK:-off}" = "true" ] || return 0
+
+  # ② 可視化専用 flock を別 fd（201）+ 別ファイルで非ブロッキング取得（Req 2.2 / 4.1）。
+  #    本サイクルの $LOCK_FILE（fd 200）とは別ファイル・別 fd で取得し、worktree / slot /
+  #    dispatch ロックは一切取得しない。
+  local lock_file="${PATH_OVERLAP_VISIBILITY_LOCK_FILE:-${LOG_DIR}/flock-skip-visibility.lock}"
+  if ! exec 201>"$lock_file" 2>/dev/null; then
+    po_warn "route=flock-skip 専用ロックファイルを開けません lock=${lock_file}"
+    return 0
+  fi
+  if ! flock -n 201; then
+    # 別の可視化パスが進行中（多重起動抑止 / Req 4.1）。抑止事実を識別可能ログで残す（Req 4.2）。
+    po_log "route=flock-skip visibility skipped (別の可視化パスが進行中 lock=${lock_file})"
+    exec 201>&- 2>/dev/null || true
+    return 0
+  fi
+
+  # ③ po_* の cwd 前提を満たす最小初期化（Req 2.4 / po_* 再利用）。失敗しても異常終了させない。
+  if ! cd "$REPO_DIR" 2>/dev/null; then
+    po_warn "route=flock-skip REPO_DIR へ cd 失敗 dir=${REPO_DIR}"
+    exec 201>&- 2>/dev/null || true
+    return 0
+  fi
+
+  po_log "route=flock-skip path-overlap visibility 開始"   # NFR 4.2 経路識別子
+
+  # ④ auto-dev 候補列挙（claim ラベル除外 = 本サイクル処理中 Issue を触らない / Req 2.4）。
+  #    重要: _dispatcher_run の search_filter / DISPATCH_LIMIT は同関数の local 変数で本関数
+  #    からは見えないため、同等の除外句・limit を本関数内で自前再構築する（既存 search_filter
+  #    に変更を加えず安全側）。除外集合に処理中ラベル（claude-claimed / claude-picked-up）と
+  #    既存 dispatcher の除外集合を必ず含めることで Req 2.4 を構造的に保証する。
+  local vis_search_filter
+  vis_search_filter="-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_STAGED_FOR_RELEASE\" -label:\"$LABEL_BLOCKED\""
+  local vis_limit=5
+  local candidates_json
+  if ! candidates_json=$(gh issue list --repo "$REPO" --label "$LABEL_TRIGGER" --state open \
+      --search "$vis_search_filter sort:created-asc" \
+      --json number,labels --limit "$vis_limit" 2>/dev/null); then
+    po_warn "route=flock-skip auto-dev 候補列挙に失敗（本サイクルの可視化を skip）"   # NFR 3.2
+    exec 201>&- 2>/dev/null || true
+    return 0
+  fi
+
+  # ⑤ 候補ごとに既存 po_* で overlap 評価（通常経路と同一規約 / Req 7.1）。
+  #    各候補の警告は warn ログして後続候補を継続する（fail-open / NFR 3.2）。
+  local issue candidate labels_json
+  while IFS= read -r issue; do
+    [ -z "$issue" ] && continue
+    candidate=$(echo "$issue" | jq -r '.number')
+    labels_json=$(echo "$issue" | jq -c '.labels')
+    po__visibility_evaluate_candidate "$candidate" "$labels_json" \
+      || po_warn "route=flock-skip issue=#${candidate} 可視化評価で警告（後続候補は継続）"
+  done < <(echo "$candidates_json" | jq -c '.[]')
+
+  # ⑥ 専用 flock 解放
+  exec 201>&- 2>/dev/null || true
+  return 0
+}
+
 # pp_resolve_target_branch: `PROMOTION_TARGET_BRANCH` のリモート存在を検証し、
 # `BASE_BRANCH` と異なることを確認する（Req 1.1.3, 1.2.2）。
 # 戻り値: 0 = 検証 OK / 1 = 中止すべき状態
