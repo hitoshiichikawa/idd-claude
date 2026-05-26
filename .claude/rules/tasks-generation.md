@@ -177,6 +177,14 @@ verify すべき build/test/lint コマンドが存在しない spec（純ドキ
 SKIPPED の順に fallback します（解決順序の詳細は README「Stage A Verify Gate (#125)」節を参照）。
 構造化ブロックを持たない既存 spec は従来どおりヒューリスティック / env 経路で動作します（後方互換）。
 
+なお、`design` モードを経由せず Architect が `tasks.md` を生成しない **design-less impl**
+（tasks.md 不在。#204 等）は、構造化ブロック / ヒューリスティック抽出の入力となる `tasks.md`
+自体が存在しないため stage-a-verify gate の **対象外（SKIP）**となります。これは未実装の
+取りこぼしではなく「watcher は verify コマンドを推測しない」設計思想（#224 / #228 / #230）に
+基づく **意図された仕様**であり、design-less impl の regression は Developer が実行するテストと
+Reviewer の AC 判定で担保します（詳細は README「Stage A Verify Gate (#125)」節の
+「design-less impl（tasks.md 不在）は gate 対象外」を参照）。
+
 ## 参考
 
 - [cc-sdd `tasks.md` テンプレート](https://github.com/gotalab/cc-sdd/blob/main/.kiro/settings/templates/specs/tasks.md)

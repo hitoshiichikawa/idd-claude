@@ -477,6 +477,13 @@ _sav_reset_resolved_source() {
 # （NFR 1.1）。design-less impl（tasks.md 不在）は第 1/第 3 段が return 1 となり、結果として
 # 既存の env→SKIPPED 順序に一致する（Req 2.5）。
 #
+# design-less impl（tasks.md 不在）の SKIPPED は未実装の取りこぼしではなく、
+# 「watcher は verify コマンドを推測しない」設計思想（#224 / #228 / #230）に基づく
+# 意図された仕様である。tasks.md を持たない design-less impl で verify を推測すると
+# 散文誤認事故（#160 / #219 / #221）と同根の問題に逆戻りするため、推測せず SKIP する。
+# regression は Developer のテストと Reviewer の AC 判定で担保する（README「Stage A
+# Verify Gate (#125)」節参照）。
+#
 # 入力: 環境変数 STAGE_A_VERIFY_COMMAND / REPO_DIR / SPEC_DIR_REL
 # 戻り値: 0 = 解決成功 / 1 = SKIPPED（いずれの手段でも解決不能）
 # stdout: 解決した shell コマンド（成功時のみ。構造化ブロック由来は複数行を改行込みで保持）
@@ -680,6 +687,8 @@ stage_a_verify_run() {
   fi
 
   # ── Gate 2: SKIPPED（解決できない / 一致なし）──
+  # design-less impl（tasks.md 不在）は resolve の全段が解決失敗となりここで SKIPPED に倒れる。
+  # これは意図された仕様であり（#230）、round counter を増やさず Stage A を続行する。
   local cmd
   if ! cmd=$(stage_a_verify_resolve_command); then
     sav_log "SKIPPED reason=no-verify-task-in-tasks-md"
