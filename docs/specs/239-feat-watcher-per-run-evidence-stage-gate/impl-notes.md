@@ -39,3 +39,20 @@
   - task 3（mode 記録）/ task 4（scaffolding）/ task 5（stage・sav）/ task 6（reviewer・result）の
     各観測点で `rs_*` 記録呼び出しを差し込む際、本 task で EXIT trap は既に張られている前提を
     使える（記録呼び出しは変数代入のみで、emit は終端で自動発火）。trap 自体の再設置は不要。
+
+### Task 3（mode 確定箇所への `rs_set_mode` 記録差し込み）
+
+- **採用方針**: `_slot_run_issue` の MODE 確定 4 分岐（impl-resume / skip-triage→impl /
+  design / impl）の `MODE="..."` 代入直後に `rs_set_mode <mode>` を 1 行ずつ追加するのみ。
+- **重要な判断**:
+  - 差し込み位置は `MODE=` 代入の直後（既存ログ `echo ... | tee -a "$LOG"` より前後どちらでも
+    挙動は同じだが、design 分岐は代入直後・他 3 分岐も代入直後に統一して可読性を確保）。
+    `MODE=""`（L6909 初期化）には差し込まない（4 分岐の確定値のみ記録 / mode=unknown 既定は
+    全分岐をすり抜けた場合のフェイルセーフとして温存）。
+  - design モードは `rs_set_mode design` のみ記録し reviewer 系は一切触れない。これにより
+    `rs_init` の既定 `reviewer=n/a` が維持される（Req 3.5）。
+  - 変数代入のみの副作用で戻り値常に 0。既存のラベル遷移 / exit code / 既存ログ行に影響なし
+    （NFR 1.2）。shellcheck クリーン（新規警告ゼロ）を確認。
+- **残存課題（次 task に影響する事項）**: なし（task 4 以降の scaffolding / stage / reviewer /
+  result の記録差し込みは本 task と独立。`rs_set_mode` の配線完了により mode value は全 4 分岐で
+  確定する）。
