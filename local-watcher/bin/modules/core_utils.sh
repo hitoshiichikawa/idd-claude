@@ -6,7 +6,7 @@
 #   - processor 系の低レベルロガー（qa_log / mq_log / ar_log / pp_log / pi_log / drr_log 系）
 #   - 日付フォーマット取得（qa_format_iso8601）
 #   - per-slot git worktree 管理（_worktree_path / _worktree_is_registered /
-#     _worktree_ensure / _worktree_reset）
+#     _worktree_ensure / _worktree_reset / _worktree_inject_claude）
 #   - per-slot 非ブロッキング flock 管理（_slot_lock_path / _slot_acquire / _slot_release）
 #   - SLOT_INIT_HOOK 起動 wrapper（_hook_invoke）
 #
@@ -236,6 +236,63 @@ _worktree_reset() {
   if ! git -C "$wt" clean -fdx >/dev/null 2>&1; then
     return 1
   fi
+  return 0
+}
+
+# gitignore 運用 repo 向けに、worktree reset 直後の slot worktree へ
+# REPO_DIR のローカル `.claude/` を注入する（Issue #237）。
+#
+# 背景:
+#   `.claude/` を gitignore して足場を public repo に出さない運用 repo では、
+#   `.claude/` が commit されないため _worktree_reset の `git reset --hard` +
+#   `git clean -fdx` 後の worktree に `.claude/agents` `.claude/rules` が現れず、
+#   agent がルール・定義を読めない degraded 状態になる。本関数は reset 完了後・
+#   agent 起動前のタイミングで REPO_DIR（install.sh が `.claude/` を最新化した
+#   ローカルクローン）から worktree へ `.claude/` をコピーして健全化する。
+#
+# 採用方式: auto-detect（worktree に `.claude/` が無い場合のみ注入）。
+#   - tracked 運用 repo は `.claude/` が commit 済み → reset 後 worktree に必ず
+#     存在 → 注入は走らず NO-OP（Req 2.1 / 2.3）。env gate を持たないが、
+#     auto-detect により tracked 運用 repo の挙動は外形的に不変（Req 2.4）。
+#   - これはローカルファイルコピーであり外部サービス呼び出しではないため、
+#     opt-in gate は不要（CLAUDE.md「opt-in gate なしで新しい外部サービス
+#     呼び出しを有効化」禁止事項の対象外）。
+#
+# 引数:
+#   $1 = 注入元 REPO_DIR（_slot_run_issue で REPO_DIR が worktree へ上書きされる
+#        前に捕捉した元の REPO_DIR）
+#   $2 = 注入先 worktree 絶対パス
+# 戻り値: 常に 0（fail-open。注入失敗で _slot_run_issue を倒さない / Req 3.2, 3.3）
+# 副作用: 条件成立時に $2/.claude を $1/.claude の内容で作成する（commit はしない）
+#
+# Req 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 3.3, 4.1, 4.2, 4.3, 4.4, NFR 3.1
+_worktree_inject_claude() {
+  local src_repo_dir="$1"
+  local wt="$2"
+
+  # NO-OP 条件 1（Req 2.1）: worktree に既に `.claude/` がある = tracked 運用 repo。
+  # 上書きせず即 return（auto-detect による既存挙動非変更 / 冪等性 Req 4.1 も担保）。
+  if [ -e "$wt/.claude" ]; then
+    return 0
+  fi
+  # NO-OP 条件 2（Req 2.2）: 注入元 REPO_DIR に `.claude/` が無い → 何もしない。
+  if [ ! -d "$src_repo_dir/.claude" ]; then
+    return 0
+  fi
+
+  # `.claude/` のみをコピーする（Req 4.2 / 4.4: 他 tracked / untracked ファイルや
+  # `.github/scripts/idd-claude-labels.sh` を巻き込まない）。
+  # `cp -a` で mode / timestamps / symlink を保持（Req 4 / rsync は依存 CLI 保証外）。
+  if cp -a "$src_repo_dir/.claude" "$wt/" 2>/dev/null; then
+    slot_log ".claude を REPO_DIR から worktree へ注入 (src=$src_repo_dir/.claude)"
+    return 0
+  fi
+
+  # fail-open（Req 3.1, 3.2, 3.3）: コピー失敗時は warn のみ出して継続する。
+  # 中途半端にコピーされた `.claude/` が残ると次回 auto-detect が NO-OP 化して
+  # 不完全状態を温存しうるため、ベストエフォートで除去してから継続する。
+  rm -rf "$wt/.claude" 2>/dev/null || true
+  slot_warn ".claude の注入に失敗しました（継続します / src=$src_repo_dir/.claude）"
   return 0
 }
 

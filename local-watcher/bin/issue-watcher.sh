@@ -6792,6 +6792,11 @@ _slot_run_issue() {
     return 1
   fi
 
+  # Issue #237: REPO_DIR を worktree へ上書きする「前」に、注入元となる元の
+  # REPO_DIR（install.sh が `.claude/` を最新化したローカルクローン）を捕捉する。
+  # _worktree_inject_claude はこの元 REPO_DIR の `.claude/` を worktree へコピーする。
+  local SRC_REPO_DIR="$REPO_DIR"
+
   # Issue #76: slot worktree が REPO_DIR の意味を担う。サブシェル内で上書きするため
   # parent cron / launchd 側の REPO_DIR には伝播せず、後段の parse_review_result /
   # stage_checkpoint_* / `git -C "$REPO_DIR"` 系すべてが slot worktree を参照するようになる。
@@ -6805,6 +6810,14 @@ _slot_run_issue() {
     return 1
   fi
   slot_log "worktree reset OK (origin/${BASE_BRANCH} 最新化 + clean -fdx)"
+
+  # ── gitignore 運用 repo 向け `.claude/` 注入（reset 完了後・hook / agent 起動前）──
+  # Issue #237: worktree に `.claude/` が無い（= gitignore 運用 repo）場合のみ、
+  # 元 REPO_DIR の `.claude/` を worktree へ注入して agent runtime を健全化する。
+  # tracked 運用 repo は worktree に `.claude/` があるため NO-OP（既存挙動不変）。
+  # fail-open のため _worktree_inject_claude は常に 0 を返し、注入失敗で
+  # claude-failed へ遷移させない（Req 3.2, 3.3）。
+  _worktree_inject_claude "$SRC_REPO_DIR" "$WT"
 
   # ── SLOT_INIT_HOOK 起動（reset 後・claude 起動前に 1 度だけ）──
   if ! _hook_invoke "$IDD_SLOT_NUMBER" "$WT"; then
