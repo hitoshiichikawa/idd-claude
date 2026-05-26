@@ -39,7 +39,7 @@
   - _Depends: 2.2_
 
 - [ ] 4. スモークテスト fixture/script を追加
-- [ ] 4.1 `test-fixtures/test-flock-skip-visibility.sh` を作成
+- [x] 4.1 `test-fixtures/test-flock-skip-visibility.sh` を作成
   - mock gh 環境で opt-in gate（off/未設定/不正値で gh を呼ばず return 0）を検証
   - 同一 lock file を保持する別プロセス下で `flock -n` 失敗 → 抑止ログ + return 0 を検証
   - 候補列挙クエリに `claude-claimed` / `claude-picked-up` 除外句が含まれることを検証（Req 2.4）
