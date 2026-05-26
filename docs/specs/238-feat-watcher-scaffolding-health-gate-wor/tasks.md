@@ -64,7 +64,7 @@
   - _Boundary: issue-watcher.sh, scaffolding-health.sh_
   - _Depends: 3.1_
 
-- [ ] 4. README を更新し挙動変更を二重管理として反映
+- [x] 4. README を更新し挙動変更を二重管理として反映
 - [x] 4.1 README に Scaffolding Health Gate / doctor の節と env を追記
   - 「オプション機能（標準有効 / 常時有効）一覧」節に `SCAFFOLDING_HEALTH_HALT`（既定 `off`=可視化
     のみ）を追記
