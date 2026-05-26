@@ -182,6 +182,7 @@ Reviewer / PjM）は、以下の方針で **内部思考言語と出力言語を
 - **`idd-claude-labels.sh` のラベルセット**: ラベル追加は OK、既存ラベル削除 / 名前変更は deprecation 期間を経てから
 - **モデル ID デフォルト更新**: 既存ユーザが明示 override している前提で、env default のみ更新
 - **README との二重管理**: 挙動を変えたら必ず README の該当箇所も同じ PR で更新する
+- **root `.claude/{agents,rules}/` と `repo-template/.claude/{agents,rules}/` の二重管理**: 両者は別系統（root = idd-claude self-hosting が使用 / `repo-template/` = `install.sh --repo` で consumer repo に配布）。片方だけ更新すると **consumer に変更が届かない**か **idd-claude 自身が古い規約で動く**ドリフトが発生する（実例: #224 の構造化 verify ブロック規約・architect.md が root のみ更新で consumer 未配布／per-task ループ・BLOCKED 規約が repo-template のみで root の Developer・Reviewer に欠落）。`.claude/agents/*.md` / `.claude/rules/*.md` を変更したら **同一 PR で両系統に byte 一致で反映する**こと（逆方向も同様）。agents の base ブランチ参照は両系統とも `<BASE_BRANCH>` プレースホルダに統一し、root にも具体値 `main` を焼き込まない（orchestrator が解決値を prompt の `Compared to:` ヘッダで渡すため idd-claude でも正しく動く）。反映後に `diff -r .claude/agents repo-template/.claude/agents` と `diff -r .claude/rules repo-template/.claude/rules` が空であることを確認する。**CLAUDE.md / README は consumer 固有内容を持つため本規約の対象外**（それぞれ root 用 / `repo-template/` 用に内容が異なってよい）
 - **Phase B Promote Pipeline (#15)**: `PROMOTE_PIPELINE_ENABLED=true` の **明示的 opt-in 制**で、未設定 / `false` の場合は導入前と完全に同一の挙動を保つ。2-branch model（`BASE_BRANCH != PROMOTION_TARGET_BRANCH`）でのみ起動する。`staged-for-release` ラベルは #100 の人間付与運用と同一ラベルを共有し、source 区別はしない。revert / promote はすべて `--force-with-lease` または fast-forward 限定で `--force`（無条件）は使わない
 
 ---
