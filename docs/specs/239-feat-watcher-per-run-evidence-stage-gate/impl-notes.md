@@ -134,6 +134,26 @@
   fixture は `rs_record_reviewer independent approve 1` / `degraded "" 1` / `rs_set_result needs-iteration` 等を
   source 直接呼びで検証する想定で、本 task の本体配線に依存しない）。
 
+### Task 7（README 更新: grep 例 + オプション機能一覧）
+
+- **採用方針**: README の既存記述は追記のみ（NFR 1.1）。「複数リポ運用時の cron.log grep 例」節に
+  `run-summary:` 専用サブ節（出力例 / 全件 grep / degraded grep / 8 key の enum 表）を追加し、
+  「オプション機能一覧」の「デフォルト有効」テーブル末尾に `RUN_SUMMARY_ENABLED` 行を 1 行追加。
+- **重要な判断**:
+  - `RUN_SUMMARY_ENABLED` の正規化規則は #112 系 8 種の「`=false` 厳密一致のみ無効」とは**異なり**、
+    lowercase の `false`/`0`/`no`/`off` のいずれかで無効化される（それ以外 = 空文字 / `False` /
+    `OFF` / typo はすべて有効）。この差異を「正規化規則」列に明記し、誤って「=false 厳密一致のみ」と
+    書かないようにした（実装 `rs_emit` の `case ... in false|0|no|off) return 0` と一致）。
+  - enum 表・grep 例は design.md L316-346 / L463 を正本として README 向けに転記。grep 例の cron.log
+    パスは既存節の他例と同じ `$HOME/.issue-watcher/cron.log` 表記に揃えた。
+  - L1206 の「上記 9 機能はすべて有効です」件数表現は、現状の「デフォルト有効」テーブル件数
+    （本追加前から 11 行）と既に乖離した曖昧な件数言及であり、本追加で初めてズレるものではない
+    ため触れていない（指示の「曖昧なら触れない」に従った）。
+- **残存課題（次 task=8 fixture への影響）**: なし。ただし README に転記した enum value
+  （`reviewer=independent:approve:r<n>` / `degraded:r<n>` / `stage-a-verify=success|round1|round2|skip|disabled|n/a`
+  / `result=ready-for-review|needs-iteration|claude-failed|hold|unknown` 等）と、task 8 で作成する
+  `test-summary.sh` の `rs_emit` 出力 assert 期待値が一致していることを task 8 側で確認すると整合性が担保される。
+
 ## 確認事項
 
 - **Debugger 経路の Stage A''/B''（round=3）の run サマリ扱い**: design.md の `stages` enum
