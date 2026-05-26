@@ -73,7 +73,7 @@
     env で渡す）・レポート書式・read-only 保証・tracked repo NO-OP（false positive 0 件）を記述
   - _Requirements: 2.1, 2.3, 4.1, 4.6, 5.2_
 
-- [ ]* 5. 検査・doctor の境界スモークテスト fixture を追加
+- [x]* 5. 検査・doctor の境界スモークテスト fixture を追加
   - `docs/specs/238-feat-watcher-scaffolding-health-gate-wor/test-fixtures/` に full/missing/empty/
     indeterminate worktree fixture と `sh_inspect_scaffolding` / HALT 値正規化を検証する
     スモークスクリプトを追加し、本 spec 実装後の回帰確認に使う
