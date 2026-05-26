@@ -39,3 +39,12 @@
   - 差分等価（NFR 1.1）は「opt-in off では本体 flock skip フックが `po_run_flock_skip_visibility` を呼ばない（=副作用ゼロ）」ことと「関数を直接呼んでも off/未設定/不正値では gh を 1 度も呼ばず return 0」の両面で検証した。mock gh は全 argv を `gh-calls.log` に記録し、状態変更系（`--add-label` / `--remove-label` / `issue comment` / `api -X PATCH`）の不在を grep で確認している。
   - 自己完結性: `mktemp -d` の一時 dir と lock file を `trap ... EXIT` で cleanup し、self-hosting 環境を汚さない。再実行で壊れない冪等構成。shellcheck はこのファイルで警告ゼロ（`SC2034` / `SC2317` は source 経由の間接参照ゆえファイル冒頭で明示 disable）。
 - **残存課題**: task 5（README の Path Overlap Checker (Phase E) 節への flock skip 可視化サブ節追記 / env var 表への `PATH_OVERLAP_VISIBILITY_LOCK_FILE` 追記 / Migration Note）が未着手。本 task の test は実装側（task 2/3）の挙動を検証するもので、README ドキュメントの正確性は別途 task 5 で担保される。
+
+### Task 5
+
+- **採用方針**: README の「Path Overlap Checker (Phase E)」節を 4 箇所更新した（推測せず実装の実書式を Grep / Read で照合してから記載）。記載した env var 名・既定値・ログ書式はすべて先行 task の実装（`promote-pipeline.sh` の `po_run_flock_skip_visibility` / `po__visibility_evaluate_candidate`、`issue-watcher.sh` の config 行 377 行・フック）と一致させた。
+- **重要な判断**:
+  - ログ書式は実装から確認した実文言に厳密一致させた。起動ログ `path-overlap: route=flock-skip path-overlap visibility 開始`（`po_log` prefix `path-overlap:` + 経路識別子前置）、overlap 検出 `route=flock-skip overlap detected candidate=#<N> paths=... holders=...`（実装は `holders=${holders_for_log}` / holder なしは `holders=-`）、多重起動抑止 `route=flock-skip visibility skipped (別の可視化パスが進行中 lock=<lock_file>)` を README にそのまま転記した。
+  - 「別インスタンス稼働（flock skip）時の対象範囲」注記は、従来「flock skip 中はそのインスタンスが何も評価しないためシグナルを残せない」だった記述を「`PATH_OVERLAP_CHECK=true` なら path-overlap 可視化パスだけは実行される」へ更新した。ただし flock skip 経路は read＋label/comment のみで claim/dispatch を行わないため、busy-wait（#228）の連続 tick カウントは実行しないことを明記し、可視化機構（path-overlap 可視化 #243 / busy-wait #228）の経路差を誤読されないよう書き分けた。
+  - env var 表は既存 2 行（`PATH_OVERLAP_CHECK` / `PATH_OVERLAP_BUSY_WAIT_THRESHOLD`）と同一の 3 列書式（変数 / 既定 / 用途）で `PATH_OVERLAP_VISIBILITY_LOCK_FILE` を 1 行追加した。既定値は実装の `${PATH_OVERLAP_VISIBILITY_LOCK_FILE:-${LOG_DIR}/flock-skip-visibility.lock}` に合わせ `$LOG_DIR/flock-skip-visibility.lock` と表記。
+- **残存課題**: なし。task 1〜5 がすべて完了し本 Issue の全 task を消化した。README はドキュメント変更のため build/test 不要（実装側 task 1〜4 が shellcheck + bash -n + スモークで検証済み）。flag 残存等の派生タスクなし（本機能は opt-in gate 配下の機能追加であり Feature Flag Protocol の対象ではない / CLAUDE.md に opt-in 宣言なし）。
