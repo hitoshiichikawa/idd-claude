@@ -154,6 +154,26 @@
   / `result=ready-for-review|needs-iteration|claude-failed|hold|unknown` 等）と、task 8 で作成する
   `test-summary.sh` の `rs_emit` 出力 assert 期待値が一致していることを task 8 側で確認すると整合性が担保される。
 
+### Task 8（fixture スモークスクリプトの追加: test-summary.sh）
+
+- **採用方針**: `run-summary.sh` を `source` し、`rs_*` 記録関数を直接呼んで `rs_emit` の出力
+  1 行を `case` ベースの部分文字列 assert で検証する隔離スモークスクリプトを新規作成（既存
+  fixture `test-inject-claude.sh` の PASS/FAIL ハーネス流儀を踏襲）。
+- **重要な判断**:
+  - 各ケース冒頭で `rs_init` を呼んで状態をリセット（`rs_record_stage` は累積するため case 間で
+    引きずらないよう全 5 ケースを `rs_init` 始まりに統一）。`out="$(rs_emit)"` で stdout を捕捉し、
+    ケース 5 のみ `out="$(RUN_SUMMARY_ENABLED=false rs_emit)"` で空を assert。
+  - `REPO` は `rs_emit` の prefix 整形に source 経由で遅延束縛参照されるが shellcheck は source
+    先の参照を追えず SC2034（未使用）を誤検出するため、`# shellcheck disable=SC2034` で個別抑制
+    （`.shellcheckrc` の SC2317/SC2012 とは別の局所抑制）。source 行は SC1091 を抑制。
+  - assert が機能していることを「stages=A,B,C を X,Y,Z に改変→FAIL 1 件・exit 1」で確認済み。
+    README L706 出力例・L729 enum 表（`independent:approve:r1` / `degraded:r1` / `reviewer=n/a` /
+    `stage-a-verify=success` / `result=ready-for-review` 等）と case1〜3 の assert 期待値が完全一致
+    することを確認（Task 7 残存課題の整合性確認を解消）。
+  - Verify 構造化ブロック全体（shellcheck 4 ファイル + `bash test-summary.sh`）が exit 0 で通ること、
+    fixture 単体が 17 assert 全 PASS・exit 0 になることを確認。
+- **残存課題（次 task に影響する事項）**: なし（task 8 は最終 task）。
+
 ## 確認事項
 
 - **Debugger 経路の Stage A''/B''（round=3）の run サマリ扱い**: design.md の `stages` enum
