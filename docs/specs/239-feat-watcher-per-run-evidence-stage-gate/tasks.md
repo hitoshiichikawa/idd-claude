@@ -46,7 +46,7 @@
   - _Boundary: run-summary.sh, stage-a-verify.sh_
   - _Depends: 1.2_
 
-- [ ] 6. Reviewer 起動・verdict・round と最終遷移の記録差し込み
+- [x] 6. Reviewer 起動・verdict・round と最終遷移の記録差し込み
   - `run_reviewer_stage` の return 直前に `rs_record_reviewer`（return 0→independent:approve / 1→independent:reject / 2→degraded / 99→independent:quota、round 付き）を差し込む
   - `mark_issue_failed` / `_slot_mark_failed` に `rs_set_result claude-failed`、round=1 defer に `rs_set_result hold`、Stage C 成功に `rs_set_result ready-for-review`、Reviewer reject 終端に `rs_set_result needs-iteration` を差し込む
   - _Requirements: 3.1, 3.2, 3.3, 3.4, 7.1, 7.2, NFR 1.1, NFR 1.2_
