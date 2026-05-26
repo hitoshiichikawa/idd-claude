@@ -42,7 +42,7 @@
   - _Depends: 2.1_
 
 - [ ] 3. doctor 点検項目群と統合ランナー sh_doctor_run を実装
-- [ ] 3.1 doctor 点検項目 `sh_doctor_check_*` を実装（全 read-only）
+- [x] 3.1 doctor 点検項目 `sh_doctor_check_*` を実装（全 read-only）
   - `sh_doctor_check_scaffolding`: REPO_DIR の `.claude/agents,rules` 非空到達性（`sh_inspect_scaffolding`
     流用、$1=REPO_DIR）（Req 4.2）
   - `sh_doctor_check_clis`: `command -v gh jq flock git claude` の存否（Req 4.3）
