@@ -300,6 +300,20 @@ STAGE_A_VERIFY_ENABLED="${STAGE_A_VERIFY_ENABLED:-true}"
 STAGE_A_VERIFY_TIMEOUT="${STAGE_A_VERIFY_TIMEOUT:-600}"
 STAGE_A_VERIFY_COMMAND="${STAGE_A_VERIFY_COMMAND:-}"
 
+# ─── Scaffolding Health Gate 設定 (#238) ───
+# worktree reset ＋ `.claude` 注入（#237）完了直後・最初の agent stage 起動前に、worktree 内の
+# `.claude/agents` / `.claude/rules` 足場の非空到達性を検査する preflight gate（Req 1）。
+# 欠落検出時は loud WARN ＋ Issue コメント可視シグナルを残す。検査ロジックは
+# modules/scaffolding-health.sh に集約し、本体は call site と `--doctor` dispatch のみを持つ。
+#
+#   - SCAFFOLDING_HEALTH_HALT:  足場欠落検出時の挙動切替。既定 `off`（= 可視化のみ・進行継続）。
+#                               `on` 厳密一致のときのみ HALT（agent stage を起動せず claim 系
+#                               ラベルを除去して人間判断待ちへ遷移）。`on` 以外（off / 未設定 /
+#                               空 / true / On / typo すべて）は既定の可視化のみとして解釈する
+#                               （Req 2.1, 2.3）。既定挙動（可視化のみ・進行継続）は本機能導入
+#                               前の自動進行フローと user-observable に同一（後方互換 / NFR 1.1）。
+SCAFFOLDING_HEALTH_HALT="${SCAFFOLDING_HEALTH_HALT:-off}"
+
 # ─── Tasks Count Gate 設定 (#147) ───
 # Architect が `tasks.md` を確定した直後（design モードの Claude 実行 rc=0 直後）に
 # watcher 側でタスク件数を機械的に再カウントし、件数レンジに応じて 3 段階の運用
@@ -369,6 +383,12 @@ PER_TASK_MAX_TASKS="${PER_TASK_MAX_TASKS:-0}"
 # 環境変数で明示上書きもできる。
 LOG_DIR="${LOG_DIR:-$HOME/.issue-watcher/logs/$REPO_SLUG}"
 LOCK_FILE="${LOCK_FILE:-/tmp/issue-watcher-${REPO_SLUG}.lock}"
+
+# ─── #243: flock skip 経路 path-overlap 可視化パスの専用ロック ───
+# 可視化パスの多重起動を抑止する短命 flock 用ファイル。本サイクルの $LOCK_FILE（fd 200）とは
+# 別ファイル・別 fd（201）で取得する（Req 2.2 / 4.1）。LOG_DIR は repo ごとに分離済みのため
+# repo 間で衝突しない。env で override 可能・既定無害値（PATH_OVERLAP_CHECK=off 環境では未参照）。
+PATH_OVERLAP_VISIBILITY_LOCK_FILE="${PATH_OVERLAP_VISIBILITY_LOCK_FILE:-${LOG_DIR}/flock-skip-visibility.lock}"
 
 # モデル設定
 TRIAGE_MODEL="${TRIAGE_MODEL:-claude-sonnet-4-6}"   # Triage は軽量モデルで十分
@@ -520,8 +540,8 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 可読性のため最も低レベルな core_utils.sh を先頭に置き、以降は #180 Part 2 で切り出した
 # 3 プロセッサ（quota-aware / merge-queue / auto-rebase）、#181 Part 3 で切り出した
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
-# #239 で追加した per-run evidence サマリ（run-summary.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "stage-a-verify.sh" "run-summary.sh" )
+# #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）を置く。
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -574,12 +594,32 @@ mkdir -p "$LOG_DIR"
 echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# doctor サブコマンド dispatch (#238 / Decision 2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# `issue-watcher.sh --doctor` は full watcher サイクルを回さず、現行 env（REPO / REPO_DIR /
+# BASE_BRANCH）で解決された repo の装備状態を read-only で点検しレポートして終了する（Req 4）。
+# module source 完了後・flock 取得の前に置くことで、稼働中の watcher が flock を握っていても
+# doctor は即実行できる（doctor は read-only で多重起動防止の対象外 / Decision 2）。
+case "${1:-}" in
+  --doctor)
+    sh_doctor_run
+    exit $?
+    ;;
+esac
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 多重起動防止
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 exec 200>"$LOCK_FILE"
 flock -n 200 || {
   echo "[$(date '+%F %T')] 他のインスタンスが実行中のためスキップ"
-  exit 0
+  # ── #243: flock skip path-overlap 可視化フック ──
+  # PATH_OVERLAP_CHECK=true のときのみ、dispatch を伴わない read+label/comment の
+  # 可視化パスを 1 サイクル実行する。off/未設定/不正値では一切呼ばず従来と完全一致（Req 6.1/6.2 / NFR 1.1）。
+  if [ "${PATH_OVERLAP_CHECK:-off}" = "true" ]; then
+    po_run_flock_skip_visibility || true   # NFR 3.2: 失敗でも exit 0 を維持
+  fi
+  exit 0   # NFR 1.1: exit code 不変
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1183,9 +1223,29 @@ stage_checkpoint_resolve_resume_point() {
   # ここから has_impl=yes 系
   case "$rev_rc" in
     2)
-      # review-notes 不在 or 解釈不能 → Stage B から再実行 (Req 2.3, 4.3)
-      START_STAGE="B"
-      sc_log "decision: START_STAGE=B reason=impl-notes-only-or-review-unparsed" >> "$LOG"
+      # review-notes 不在 or 解釈不能。
+      # #251: per-task ループ未完（tasks.md に残必須タスクあり）の場合は、impl-notes.md が
+      # tracked でも Stage A を再開して残タスクを完了させる。per-task ループ (#21) は task 1
+      # 完了時点で impl-notes.md へ learning を commit するため、これを「Stage A 完了」と
+      # みなして Stage B へ skip すると、残タスク（後続）が永久に未完になり、後続タスクが
+      # 作る成果物（test fixture 等）に依存する stage-a-verify が無限に失敗する（#68 と
+      # #194 hold-resume の衝突）。残必須タスクが無い場合のみ従来どおり Stage B へ skip する。
+      local _sc_tasks_md="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+      local _sc_pending=""
+      if [ -f "$_sc_tasks_md" ]; then
+        _sc_pending=$(pt_extract_pending_tasks "$_sc_tasks_md" 2>/dev/null || true)
+      fi
+      if [ -n "$_sc_pending" ]; then
+        local _sc_pending_count
+        _sc_pending_count=$(printf '%s\n' "$_sc_pending" | grep -c . 2>/dev/null || echo 0)
+        # shellcheck disable=SC2034
+        START_STAGE="A"
+        sc_log "decision: START_STAGE=A reason=per-task-incomplete (#251: impl-notes.md ありだが tasks.md に残必須タスク ${_sc_pending_count} 件 → Stage A 再開)" >> "$LOG"
+      else
+        # tasks.md 不在（design-less impl）/ 残必須タスク 0 件（完走済み）→ 従来どおり Stage B
+        START_STAGE="B"
+        sc_log "decision: START_STAGE=B reason=impl-notes-only-or-review-unparsed" >> "$LOG"
+      fi
       ;;
     0)
       # approve → Stage C (Req 2.4)
@@ -4271,20 +4331,13 @@ verify_pushed_or_retry() {
   fi
 
   if [ "$push_rc" -eq 0 ]; then
-    # ── リトライ成功（Req 4.2, 4.3）──
+    # ── リトライ成功（Req 1.1, 1.2, 1.3, 1.4）──
+    # #248: 成功時の Issue コメント投稿は誤検知ノイズ（ahead>0 は commit-only 設計の
+    # 正常状態）となるため抑止する。監査トレーサビリティは $LOG の単一 info 行に
+    # Issue 番号 / stage 識別子 / branch / 復旧 commit 数を機械可読フィールドとして
+    # 含めて担保する（Req 2.1〜2.4 / NFR 3.1）。「push 漏れ」原因示唆文言は出さない。
     qa_warn "${stage_label} auto-push retry SUCCESS: ahead=${ahead_count} issue=#${NUMBER:-?} branch=${branch} stage_id=${stage_id}"
-    echo "[$(date '+%F %T')] ${stage_label} 自動 push リトライ成功 ahead=${ahead_count} → 継続" >> "$LOG"
-
-    # Issue コメント投稿（NFR 2.2: Issue 番号 / stage 識別子 / branch / commit 数を含める）
-    local comment_body
-    comment_body="⚠️ Issue #${NUMBER:-?} の ${stage_label} 完了直後に未 push commit を検出し、自動 push リトライで復旧しました。
-
-- 対象 stage : \`${stage_id}\`
-- 対象 branch: \`${branch}\`
-- 復旧 commit 数: ${ahead_count}
-
-サブエージェント（Developer / Reviewer）の push 漏れ等が根本原因の可能性があります。詳細は watcher ログ \`${LOG}\` を確認してください。"
-    gh issue comment "${NUMBER}" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1 || true
+    echo "[$(date '+%F %T')] ${stage_label} 自動 push リトライ成功 → 継続 issue=#${NUMBER:-?} stage_id=${stage_id} branch=${branch} recovered_commits=${ahead_count}" >> "$LOG"
 
     if [ -n "$push_stderr_tmp" ]; then rm -f "$push_stderr_tmp" 2>/dev/null || true; fi
     return 0
@@ -6907,6 +6960,24 @@ _slot_run_issue() {
   # fail-open のため _worktree_inject_claude は常に 0 を返し、注入失敗で
   # claude-failed へ遷移させない（Req 3.2, 3.3）。
   _worktree_inject_claude "$SRC_REPO_DIR" "$WT"
+
+  # ── Scaffolding Health preflight gate（#238 / reset+注入後・agent stage 前）──
+  # worktree 内の `.claude/agents` / `.claude/rules` 非空到達性を検査し、欠落時は loud WARN ＋
+  # Issue コメント可視シグナルを残す（Req 1）。既定（SCAFFOLDING_HEALTH_HALT=off）は可視化のみで
+  # 進行を止めず（Req 2.1）、`on` opt-in かつ missing のときだけ gate が非 0 を返す（Req 2.2）。
+  # indeterminate（検査の I/O 異常）は fail-open で常に継続（gate が 0 / Req 3）。
+  if ! sh_preflight_gate "$WT"; then
+    # HALT opt-in かつ missing → agent stage を起動せず人間判断待ちへ遷移して当該 Issue を
+    # 当該サイクル終了する。claude-failed は付けない（足場欠落は「失敗」ではなく「人間判断
+    # 待ち」/ Req 2.2 / design Decision 3）。claim 系ラベル（claude-claimed / claude-picked-up）を
+    # 除去して auto-dev へ戻し、dispatcher の in-flight 判定が誤らないようにする（次 tick の
+    # 再 pickup は人間が足場を修復した後に full 判定で自然に進行する / `_slot_mark_failed` の
+    # label 操作を参考にするが `claude-failed` は付けない / fail-open）。
+    gh issue edit "$NUMBER" --repo "$REPO" \
+      --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" >/dev/null 2>&1 || true
+    slot_log "scaffolding-health: HALT により agent stage を起動せず人間判断待ち（claim 系ラベル除去 / Issue #${NUMBER}）"
+    return 0
+  fi
 
   # ── SLOT_INIT_HOOK 起動（reset 後・claude 起動前に 1 度だけ）──
   if ! _hook_invoke "$IDD_SLOT_NUMBER" "$WT"; then
