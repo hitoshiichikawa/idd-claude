@@ -16,7 +16,7 @@
   - dispatch 制御の return（0=続行/1=skip）は持たず、戻り値は warn 判定用にのみ使う
   - _Requirements: 1.2, 1.3, 2.3, 3.1, 5.1, 5.2, 5.3, 7.1, 7.2, NFR 2.1, NFR 2.2, NFR 3.1, NFR 4.1_
   - _Boundary: po__visibility_evaluate_candidate_
-- [ ] 2.2 `po_run_flock_skip_visibility` を追加（専用 flock + 候補列挙 + 候補ループ）
+- [x] 2.2 `po_run_flock_skip_visibility` を追加（専用 flock + 候補列挙 + 候補ループ）
   - 冒頭で opt-in gate 二重防御（`[ "${PATH_OVERLAP_CHECK:-off}" = "true" ] || return 0`）
   - 別 fd（201）+ 別ファイル（`PATH_OVERLAP_VISIBILITY_LOCK_FILE`）で `flock -n` 非ブロッキング取得。取得失敗時は抑止ログ（`route=flock-skip visibility skipped`）を出し `return 0`
   - `cd "$REPO_DIR"`（po_* の cwd 前提を満たす最小初期化）。失敗時は warn + `return 0`
