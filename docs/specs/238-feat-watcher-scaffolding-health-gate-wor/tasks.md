@@ -54,7 +54,7 @@
     git 作業ツリー・index・refs を変更せず Issue/PR/ラベルへ書き込まない
   - _Requirements: 4.2, 4.3, 4.4, 4.5, 4.7, NFR 4.1_
   - _Boundary: scaffolding-health.sh_
-- [ ] 3.2 統合ランナー `sh_doctor_run` とトップレベル `--doctor` ディスパッチを実装
+- [x] 3.2 統合ランナー `sh_doctor_run` とトップレベル `--doctor` ディスパッチを実装
   - `sh_doctor_run`: env REPO/REPO_DIR/BASE_BRANCH で全 `sh_doctor_check_*` を集約し、ヘッダ＋各項目＋
     `RESULT: <full|degraded>` 一覧をレポート。1 項目でも degraded なら repo 全体 degraded 表示。
     点検不能項目は `unknown` 表示。`exit 0` を維持（read-only / 線形以下 / 数秒以内）
