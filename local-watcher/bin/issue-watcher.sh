@@ -584,7 +584,13 @@ echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUE
 exec 200>"$LOCK_FILE"
 flock -n 200 || {
   echo "[$(date '+%F %T')] 他のインスタンスが実行中のためスキップ"
-  exit 0
+  # ── #243: flock skip path-overlap 可視化フック ──
+  # PATH_OVERLAP_CHECK=true のときのみ、dispatch を伴わない read+label/comment の
+  # 可視化パスを 1 サイクル実行する。off/未設定/不正値では一切呼ばず従来と完全一致（Req 6.1/6.2 / NFR 1.1）。
+  if [ "${PATH_OVERLAP_CHECK:-off}" = "true" ]; then
+    po_run_flock_skip_visibility || true   # NFR 3.2: 失敗でも exit 0 を維持
+  fi
+  exit 0   # NFR 1.1: exit code 不変
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
