@@ -7,7 +7,7 @@
   - `RUN_SUMMARY_ENABLED` を `"${RUN_SUMMARY_ENABLED:-true}"` で override 可能にする
   - _Requirements: 1.2, 1.3, NFR 1.3, NFR 2.2, NFR 3.1_
   - _Boundary: run-summary.sh_
-- [ ] 1.2 記録系 `rs_*` 関数（mode / issue / stage / scaffolding / reviewer / sav / error / result）を実装
+- [x] 1.2 記録系 `rs_*` 関数（mode / issue / stage / scaffolding / reviewer / sav / error / result）を実装
   - `rs_set_mode` / `rs_set_issue` / `rs_record_stage`（重複排除・Ap/Bp 表記）/ `rs_set_scaffolding` / `rs_record_reviewer` / `rs_record_sav` / `rs_record_error` / `rs_set_result` を変数代入のみの副作用で実装（戻り値常に 0）
   - `rs_scan_degraded_log` を実装（`$LOG` を `grep -q` で走査し degraded 兆候パターンで errors=yes。パターン集合をモジュール内定数で SSoT 化）
   - _Requirements: 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, 3.4, 3.5, 4.1, 4.2, 4.3, 5.1, 5.2, 6.1, 6.2, 6.3, 7.1, 7.2, NFR 1.2, NFR 3.1_
