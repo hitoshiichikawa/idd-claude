@@ -384,6 +384,12 @@ PER_TASK_MAX_TASKS="${PER_TASK_MAX_TASKS:-0}"
 LOG_DIR="${LOG_DIR:-$HOME/.issue-watcher/logs/$REPO_SLUG}"
 LOCK_FILE="${LOCK_FILE:-/tmp/issue-watcher-${REPO_SLUG}.lock}"
 
+# ─── #243: flock skip 経路 path-overlap 可視化パスの専用ロック ───
+# 可視化パスの多重起動を抑止する短命 flock 用ファイル。本サイクルの $LOCK_FILE（fd 200）とは
+# 別ファイル・別 fd（201）で取得する（Req 2.2 / 4.1）。LOG_DIR は repo ごとに分離済みのため
+# repo 間で衝突しない。env で override 可能・既定無害値（PATH_OVERLAP_CHECK=off 環境では未参照）。
+PATH_OVERLAP_VISIBILITY_LOCK_FILE="${PATH_OVERLAP_VISIBILITY_LOCK_FILE:-${LOG_DIR}/flock-skip-visibility.lock}"
+
 # モデル設定
 TRIAGE_MODEL="${TRIAGE_MODEL:-claude-sonnet-4-6}"   # Triage は軽量モデルで十分
 DEV_MODEL="${DEV_MODEL:-claude-opus-4-7}"           # 本実装は Opus 4.7 + 1M context
@@ -606,7 +612,13 @@ esac
 exec 200>"$LOCK_FILE"
 flock -n 200 || {
   echo "[$(date '+%F %T')] 他のインスタンスが実行中のためスキップ"
-  exit 0
+  # ── #243: flock skip path-overlap 可視化フック ──
+  # PATH_OVERLAP_CHECK=true のときのみ、dispatch を伴わない read+label/comment の
+  # 可視化パスを 1 サイクル実行する。off/未設定/不正値では一切呼ばず従来と完全一致（Req 6.1/6.2 / NFR 1.1）。
+  if [ "${PATH_OVERLAP_CHECK:-off}" = "true" ]; then
+    po_run_flock_skip_visibility || true   # NFR 3.2: 失敗でも exit 0 を維持
+  fi
+  exit 0   # NFR 1.1: exit code 不変
 }
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
