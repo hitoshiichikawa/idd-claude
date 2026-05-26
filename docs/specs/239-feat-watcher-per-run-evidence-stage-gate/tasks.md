@@ -53,7 +53,7 @@
   - _Boundary: run-summary.sh_
   - _Depends: 1.2_
 
-- [ ] 7. README 更新（grep 例 + オプション機能一覧）
+- [x] 7. README 更新（grep 例 + オプション機能一覧）
   - 「複数リポ運用時の cron.log grep 例」節に `run-summary:` の grep 例とフォーマット enum 表を追加
   - 「オプション機能一覧」節に `RUN_SUMMARY_ENABLED`（既定 true / `=false` で無効化）を追加
   - 本機能が `.claude` 配下を変更せず root↔repo-template byte 一致規約の対象外であることを確認
