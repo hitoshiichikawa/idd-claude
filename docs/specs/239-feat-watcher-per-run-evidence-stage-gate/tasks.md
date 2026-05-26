@@ -60,7 +60,7 @@
   - _Requirements: 8.1, NFR 1.1, NFR 1.3_
   - _Boundary: run-summary.sh_
 
-- [ ] 8. fixture スモークスクリプトの追加（stage-a-verify gate の必須再実行対象）
+- [x] 8. fixture スモークスクリプトの追加（stage-a-verify gate の必須再実行対象）
   - `docs/specs/239-feat-watcher-per-run-evidence-stage-gate/test-fixtures/test-summary.sh` を作成し、`run-summary.sh` を source して impl 正常 / degraded / design / 未初期化フェイルセーフ / 無効化の各ケースで `rs_emit` 出力 1 行を grep assert
   - 本タスクは非 deferrable（必須）。`## Verify` ブロックの stage-a-verify gate が `bash .../test-summary.sh` を Stage A で再実行するため、fixture が存在しないと gate が必ず失敗する。よって defer 不可（gate 依存のためタスク 8 を必須化）
   - _Requirements: 1.1, 1.4, 1.5, 3.4, 5.2, 6.2, 8.2, 8.3, NFR 1.3, NFR 4.1_
