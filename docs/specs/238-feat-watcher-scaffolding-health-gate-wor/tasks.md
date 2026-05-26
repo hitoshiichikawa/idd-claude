@@ -28,7 +28,7 @@
     でも停止に倒さず継続（Req 3.3）
   - _Requirements: 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3, NFR 2.1_
   - _Boundary: scaffolding-health.sh_
-- [ ] 2.2 本体へ env 定義・module source・preflight gate call site を結線
+- [x] 2.2 本体へ env 定義・module source・preflight gate call site を結線
   - `issue-watcher.sh` Config ブロック（`STAGE_A_VERIFY_*` 近傍）に `SCAFFOLDING_HEALTH_HALT="${SCAFFOLDING_HEALTH_HALT:-off}"`
     を追加し、既定挙動（可視化のみ）を変えないコメントを付す
   - `REQUIRED_MODULES` 配列末尾に `"scaffolding-health.sh"` を 1 要素追加
