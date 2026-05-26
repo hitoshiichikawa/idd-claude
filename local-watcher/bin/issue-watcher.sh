@@ -1210,9 +1210,29 @@ stage_checkpoint_resolve_resume_point() {
   # ここから has_impl=yes 系
   case "$rev_rc" in
     2)
-      # review-notes 不在 or 解釈不能 → Stage B から再実行 (Req 2.3, 4.3)
-      START_STAGE="B"
-      sc_log "decision: START_STAGE=B reason=impl-notes-only-or-review-unparsed" >> "$LOG"
+      # review-notes 不在 or 解釈不能。
+      # #251: per-task ループ未完（tasks.md に残必須タスクあり）の場合は、impl-notes.md が
+      # tracked でも Stage A を再開して残タスクを完了させる。per-task ループ (#21) は task 1
+      # 完了時点で impl-notes.md へ learning を commit するため、これを「Stage A 完了」と
+      # みなして Stage B へ skip すると、残タスク（後続）が永久に未完になり、後続タスクが
+      # 作る成果物（test fixture 等）に依存する stage-a-verify が無限に失敗する（#68 と
+      # #194 hold-resume の衝突）。残必須タスクが無い場合のみ従来どおり Stage B へ skip する。
+      local _sc_tasks_md="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+      local _sc_pending=""
+      if [ -f "$_sc_tasks_md" ]; then
+        _sc_pending=$(pt_extract_pending_tasks "$_sc_tasks_md" 2>/dev/null || true)
+      fi
+      if [ -n "$_sc_pending" ]; then
+        local _sc_pending_count
+        _sc_pending_count=$(printf '%s\n' "$_sc_pending" | grep -c . 2>/dev/null || echo 0)
+        # shellcheck disable=SC2034
+        START_STAGE="A"
+        sc_log "decision: START_STAGE=A reason=per-task-incomplete (#251: impl-notes.md ありだが tasks.md に残必須タスク ${_sc_pending_count} 件 → Stage A 再開)" >> "$LOG"
+      else
+        # tasks.md 不在（design-less impl）/ 残必須タスク 0 件（完走済み）→ 従来どおり Stage B
+        START_STAGE="B"
+        sc_log "decision: START_STAGE=B reason=impl-notes-only-or-review-unparsed" >> "$LOG"
+      fi
       ;;
     0)
       # approve → Stage C (Req 2.4)
