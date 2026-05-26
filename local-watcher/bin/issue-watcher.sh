@@ -6911,10 +6911,12 @@ _slot_run_issue() {
   if $HAS_EXISTING_SPEC; then
     echo "✅ #$NUMBER: 設計レビュー済み（spec dir あり） → impl-resume モード" | tee -a "$LOG"
     MODE="impl-resume"
+    rs_set_mode impl-resume
   elif echo "$LABELS" | grep -qx "$LABEL_SKIP_TRIAGE"; then
     echo "skip-triage ラベルがあるため Triage をスキップ → impl モード" | tee -a "$LOG"
     ARCHITECT_REASON="Triage をスキップ（軽微な変更扱い）"
     MODE="impl"
+    rs_set_mode impl
   else
     # ── Dependency Resolver Gate (Issue #146) ──
     # Triage 起動直前に Issue 本文の前提依存（canonical `Depends on:` /
@@ -7047,9 +7049,11 @@ _slot_run_issue() {
 
     if [ "$NEEDS_ARCHITECT" = "true" ]; then
       MODE="design"
+      rs_set_mode design
       echo "🎨 #$NUMBER: Architect 必要 → design モード（理由: $ARCHITECT_REASON）" | tee -a "$LOG"
     else
       MODE="impl"
+      rs_set_mode impl
       echo "✅ #$NUMBER: Triage 通過（Architect 不要） → impl モード" | tee -a "$LOG"
     fi
   fi
