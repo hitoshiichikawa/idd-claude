@@ -847,8 +847,8 @@ po_check_dispatch_gate() {
 
   if [ "$overlap_count" -gt 0 ]; then
     # Req 5.2 / 5.3 / 8.1 / 8.2: overlap 検出ログ（holders を含める）→ awaiting-slot
-    # 付与（未付与時のみ）。holders は overlap path（正規化済 top-level）ごとに
-    # in-flight Issue 番号配列を解決し、log では unique sort で平坦化する。
+    # 付与（冪等）と sticky comment の最新化。holders は overlap path（正規化済 top-level）
+    # ごとに in-flight Issue 番号配列を解決し、log では unique sort で平坦化する。
     local overlap_holders_map holders_for_log paths_for_log
     overlap_holders_map=$(po_resolve_overlap_holders "$overlap" "$inflight_holders")
     holders_for_log=$(po_format_holders_for_log "$overlap_holders_map")
@@ -860,10 +860,18 @@ po_check_dispatch_gate() {
       # holders=「-」で出力して欠落の事実をログに残す
       po_log "overlap detected candidate=#${candidate} paths=${paths_for_log} holders=-"
     fi
-    if [ -z "$has_awaiting" ]; then
-      if ! po_apply_awaiting_slot "$candidate" "$overlap" "$overlap_holders_map"; then
-        po_warn "issue=#${candidate} awaiting-slot 付与 / コメント投稿に失敗（次サイクルで再評価）"
-      fi
+    # #257 Req 1.1 / 1.2 / 1.3 / 2.2 / NFR 3.1: awaiting-slot ラベル付与状態に関わらず
+    # 毎サイクル po_apply_awaiting_slot を呼ぶ。同関数は内部で
+    #   ① ラベル付与（`gh issue edit --add-label` は既付与でも error にならず冪等）
+    #   ② 既存 marker (<!-- idd-claude:awaiting-slot:v1 -->) 付きコメントを検索
+    #      → 既存ありなら `gh api -X PATCH` で本文を最新の overlap / holders で上書き
+    #      → 無ければ `gh issue comment` で新規作成
+    # を行うため、既に awaiting-slot ラベルが付与されている Issue でも sticky comment
+    # が最新ブロッカー情報へ更新される（ラベル / コメントとも Issue あたり 1 件を維持 /
+    # NFR 3.1）。失敗しても警告ログのみで本サイクルの dispatch 見送り判定（return 1）
+    # は継続する（Req 3.1 / 3.2 / 3.3）。
+    if ! po_apply_awaiting_slot "$candidate" "$overlap" "$overlap_holders_map"; then
+      po_warn "issue=#${candidate} awaiting-slot 付与 / コメント更新に失敗（次サイクルで再評価）"
     fi
     return 1  # dispatch skip
   fi
