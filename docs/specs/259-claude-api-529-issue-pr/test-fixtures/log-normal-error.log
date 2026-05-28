@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init"}
+{"type":"assistant","message":{"content":"running test"}}
+Error: command 'npm test' failed with exit code 1
+TypeError: Cannot read property 'x' of undefined at line 42
+SyntaxError: Unexpected token ';' in file.js
