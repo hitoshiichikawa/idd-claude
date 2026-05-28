@@ -2199,6 +2199,59 @@ pt_extract_pending_tasks() {
   return 0
 }
 
+# ─── pt_check_task_completed <tasks_md_path> <task_id> ───
+#
+# tasks.md 上で指定 task_id の checkbox 状態を判定し、戻り値で表現する。Issue #263 の
+# 「per-task Implementer が rc=0 で抜けたが対象 task が `- [ ]` のまま放置される」無限
+# リトライループ検出のために使用する。
+#
+# 戻り値:
+#   0 = `- [x]` 済み（完了マーカー存在 / 進捗ありの正常系）
+#   1 = `- [ ]` のまま（未完了 / 進捗ゼロ）
+#   2 = tasks.md 不在、または該当 task_id の checkbox 行が一切存在しない（fail-safe）
+#
+# 判定パターン（pt_extract_pending_tasks の regex と整合）:
+#   - 親タスク慣習: `- [x] 1. <title>` / `- [ ] 1. <title>`（ID 後ろに `.` + 空白）
+#   - 子タスク慣習: `- [x] 1.1 <title>` / `- [ ] 1.1 <title>`（ID 後ろに空白のみ）
+#   - deferrable `- [ ]*` は pt_extract_pending_tasks 側で除外されているため、本関数の
+#     ループ呼出ルートには到達しない（Req 3.3 / Req 5.3 / Out of Scope と整合）
+#   - 1 件の task_id が複数行に出現する spec は想定外（tasks.md は numeric ID 一意）。
+#     重複時は「いずれかの行に `[x]` があれば完了扱い」とせず、未完了行優先で 1 を返す
+#     方が安全側に倒れるが、本実装では grep の出現順で先勝ち判定とする（重複時の
+#     挙動は spec 外）。
+#
+# set -euo pipefail 配下で grep no-match による失敗を関数全体に伝播させないため、
+# `|| true` で吸収する。
+#
+# Requirements: 1.1, 5.3, NFR 3.1
+pt_check_task_completed() {
+  local tasks_md="$1"
+  local task_id="$2"
+
+  if [ ! -f "$tasks_md" ]; then
+    return 2
+  fi
+
+  # task_id を正規表現リテラルとして安全にエスケープ（`.` のみ含む想定だが防御的に処理）
+  local task_id_re
+  # shellcheck disable=SC2016  # sed の置換式は単引用符内で完結（シェル展開は意図的に行わない）
+  task_id_re=$(printf '%s' "$task_id" | sed -E 's/[][\\.*^$()+?{|/]/\\&/g')
+
+  # `- [x] <task_id>(\.)? ` で完了済みを優先確認（親 / 子両慣習をカバー）
+  if grep -qE "^- \[x\] ${task_id_re}\.? " "$tasks_md" 2>/dev/null; then
+    return 0
+  fi
+
+  # `- [ ] <task_id>(\.)? ` で未完了行の存在を確認（進捗ゼロ判定）
+  if grep -qE "^- \[ \] ${task_id_re}\.? " "$tasks_md" 2>/dev/null; then
+    return 1
+  fi
+
+  # checkbox 行自体が見つからない → fail-safe（Req 5.3: silent fail で resumable
+  # return 0 に倒さず、呼び出し側で claude-failed 化する）
+  return 2
+}
+
 # ─── pt_extract_learnings <impl_notes_path> ───
 #
 # impl-notes.md の `## Implementation Notes` 見出しから「次の `## ` 見出しが現れる直前まで」
@@ -2880,6 +2933,72 @@ EOF
 #   - quota 超過時: 呼び出し側に return 99 相当で伝搬する代わりに return 0（既存 Stage A
 #     の quota パスと同じく watcher は正常終了し、Resume Processor が次 tick で再開）
 #
+# ─── pt_mark_no_progress_failed <task_id> <stage_phase> <check_rc> ───
+#
+# per-task Implementer が rc=0 で終了したにもかかわらず対象 task の
+# `- [ ] → - [x]` 遷移が検出できなかった場合に `claude-failed` 化する専用ヘルパー
+# （Issue #263）。`mark_issue_failed` を流用し、stage 識別子と Issue コメント本文だけを
+# 本機能用に組み立てる（NFR 1.2: 既存失敗ハンドラの挙動を変更せず流用のみ）。
+#
+# Args:
+#   $1 = task_id (例: `1.2`)
+#   $2 = stage_phase (`initial` / `blocked-redo` / `round2-redo` / `round3-redo`)
+#        Implementer 呼出 4 箇所のどの段階で進捗ゼロが検出されたかを識別する
+#   $3 = check_rc (`1` = `- [ ]` のまま / `2` = 該当行不在 or tasks.md 不在)
+#
+# 副作用（mark_issue_failed と等価 / Req 2.1, 2.2, 4.x, NFR 1.2）:
+#   1. claude-claimed / claude-picked-up を除去し claude-failed を付与
+#   2. 復旧手順付き Issue コメントを 1 件投稿
+#   3. watcher ログに grep 可能な 1 行を出力（呼び出し側で pt_log を発射する想定）
+#
+# Requirements: #263 Req 2.1, 2.2, 2.5, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, NFR 1.2, NFR 2.1
+pt_mark_no_progress_failed() {
+  local task_id="$1"
+  local stage_phase="$2"
+  local check_rc="$3"
+
+  local cause_desc
+  case "$check_rc" in
+    2)
+      cause_desc="tasks.md 上で task=\`${task_id}\` に対応する \`- [ ]\` / \`- [x]\` 行が見つかりませんでした（tasks.md 読取失敗 / 該当行不在）。fail-safe として無限ループに入る前に停止します（Req 5.3）。"
+      ;;
+    *)
+      cause_desc="tasks.md 上の task=\`${task_id}\` 行が \`- [ ]\` のまま \`- [x]\` に遷移していません。Implementer が編集失敗（置換競合・コンパイルエラー等）から復旧できなかった可能性があります。"
+      ;;
+  esac
+
+  local extra_body
+  extra_body=$(cat <<EOF
+## 失敗カテゴリ
+- カテゴリ: \`per-task-implementer-no-progress\`
+- 対象 task ID: \`${task_id}\`
+- 検出フェーズ: \`${stage_phase}\` (Implementer 呼出 4 箇所のいずれか: initial / blocked-redo / round2-redo / round3-redo)
+- 判定根拠: pt_check_task_completed rc=${check_rc}
+- ログ: \`$LOG\`
+
+## 原因
+per-task Implementer が rc=0（正常終了扱い）で終了したにもかかわらず、対象 task の
+\`- [ ]\` → \`- [x]\` 遷移が \`tasks.md\` で確認できませんでした。${cause_desc}
+
+このまま再開すると次 tick の dispatcher が同じ Issue を再 pickup し、Implementer が同じ
+失敗を rc=0 で繰り返す無限リトライループに陥るため、自動再開を停止しました（Issue #263）。
+
+## 次の手順
+1. watcher ログ \`$LOG\` を確認し、当該 task=\`${task_id}\` の Implementer 実行で
+   何が失敗していたか（編集競合・テスト失敗・prompt 不備等）を特定する
+2. 必要なら手動で修正 commit を積み、tasks.md の該当行を \`- [x]\` に更新する
+   （または Architect 差し戻し / Issue 分割を判断する）
+3. 復旧操作完了後、Issue から \`claude-failed\` ラベルを外すと watcher が次サイクルで
+   再 pickup する
+EOF
+)
+
+  # grep 可能ログを 1 行出力（NFR 2.1, NFR 2.2 / 既存 per-task ログ書式と整合）
+  pt_log "task=${task_id} implementer end rc=0 progress=zero phase=${stage_phase} check_rc=${check_rc} → claude-failed (per-task-implementer-no-progress)" >> "$LOG"
+
+  mark_issue_failed "per-task-implementer-no-progress" "$extra_body"
+}
+
 # Requirements: 2.1, 2.6, 2.7, 3.4, 3.5, 3.6, 3.7, 5.1, 5.2
 run_per_task_loop() {
   local tasks_md="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
@@ -2921,7 +3040,20 @@ run_per_task_loop() {
     local impl_rc=0
     run_per_task_implementer "$task_id" || impl_rc=$?
     case "$impl_rc" in
-      0) ;; # 続行
+      0)
+        # Issue #263: 進捗ゼロ検出。Implementer が rc=0 を返したが対象 task の checkbox が
+        # `- [ ] → - [x]` に遷移していない場合、次 tick で同じ Issue が再 pickup されて
+        # 同じ Implementer 失敗を rc=0 で繰り返す無限リトライループに陥るため、ここで
+        # claude-failed 化して停止する。tasks.md 不在は run_per_task_loop 冒頭で防御済み
+        # だが、grep no-match や該当行不在を fail-safe として捕捉する（Req 1.1, 1.3, 5.3）。
+        local _pt_check_rc=0
+        pt_check_task_completed "$tasks_md" "$task_id" || _pt_check_rc=$?
+        if [ "$_pt_check_rc" != "0" ]; then
+          echo "❌ #$NUMBER: per-task Implementer (task=$task_id, phase=initial) rc=0 だが進捗ゼロ検出 (check_rc=$_pt_check_rc) → claude-failed (per-task-implementer-no-progress)" | tee -a "$LOG"
+          pt_mark_no_progress_failed "$task_id" "initial" "$_pt_check_rc"
+          return 1
+        fi
+        ;;
       99)
         # quota 超過: 既存 #66 規約に従い watcher は正常終了。Resume Processor が次 tick で再開
         echo "⏸️ #$NUMBER: per-task Implementer (task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
@@ -2977,7 +3109,18 @@ run_per_task_loop() {
         local impl_bl_rc=0
         run_per_task_implementer "$task_id" || impl_bl_rc=$?
         case "$impl_bl_rc" in
-          0) ;; # 続行: 通常の Reviewer Round 1 に合流（Req 6.2 / 4.4 相当）
+          0)
+            # Issue #263: BLOCKED 経路再実行後も進捗ゼロのまま rc=0 で抜けるケースを検出。
+            # 通常の Reviewer Round 1 に合流させる前に、対象 task の `- [ ] → - [x]` 遷移を
+            # 機械検証する（Req 1.3 / 全 4 箇所適用）。
+            local _pt_check_bl_rc=0
+            pt_check_task_completed "$tasks_md" "$task_id" || _pt_check_bl_rc=$?
+            if [ "$_pt_check_bl_rc" != "0" ]; then
+              echo "❌ #$NUMBER: per-task Implementer (BLOCKED 経路再実行 / task=$task_id, phase=blocked-redo) rc=0 だが進捗ゼロ検出 (check_rc=$_pt_check_bl_rc) → claude-failed (per-task-implementer-no-progress)" | tee -a "$LOG"
+              pt_mark_no_progress_failed "$task_id" "blocked-redo" "$_pt_check_bl_rc"
+              return 1
+            fi
+            ;;
           99)
             echo "⏸️ #$NUMBER: per-task Implementer (BLOCKED 経路再実行 / task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
             return 0
@@ -3008,7 +3151,18 @@ run_per_task_loop() {
         local impl2_rc=0
         run_per_task_implementer "$task_id" || impl2_rc=$?
         case "$impl2_rc" in
-          0) ;;
+          0)
+            # Issue #263: Reviewer reject 後の Implementer 再実行も rc=0 で抜けたが進捗ゼロ
+            # のままだと、後段 Reviewer round=2 が同じ未完了状態を再 reject → 同じ無限
+            # ループに陥る。round=2 起動前にここで停止する（Req 1.3）。
+            local _pt_check_r2_rc=0
+            pt_check_task_completed "$tasks_md" "$task_id" || _pt_check_r2_rc=$?
+            if [ "$_pt_check_r2_rc" != "0" ]; then
+              echo "❌ #$NUMBER: per-task Implementer 再実行 (task=$task_id, phase=round2-redo) rc=0 だが進捗ゼロ検出 (check_rc=$_pt_check_r2_rc) → claude-failed (per-task-implementer-no-progress)" | tee -a "$LOG"
+              pt_mark_no_progress_failed "$task_id" "round2-redo" "$_pt_check_r2_rc"
+              return 1
+            fi
+            ;;
           99)
             echo "⏸️ #$NUMBER: per-task Implementer 再実行 (task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
             return 0
@@ -3056,7 +3210,20 @@ run_per_task_loop() {
               local impl3_rc=0
               run_per_task_implementer "$task_id" || impl3_rc=$?
               case "$impl3_rc" in
-                0) ;;
+                0)
+                  # Issue #263: Debugger 経由 Implementer 再実行も rc=0 で抜けたが進捗ゼロ
+                  # のままだと、Reviewer round=3 が同じ未完了状態を reject 確定し、結果として
+                  # Debugger Gate 終端の round=3 経路で `per-task-reviewer-reject3` を出すが、
+                  # 進捗ゼロが原因であることを stage 識別子で区別できないため、ここで
+                  # `per-task-implementer-no-progress` として停止する（Req 1.3）。
+                  local _pt_check_r3_rc=0
+                  pt_check_task_completed "$tasks_md" "$task_id" || _pt_check_r3_rc=$?
+                  if [ "$_pt_check_r3_rc" != "0" ]; then
+                    echo "❌ #$NUMBER: per-task Implementer 3 回目 (task=$task_id, phase=round3-redo / Debugger 経由) rc=0 だが進捗ゼロ検出 (check_rc=$_pt_check_r3_rc) → claude-failed (per-task-implementer-no-progress)" | tee -a "$LOG"
+                    pt_mark_no_progress_failed "$task_id" "round3-redo" "$_pt_check_r3_rc"
+                    return 1
+                  fi
+                  ;;
                 99)
                   echo "⏸️ #$NUMBER: per-task Implementer 3 回目 (task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
                   return 0
