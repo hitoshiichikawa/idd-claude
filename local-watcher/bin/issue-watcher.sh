@@ -6320,8 +6320,14 @@ _normalize_slug() {
     echo ""
     return 0
   fi
-  echo "$raw" | tr '[:upper:]' '[:lower:]' \
-    | sed -E 's/[^a-z0-9]+/-/g' | cut -c1-40 | sed -E 's/-+$//'
+  local res
+  res=$(echo "$raw" | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9]+/-/g' | cut -c1-40 | sed -E 's/-+$//')
+  if [ -z "$res" ]; then
+    echo "issue"
+  else
+    echo "$res"
+  fi
 }
 
 # スラグ不一致を検出したとき、`claude-claimed` を除去して `needs-decisions` を付与し、

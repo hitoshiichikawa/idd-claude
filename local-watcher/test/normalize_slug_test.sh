@@ -95,6 +95,11 @@ assert_eq "Req 5.1: Unicode は非英数字扱い" \
   "feat-watcher" \
   "$(_normalize_slug "feat 日本語 watcher")"
 
+# Unicode 文字（日本語）のみの入力 → "issue" にフォールバック
+assert_eq "日本語のみの入力 → issue" \
+  "issue" \
+  "$(_normalize_slug "日本語")"
+
 # 空入力 → 空出力（NFR 2.1 の安全側挙動）
 assert_eq "境界: 空入力 → 空出力" \
   "" \
