@@ -1092,19 +1092,55 @@ stage_checkpoint_read_review_result() {
 
 # ─── stage_checkpoint_find_impl_pr ───
 #
-# Stage C 完了（impl PR の存在）を観測する。OPEN / MERGED / CLOSED いずれの状態でも
-# 「Stage C 後の状態」とみなして自動進行を停止する（Req 1.3, 2.6）。CLOSED は人間判断に
-# よる close と解釈し、自動再開はしない。
+# Stage C 完了（impl PR の存在）を観測する。OPEN / MERGED を「Stage C 後の状態」とみなして
+# 自動進行を停止する。CLOSED 未マージ PR は人間が意図的に close した「やり直したい / 途中で
+# 打ち切った」状態として扱い、resume 地点判定の停止根拠から **除外** する（Issue #265 /
+# Req 1.1, 1.4, 1.5）。これにより `claude-failed` ラベル除去後に CLOSED PR が残っていても
+# 次サイクルの自動進行（Stage A 再開）がブロックされない。
 #
-# 入力: 環境変数 REPO / BRANCH
-# 戻り値: 0 = 既存 impl PR あり / 1 = なし / 2 = gh API エラー
-# stdout: `<pr_number>,<state>`（複数の場合は最新 1 件のみ）
+# 採用優先順位（Req 1.5）: OPEN を最優先、次に MERGED、CLOSED は既定で除外。
+# 第 1 引数に `true` を渡したときのみ CLOSED を最終 fallback として採用する（Issue #212 の
+# Stage C CLOSED ガード経路を保持する目的。Out of Scope: needs-decisions 付与経路は不変）。
+#
+# 入力:
+#   $1 = include_closed（true なら CLOSED を最終 fallback として採用。省略時は false）
+#   環境変数 REPO / BRANCH / LOG
+# 戻り値: 0 = 既存 impl PR あり / 1 = なし（CLOSED のみのケース含む） / 2 = gh API エラー
+# stdout: `<pr_number>,<state>`（採用優先順位に従って 1 件のみ）
+# 副作用: CLOSED を除外したときに $LOG へ `stage-checkpoint:` prefix の観測ログを 1 行出力
+#         （Req 4.1, 4.3 / NFR 2.1）
 stage_checkpoint_find_impl_pr() {
+  local include_closed="${1:-false}"
   local prs
   prs=$(gh pr list --repo "$REPO" --head "$BRANCH" --state all \
         --json number,state --limit 5 2>/dev/null) || return 2
-  local found
-  found=$(echo "$prs" | jq -r '[.[] | select(.state == "OPEN" or .state == "MERGED" or .state == "CLOSED")] | .[0] // empty' 2>/dev/null || true)
+
+  # OPEN / MERGED を優先採用（OPEN > MERGED の順）。CLOSED の件数も観測ログのために抽出する。
+  local open_pr merged_pr closed_pr closed_count
+  open_pr=$(echo "$prs" | jq -r '[.[] | select(.state == "OPEN")] | .[0] // empty' 2>/dev/null || true)
+  merged_pr=$(echo "$prs" | jq -r '[.[] | select(.state == "MERGED")] | .[0] // empty' 2>/dev/null || true)
+  closed_pr=$(echo "$prs" | jq -r '[.[] | select(.state == "CLOSED")] | .[0] // empty' 2>/dev/null || true)
+  closed_count=$(echo "$prs" | jq -r '[.[] | select(.state == "CLOSED")] | length' 2>/dev/null || echo 0)
+
+  local found=""
+  if [ -n "$open_pr" ]; then
+    found="$open_pr"
+  elif [ -n "$merged_pr" ]; then
+    found="$merged_pr"
+  elif [ -n "$closed_pr" ] && [ "$include_closed" = "true" ]; then
+    # Stage C CLOSED ガード（Issue #212）専用: include_closed=true のときのみ CLOSED を採用。
+    # 既定の resolve_resume_point / stage_a_crossing_probe / spec_completeness 経路には届かない。
+    found="$closed_pr"
+  fi
+
+  # OPEN / MERGED 不在 + CLOSED 存在のときは「CLOSED を除外した」観測ログを残す（Req 4.1, 4.3 / NFR 2.1）。
+  # include_closed=true で CLOSED を採用したケースでは除外していないのでログを出さない。
+  if [ -z "$open_pr" ] && [ -z "$merged_pr" ] && [ -n "$closed_pr" ] && [ "$include_closed" != "true" ]; then
+    local closed_num
+    closed_num=$(echo "$closed_pr" | jq -r '.number // "?"' 2>/dev/null || echo '?')
+    sc_log "find-impl-pr: excluded-closed pr=#${closed_num} count=${closed_count} reason=closed-unmerged-not-stop-signal branch=${BRANCH} issue=#${NUMBER:-?}" >> "$LOG"
+  fi
+
   [ -n "$found" ] || return 1
   echo "$found" | jq -r '"\(.number),\(.state)"' 2>/dev/null || return 2
   return 0
@@ -1116,7 +1152,8 @@ stage_checkpoint_find_impl_pr() {
 # 出力 domain: A / B / C / TERMINAL_OK / TERMINAL_FAILED。
 #
 # Decision Table（design.md と同期、設計参照: docs/specs/68-*/design.md）:
-#   既存 PR あり                                      → TERMINAL_OK
+#   既存 PR あり（OPEN / MERGED）                     → TERMINAL_OK
+#   既存 PR が CLOSED 未マージのみ                    → 「既存 PR なし」扱い（Issue #265 / Req 1.1, 1.4）
 #   impl-notes 無 / review-notes 有 (任意)            → A (INCONSISTENT, Req 5.1)
 #   impl-notes 無 / review-notes 無                   → A (Req 2.2)
 #   impl-notes 有 / review-notes 無                   → B (Req 2.3)
@@ -1316,8 +1353,12 @@ stage_c_existing_pr_guard() {
     return 1
   fi
 
+  # include_closed=true: 同一サイクル内で Stage A 越境後に CLOSED 状態の PR を新規検出する
+  # ケースについて Issue #212 の既存規約（needs-decisions 付与 + Issue コメント）を保持する
+  # （Issue #265 Out of Scope と整合）。include_closed=false な他経路（resolve_resume_point /
+  # stage_a_crossing_probe / spec_artifacts_completeness_guard）では CLOSED は除外される。
   local pr_info pr_rc
-  pr_info=$(stage_checkpoint_find_impl_pr 2>/dev/null) && pr_rc=0 || pr_rc=$?
+  pr_info=$(stage_checkpoint_find_impl_pr true 2>/dev/null) && pr_rc=0 || pr_rc=$?
 
   case "$pr_rc" in
     1)
@@ -1397,6 +1438,9 @@ stage_c_existing_pr_guard() {
 # 再利用し、`STAGE_CHECKPOINT_ENABLED=true`（#112 以降の既定）時のみ有効化する。
 # `true` 以外（明示 opt-out その他の任意の値）では本関数は 1 行も実行せず即 return 0 する。
 # このとき検出フラグも set せず、本修正導入前と完全に同一の挙動を保つ（Req 2.5 / NFR 1.1）。
+#
+# `find_impl_pr` を include_closed=false（既定）で呼ぶため、CLOSED 未マージ PR は越境根拠
+# として記録されない（Issue #265 / Req 3.3）。OPEN / MERGED の既存挙動は不変。
 #
 # 入力: 環境変数 STAGE_CHECKPOINT_ENABLED / NUMBER / BRANCH / REPO / LOG
 # 副作用:
@@ -1674,9 +1718,11 @@ docs-only 補完追従 PR の自動作成に失敗したため、人間判断に
 #
 # #213 ガードとの非干渉（Req 4.1）: 本関数は `stage_c_existing_pr_guard` を呼ばず、その後段に
 # 置かれる。MERGED ガードの「新規 impl PR 抑止」は維持され、本関数は impl PR を作らず
-# docs-only PR のみ作成する（Req 4.2 / 4.3）。MERGED 以外（OPEN/CLOSED/none）では補完を
-# 起動しない（OPEN は通常フローで review-notes が commit され、CLOSED は #213 ガードが既に
-# エスカレーション済み、none は本来の Stage C 経路 / Req 4.1）。
+# docs-only PR のみ作成する（Req 4.2 / 4.3）。MERGED 以外（OPEN/none）では補完を起動しない
+# （OPEN は通常フローで review-notes が commit され、none は本来の Stage C 経路 / Req 4.1）。
+# CLOSED 未マージ PR のみのケースは `find_impl_pr`（include_closed=false）が rc=1 を返し
+# pr_state="(none)" として扱われるため、補完起動条件の MERGED マッチには到達しない
+# （Issue #265 / Req 3.4 と整合: MERGED のみが起動条件、その他は無起動）。
 #
 # `STAGE_CHECKPOINT_ENABLED=true`（既定）時のみ有効化する。`=true` 以外では 1 行も実行せず
 # 即 return 0 し、本修正導入前と完全に同一の挙動を保つ（Req 3.5 / NFR 1.1）。
