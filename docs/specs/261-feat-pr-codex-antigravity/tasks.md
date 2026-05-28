@@ -12,7 +12,7 @@
   - `shellcheck` 警告ゼロ
   - _Requirements: NFR 1.2, NFR 2.1, NFR 3.1_
 
-- [ ] 2. pr-reviewer.sh モジュール骨格と opt-in gate の実装
+- [x] 2. pr-reviewer.sh モジュール骨格と opt-in gate の実装
 - [x] 2.1 モジュールヘッダ / 入口関数 / opt-in 早期 return
   - 新規 `local-watcher/bin/modules/pr-reviewer.sh` を作成
   - ファイル冒頭コメントで「用途 / 配置先 / 依存 / セットアップ参照先」を既存モジュールと同形式で記述
