@@ -1208,6 +1208,36 @@ pi_run_iteration() {
       pi_warn "PR #${pr_number}: kind=${kind} Claude 実行が失敗 (log: ${pi_log_file})"
       # claude 失敗時も round 中に部分編集が残っている可能性があるため、後段の自動回復に
       # 続ける。検出 file の有無にかかわらず post-round-recover 経路で dirty を退避する。
+      #
+      # Issue #259: 失敗ログから Claude API 一時混雑エラー (529 Overloaded) の痕跡を検出
+      # した場合、PR コメントとして一時障害である旨と次回ポーリングサイクルで自動再試行
+      # される旨を投稿する。検知ロジックが失敗・例外を起こしても既存の needs-iteration
+      # 据え置き / claude-failed 遷移 / post-round-recover 経路を妨げないよう、すべての
+      # 副作用は `|| true` で握り、grep の失敗（一致なし）と区別する。
+      #   - 検知あり (rc=0) → PR コメント投稿 + INFO ログ
+      #   - 検知なし (rc=1) → INFO ログのみ
+      #   - ログ不在 (rc=2) → WARN ログのみ（既存処理は継続 / Req 1.5）
+      local _pi_529_rc=0
+      claude_log_detect_529 "$pi_log_file" || _pi_529_rc=$?
+      case "$_pi_529_rc" in
+        0)
+          pi_log "PR #${pr_number}: kind=${kind} round=${next_round} 529-overloaded detected (log: ${pi_log_file})"
+          local _pi_529_body
+          _pi_529_body=":warning: **Claude API 一時混雑エラー (529 Overloaded)**: 混雑のため一時処理を中断しました。進捗（Round数等）は据え置かれ、次のポーリングサイクルで自動再試行します。
+
+<!-- idd-claude:pr-iteration-529-warning round=${next_round} -->"
+          if ! timeout "$PR_ITERATION_GIT_TIMEOUT" \
+              gh pr comment "$pr_number" --repo "$REPO" --body "$_pi_529_body" >/dev/null 2>&1; then
+            pi_warn "PR #${pr_number}: kind=${kind} round=${next_round} 529 警告コメントの投稿に失敗 (既存処理は継続)"
+          fi
+          ;;
+        2)
+          pi_warn "PR #${pr_number}: kind=${kind} round=${next_round} 529 検知用ログファイルが不在または読み取り不能のためスキップ (log: ${pi_log_file})"
+          ;;
+        *)
+          pi_log "PR #${pr_number}: kind=${kind} round=${next_round} 529-overloaded not detected"
+          ;;
+      esac
     else
       pi_log "PR #${pr_number}: kind=${kind} Claude 実行完了 (log: ${pi_log_file})"
     fi
