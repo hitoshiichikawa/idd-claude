@@ -21,7 +21,7 @@
   - サイクル開始の 1 行サマリログを `pr_log` で出力（解決済み tool / max_prs / timeout）
   - _Requirements: 1.1, 1.2, 1.3, NFR 1.1, NFR 3.1_
 
-- [ ] 2.2 tool 解決と排他検証 `pr_resolve_tool`
+- [x] 2.2 tool 解決と排他検証 `pr_resolve_tool`
   - `PR_REVIEWER_TOOL` / `PR_REVIEWER_CODEX_ENABLED` / `PR_REVIEWER_ANTIGRAVITY_ENABLED` から
     Design Decision 1 の解決順序で `codex` / `antigravity` / `none` / `conflict` のいずれかを返す
   - 排他エラー / 両方無効化は `pr_log` / `pr_warn` で観測可能にする
