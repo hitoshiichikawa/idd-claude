@@ -37,6 +37,8 @@
   - `PR_REVIEWER_<TOOL>_AUTH_CMD` env を解決し、空文字なら skip（戻り値 2）
   - 非空ならコマンドを実行し、終了コード 0 で OK 判定
   - stdout/stderr は破棄（auth token 流出防止 / Security Considerations）
+  - 既定値は実機ドキュメント整合: codex = `codex login status`、agy = `""`（既定 skip。
+    Decision 3）
   - _Requirements: 3.2_
 
 - [ ] 4. 重複防止 marker と候補 PR 列挙
@@ -54,16 +56,27 @@
   - 取得失敗 / timeout 時は `pr_warn` + 空配列を返す（NFR 3.1 の観測性）
   - _Requirements: 7.1, 7.2, 7.3_
 
-- [ ] 5. レビュー実行とコメント投稿
-- [ ] 5.1 `pr_substitute_placeholders` の実装
-  - `{BASE}` / `{HEAD}` / `{PR}` を `base_ref` / `head_ref` / `pr_number` で文字列置換
-  - 置換結果に shell metacharacter（`;` `|` `&` `$(` 等）が混入していたら当該 PR を skip + WARN
+- [ ] 5. レビュー prompt 解決とレビュー実行とコメント投稿
+- [ ] 5.1 `pr_build_prompt_file` と `pr_substitute_placeholders` の実装
+  - `pr_build_prompt_file`: `PR_REVIEWER_<TOOL>_PROMPT` → `PR_REVIEWER_PROMPT` → 内蔵 default の順で
+    prompt 本体を解決し、`{BASE}` / `{HEAD}` / `{PR}` を文字列置換した結果を `mktemp -t
+    idd-claude-pr-reviewer.XXXXXX` で得た一時ファイルに書き出し、stdout にそのパスを返す
+  - `pr_substitute_placeholders`: cmd template の `{BASE}` / `{HEAD}` / `{PR}` / `{PROMPT_FILE}` を
+    文字列置換
+  - 置換結果に shell metacharacter（`;` `|` `&` `` ` `` `$(` 等）が混入していたら当該 PR を skip + WARN
+  - 内蔵 default prompt は design.md 「Default Review Prompt」節の本文と byte 一致させる
   - _Requirements: 4.3_
 
 - [ ] 5.2 `pr_execute_review_command` の実装
-  - サブシェル + trap で BASE_BRANCH 復帰を保証
+  - サブシェル + trap で BASE_BRANCH 復帰と prompt tempfile 削除を保証
   - `git fetch origin <head_ref>` → `git checkout -B <head_ref> origin/<head_ref>`
-  - 解決済みコマンドを `PR_REVIEWER_EXEC_TIMEOUT` 秒の `timeout` で実行し、stdout を変数キャプチャ
+  - 解決済みコマンドを `PR_REVIEWER_EXEC_TIMEOUT` 秒の `timeout` で実行（`bash -c "$resolved_cmd"`
+    で subshell に閉じ込め、**`eval` は使わない** — Decision 9）
+  - stdout を変数キャプチャ。`agy --output-format json` の場合は `jq -r '.message // .'` 等で
+    最終 message を抽出（実装時に `agy --help` 出力を確認して JSON schema を確定）
+  - 実行直後に `git status --porcelain` 検査でワークツリー変更を検出した場合は
+    `git checkout -- .` で破棄しつつ `kind=workspace-modified` のエラーコメントを投稿
+    （read-only 安全性 invariant、Decision 8）
   - stderr は 1KB に truncate して呼び出し元へ渡す
   - 終了コードと stdout を分離して返す
   - _Requirements: 4.1, 4.2, 4.5_
@@ -71,19 +84,32 @@
 - [ ] 5.3 `pr_post_review_comment` / `pr_post_error_comment` の実装
   - `pr_post_review_comment`: レビュー結果テキスト末尾に hidden marker `kind=review` を付与し
     `gh pr comment` で投稿
-  - `pr_post_error_comment`: 本文冒頭に `## 自動レビューエラー` 見出し + `kind=<conflict-tool|not-installed|not-authenticated|exec-failed>` の marker
+  - `pr_post_error_comment`: 本文冒頭に `## 自動レビューエラー` 見出し + `kind=<conflict-tool|not-installed|not-authenticated|exec-failed|workspace-modified>` の marker
   - 投稿失敗時は `pr_warn`（後続 processor 阻害なし）
   - _Requirements: 2.4, 3.1, 3.2, 3.4, 4.4, 6.1, 6.4_
 
-- [ ] 6. キーワード検出と needs-iteration ラベル付与
-  - `pr_detect_iteration_keyword` を実装: `grep -E -i -c "$PR_REVIEWER_ITERATION_PATTERN"` でマッチ件数取得
+- [ ] 6. 構造化 VERDICT 検出と needs-iteration ラベル付与
+  - `pr_detect_iteration_keyword` を実装: `grep -E -i -c "$PR_REVIEWER_ITERATION_PATTERN"` で
+    マッチ件数取得。既定 pattern は内蔵 prompt が最終行に出力する
+    `^[[:space:]]*VERDICT:[[:space:]]*needs-iteration[[:space:]]*$` を line-anchored で検出
+    （Decision 4）。env override で旧来の自由文 grep にも切替可
   - マッチ件数とパターンを `pr_log` で記録（NFR 3.1）
   - マッチ件数 > 0 のとき `gh pr edit <n> --repo $REPO --add-label "$LABEL_NEEDS_ITERATION"`
     （`gh` 側で冪等のため再付与は no-op）
   - _Requirements: 5.1, 5.2, 5.3, 5.4_
 
 - [ ] 7. issue-watcher.sh への配線（env / source / dispatcher）
-  - **Config ブロック追記**: 既存「PR Iteration Processor 設定」節の **後** に「PR Reviewer Processor 設定 (#261)」節を追加し、design.md の Environment Variable Catalog にある 13 個の env を `${VAR:-default}` で解決
+  - **Config ブロック追記**: 既存「PR Iteration Processor 設定」節の **後** に「PR Reviewer Processor 設定 (#261)」節を追加し、design.md の Environment Variable Catalog にある env 群を `${VAR:-default}` で解決
+    - `PR_REVIEWER_ENABLED` / `PR_REVIEWER_TOOL` / `PR_REVIEWER_CODEX_ENABLED` /
+      `PR_REVIEWER_ANTIGRAVITY_ENABLED`
+    - `PR_REVIEWER_CODEX_CMD`（既定: `codex exec --sandbox read-only "$(cat '{PROMPT_FILE}')"`）
+    - `PR_REVIEWER_ANTIGRAVITY_CMD`（既定: `agy -p "$(cat '{PROMPT_FILE}')" --output-format json`）
+    - `PR_REVIEWER_PROMPT`（既定: 内蔵 default。design.md 「Default Review Prompt」節）
+    - `PR_REVIEWER_CODEX_AUTH_CMD`（既定: `codex login status`）
+    - `PR_REVIEWER_ANTIGRAVITY_AUTH_CMD`（既定: `""`）
+    - `PR_REVIEWER_ITERATION_PATTERN`（既定: 構造化 VERDICT token の line-anchored ERE）
+    - `PR_REVIEWER_HEAD_PATTERN` / `PR_REVIEWER_MAX_PRS` / `PR_REVIEWER_GIT_TIMEOUT` /
+      `PR_REVIEWER_EXEC_TIMEOUT`
   - **REQUIRED_MODULES 追記**: 既存配列に `"pr-reviewer.sh"` を追加（`"pr-iteration.sh"` の隣）
   - **dispatcher call site 追加**: `process_pr_iteration` 呼び出しの **直前**（既存 line 994〜995 付近）に
     `process_pr_reviewer || pr_warn "process_pr_reviewer が想定外のエラーで終了しました（後続 Issue 処理は継続）"` を 1 行追加
