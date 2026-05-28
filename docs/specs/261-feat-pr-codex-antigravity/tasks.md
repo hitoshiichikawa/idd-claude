@@ -5,7 +5,7 @@
 > （`issue-watcher.sh` / `core_utils.sh` / `README.md`）への追記で完結する。`(P)` 並列マークは
 > 編集対象ファイルが分かれる箇所のみ付与し、`_Boundary:_` で衝突境界を明示する。
 
-- [ ] 1. core_utils.sh への logger 追加（pr_log / pr_warn / pr_error）
+- [x] 1. core_utils.sh への logger 追加（pr_log / pr_warn / pr_error）
   - `local-watcher/bin/modules/core_utils.sh` の既存 `pi_log` / `drr_log` 群の末尾に、同形式
     （`[$(date '+%F %T')] [$REPO] pr-reviewer: ...`）で 3 関数を追加する
   - 既存関数・順序は変更しない（NFR 1.2）
