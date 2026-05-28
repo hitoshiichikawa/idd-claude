@@ -120,6 +120,66 @@ drr_error() {
   echo "[$(date '+%F %T')] [$REPO] design-review-release: ERROR: $*" >&2
 }
 
+# ─── Issue #259: Claude API 529 Overloaded detector ───
+#
+# Claude API の一時的な過負荷 (HTTP 529 Overloaded) は claude CLI の stream-json
+# 出力に Anthropic API のエラー JSON 断片として現れる。代表的なシグネチャ:
+#   - `"api_error_status":529`
+#   - `"error_status":529`
+#   - `"status":529`（HTTP 5xx の直書き）
+#   - `"type":"overloaded_error"`
+#   - `"Overloaded"`（人間可読 message）
+#
+# 設計判断:
+#   - false-positive を避けるため、`529` 単独の数値検出はせず、必ず `status[:.]?\s*529`
+#     形式（JSON key の隣接）に限定する。
+#   - `Overloaded` は anthropic API 文言と被るため、case-insensitive ではなく
+#     大文字 O 始まりの単語境界一致で検出する。
+#   - ファイル不在 / 読み取り不能 / 空ファイルは検出なし扱い（後段の警告コメント
+#     投稿を抑止して既存挙動を妨げない / Req 1.5 / 2.4 / 4.4）。
+#   - 副作用なし（純粋な検査関数）。失敗系含めて呼び出し元の既存処理を継続させる
+#     ため、grep が失敗してもエラー伝播させない。
+#
+# 引数: $1 = 検査対象のログファイルパス
+# 戻り値:
+#   0 = 529 痕跡を検知（呼び出し元で警告メッセージを付加する）
+#   1 = 検知なし（既存メッセージのみ）
+#   2 = ファイル不在 / 読み取り不能（検知なし相当として扱うが grep スキップ。
+#       呼び出し元はログ可観測性のため 1 と区別したい場合に参照可能）
+# 出力: stdout には何も書かない。
+#
+# Requirements: 1.1, 1.5, 2.1, 2.4, 3.1, 3.2, 4.4, NFR 1.1
+claude_log_detect_529() {
+  local log_path="${1:-}"
+  if [ -z "$log_path" ]; then
+    return 2
+  fi
+  if [ ! -f "$log_path" ] || [ ! -r "$log_path" ]; then
+    return 2
+  fi
+  # 検出パターン群:
+  #   - `"api_error_status":529` / `"error_status":529` / `"status":529`
+  #     （JSON key の直後 colon ＋ optional whitespace ＋ 529。`status: 529` の plain
+  #     text 表記もカバーする）
+  #   - `"type":"overloaded_error"` （Anthropic API の標準 error type 文字列）
+  #   - 単独の "Overloaded" 単語境界（HTTP 529 の reason phrase）
+  # grep 自体は終了コード 1（一致なし）で問題ないため `|| true` で吸収し、
+  # set -euo pipefail 配下でも安全に動作するようにする。
+  if grep -qE '"(api_error_status|error_status|status)"\s*:\s*529' "$log_path" 2>/dev/null; then
+    return 0
+  fi
+  if grep -qE '\bstatus\s*:\s*529\b' "$log_path" 2>/dev/null; then
+    return 0
+  fi
+  if grep -qE '"type"\s*:\s*"overloaded_error"' "$log_path" 2>/dev/null; then
+    return 0
+  fi
+  if grep -qE '\bOverloaded\b' "$log_path" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
 # ─── Phase C: Worktree Manager ───
 #
 # Per-slot 永続 worktree を $WORKTREE_BASE_DIR/<repo-slug>/slot-N/ に配置し、

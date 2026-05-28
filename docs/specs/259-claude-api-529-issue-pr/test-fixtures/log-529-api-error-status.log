@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","cwd":"/some/path"}
+{"type":"result","subtype":"error","is_error":true,"result":"{\"api_error_status\":529,\"message\":\"Overloaded\"}"}

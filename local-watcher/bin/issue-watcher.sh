@@ -4556,6 +4556,31 @@ mark_issue_failed() {
 
 ${extra_body}"
   fi
+
+  # Issue #259: 現在の実行ログから Claude API 一時混雑エラー (529 Overloaded) の痕跡を
+  # 検出した場合、失敗通知コメント本文に警告ブロックを差し込む。検知ロジックが失敗・
+  # 例外を起こしても既存の `claude-failed` ラベル付与・失敗コメント投稿の責務を妨げない
+  # よう、すべて defensive に握り、検知なし / 検知失敗時は本機能導入前と完全に同一の
+  # コメントを投稿する（Req 2.4 / 4.4 / NFR 1.1）。
+  local _mif_529_rc=0
+  claude_log_detect_529 "$LOG" || _mif_529_rc=$?
+  case "$_mif_529_rc" in
+    0)
+      echo "[$(date '+%F %T')] [$REPO] mark_issue_failed: 529-overloaded detected issue=#${NUMBER} stage=${stage} log=${LOG}" >> "$LOG" 2>/dev/null || true
+      body="${body}
+
+---
+
+:warning: **Claude API 一時混雑エラー (529 Overloaded) が検出されました**: 開発中に Claude API が高負荷（529 Overloaded）となったため、処理が中断された可能性があります。一時的な混雑によるエラーの可能性があるため、時間をおいて再試行してください。"
+      ;;
+    2)
+      echo "[$(date '+%F %T')] [$REPO] mark_issue_failed: 529 検知用ログファイルが不在または読み取り不能のためスキップ issue=#${NUMBER} stage=${stage} log=${LOG}" >> "$LOG" 2>/dev/null || true
+      ;;
+    *)
+      echo "[$(date '+%F %T')] [$REPO] mark_issue_failed: 529-overloaded not detected issue=#${NUMBER} stage=${stage}" >> "$LOG" 2>/dev/null || true
+      ;;
+  esac
+
   body="${body}
 
 問題を解決してから \`claude-failed\` ラベルを外してください。"
