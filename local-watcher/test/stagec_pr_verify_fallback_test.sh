@@ -15,7 +15,7 @@
 #         - 代替経路の呼び出しは 1 回限り（Req 2.6）
 #         - 代替経路の呼び出しに timeout コマンドを経由する（NFR 1.4 / Req 2.5）
 #         - 代替経路の URL に owner プレフィックスが含まれる
-#           （`gh api repos/{owner}/{repo}/pulls?head={owner}:BRANCH&state=open`）
+#           （`gh api repos/{owner}/{repo}/pulls?head={owner}:BRANCH&state=all`）
 #         - リトライ間 sleep は STAGEC_VERIFY_SLEEP_CMD で fake 化し
 #           テスト 1 件あたり 30 秒以内に収める（Req 5.8）
 #
@@ -55,11 +55,12 @@ if ! declare -F verify_stagec_pr_or_retry >/dev/null; then
   exit 2
 fi
 
-# サニティチェック: 代替経路の `gh api repos/.../pulls?head=...` 呼び出しが
-# 実装本体に残っていること（Issue #110 Req 2.1）
+# サニティチェック: 代替経路の `gh api repos/.../pulls?head=...&state=all` 呼び出しが
+# 実装本体に残っていること（Issue #110 Req 2.1）。`state=all` は高速 merge 済み PR を
+# 取りこぼさないための回帰ガード（state=open 固定だと merged PR を見落とす）。
 # shellcheck disable=SC2016
-if ! grep -q 'gh api "repos/\${REPO}/pulls?head=' "$WATCHER_SH"; then
-  echo "ERROR: issue-watcher.sh に代替 API 経路 (gh api repos/.../pulls?head=) が見つからない (Issue #110 Req 2.1)" >&2
+if ! grep -q 'gh api "repos/\${REPO}/pulls?head=.*&state=all"' "$WATCHER_SH"; then
+  echo "ERROR: issue-watcher.sh に代替 API 経路 (gh api repos/.../pulls?head=...&state=all) が見つからない (Issue #110 Req 2.1)" >&2
   exit 2
 fi
 
