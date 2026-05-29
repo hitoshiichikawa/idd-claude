@@ -887,6 +887,37 @@ prompt / template / docs では以下の用語が同義で使われます:
 6. merge 後、Issue から **`awaiting-design-review` ラベルを外す** → 次回ポーリングで Developer が自動起動し、実装 PR が別途作成される
 7. 実装 PR が作成されたら人間がレビューして merge する
 
+#### 部分実装 PR と最終 PR の `Refs` / `Closes` 使い分け（auto-close 事故防止）
+
+Architect が `tasks.md` を複数タスクに分割した spec では、turn 予算や per-task ループの都合で
+**1 つの impl PR がタスクの一部だけを完了させる「部分実装 PR」** になる場合があります。この
+ような部分実装 PR の本文に GitHub の close キーワード（`Closes #N` / `Fixes #N` / `Resolves #N`）
+を書いてしまうと、merge と同時に Issue が auto-close され、**残タスクが永久に着手不能**に
+なります（Issue #273 の事故）。これを避けるため、PjM サブエージェントは impl PR 本文の
+「対応 Issue」セクションを以下の規約で使い分けます。
+
+- **部分実装 PR**（`tasks.md` の `- [ ]` 最上位タスクが本 PR の merge 後も残存するケース）:
+  PR 本文は `Refs #<issue-number>` で書く。auto-close は発生しない
+- **残タスクは追加 impl PR で進める**: 次サイクルで watcher が同じ Issue を再ピックアップし、
+  per-task ループ（`PER_TASK_LOOP_ENABLED=true` 既定）が `tasks.md` の次の未完了タスクから
+  実装を継続する
+- **最終 PR**（`tasks.md` の全最上位タスクが本 PR の merge で完了するケース、または
+  design-less impl で単一 PR で完了するケース）: PR 本文は `Closes #<issue-number>` で書く。
+  merge と同時に Issue が auto-close される
+- **判定根拠の明示**: PjM は判定根拠（残未チェックタスク件数 or design-less impl 判定）を
+  PR 本文の「確認事項」セクションに 1 行記載する
+
+**第 2 防御線（watcher ガード）**: 万一 `Closes` で部分 merge されてしまい Issue が
+auto-close された場合でも、**人間が当該 Issue を reopen すれば watcher が `tasks.md` の
+`- [ ]` 残存を検知し**、当該 MERGED PR を resume 停止根拠として採用せずに残タスク再開を継続
+します（Issue #273 で実装した安全網）。reopen 操作だけで残タスクが自動的に進むため、
+`Closes` 事故からの復旧手段が確実に存在します。
+
+**観測性**: 判定根拠は `cron.log` から以下の prefix で grep 抽出できます。
+
+- 非 terminal 扱い（OPEN Issue + 未チェック残存）: `stage-checkpoint: find-impl-pr: merged-non-terminal pr=#... issue=#... issue_state=OPEN unchecked=... reason=open-issue-with-unchecked-tasks ...`
+- terminal 扱い（CLOSED Issue / 全完了 / design-less / API 失敗等の safe fallback）: `stage-checkpoint: find-impl-pr: merged-terminal pr=#... issue=#... issue_state=... unchecked=... reason=... ...`
+
 ### Issue の書き方（PM を誤解させないコツ）
 
 `.github/ISSUE_TEMPLATE/feature.yml` は、PM エージェントが誤解なくキャッチできる順序でフィールドを並べています。
