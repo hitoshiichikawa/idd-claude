@@ -101,7 +101,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4_
   - _Boundary: PjM Agent (impl)_
 
-- [ ] 6. PjM project-manager.md (repo-template) を root と byte 一致で更新する
+- [x] 6. PjM project-manager.md (repo-template) を root と byte 一致で更新する
   - `repo-template/.claude/agents/project-manager.md` を task 5 の root 版と **byte 一致**で
     更新する（CLAUDE.md「root と repo-template/ の二重管理」規約 NFR 4.1）
   - 更新後に `diff -r .claude/agents repo-template/.claude/agents` が空（無出力）になることを
