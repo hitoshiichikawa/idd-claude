@@ -11,8 +11,9 @@
 #   - 入口: process_pr_reviewer（dispatcher から呼ばれる）
 #   - tool 解決と排他検証: pr_resolve_tool（出力: `codex` / `antigravity` /
 #     `none` / `conflict`、戻り値 0 = ok / 1 = conflict / 2 = none）
-#   - 後続の健全性チェック / 候補 PR 取得 / レビュー実行 / コメント投稿 /
-#     ラベル付与は後続タスク（3〜6）で順次追加する。
+#   - 健全性チェック (installed / authenticated) を task 3 で追加。
+#     候補 PR 取得 / レビュー実行 / コメント投稿 / ラベル付与は後続タスク
+#     （4〜6）で順次追加する。
 #
 # 配置先:
 #   $HOME/bin/modules/pr-reviewer.sh（install.sh が local-watcher/bin/modules/ から配置する）
@@ -106,6 +107,100 @@ pr_resolve_tool() {
   pr_log "tool 未指定（PR_REVIEWER_TOOL 未設定 かつ PR_REVIEWER_{CODEX,ANTIGRAVITY}_ENABLED いずれも true ではない）。サイクルを skip します" >&2
   echo "none"
   return 2
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_check_tool_installed: 指定ツールの実行ファイルが PATH 上に存在するか確認
+#
+#   入力: $1 = "codex" | "antigravity"
+#         （Decision 2 / 3: antigravity の実バイナリ名は `agy`）
+#   出力: なし（観測ログは pr_log のみ）
+#   戻り値: 0 = ok (installed) / 1 = not-installed
+#   AC: 3.1
+#
+#   - `command -v "$bin"` で PATH 上の実行ファイル存在を確認する pure check。
+#     stdout は捨てて戻り値のみを契約とする（呼び出し元は rc で分岐）。
+#   - "codex" / "antigravity" 以外の入力は内部矛盾（pr_resolve_tool が canonical
+#     2 値以外を返すことは無い設計）。安全側に倒し、観測ログを残して
+#     not-installed (rc=1) 相当を返す。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_check_tool_installed() {
+  local tool="${1:-}"
+  local bin=""
+
+  case "$tool" in
+    codex)
+      bin="codex"
+      ;;
+    antigravity)
+      bin="agy"
+      ;;
+    *)
+      pr_error "pr_check_tool_installed: 未知の tool 名 '${tool}'（'codex' / 'antigravity' のいずれか）。not-installed として扱います"
+      return 1
+      ;;
+  esac
+
+  if command -v "$bin" >/dev/null 2>&1; then
+    pr_log "tool installed check: tool=${tool} bin=${bin} result=ok"
+    return 0
+  fi
+
+  pr_log "tool installed check: tool=${tool} bin=${bin} result=not-installed"
+  return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_check_tool_authenticated: 指定ツールが認証済みか確認
+#
+#   入力: $1 = "codex" | "antigravity"
+#   出力: なし（観測ログは pr_log のみ。auth コマンドの stdout/stderr は破棄）
+#   戻り値: 0 = ok (authenticated)
+#           1 = not-authenticated
+#           2 = check 機構が無効（env 未設定 / 空文字 = 既定 skip）
+#   AC: 3.2
+#
+#   - `PR_REVIEWER_<TOOL>_AUTH_CMD` env を解決し、空文字なら skip (rc=2)。
+#     既定値は task 7 で issue-watcher.sh 本体側に焼き込まれる:
+#       - codex: `codex login status`
+#       - agy:   `""`（既定 skip。Decision 3）
+#     本 task 範囲では env 未設定 = 空文字扱い = skip で OK。
+#   - 非空なら `bash -c "$auth_cmd"` を `>/dev/null 2>&1` で stdout/stderr を完全
+#     破棄して実行（Security Considerations: auth token / 認証 URL 等の流出防止）。
+#   - 終了コード 0 → ok (rc=0)、非ゼロ → not-authenticated (rc=1)。
+#   - `eval` は使わない（Decision 9）。`bash -c` で subshell に閉じ込める。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_check_tool_authenticated() {
+  local tool="${1:-}"
+  local auth_cmd=""
+
+  case "$tool" in
+    codex)
+      auth_cmd="${PR_REVIEWER_CODEX_AUTH_CMD:-}"
+      ;;
+    antigravity)
+      auth_cmd="${PR_REVIEWER_ANTIGRAVITY_AUTH_CMD:-}"
+      ;;
+    *)
+      pr_error "pr_check_tool_authenticated: 未知の tool 名 '${tool}'（'codex' / 'antigravity' のいずれか）。skip として扱います"
+      return 2
+      ;;
+  esac
+
+  if [ -z "$auth_cmd" ]; then
+    # AC 3.2 既定: 空文字 = check 機構が無効（skip）
+    pr_log "tool authenticated check: tool=${tool} result=skipped (auth cmd unset)"
+    return 2
+  fi
+
+  # auth コマンド実行: stdout / stderr を完全破棄（Security Considerations）
+  if bash -c "$auth_cmd" >/dev/null 2>&1; then
+    pr_log "tool authenticated check: tool=${tool} result=ok"
+    return 0
+  fi
+
+  pr_log "tool authenticated check: tool=${tool} result=not-authenticated"
+  return 1
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
