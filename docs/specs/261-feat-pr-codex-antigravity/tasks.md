@@ -27,7 +27,7 @@
   - 排他エラー / 両方無効化は `pr_log` / `pr_warn` で観測可能にする
   - _Requirements: 2.1, 2.2, 2.3, 2.5, NFR 3.1_
 
-- [ ] 3. ツール健全性チェック（installed / authenticated）
+- [x] 3. ツール健全性チェック（installed / authenticated）
 - [x] 3.1 `pr_check_tool_installed` 実装
   - `command -v "$tool"` で PATH 上の実行ファイル存在を確認
   - 戻り値 0/1 を返す pure check
