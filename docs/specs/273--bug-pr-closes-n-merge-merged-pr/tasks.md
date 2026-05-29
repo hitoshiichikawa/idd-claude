@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. test-fixtures と判定マトリクス回帰スクリプトを追加する
+- [x] 1. test-fixtures と判定マトリクス回帰スクリプトを追加する
   - `docs/specs/273--bug-pr-closes-n-merge-merged-pr/test-fixtures/tasks-with-unchecked.md` を
     新規作成（`- [ ] 1. ...` / `- [ ] 2. ...` を含む 2 件以上、子タスク `1.1` と完了済み
     `- [x] 3. ...` も混在させて regex の精度を担保）
