@@ -15,7 +15,7 @@
     カウンタと終了 code（`FAIL > 0 → exit 1`）を `265-*/test-find-impl-pr.sh` と同形式で実装
   - _Requirements: 2.4, 3.2, 3.3_
 
-- [ ] 2. Stage Checkpoint Module に sc_issue_state ヘルパを追加する
+- [x] 2. Stage Checkpoint Module に sc_issue_state ヘルパを追加する
   - `local-watcher/bin/issue-watcher.sh` の Stage Checkpoint Module セクション
     （`stage_checkpoint_has_impl_notes` の直後）に `sc_issue_state()` を新規追加
   - 実装: `gh issue view "$NUMBER" --repo "$REPO" --json state --jq '.state' 2>/dev/null` を
