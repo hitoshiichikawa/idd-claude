@@ -1109,6 +1109,25 @@ stage_checkpoint_has_impl_notes() {
   [ -n "$out" ]
 }
 
+# ─── sc_issue_state ───
+#
+# 対象 Issue (`$NUMBER`) の state を 1 トークン (`OPEN` / `CLOSED`) で stdout に返す
+# read-only ヘルパ。`stage_checkpoint_find_impl_pr` が MERGED PR を terminal として
+# 採用する前に、Issue が reopen されていないかを確認するために使う
+# （Issue #273 / Req 2.3, 3.1, 4.3）。
+#
+# 入力: 環境変数 NUMBER / REPO（呼び出し元 _slot_run_issue が設定済み）
+# 戻り値: 0 = 取得成功（stdout = "OPEN" / "CLOSED"）/ 1 = API 失敗（stdout 空）
+# 副作用: なし（read-only）
+sc_issue_state() {
+  local state
+  state=$(gh issue view "$NUMBER" --repo "$REPO" --json state --jq '.state' 2>/dev/null || true)
+  case "$state" in
+    OPEN|CLOSED) echo "$state"; return 0 ;;
+    *)           return 1 ;;
+  esac
+}
+
 # ─── stage_checkpoint_read_review_result ───
 #
 # Stage B 完了 checkpoint（review-notes.md）の RESULT 行を抽出する。
