@@ -33,7 +33,7 @@
   - 戻り値 0/1 を返す pure check
   - _Requirements: 3.1_
 
-- [ ] 3.2 `pr_check_tool_authenticated` 実装
+- [x] 3.2 `pr_check_tool_authenticated` 実装
   - `PR_REVIEWER_<TOOL>_AUTH_CMD` env を解決し、空文字なら skip（戻り値 2）
   - 非空ならコマンドを実行し、終了コード 0 で OK 判定
   - stdout/stderr は破棄（auth token 流出防止 / Security Considerations）
