@@ -2440,6 +2440,206 @@ pt_resolve_diff_range() {
   return 0
 }
 
+# ─── pt_has_subtasks <tasks_md_path> <task_id> ───
+#
+# tasks.md 上で指定 task_id を numeric 階層 prefix とする子タスク行が 1 件以上存在するか
+# 判定する（Issue #270 / Req 2.1, 2.4, 2.5）。
+#
+# 判定パターン（checkbox enforcement の判定パターンに整合 / .claude/rules/tasks-generation.md）:
+#   - 行頭が `- [ ]` / `- [ ]*` / `- [x]` / `- [x]*` のいずれかで開始
+#   - 続けて `<task_id>.<下位 ID>(<.下位 ID>)* `（末尾 `.` あり / なしを許容）
+#   - 例: 親 task_id=`4` に対し `- [ ] 4.1 <title>` / `- [x] 4.2.1 <title>` / `- [ ]* 4.3 <title>`
+#
+# 戻り値:
+#   0 = 子タスクが 1 件以上存在する（= 親タスクとして扱える）
+#   1 = 子タスクが 1 件も存在しない（= 通常タスク / 階層末端）
+#   2 = tasks.md 不在 / その他 fail-safe（NFR 1.3）
+#
+# Req 2.4: 子タスクの完了 / 未完了状態（`- [x]` か `- [ ]` か）に関わらず、子タスクの
+# 存在のみで親タスク判定を成立させる
+# Req 2.5: deferrable 印 `- [ ]*` も子タスク存在判定の対象に含める
+#
+# Requirements (Issue #270): 2.1, 2.4, 2.5, NFR 1.3
+pt_has_subtasks() {
+  local tasks_md="$1"
+  local task_id="$2"
+  if [ ! -f "$tasks_md" ]; then
+    return 2
+  fi
+  if [ -z "$task_id" ]; then
+    return 2
+  fi
+  # task_id を正規表現リテラルとして安全にエスケープ
+  local task_id_re
+  # shellcheck disable=SC2016
+  task_id_re=$(printf '%s' "$task_id" | sed -E 's/[][\\.*^$()+?{|/]/\\&/g')
+  # 子タスク行: `- [ ]` / `- [ ]*` / `- [x]` / `- [x]*` + ` <task_id>.<下位 ID>(...)? `
+  if grep -qE "^- \[[ x]\]\*? ${task_id_re}\.[0-9]+(\.[0-9]+)*\.? " "$tasks_md" 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# ─── pt_is_parent_checkbox_only_diff <task_id> <range_start> <range_end> ───
+#
+# 指定 diff range (`range_start..range_end`) の変更内容が、`tasks.md` 1 ファイルのみで構成され、
+# かつその変更内容が指定 task_id の checkbox flip `- [ ]` → `- [x]` のみであることを判定する
+# （Issue #270 / Req 3.1, 3.4, 3.5）。
+#
+# 戻り値:
+#   0 = 条件成立（Reviewer スキップ可能）
+#   1 = 条件不成立（tasks.md 以外のファイル変更を含む / tasks.md 内に他編集を含む / fail-safe）
+#
+# 判定手順:
+#   1. `git diff --name-only <range>` で変更ファイル集合を取得し、`tasks.md` 1 件のみであることを確認
+#      - 0 件 / 2 件以上 → 不成立
+#      - 1 件だがファイル名が tasks.md でない → 不成立
+#   2. `git diff <range> -- <tasks_md>` の hunk 内行を走査し、以下のみで構成されることを確認:
+#      - 削除行 `- ` で始まる中身が `- [ ] <task_id>(\.)? ` で始まる行のみ
+#      - 追加行 `+ ` で始まる中身が `- [x] <task_id>(\.)? ` で始まる行のみ
+#      - diff header / hunk header / context 行は無視
+#   3. 削除行 1 件 + 追加行 1 件で完全に対応する（task_id checkbox flip 1 ペアのみ）こと
+#      - 他 task_id の checkbox flip / `_Requirements:_` 編集 / 新規追加 / 削除のみ等が
+#        混入すれば不成立
+#
+# Req 3.2: tasks.md 以外のファイルが 1 件でも含まれれば不成立
+# Req 3.5: tasks.md 内の変更が他編集を含めば不成立
+# NFR 1.3: 異常系（git diff 失敗等）は不成立（保守的に倒す）
+#
+# Requirements (Issue #270): 3.1, 3.2, 3.4, 3.5, NFR 1.3
+pt_is_parent_checkbox_only_diff() {
+  local task_id="$1"
+  local range_start="$2"
+  local range_end="$3"
+
+  if [ -z "$task_id" ] || [ -z "$range_start" ] || [ -z "$range_end" ]; then
+    return 1
+  fi
+
+  # spec ディレクトリ配下の tasks.md パスを canonical に決める。git diff --name-only は
+  # repo root からの相対パスで返るため、SPEC_DIR_REL/tasks.md と比較する。
+  local tasks_md_rel="${SPEC_DIR_REL:-}/tasks.md"
+  if [ -z "${SPEC_DIR_REL:-}" ]; then
+    # SPEC_DIR_REL が未設定 → fail-safe で不成立
+    return 1
+  fi
+
+  # ── (1) 変更ファイル集合の取得と検証 ──
+  local changed_files
+  if ! changed_files=$(git diff --name-only "${range_start}..${range_end}" 2>/dev/null); then
+    return 1
+  fi
+
+  # 空 diff → 不成立（checkbox flip すら無い）
+  if [ -z "$changed_files" ]; then
+    return 1
+  fi
+
+  # 変更ファイルが tasks.md ちょうど 1 件のみであることを検証
+  local changed_count
+  changed_count=$(printf '%s\n' "$changed_files" | wc -l | tr -d '[:space:]')
+  if [ "$changed_count" != "1" ]; then
+    return 1
+  fi
+  if [ "$changed_files" != "$tasks_md_rel" ]; then
+    return 1
+  fi
+
+  # ── (2) tasks.md 内の hunk 内容を走査 ──
+  local diff_body
+  if ! diff_body=$(git diff "${range_start}..${range_end}" -- "$tasks_md_rel" 2>/dev/null); then
+    return 1
+  fi
+  if [ -z "$diff_body" ]; then
+    return 1
+  fi
+
+  # task_id を正規表現リテラルとして安全にエスケープ
+  local task_id_re
+  # shellcheck disable=SC2016
+  task_id_re=$(printf '%s' "$task_id" | sed -E 's/[][\\.*^$()+?{|/]/\\&/g')
+
+  # hunk 行を分類:
+  #   - 削除行: `-` で始まるが `--- a/path` の diff file header ではない行
+  #   - 追加行: `+` で始まるが `+++ b/path` の diff file header ではない行
+  #   - その他（context / hunk header `@@` / `diff --git` / `index ` 行）: 無視
+  # 期待: 削除行 1 件 + 追加行 1 件のペアのみで、それぞれが当該 task_id の checkbox flip。
+  #
+  # 注意: 削除行の中身が `- [ ]` で始まる markdown list の場合、diff 上は `-- [ ]` のように
+  # 行頭が `--` 2 文字になる。よって `^-[^-]` で diff header を除外する素朴な regex は
+  # markdown 削除行を取りこぼす。`^--- ` を file header として明示除外する形に修正する。
+  local minus_count plus_count minus_match plus_match
+  # `- [ ] <task_id>(\.)? ` で始まる削除行 = `^-- \[ \] <task_id>(\.)? `
+  minus_match=$(printf '%s\n' "$diff_body" | grep -cE "^-- \[ \] ${task_id_re}\.? " 2>/dev/null || true)
+  # `- [x] <task_id>(\.)? ` で始まる追加行 = `^\+- \[x\] <task_id>(\.)? `
+  plus_match=$(printf '%s\n' "$diff_body" | grep -cE "^\+- \[x\] ${task_id_re}\.? " 2>/dev/null || true)
+
+  # 全削除行 / 追加行の総数: 行頭 `-` / `+` を持ち、かつ file header (`--- ` / `+++ `) ではない行。
+  # diff header / hunk header / context 行は除外する。
+  minus_count=$(printf '%s\n' "$diff_body" | grep -E '^-' | grep -cvE '^--- ' 2>/dev/null || true)
+  plus_count=$(printf '%s\n' "$diff_body" | grep -E '^\+' | grep -cvE '^\+\+\+ ' 2>/dev/null || true)
+
+  # 厳密一致: 削除行 1 件 + 追加行 1 件で、それぞれが当該 task_id の checkbox flip ペア
+  if [ "$minus_count" = "1" ] && [ "$plus_count" = "1" ] \
+     && [ "$minus_match" = "1" ] && [ "$plus_match" = "1" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# ─── pt_should_skip_reviewer <task_id> ───
+#
+# per-task Reviewer 起動直前のスキップ判定 dispatcher（Issue #270 / Req 1.1, 1.2, 1.3）。
+#
+# 以下を順に判定し、すべて成立した場合のみ「Reviewer 起動をスキップ可能」として stdout に
+# 判定根拠ログを 1 行残し、return 0。いずれか不成立 / fail-safe なら return 1。
+#
+#   1. 当該 task_id が「子タスクを 1 件以上持つ親タスク」である（pt_has_subtasks rc=0）
+#   2. pt_resolve_diff_range が成功する（marker commit が見つかる）
+#   3. 当該 task の diff range が `tasks.md` のみ + checkbox flip のみで構成される
+#      （pt_is_parent_checkbox_only_diff rc=0）
+#
+# 戻り値:
+#   0 = スキップ条件成立（Reviewer 起動不要 / approve 扱い）
+#   1 = スキップ条件不成立（通常通り Reviewer を起動すべき / fail-safe 含む）
+#
+# NFR 2.1: スキップ成立時のみ単一行ログを stdout に出力（呼び出し側で `>> "$LOG"` する規約）。
+# NFR 2.3: スキップ不成立時は新規ログを出さない（既存ログ量を増やさない後方互換）。
+#
+# Requirements (Issue #270): 1.1, 1.2, 1.3, 1.4, 2.x, 3.x, NFR 1.3, NFR 2.1, NFR 2.3
+pt_should_skip_reviewer() {
+  local task_id="$1"
+  local tasks_md="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+
+  # (1) 親タスク判定（子タスクが 1 件以上存在するか）
+  local _has_rc=0
+  pt_has_subtasks "$tasks_md" "$task_id" || _has_rc=$?
+  if [ "$_has_rc" != "0" ]; then
+    # 子タスク不在 or fail-safe → スキップ対象外（既存ログを増やさない）
+    return 1
+  fi
+
+  # (2) diff range 解決
+  local range_line range_start range_end
+  if ! range_line=$(pt_resolve_diff_range "$task_id" 2>/dev/null); then
+    return 1
+  fi
+  range_start=$(printf '%s' "$range_line" | cut -f1)
+  range_end=$(printf '%s' "$range_line" | cut -f2)
+  if [ -z "$range_start" ] || [ -z "$range_end" ]; then
+    return 1
+  fi
+
+  # (3) tasks.md only + checkbox flip only 判定
+  if ! pt_is_parent_checkbox_only_diff "$task_id" "$range_start" "$range_end"; then
+    return 1
+  fi
+
+  # スキップ成立。NFR 2.1 / Req 1.4 に従い grep 可能な単一行ログを stdout に出力。
+  pt_log "task=${task_id} reviewer skipped reason=parent-task-checkbox-only-diff range=${range_start:0:7}..${range_end:0:7}"
+  return 0
+}
+
 # ─── build_per_task_implementer_prompt <task_id> ───
 #
 # per-task Implementer 用の prompt を heredoc で組み立てて stdout に出力。
@@ -3180,8 +3380,18 @@ run_per_task_loop() {
       fi
     fi
 
+    # Issue #270: 親タスク完了マーク commit のみで構成される task の Reviewer 起動を抑止する。
+    # 親タスク（子タスクを 1 件以上持つ task）かつ diff range の変更が `tasks.md` のみ かつ
+    # その変更が当該 task ID の checkbox flip のみ なら、Reviewer は本来レビュー対象を持たず
+    # `review-notes.md` を書き出さないため `parse-failed` → `claude-failed` を引き起こす。
+    # 該当する場合のみ Reviewer 起動をスキップし approve 扱い（rev_rc=0）で続行する。
+    # 通常タスク / 子タスク / 異常系（diff range 解決失敗等）は本判定を bypass し従来経路へ。
     local rev_rc=0
-    run_per_task_reviewer "$task_id" 1 || rev_rc=$?
+    if pt_should_skip_reviewer "$task_id" >> "$LOG"; then
+      rev_rc=0
+    else
+      run_per_task_reviewer "$task_id" 1 || rev_rc=$?
+    fi
     case "$rev_rc" in
       0)
         # approve → 次 task へ
