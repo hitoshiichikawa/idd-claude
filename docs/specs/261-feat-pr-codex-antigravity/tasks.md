@@ -41,14 +41,14 @@
     Decision 3）
   - _Requirements: 3.2_
 
-- [ ] 4. 重複防止 marker と候補 PR 列挙
-- [ ] 4.1 `pr_build_marker` と `pr_already_processed` の実装
+- [x] 4. 重複防止 marker と候補 PR 列挙
+- [x] 4.1 `pr_build_marker` と `pr_already_processed` の実装
   - hidden HTML marker フォーマット `<!-- idd-claude:pr-reviewer sha=<oid> kind=<kind> tool=<tool> -->` を生成
   - `gh api /repos/$REPO/issues/<n>/comments` で marker 既存判定（`jq -e` でテスト）
   - 戻り値: 0 = 既存（skip）, 1 = 未存在（continue）
   - _Requirements: 3.3, 6.1, 6.2, 6.3, 6.4, NFR 4.1_
 
-- [ ] 4.2 `pr_fetch_candidate_prs` の実装
+- [x] 4.2 `pr_fetch_candidate_prs` の実装
   - `gh pr list --repo $REPO --state open --search "-draft:true" --json number,headRefName,headRefOid,baseRefName,isDraft,url,headRepositoryOwner --limit 50`
   - クライアント側 fail-safe filter: `select(.isDraft == false)` + head pattern (`PR_REVIEWER_HEAD_PATTERN`) +
     fork 除外（`headRepositoryOwner.login == $owner`、既存 `pi_fetch_candidate_prs` 踏襲）
@@ -56,8 +56,8 @@
   - 取得失敗 / timeout 時は `pr_warn` + 空配列を返す（NFR 3.1 の観測性）
   - _Requirements: 7.1, 7.2, 7.3_
 
-- [ ] 5. レビュー prompt 解決とレビュー実行とコメント投稿
-- [ ] 5.1 `pr_build_prompt_file` と `pr_substitute_placeholders` の実装
+- [x] 5. レビュー prompt 解決とレビュー実行とコメント投稿
+- [x] 5.1 `pr_build_prompt_file` と `pr_substitute_placeholders` の実装
   - `pr_build_prompt_file`: `PR_REVIEWER_<TOOL>_PROMPT` → `PR_REVIEWER_PROMPT` → 内蔵 default の順で
     prompt 本体を解決し、`{BASE}` / `{HEAD}` / `{PR}` を文字列置換した結果を `mktemp -t
     idd-claude-pr-reviewer.XXXXXX` で得た一時ファイルに書き出し、stdout にそのパスを返す
@@ -67,7 +67,7 @@
   - 内蔵 default prompt は design.md 「Default Review Prompt」節の本文と byte 一致させる
   - _Requirements: 4.3_
 
-- [ ] 5.2 `pr_execute_review_command` の実装
+- [x] 5.2 `pr_execute_review_command` の実装
   - サブシェル + trap で BASE_BRANCH 復帰と prompt tempfile 削除を保証
   - `git fetch origin <head_ref>` → `git checkout -B <head_ref> origin/<head_ref>`
   - 解決済みコマンドを `PR_REVIEWER_EXEC_TIMEOUT` 秒の `timeout` で実行（`bash -c "$resolved_cmd"`
@@ -81,14 +81,14 @@
   - 終了コードと stdout を分離して返す
   - _Requirements: 4.1, 4.2, 4.5_
 
-- [ ] 5.3 `pr_post_review_comment` / `pr_post_error_comment` の実装
+- [x] 5.3 `pr_post_review_comment` / `pr_post_error_comment` の実装
   - `pr_post_review_comment`: レビュー結果テキスト末尾に hidden marker `kind=review` を付与し
     `gh pr comment` で投稿
   - `pr_post_error_comment`: 本文冒頭に `## 自動レビューエラー` 見出し + `kind=<conflict-tool|not-installed|not-authenticated|exec-failed|workspace-modified>` の marker
   - 投稿失敗時は `pr_warn`（後続 processor 阻害なし）
   - _Requirements: 2.4, 3.1, 3.2, 3.4, 4.4, 6.1, 6.4_
 
-- [ ] 6. 構造化 VERDICT 検出と needs-iteration ラベル付与
+- [x] 6. 構造化 VERDICT 検出と needs-iteration ラベル付与
   - `pr_detect_iteration_keyword` を実装: `grep -E -i -c "$PR_REVIEWER_ITERATION_PATTERN"` で
     マッチ件数取得。既定 pattern は内蔵 prompt が最終行に出力する
     `^[[:space:]]*VERDICT:[[:space:]]*needs-iteration[[:space:]]*$` を line-anchored で検出
@@ -98,7 +98,7 @@
     （`gh` 側で冪等のため再付与は no-op）
   - _Requirements: 5.1, 5.2, 5.3, 5.4_
 
-- [ ] 7. issue-watcher.sh への配線（env / source / dispatcher）
+- [x] 7. issue-watcher.sh への配線（env / source / dispatcher）
   - **Config ブロック追記**: 既存「PR Iteration Processor 設定」節の **後** に「PR Reviewer Processor 設定 (#261)」節を追加し、design.md の Environment Variable Catalog にある env 群を `${VAR:-default}` で解決
     - `PR_REVIEWER_ENABLED` / `PR_REVIEWER_TOOL` / `PR_REVIEWER_CODEX_ENABLED` /
       `PR_REVIEWER_ANTIGRAVITY_ENABLED`
@@ -116,14 +116,14 @@
   - 既存 env / 既存 dispatcher 順序 / 既存 source 群を変更しないこと（NFR 1.1, 1.2）
   - _Requirements: 1.1, 1.2, 1.3, NFR 1.1, NFR 1.2_
 
-- [ ] 8. README への追記（opt-in 機能一覧 + 詳細セクション）
+- [x] 8. README への追記（opt-in 機能一覧 + 詳細セクション）
   - 「オプション機能一覧 / opt-in（既定 OFF、明示的に有効化が必要）」表に 1 行追加
     （制御変数: `PR_REVIEWER_ENABLED` / 既定 `false` / 正規化規則 / 追加 env: `PR_REVIEWER_TOOL` 等 / 詳細リンク / 関連 #261）
   - 新規 h2 セクション「PR Reviewer Processor (#261)」を追加: 概要 / env 一覧表（既定値・正規化規則）/ tool 排他制御 / hidden marker / cron 例 / トラブルシュート FAQ
   - `repo-template/README.md` は存在しないため二重管理対応は不要（design.md File Structure Plan で明記）
   - _Requirements: 1.2, 2.1, 2.2, 2.3, 2.4, 2.5, 3.1, 3.2, 3.3, 3.4, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 5.4, 6.1, 6.2, 6.3, 6.4, 7.1, 7.2, 7.3, NFR 1.1_
 
-- [ ] 9. 静的解析クリーン化と手動スモーク
+- [x] 9. 静的解析クリーン化と手動スモーク
   - `shellcheck` を新規 / 編集ファイルに実行し警告ゼロを確認（NFR 2.1）
   - `PR_REVIEWER_ENABLED=false`（既定）の dry-run で `process_pr_reviewer` が早期 return することを log 観察
   - `PR_REVIEWER_ENABLED=true` + ツール未インストールで `kind=not-installed` コメント 1 回投稿を確認
