@@ -28,7 +28,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.5, NFR 3.1_
 
 - [ ] 3. ツール健全性チェック（installed / authenticated）
-- [ ] 3.1 `pr_check_tool_installed` 実装
+- [x] 3.1 `pr_check_tool_installed` 実装
   - `command -v "$tool"` で PATH 上の実行ファイル存在を確認
   - 戻り値 0/1 を返す pure check
   - _Requirements: 3.1_
