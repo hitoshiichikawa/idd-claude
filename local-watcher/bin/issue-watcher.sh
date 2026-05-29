@@ -1128,6 +1128,38 @@ sc_issue_state() {
   esac
 }
 
+# ─── sc_tasks_unchecked_count ───
+#
+# `tasks.md` の **最上位 numeric ID 未チェックタスク** 件数を整数で stdout に返す
+# read-only ヘルパ。`stage_checkpoint_find_impl_pr` が MERGED PR を terminal として
+# 採用する前に、tasks.md に未着手タスクが残存していないかを確認するために使う
+# （Issue #273 / Req 2.1, 2.4, 3.2, 3.3）。
+#
+# 入力: 環境変数 REPO_DIR / SPEC_DIR_REL（呼び出し元 _slot_run_issue が設定済み）
+# 戻り値:
+#   0 = 取得成功（stdout = 件数）
+#   1 = I/O 失敗（読み取り権限なし等、stdout = 0、safe fallback）
+#   2 = ファイル不在（design-less impl 等価扱い、stdout = 0）
+# 副作用: なし（read-only）
+#
+# 判定 regex 正本: `.claude/rules/tasks-generation.md` の「Checkbox 形式の必須化」節および
+# `.claude/rules/design-review-gate.md` の Budget overflow count 抽出 regex
+# (`^- \[ \]\*? [0-9]+\. `) と **完全一致**。両者は別実行基盤のため共有コードを持てず、
+# 同一 regex を明記してドリフトを防ぐ（design.md L252-255）。
+sc_tasks_unchecked_count() {
+  local rel="$SPEC_DIR_REL/tasks.md"
+  local path="$REPO_DIR/$rel"
+  [ -f "$path" ] || { echo 0; return 2; }
+  [ -r "$path" ] || { echo 0; return 1; }
+  # `grep -cE` は 0 件マッチで rc=1 + stdout="0" を返すため、`|| echo 0` 形式だと
+  # `0\n0` の重複出力になる（task 1 で観測済み）。`|| count=0` 形式で受けて
+  # stdout 単独の整数 1 トークンを保証する。
+  local count
+  count=$(grep -cE '^- \[ \]\*? [0-9]+\. ' "$path" 2>/dev/null) || count=0
+  echo "$count"
+  return 0
+}
+
 # ─── stage_checkpoint_read_review_result ───
 #
 # Stage B 完了 checkpoint（review-notes.md）の RESULT 行を抽出する。
