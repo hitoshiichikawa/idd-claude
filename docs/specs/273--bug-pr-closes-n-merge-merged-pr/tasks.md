@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. test-fixtures と判定マトリクス回帰スクリプトを追加する
+- [x] 1. test-fixtures と判定マトリクス回帰スクリプトを追加する
   - `docs/specs/273--bug-pr-closes-n-merge-merged-pr/test-fixtures/tasks-with-unchecked.md` を
     新規作成（`- [ ] 1. ...` / `- [ ] 2. ...` を含む 2 件以上、子タスク `1.1` と完了済み
     `- [x] 3. ...` も混在させて regex の精度を担保）
@@ -15,7 +15,7 @@
     カウンタと終了 code（`FAIL > 0 → exit 1`）を `265-*/test-find-impl-pr.sh` と同形式で実装
   - _Requirements: 2.4, 3.2, 3.3_
 
-- [ ] 2. Stage Checkpoint Module に sc_issue_state ヘルパを追加する
+- [x] 2. Stage Checkpoint Module に sc_issue_state ヘルパを追加する
   - `local-watcher/bin/issue-watcher.sh` の Stage Checkpoint Module セクション
     （`stage_checkpoint_has_impl_notes` の直後）に `sc_issue_state()` を新規追加
   - 実装: `gh issue view "$NUMBER" --repo "$REPO" --json state --jq '.state' 2>/dev/null` を
@@ -27,7 +27,7 @@
   - _Requirements: 2.3, 3.1, 4.3_
   - _Boundary: Stage Checkpoint Module_
 
-- [ ] 3. Stage Checkpoint Module に sc_tasks_unchecked_count ヘルパを追加する (P)
+- [x] 3. Stage Checkpoint Module に sc_tasks_unchecked_count ヘルパを追加する (P)
   - `local-watcher/bin/issue-watcher.sh` の Stage Checkpoint Module セクション
     （task 2 の直後）に `sc_tasks_unchecked_count()` を新規追加
   - パス解決: `local rel="$SPEC_DIR_REL/tasks.md"`, `local path="$REPO_DIR/$rel"`
@@ -44,7 +44,7 @@
   - _Boundary: Stage Checkpoint Module_
   - _Depends: 1_
 
-- [ ] 4. stage_checkpoint_find_impl_pr の MERGED 採用ブロックに再判定ガードを inject する
+- [x] 4. stage_checkpoint_find_impl_pr の MERGED 採用ブロックに再判定ガードを inject する
   - `local-watcher/bin/issue-watcher.sh` L1160-1195 付近の `stage_checkpoint_find_impl_pr()` の
     `elif [ -n "$merged_pr" ]; then found="$merged_pr"` 分岐を改修
   - 改修ロジック:
@@ -79,7 +79,7 @@
   - _Boundary: Stage Checkpoint Module_
   - _Depends: 2, 3_
 
-- [ ] 5. PjM project-manager.md (root) に Refs/Closes 使い分け規約を追記する (P)
+- [x] 5. PjM project-manager.md (root) に Refs/Closes 使い分け規約を追記する (P)
   - `.claude/agents/project-manager.md` の「モード 2: implementation」節（L204 付近）の
     「実装 PR 本文テンプレート」直前に新規サブ節「## 実装 PR 本文の `Refs` / `Closes`
     使い分け（auto-close 事故防止）」を追加
@@ -101,7 +101,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4_
   - _Boundary: PjM Agent (impl)_
 
-- [ ] 6. PjM project-manager.md (repo-template) を root と byte 一致で更新する
+- [x] 6. PjM project-manager.md (repo-template) を root と byte 一致で更新する
   - `repo-template/.claude/agents/project-manager.md` を task 5 の root 版と **byte 一致**で
     更新する（CLAUDE.md「root と repo-template/ の二重管理」規約 NFR 4.1）
   - 更新後に `diff -r .claude/agents repo-template/.claude/agents` が空（無出力）になることを
@@ -110,7 +110,7 @@
   - _Boundary: PjM Agent (impl), リポジトリ二重管理規約_
   - _Depends: 5_
 
-- [ ] 7. README に Refs/Closes 使い分け規約と watcher ガードの概要を追記する (P)
+- [x] 7. README に Refs/Closes 使い分け規約と watcher ガードの概要を追記する (P)
   - `README.md` の「使い方 > 基本フロー」節（L877〜L889 付近）の 7 番目項目「実装 PR が作成
     されたら人間がレビューして merge する」の直後に新規ブロックを追加
   - 内容:

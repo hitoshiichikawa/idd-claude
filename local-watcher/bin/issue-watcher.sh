@@ -1109,6 +1109,57 @@ stage_checkpoint_has_impl_notes() {
   [ -n "$out" ]
 }
 
+# ─── sc_issue_state ───
+#
+# 対象 Issue (`$NUMBER`) の state を 1 トークン (`OPEN` / `CLOSED`) で stdout に返す
+# read-only ヘルパ。`stage_checkpoint_find_impl_pr` が MERGED PR を terminal として
+# 採用する前に、Issue が reopen されていないかを確認するために使う
+# （Issue #273 / Req 2.3, 3.1, 4.3）。
+#
+# 入力: 環境変数 NUMBER / REPO（呼び出し元 _slot_run_issue が設定済み）
+# 戻り値: 0 = 取得成功（stdout = "OPEN" / "CLOSED"）/ 1 = API 失敗（stdout 空）
+# 副作用: なし（read-only）
+sc_issue_state() {
+  local state
+  state=$(gh issue view "$NUMBER" --repo "$REPO" --json state --jq '.state' 2>/dev/null || true)
+  case "$state" in
+    OPEN|CLOSED) echo "$state"; return 0 ;;
+    *)           return 1 ;;
+  esac
+}
+
+# ─── sc_tasks_unchecked_count ───
+#
+# `tasks.md` の **最上位 numeric ID 未チェックタスク** 件数を整数で stdout に返す
+# read-only ヘルパ。`stage_checkpoint_find_impl_pr` が MERGED PR を terminal として
+# 採用する前に、tasks.md に未着手タスクが残存していないかを確認するために使う
+# （Issue #273 / Req 2.1, 2.4, 3.2, 3.3）。
+#
+# 入力: 環境変数 REPO_DIR / SPEC_DIR_REL（呼び出し元 _slot_run_issue が設定済み）
+# 戻り値:
+#   0 = 取得成功（stdout = 件数）
+#   1 = I/O 失敗（読み取り権限なし等、stdout = 0、safe fallback）
+#   2 = ファイル不在（design-less impl 等価扱い、stdout = 0）
+# 副作用: なし（read-only）
+#
+# 判定 regex 正本: `.claude/rules/tasks-generation.md` の「Checkbox 形式の必須化」節および
+# `.claude/rules/design-review-gate.md` の Budget overflow count 抽出 regex
+# (`^- \[ \]\*? [0-9]+\. `) と **完全一致**。両者は別実行基盤のため共有コードを持てず、
+# 同一 regex を明記してドリフトを防ぐ（design.md L252-255）。
+sc_tasks_unchecked_count() {
+  local rel="$SPEC_DIR_REL/tasks.md"
+  local path="$REPO_DIR/$rel"
+  [ -f "$path" ] || { echo 0; return 2; }
+  [ -r "$path" ] || { echo 0; return 1; }
+  # `grep -cE` は 0 件マッチで rc=1 + stdout="0" を返すため、`|| echo 0` 形式だと
+  # `0\n0` の重複出力になる（task 1 で観測済み）。`|| count=0` 形式で受けて
+  # stdout 単独の整数 1 トークンを保証する。
+  local count
+  count=$(grep -cE '^- \[ \]\*? [0-9]+\. ' "$path" 2>/dev/null) || count=0
+  echo "$count"
+  return 0
+}
+
 # ─── stage_checkpoint_read_review_result ───
 #
 # Stage B 完了 checkpoint（review-notes.md）の RESULT 行を抽出する。
@@ -1174,7 +1225,56 @@ stage_checkpoint_find_impl_pr() {
   if [ -n "$open_pr" ]; then
     found="$open_pr"
   elif [ -n "$merged_pr" ]; then
-    found="$merged_pr"
+    # MERGED PR を terminal として採用する前の再判定ガード（Issue #273 / Req 2.1, 2.2, 2.3, 2.4, 3.1, 3.2, 4.1, 4.2）。
+    # 部分実装 PR が `Closes #N` で merge → Issue 自動 close → reopen + 残タスクあり、
+    # というシナリオで MERGED PR を terminal とみなして自動進行を止めてしまう取りこぼし
+    # を防ぐ。OPEN PR がある経路には到達しないため、追加 `gh issue view` は OPEN PR 不在
+    # かつ MERGED PR 存在時のみ発火する（Req 2.5）。
+    local merged_num issue_state="" issue_rc=0 tasks_unchecked=0 tasks_rc=0 reason=""
+    merged_num=$(echo "$merged_pr" | jq -r '.number // "?"' 2>/dev/null || echo '?')
+    issue_state=$(sc_issue_state) || true
+    issue_rc=$?
+    if [ "$issue_rc" -ne 0 ]; then
+      reason="issue-api-failure"
+      found="$merged_pr"
+    elif [ "$issue_state" = "CLOSED" ]; then
+      reason="closed-issue"
+      found="$merged_pr"
+    else
+      # issue_state == "OPEN"
+      tasks_unchecked=$(sc_tasks_unchecked_count) || true
+      tasks_rc=$?
+      case "$tasks_rc" in
+        2)
+          reason="no-tasks-file"
+          found="$merged_pr"
+          ;;
+        1)
+          reason="tasks-io-failure"
+          found="$merged_pr"
+          ;;
+        0)
+          if [ "$tasks_unchecked" -ge 1 ] 2>/dev/null; then
+            reason="open-issue-with-unchecked-tasks"
+            found=""
+          else
+            reason="all-checked"
+            found="$merged_pr"
+          fi
+          ;;
+        *)
+          # 想定外 rc は safe fallback（既存挙動維持）
+          reason="tasks-unknown-rc"
+          found="$merged_pr"
+          ;;
+      esac
+    fi
+
+    if [ -z "$found" ]; then
+      sc_log "find-impl-pr: merged-non-terminal pr=#${merged_num} issue=#${NUMBER} issue_state=OPEN unchecked=${tasks_unchecked} reason=${reason} branch=${BRANCH}" >> "$LOG"
+    else
+      sc_log "find-impl-pr: merged-terminal pr=#${merged_num} issue=#${NUMBER} issue_state=${issue_state:-unknown} unchecked=${tasks_unchecked} reason=${reason} branch=${BRANCH}" >> "$LOG"
+    fi
   elif [ -n "$closed_pr" ] && [ "$include_closed" = "true" ]; then
     # Stage C CLOSED ガード（Issue #212）専用: include_closed=true のときのみ CLOSED を採用。
     # 既定の resolve_resume_point / stage_a_crossing_probe / spec_completeness 経路には届かない。
