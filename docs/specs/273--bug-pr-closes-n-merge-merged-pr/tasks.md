@@ -27,7 +27,7 @@
   - _Requirements: 2.3, 3.1, 4.3_
   - _Boundary: Stage Checkpoint Module_
 
-- [ ] 3. Stage Checkpoint Module に sc_tasks_unchecked_count ヘルパを追加する (P)
+- [x] 3. Stage Checkpoint Module に sc_tasks_unchecked_count ヘルパを追加する (P)
   - `local-watcher/bin/issue-watcher.sh` の Stage Checkpoint Module セクション
     （task 2 の直後）に `sc_tasks_unchecked_count()` を新規追加
   - パス解決: `local rel="$SPEC_DIR_REL/tasks.md"`, `local path="$REPO_DIR/$rel"`
