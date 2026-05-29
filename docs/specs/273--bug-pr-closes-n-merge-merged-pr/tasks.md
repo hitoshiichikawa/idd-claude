@@ -110,7 +110,7 @@
   - _Boundary: PjM Agent (impl), リポジトリ二重管理規約_
   - _Depends: 5_
 
-- [ ] 7. README に Refs/Closes 使い分け規約と watcher ガードの概要を追記する (P)
+- [x] 7. README に Refs/Closes 使い分け規約と watcher ガードの概要を追記する (P)
   - `README.md` の「使い方 > 基本フロー」節（L877〜L889 付近）の 7 番目項目「実装 PR が作成
     されたら人間がレビューして merge する」の直後に新規ブロックを追加
   - 内容:
