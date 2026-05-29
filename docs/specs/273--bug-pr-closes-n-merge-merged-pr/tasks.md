@@ -44,7 +44,7 @@
   - _Boundary: Stage Checkpoint Module_
   - _Depends: 1_
 
-- [ ] 4. stage_checkpoint_find_impl_pr の MERGED 採用ブロックに再判定ガードを inject する
+- [x] 4. stage_checkpoint_find_impl_pr の MERGED 採用ブロックに再判定ガードを inject する
   - `local-watcher/bin/issue-watcher.sh` L1160-1195 付近の `stage_checkpoint_find_impl_pr()` の
     `elif [ -n "$merged_pr" ]; then found="$merged_pr"` 分岐を改修
   - 改修ロジック:
