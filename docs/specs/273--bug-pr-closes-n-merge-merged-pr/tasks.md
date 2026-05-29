@@ -79,7 +79,7 @@
   - _Boundary: Stage Checkpoint Module_
   - _Depends: 2, 3_
 
-- [ ] 5. PjM project-manager.md (root) に Refs/Closes 使い分け規約を追記する (P)
+- [x] 5. PjM project-manager.md (root) に Refs/Closes 使い分け規約を追記する (P)
   - `.claude/agents/project-manager.md` の「モード 2: implementation」節（L204 付近）の
     「実装 PR 本文テンプレート」直前に新規サブ節「## 実装 PR 本文の `Refs` / `Closes`
     使い分け（auto-close 事故防止）」を追加
