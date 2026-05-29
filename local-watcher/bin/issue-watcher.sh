@@ -255,6 +255,49 @@ PR_ITERATION_DESIGN_HEAD_PATTERN="${PR_ITERATION_DESIGN_HEAD_PATTERN:-^claude/is
 # 設計 PR 用 Iteration テンプレートの配置先（install.sh --local が配置）。
 ITERATION_TEMPLATE_DESIGN="${ITERATION_TEMPLATE_DESIGN:-$HOME/bin/iteration-prompt-design.tmpl}"
 
+# ─── PR Reviewer Processor 設定 (#261) ───
+# 外部 AI レビューツール（codex / antigravity (バイナリ名 agy)）に open PR を
+# 自動レビューさせ、結果を PR コメントとして残し、修正要求の VERDICT を検出したら
+# needs-iteration ラベルを付与して既存 PR Iteration Processor (#26) へ接続する。
+# **完全な opt-in**（NFR 1.1）。PR_REVIEWER_ENABLED=true 厳密一致以外は env を読みもせず
+# process_pr_reviewer が早期 return するため、未設定環境では本機能導入前と挙動が等価。
+# 関数本体は modules/pr-reviewer.sh、ロガー pr_log / pr_warn / pr_error は core_utils.sh。
+PR_REVIEWER_ENABLED="${PR_REVIEWER_ENABLED:-false}"
+# 使用ツール選択（canonical 単一値）。codex / antigravity のいずれか。空なら下の
+# *_ENABLED alias で解決する（Decision 1 の解決順序）。
+PR_REVIEWER_TOOL="${PR_REVIEWER_TOOL:-}"
+# 代替指定（alias）。=true 厳密一致のみ有効。両方 true は排他エラー（AC 2.3）。
+PR_REVIEWER_CODEX_ENABLED="${PR_REVIEWER_CODEX_ENABLED:-false}"
+PR_REVIEWER_ANTIGRAVITY_ENABLED="${PR_REVIEWER_ANTIGRAVITY_ENABLED:-false}"
+# 実行コマンドテンプレート。プレースホルダ {BASE}/{HEAD}/{PR}/{PROMPT_FILE} を置換後に
+# bash -c で実行（eval 不使用、Decision 9）。codex には review サブコマンドが存在しない
+# ため `codex exec` を使用し `--sandbox read-only` を焼き込む（Decision 2 / 8）。
+# 既定値中の \$(cat '...') はリテラル保持し、実行時に inner bash -c が prompt を展開する。
+PR_REVIEWER_CODEX_CMD="${PR_REVIEWER_CODEX_CMD:-codex exec --sandbox read-only \"\$(cat '{PROMPT_FILE}')\"}"
+# antigravity の実バイナリは agy。-p（=--print）で非対話、--output-format json で
+# 最終 message を JSON 出力（pr_run_review_for_pr が jq で抽出、Decision 3）。
+PR_REVIEWER_ANTIGRAVITY_CMD="${PR_REVIEWER_ANTIGRAVITY_CMD:-agy -p \"\$(cat '{PROMPT_FILE}')\" --output-format json}"
+# レビュー指示プロンプト本体（tool 共通）。空なら modules/pr-reviewer.sh の内蔵 default を
+# 使用（{BASE}/{HEAD}/{PR} を置換）。
+PR_REVIEWER_PROMPT="${PR_REVIEWER_PROMPT:-}"
+# 認証チェックコマンド（終了コード 0 で認証 OK、空文字なら check skip）。codex は
+# `codex login status`（`codex auth status` は存在しない）。agy は auth status 相当が
+# 存在しないため既定 skip（Decision 3）。
+PR_REVIEWER_CODEX_AUTH_CMD="${PR_REVIEWER_CODEX_AUTH_CMD:-codex login status}"
+PR_REVIEWER_ANTIGRAVITY_AUTH_CMD="${PR_REVIEWER_ANTIGRAVITY_AUTH_CMD:-}"
+# needs-iteration 付与トリガ。内蔵 prompt が最終行に出力する構造化 VERDICT token を
+# line-anchored で検出する ERE（grep -E -i）。自由文 grep を希望する場合は override 可
+# （Decision 4）。
+PR_REVIEWER_ITERATION_PATTERN="${PR_REVIEWER_ITERATION_PATTERN:-^[[:space:]]*VERDICT:[[:space:]]*needs-iteration[[:space:]]*$}"
+# 対象 head ブランチ pattern（jq の test() 互換 POSIX ERE）。既定は MERGE_QUEUE の慣習に倣う。
+PR_REVIEWER_HEAD_PATTERN="${PR_REVIEWER_HEAD_PATTERN:-^claude/}"
+# 1 サイクルあたりの処理上限（残りは次回サイクルへ持ち越し）。
+PR_REVIEWER_MAX_PRS="${PR_REVIEWER_MAX_PRS:-5}"
+# git / gh 各操作の個別タイムアウト（秒）。レビュー実行自体は下の EXEC_TIMEOUT が支配。
+PR_REVIEWER_GIT_TIMEOUT="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+# レビュー実行コマンドの最大経過秒数。
+PR_REVIEWER_EXEC_TIMEOUT="${PR_REVIEWER_EXEC_TIMEOUT:-600}"
+
 # ─── Design Review Release Processor 設定 (#40) ───
 # 設計 PR が merge された Issue から `awaiting-design-review` ラベルを自動除去し、
 # ステータスコメントを 1 件投稿する。標準機能としてデフォルト有効化（#112）。
@@ -541,7 +584,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（quota-aware / merge-queue / auto-rebase）、#181 Part 3 で切り出した
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -990,6 +1033,11 @@ process_design_review_release() {
   drr_log "サマリ: removed=${removed}, kept=${kept}, skip=${skipped}, fail=${failed}, overflow=${skipped_overflow}"
   return 0
 }
+
+# PR Reviewer Processor (#261) を PR Iteration の直前に実行。レビュー結果で付与した
+# needs-iteration ラベルを同一 flock 内で直後の process_pr_iteration が引き継げる
+# （PR_REVIEWER_ENABLED!=true なら即 return 0 で本機能導入前と等価、NFR 1.1）。
+process_pr_reviewer || pr_warn "process_pr_reviewer が想定外のエラーで終了しました（後続 Issue 処理は継続）"
 
 # Phase A 直後に PR Iteration Processor を実行（AC 8.1 / 8.2: 同一 flock 内で直列実行）
 process_pr_iteration || pi_warn "process_pr_iteration が想定外のエラーで終了しました（後続 Issue 処理は継続）"
