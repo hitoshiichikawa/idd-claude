@@ -120,6 +120,18 @@ drr_error() {
   echo "[$(date '+%F %T')] [$REPO] design-review-release: ERROR: $*" >&2
 }
 
+# pr-reviewer 専用ロガー（識別用 prefix と timestamp 形式を Issue Watcher と揃える）
+# Issue #261 Req NFR 3.1: 時刻 prefix と processor prefix の間に `[$REPO]` を挿入。
+pr_log() {
+  echo "[$(date '+%F %T')] [$REPO] pr-reviewer: $*"
+}
+pr_warn() {
+  echo "[$(date '+%F %T')] [$REPO] pr-reviewer: WARN: $*" >&2
+}
+pr_error() {
+  echo "[$(date '+%F %T')] [$REPO] pr-reviewer: ERROR: $*" >&2
+}
+
 # ─── Issue #259: Claude API 529 Overloaded detector ───
 #
 # Claude API の一時的な過負荷 (HTTP 529 Overloaded) は claude CLI の stream-json

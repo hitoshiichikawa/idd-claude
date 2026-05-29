@@ -5,15 +5,15 @@
 > （`issue-watcher.sh` / `core_utils.sh` / `README.md`）への追記で完結する。`(P)` 並列マークは
 > 編集対象ファイルが分かれる箇所のみ付与し、`_Boundary:_` で衝突境界を明示する。
 
-- [ ] 1. core_utils.sh への logger 追加（pr_log / pr_warn / pr_error）
+- [x] 1. core_utils.sh への logger 追加（pr_log / pr_warn / pr_error）
   - `local-watcher/bin/modules/core_utils.sh` の既存 `pi_log` / `drr_log` 群の末尾に、同形式
     （`[$(date '+%F %T')] [$REPO] pr-reviewer: ...`）で 3 関数を追加する
   - 既存関数・順序は変更しない（NFR 1.2）
   - `shellcheck` 警告ゼロ
   - _Requirements: NFR 1.2, NFR 2.1, NFR 3.1_
 
-- [ ] 2. pr-reviewer.sh モジュール骨格と opt-in gate の実装
-- [ ] 2.1 モジュールヘッダ / 入口関数 / opt-in 早期 return
+- [x] 2. pr-reviewer.sh モジュール骨格と opt-in gate の実装
+- [x] 2.1 モジュールヘッダ / 入口関数 / opt-in 早期 return
   - 新規 `local-watcher/bin/modules/pr-reviewer.sh` を作成
   - ファイル冒頭コメントで「用途 / 配置先 / 依存 / セットアップ参照先」を既存モジュールと同形式で記述
   - `process_pr_reviewer()` を定義し、`[ "$PR_REVIEWER_ENABLED" != "true" ] && return 0` の早期 return
@@ -21,19 +21,19 @@
   - サイクル開始の 1 行サマリログを `pr_log` で出力（解決済み tool / max_prs / timeout）
   - _Requirements: 1.1, 1.2, 1.3, NFR 1.1, NFR 3.1_
 
-- [ ] 2.2 tool 解決と排他検証 `pr_resolve_tool`
+- [x] 2.2 tool 解決と排他検証 `pr_resolve_tool`
   - `PR_REVIEWER_TOOL` / `PR_REVIEWER_CODEX_ENABLED` / `PR_REVIEWER_ANTIGRAVITY_ENABLED` から
     Design Decision 1 の解決順序で `codex` / `antigravity` / `none` / `conflict` のいずれかを返す
   - 排他エラー / 両方無効化は `pr_log` / `pr_warn` で観測可能にする
   - _Requirements: 2.1, 2.2, 2.3, 2.5, NFR 3.1_
 
-- [ ] 3. ツール健全性チェック（installed / authenticated）
-- [ ] 3.1 `pr_check_tool_installed` 実装
+- [x] 3. ツール健全性チェック（installed / authenticated）
+- [x] 3.1 `pr_check_tool_installed` 実装
   - `command -v "$tool"` で PATH 上の実行ファイル存在を確認
   - 戻り値 0/1 を返す pure check
   - _Requirements: 3.1_
 
-- [ ] 3.2 `pr_check_tool_authenticated` 実装
+- [x] 3.2 `pr_check_tool_authenticated` 実装
   - `PR_REVIEWER_<TOOL>_AUTH_CMD` env を解決し、空文字なら skip（戻り値 2）
   - 非空ならコマンドを実行し、終了コード 0 で OK 判定
   - stdout/stderr は破棄（auth token 流出防止 / Security Considerations）
