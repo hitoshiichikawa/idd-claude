@@ -4953,7 +4953,9 @@ ${push_stderr_tail}
 # ─── Stage C 完了直後の PR 実在 verify ヘルパー (Issue #108 / #110) ───
 #
 # Stage C の Claude 実行が return code 0 で終了した直後に、対象 branch を head と
-# する impl PR が GitHub 側で参照可能か `gh pr view --head` で verify する。GitHub の
+# する impl PR が GitHub 側で参照可能か `gh pr list --head <branch> --state all` で verify する
+# （`gh pr view` は `--head` 非対応で常に失敗し、かつ open のみ探索だと高速 merge 済み PR を
+#  取りこぼすため、list + `--state all` で open/merged 双方を検出する）。GitHub の
 # eventual consistency により PR 作成直後数十秒は当該クエリが空応答を返すケースが
 # 観測されているため、主経路は最大 6 回までリトライ可能とし、整合性遅延に起因する
 # false negative を吸収する。さらに主経路が全試行で空応答 / 失敗で終わった場合は、
@@ -4991,7 +4993,7 @@ ${push_stderr_tail}
 #     なしで gh を実行する（既存 verify_pushed_or_retry と同方針 / 既存 cron
 #     互換性のため）。1 試行・代替経路ともに `${STAGEC_VERIFY_TIMEOUT_SECS:-15}` 秒
 #     上限（Req 1.6 / 2.5 / NFR 1.3 / 1.4）。
-#   - 代替経路は List Pulls API を直接叩く `gh api repos/{owner}/{repo}/pulls?head={owner}:BRANCH&state=open`
+#   - 代替経路は List Pulls API を直接叩く `gh api repos/{owner}/{repo}/pulls?head={owner}:BRANCH&state=all`
 #     パターン。`{owner}` は `$REPO`（owner/repo 形式）から prefix を抽出。
 #     edge cache の独立性を期待する経路設計のため、代替経路自体のリトライは
 #     行わない（Req 2.6）。
@@ -5037,8 +5039,8 @@ verify_stagec_pr_or_retry() {
 
     pr_url=""
     rc=0
-    pr_url=$("${_gh_timeout[@]}" gh pr view --repo "$REPO" --head "$branch" \
-              --json url --jq '.url' 2>/dev/null) || rc=$?
+    pr_url=$("${_gh_timeout[@]}" gh pr list --repo "$REPO" --head "$branch" --state all \
+              --json url --jq '.[0].url // empty' 2>/dev/null) || rc=$?
 
     if [ "$rc" -eq 0 ] && [ -n "$pr_url" ]; then
       # 1 回目以降の試行回数判定: N >= 2 の場合のみ「リトライで成功」ログを残す
@@ -5073,7 +5075,7 @@ verify_stagec_pr_or_retry() {
   local _owner="${REPO%%/*}"
   echo "[$(date '+%F %T')] stageC PR verify fallback start (List Pulls API) issue=#${issue_number} branch=${branch} owner=${_owner}" >> "$LOG"
   local _fb_url="" _fb_rc=0 _fb_outcome=""
-  _fb_url=$("${_gh_timeout[@]}" gh api "repos/${REPO}/pulls?head=${_owner}:${branch}&state=open" \
+  _fb_url=$("${_gh_timeout[@]}" gh api "repos/${REPO}/pulls?head=${_owner}:${branch}&state=all" \
             --jq '.[0].html_url // empty' 2>/dev/null) || _fb_rc=$?
   if [ "$_fb_rc" -eq 0 ] && [ -n "$_fb_url" ]; then
     # Req 2.2 / 3.4: 代替経路で救済（主経路全失敗 / 代替経路で成功）

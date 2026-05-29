@@ -4003,21 +4003,29 @@ cd ~/.idd-claude && git pull && ./install.sh --local
 
 Stage C（PjM / PR 作成）で `claude` が return code 0 を返しても、**PjM サブエージェントが
 1 turn で空転終了して impl PR を作らなかった**ケースや、**GitHub の eventual consistency
-（edge cache lag）で作成直後の PR が一時的に `gh pr view` から見えない**ケースがあり得ます。
+（edge cache lag）で作成直後の PR が一時的に PR 検出クエリ（`gh pr list --head`）から見えない**ケースがあり得ます。
 本機能はこれを吸収するため、Stage C 完了報告後に impl PR の実在を **retry-with-backoff で
 検証**し、確認できない場合のみ安全側に倒して `claude-failed`（`stageC-pr-missing`）へ遷移
 させます。[#110](https://github.com/hitoshiichikawa/idd-claude/issues/110) で、KeyNest #32 で
 観測された 73 秒超の edge cache lag に対応して主経路を 6 回 / 合計 135 秒へ延長し、最終
 attempt 後に List Pulls API への独立 fallback を 1 ターン追加しています。
 
+> **バグ修正（PR 検出が merged PR を取りこぼす問題）**: 当初の主経路は `gh pr view --head`
+> を用いていましたが、`gh pr view` は `--head` フラグを持たず（`gh pr list` 用）常に失敗して
+> いました。通常は fallback が救済していましたが、その fallback も `state=open` 固定だったため、
+> **PR が verify 窓（最大 135 秒）の途中で merge されると主経路・fallback の両方が PR 不在と
+> 誤判定し、merge 済みにもかかわらず `claude-failed` を誤付与**していました。主経路を
+> `gh pr list --head <branch> --state all`、fallback を `state=all` に修正し、open / merged
+> 双方を確実に検出するようにしています。
+
 ### 挙動
 
-1. **主経路**: `gh pr view --head <branch>` を待機系列 `0 5 10 20 40 60` 秒（合計 135 秒）で
-   最大 6 回リトライする
+1. **主経路**: `gh pr list --head <branch> --state all` を待機系列 `0 5 10 20 40 60` 秒（合計 135 秒）で
+   最大 6 回リトライする（`--state all` で open / merged 双方を検出する）
 2. **1 回目で即時成功した通常ケースは追加ログを出さず、本機能導入前と外形挙動が完全に同一**
    （2 回目以降で成功したときのみ `SUCCESS attempt=N/M` を記録）
 3. 主経路を使い切っても PR 不在なら、**代替経路**（List Pulls API
-   `gh api repos/{owner}/{repo}/pulls?head={owner}:<branch>&state=open`）を **1 ターンだけ**
+   `gh api repos/{owner}/{repo}/pulls?head={owner}:<branch>&state=all`）を **1 ターンだけ**
    （リトライなし）呼び、edge cache の独立性で救済を試みる
 4. それでも PR が見つからなければ `claude-failed`（`stageC-pr-missing`）へ遷移し、人間が原因を
    特定できる粒度のログを残す
