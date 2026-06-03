@@ -280,6 +280,9 @@ sec_apply_block_labels() {
   # AC 3.6 / NFR 4.1: 同一 (sha, kind=security-block) が既存なら再付与しない
   if sec_already_processed "$pr_number" "$sha" "security-block"; then
     sec_log "PR #${pr_number}: sha=${sha} は既に strict ラベル付与済み（kind=security-block marker 検出）。skip"
+    # #281 task 8: cycle サマリの skipped_blocked カウンタをインクリメント
+    # （`process_security_review` で 0 リセットされたグローバル変数を呼び出し元から共有）。
+    _sec_skipped_blocked_count=$((${_sec_skipped_blocked_count:-0} + 1))
     return 0
   fi
 
@@ -305,6 +308,9 @@ sec_apply_block_labels() {
   fi
 
   sec_log "PR #${pr_number}: strict ラベル付与成功 labels=${SECURITY_REVIEW_BLOCK_LABEL}+needs-iteration blocking=${blocking_count} threshold=${threshold} sha=${sha}"
+  # #281 task 8: cycle サマリの blocked カウンタをインクリメント
+  # （重複 skip ではなく新規ラベル付与成功時のみカウント）。
+  _sec_blocked_count=$((${_sec_blocked_count:-0} + 1))
   return 0
 }
 
@@ -1068,12 +1074,26 @@ process_security_review() {
     return 0
   fi
 
-  # ② AC 5.1 / 5.2 / 5.3: strict 要求 env を検査（WARN 後 advisory 固定で続行）
-  local mode
+  # ② AC 5.1 / 5.2 / 5.3: mode / threshold を解決し、モジュール内グローバルに退避
+  #    （task 6 / task 7 のクリーン / 検出経路から `_sec_resolved_mode` /
+  #     `_sec_resolved_threshold` 名で参照される / design.md L471-475, L484-485）。
+  local mode threshold
   mode=$(sec_check_strict_request)
+  threshold=$(sec_resolve_block_severity)
+  # shellcheck disable=SC2034  # _sec_resolved_threshold は将来の参照用（本 task 時点では _strict_threshold をローカル再評価しているため未使用だが、design.md L484 の契約に従い設定する）
+  _sec_resolved_mode="$mode"
+  # shellcheck disable=SC2034
+  _sec_resolved_threshold="$threshold"
+
+  # ②.5 AC 5.2 / NFR 3.1: blocked / skipped_blocked カウンタを 0 リセット
+  # （`sec_apply_block_labels` がインクリメントするモジュール内グローバル / Req NFR 3.1）。
+  _sec_blocked_count=0
+  _sec_skipped_blocked_count=0
 
   # ③ AC 5.2 / NFR 3.1: サイクル開始の 1 行サマリログ
-  sec_log "cycle start: mode=${mode} strict=not-implemented (split to #281) max_prs=${SECURITY_REVIEW_MAX_PRS:-unset} git_timeout=${SECURITY_REVIEW_GIT_TIMEOUT:-unset}s exec_timeout=${SECURITY_REVIEW_EXEC_TIMEOUT:-unset}s head_pattern=${SECURITY_REVIEW_HEAD_PATTERN:-unset} model=${SECURITY_REVIEW_MODEL:-unset}"
+  #    #281 task 8: `strict=not-implemented (split to #281)` 表記を削除し
+  #    `threshold=${threshold}` を追加（Req 1.3, 2.5, NFR 3.1）。
+  sec_log "cycle start: mode=${mode} threshold=${threshold} max_prs=${SECURITY_REVIEW_MAX_PRS:-unset} git_timeout=${SECURITY_REVIEW_GIT_TIMEOUT:-unset}s exec_timeout=${SECURITY_REVIEW_EXEC_TIMEOUT:-unset}s head_pattern=${SECURITY_REVIEW_HEAD_PATTERN:-unset} model=${SECURITY_REVIEW_MODEL:-unset}"
 
   # ④ 候補 PR 列挙（AC 2.1 / 2.3）
   local prs_json total
@@ -1082,7 +1102,7 @@ process_security_review() {
 
   # ⑤ 候補 0 件 → サマリログのみで return
   if [ "$total" -eq 0 ]; then
-    sec_log "サマリ: mode=${mode} reviewed=0 clean=0 skip=0 fail=0 errored=0 overflow=0 notes_written=0 notes_skipped=0（候補 PR なし）"
+    sec_log "サマリ: mode=${mode} reviewed=0 clean=0 skip=0 fail=0 errored=0 overflow=0 notes_written=0 notes_skipped=0 blocked=${_sec_blocked_count} skipped_blocked=${_sec_skipped_blocked_count}（候補 PR なし）"
     return 0
   fi
 
@@ -1102,7 +1122,7 @@ process_security_review() {
   local pr_iter
   pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]" 2>/dev/null || echo "")
   if [ -z "$pr_iter" ]; then
-    sec_log "サマリ: mode=${mode} reviewed=0 clean=0 skip=0 fail=0 errored=0 overflow=${skipped_overflow} notes_written=0 notes_skipped=0（iterate 対象なし）"
+    sec_log "サマリ: mode=${mode} reviewed=0 clean=0 skip=0 fail=0 errored=0 overflow=${skipped_overflow} notes_written=0 notes_skipped=0 blocked=${_sec_blocked_count} skipped_blocked=${_sec_skipped_blocked_count}（iterate 対象なし）"
     return 0
   fi
 
@@ -1130,8 +1150,10 @@ process_security_review() {
   # 本 entrypoint では clean の内訳は集計しない（sec_run_review_for_pr は 0/1/2/3 を
   # 返すのみ。clean / non-clean の区別は marker kind = security-review-clean /
   # security-review のログ行で事後識別する）。notes_written / notes_skipped も
-  # sec_write_security_notes のログ行で事後集計可能。本サマリは合算値のみを記録する。
-  sec_log "サマリ: mode=${mode} reviewed=${reviewed} clean=${clean} skip=${skip} fail=${fail} errored=${errored} overflow=${skipped_overflow} notes_written=0 notes_skipped=0"
+  # sec_write_security_notes のログ行で事後集計可能。
+  # #281 task 8: 新規 strict カウンタ `blocked=N skipped_blocked=N` を追加
+  # （Req NFR 3.1 / design.md L602。`sec_apply_block_labels` 経由でインクリメントされる）。
+  sec_log "サマリ: mode=${mode} reviewed=${reviewed} clean=${clean} skip=${skip} fail=${fail} errored=${errored} overflow=${skipped_overflow} notes_written=0 notes_skipped=0 blocked=${_sec_blocked_count} skipped_blocked=${_sec_skipped_blocked_count}"
 
   # 念のため最終確認で base branch に戻す
   git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
