@@ -825,6 +825,11 @@ sec_write_security_notes() {
 #     8. 出力空 → kind=scan-failed エラーコメント + rc=3
 #     9. spec ディレクトリ解決は sec_resolve_spec_dir 経由（特定不可なら notes 書き出し
 #        skip / PR コメントは通常投稿）
+#
+#   #281 task 6 で strict 経路を統合: 検出 ≥ 1 件分岐の sec_post_review_comment 呼び出し
+#   直前に「モジュール内グローバル _sec_resolved_mode = strict かつ blocking_count > 0」
+#   の場合のみ override note を review_text に append し sec_apply_block_labels を呼ぶ
+#   枝を追加。_sec_resolved_mode 未定義 / 空 / "advisory" 環境では構造的に no-op（NFR 1.1）。
 # ─────────────────────────────────────────────────────────────────────────────
 sec_run_review_for_pr() {
   local pr_json="$1"
@@ -945,8 +950,38 @@ sec_run_review_for_pr() {
 
   sec_log "PR #${pr_number}: 検出 ${total_findings} 件 (${severity_summary})"
 
+  # #281 task 6: strict 経路の判定枝。`_sec_resolved_mode` は task 8 で
+  # `process_security_review` から設定される予定（現時点では未配線）。
+  # `${_sec_resolved_mode:-}` で安全に参照し、未定義 / 空 / "advisory" / "advisory" 以外の値で
+  # あっても厳密一致 "strict" のみ枝に入る（NFR 1.1 byte 等価）。
+  # blocking_count > 0 → override note を review_text 末尾に append + ラベル 2 枚付与。
+  # blocking_count = 0 → ラベル付与なし、sec_log で記録（Req 3.2）。
+  local _strict_blocking_count=0
+  local _strict_threshold=""
+  if [ "${_sec_resolved_mode:-}" = "strict" ] && [ "$total_findings" -gt 0 ]; then
+    _strict_threshold=$(sec_resolve_block_severity)
+    _strict_blocking_count=$(sec_count_blocking_findings "$severity_summary" "$_strict_threshold")
+    if [ "$_strict_blocking_count" -gt 0 ]; then
+      sec_log "PR #${pr_number}: strict 判定 blocking=${_strict_blocking_count} threshold=${_strict_threshold}"
+      # Req 4.5: review_text 末尾に override note を append（design.md L496-501 のテンプレ）
+      local override_note
+      # shellcheck disable=SC2016  # 単一引用符内のバッククォートは markdown コードフェンスのリテラル
+      override_note=$(printf '> このコメントは Security Review strict モード (#281) によりマージ阻害ラベル\n> `%s` / `needs-iteration` が付与されています。false positive と\n> 判断する場合は GitHub UI から両ラベルを手動で剥がしてください（同一 SHA への再付与は\n> 行われません）。' \
+        "${SECURITY_REVIEW_BLOCK_LABEL:-needs-security-fix}")
+      review_text=$(printf '%s\n\n%s' "$review_text" "$override_note")
+    else
+      sec_log "PR #${pr_number}: strict 判定 blocking=0 threshold=${_strict_threshold}（閾値以上検出なし、ラベル付与なし）"
+    fi
+  fi
+
   if ! sec_post_review_comment "$pr_number" "$sha" "$review_text"; then
     return 1
+  fi
+
+  # #281 task 6: blocking_count > 0 の場合のみ、コメント投稿成功後にラベル 2 枚付与を実行
+  # （fail-continue / design.md L465: `|| true` で吸収して既存 advisory 経路を阻害しない）
+  if [ "${_sec_resolved_mode:-}" = "strict" ] && [ "$_strict_blocking_count" -gt 0 ]; then
+    sec_apply_block_labels "$pr_number" "$sha" "$_strict_blocking_count" "$_strict_threshold" || true
   fi
 
   sec_write_security_notes "$pr_number" "$sha" "$spec_dir" "$total_findings" "$severity_summary" "$review_text" || true
