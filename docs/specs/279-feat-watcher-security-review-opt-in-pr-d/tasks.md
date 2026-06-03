@@ -121,7 +121,7 @@
   - _Requirements: 1.3, 4.4, NFR 1.1_
   - _Boundary: issue-watcher.sh dispatcher call site_
 
-- [ ] 5. README.md にドキュメント追記（同一 PR 内で実施 / NFR 6.2）
+- [x] 5. README.md にドキュメント追記（同一 PR 内で実施 / NFR 6.2）
   - 「オプション機能一覧」§ の opt-in 表に `SECURITY_REVIEW_ENABLED` 行を追加
   - 新規 h2 セクション「Security Review Processor (#279)」を `## PR Reviewer Processor (#261)` の **直後** に追加
   - 含める内容: 概要 / advisory 固定の旨 / 既定 OFF / 動作フロー / 環境変数表（モデル既定値
