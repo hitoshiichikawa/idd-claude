@@ -31,7 +31,7 @@
   - kind 3 値（`security-review` / `security-review-clean` / `scan-failed`）すべてで動作
   - 取得失敗時は安全側で「既存扱い (rc=0)」に倒し重複投稿を防ぐ
   - _Requirements: 2.4, 6.2, 6.3, NFR 4.1_
-- [ ] 2.6 `sec_resolve_spec_dir` を実装（ブランチ名から spec ディレクトリを解決）
+- [x] 2.6 `sec_resolve_spec_dir` を実装（ブランチ名から spec ディレクトリを解決）
   - 入力: `$1 = pr_branch`（例: `claude/issue-279-design-feat-watcher-security-review-opt-in-pr-d`）
   - 解決順序: ブランチ名から `^claude/issue-(\d+)-` で issue 番号抽出 → `docs/specs/<番号>-*/` glob → 1 件マッチで採用、0 件 / 2 件以上で空文字
   - 戻り値 0 固定（特定不可は空文字で表現）
