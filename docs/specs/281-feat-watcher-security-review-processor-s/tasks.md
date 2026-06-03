@@ -27,7 +27,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 5.1, 5.2, NFR 5.1_
   - _Boundary: modules/security-review.sh severity helpers_
 
-- [ ] 4. `sec_check_strict_request` の挙動を mode 解決に変更
+- [x] 4. `sec_check_strict_request` の挙動を mode 解決に変更
   - 既存実装（#279 advisory fallback + WARN）を以下に置換:
     - `SECURITY_REVIEW_MODE=strict` 厳密一致 → stdout に `strict` を出力（Req 1.2）
     - `SECURITY_REVIEW_MODE` 未設定 / 空 / `advisory` → stdout に `advisory`（Req 1.1, 1.5、#279 と byte 等価）
