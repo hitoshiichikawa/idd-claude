@@ -84,6 +84,135 @@ sec_check_strict_request() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# sec_resolve_block_severity: severity 閾値 env を解決し許容値に正規化する（#281 task 3）
+#   入力: 環境変数のみ
+#     - SECURITY_REVIEW_BLOCK_SEVERITY: 期待値 critical/high/medium/low/info の小文字 5 値
+#       のいずれか。未設定 / 空 / 不正値（typo / 大文字混在 / 空白混入等）は WARN + "high"
+#       fallback。
+#   出力: stdout に 5 値のいずれか 1 行（小文字 token）
+#   戻り値: 0 固定
+#   AC: 2.1, 2.2, 2.4
+#   副作用: 不正値検出時に sec_warn 1 行を stderr に出す
+#
+#   - 未設定 / 空 → WARN なしで既定 "high" 採用（Req 2.2 既定値 / 既存 #279 と byte 等価）。
+#   - 5 値以外（大文字混在 / typo / 空白混入等）→ sec_warn 1 行 + "high" fallback（Req 2.4）。
+#   - shell metacharacter / コマンドインジェクション対策はホワイトリスト照合で構造的に防御
+#     （design.md Security Considerations）。
+#   - stdout 単一 token 契約のため、観測ログは sec_warn（stderr）のみ使用。
+# ─────────────────────────────────────────────────────────────────────────────
+sec_resolve_block_severity() {
+  local raw="${SECURITY_REVIEW_BLOCK_SEVERITY:-}"
+
+  # 未設定 / 空 → 既定 high（WARN なし、本機能導入前と byte 等価）
+  if [ -z "$raw" ]; then
+    echo "high"
+    return 0
+  fi
+
+  case "$raw" in
+    critical|high|medium|low|info)
+      echo "$raw"
+      ;;
+    *)
+      sec_warn "SECURITY_REVIEW_BLOCK_SEVERITY='${raw}' は許容値（critical/high/medium/low/info）に一致しません。既定 'high' で続行します"
+      echo "high"
+      ;;
+  esac
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sec_severity_at_or_above: severity ordinal 比較ヘルパ（#281 task 3）
+#   入力: $1 = severity1, $2 = threshold（どちらも小文字 5 値のいずれか）
+#   出力: なし
+#   戻り値: 0 = $1 >= $2 / 1 = $1 < $2 / 2 = 入力値不正
+#   ordinal map: critical=5, high=4, medium=3, low=2, info=1
+#   AC: 2.3
+#
+#   - ホワイトリスト照合で正規化された値のみを受理する純粋関数。呼び出し元
+#     （sec_count_blocking_findings 等）が既に sec_resolve_block_severity 経由で
+#     正規化済みの値を渡すことを前提とするが、防御的に入力検証する。
+# ─────────────────────────────────────────────────────────────────────────────
+sec_severity_at_or_above() {
+  local sev="${1:-}"
+  local thr="${2:-}"
+  local sev_ord thr_ord
+
+  case "$sev" in
+    critical) sev_ord=5 ;;
+    high)     sev_ord=4 ;;
+    medium)   sev_ord=3 ;;
+    low)      sev_ord=2 ;;
+    info)     sev_ord=1 ;;
+    *)        return 2 ;;
+  esac
+
+  case "$thr" in
+    critical) thr_ord=5 ;;
+    high)     thr_ord=4 ;;
+    medium)   thr_ord=3 ;;
+    low)      thr_ord=2 ;;
+    info)     thr_ord=1 ;;
+    *)        return 2 ;;
+  esac
+
+  if [ "$sev_ord" -ge "$thr_ord" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sec_count_blocking_findings: severity_summary から閾値以上件数を合算する（#281 task 3）
+#   入力: $1 = severity_summary（"critical=N high=N medium=N low=N info=N total=N" 形式、
+#         既存 sec_count_severities の出力フォーマット）
+#         $2 = threshold（critical/high/medium/low/info の小文字 5 値のいずれか）
+#   出力: stdout に整数 1 行（閾値以上件数の合算）
+#   戻り値: 0 固定（合算失敗時は "0" を出力して安全側に倒す）
+#   AC: 5.1, 5.2
+#
+#   - 既存 sec_count_severities の出力（"critical=N high=N medium=N low=N info=N total=N"）
+#     を sed で各カウントに分解し、sec_severity_at_or_above で閾値以上判定された severity
+#     のカウントのみを合算する。
+#   - threshold が不正値（sec_severity_at_or_above が rc=2 を返す）の場合は "0" を返す
+#     安全側設計（呼び出し元は通常 sec_resolve_block_severity 経由で正規化済みを渡すため
+#     到達しない想定だが、防御的フォールバック）。
+#   - severity_summary から数値抽出に失敗した severity は 0 として扱う（malformed input
+#     でも "0" を返してラベル付与判定をスキップさせる / Req 5.3 安全側設計）。
+# ─────────────────────────────────────────────────────────────────────────────
+sec_count_blocking_findings() {
+  local summary="${1:-}"
+  local threshold="${2:-}"
+
+  # threshold 妥当性チェック（無効なら 0 件返して安全側 advisory に倒す）
+  case "$threshold" in
+    critical|high|medium|low|info) ;;
+    *) printf '0'; return 0 ;;
+  esac
+
+  local crit high med low info
+  crit=$(printf '%s' "$summary" | sed -n 's/.*critical=\([0-9][0-9]*\).*/\1/p')
+  high=$(printf '%s' "$summary" | sed -n 's/.*high=\([0-9][0-9]*\).*/\1/p')
+  med=$(printf  '%s' "$summary" | sed -n 's/.*medium=\([0-9][0-9]*\).*/\1/p')
+  low=$(printf  '%s' "$summary" | sed -n 's/.*low=\([0-9][0-9]*\).*/\1/p')
+  info=$(printf '%s' "$summary" | sed -n 's/.*info=\([0-9][0-9]*\).*/\1/p')
+  crit="${crit:-0}"; high="${high:-0}"; med="${med:-0}"; low="${low:-0}"; info="${info:-0}"
+
+  local total=0
+  local pair sev count
+  for pair in "critical:$crit" "high:$high" "medium:$med" "low:$low" "info:$info"; do
+    sev="${pair%%:*}"
+    count="${pair##*:}"
+    if sec_severity_at_or_above "$sev" "$threshold"; then
+      total=$((total + count))
+    fi
+  done
+
+  printf '%s' "$total"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # sec_fetch_candidate_prs: 候補 PR を JSON 配列で返す（task 2.4）
 #   出力: stdout に jq 配列形式の JSON 1 行（候補なし / 失敗時は "[]"）
 #   戻り値: 0 固定（失敗は degraded path = "[]" + WARN に倒す）
