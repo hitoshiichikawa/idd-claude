@@ -94,7 +94,7 @@
   - 言語方針に従い日本語ベース、env var 名・ラベル名は英語固定
   - _Requirements: 4.1, 4.5, NFR 6.1, NFR 6.2_
 
-- [ ] 10. 静的解析と手動スモークテスト
+- [x] 10. 静的解析と手動スモークテスト
   - `shellcheck local-watcher/bin/modules/security-review.sh local-watcher/bin/issue-watcher.sh install.sh setup.sh .github/scripts/*.sh` が警告ゼロ
   - `actionlint .github/workflows/*.yml` が警告ゼロ（本機能で workflow 変更なし、非回帰確認）
   - `diff -r .claude/agents repo-template/.claude/agents` と `diff -r .claude/rules repo-template/.claude/rules` が空（本機能で agents/rules を編集していないことの確認 / NFR 7.2）
