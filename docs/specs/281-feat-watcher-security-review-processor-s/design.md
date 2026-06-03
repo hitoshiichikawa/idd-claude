@@ -264,6 +264,11 @@ README.md                            # ★ 編集: 「Security Review Processor 
 - `README.md`（**編集**）:
   - 「Security Review Processor (#279)」節内の「既知の制約 - strict 拡張は別 Issue として
     分割済み」表記を撤去し、「strict モード（#281）」サブ節を追加
+  - **既存「### 環境変数」表（`Security Review Processor (#279)` 節配下）に新規 3 行を追記する**:
+    `SECURITY_REVIEW_MODE`（既定 `advisory`）/ `SECURITY_REVIEW_BLOCK_SEVERITY`（既定 `high`）/
+    `SECURITY_REVIEW_BLOCK_LABEL`（既定 `needs-security-fix`）
+  - **既存「### 環境変数」表直下の disclaimer 引用ブロック「> **strict 関連 env は本 spec では
+    実装されない**: ...」（4 行）を撤去** し、strict サブ節への参照 1 行に置換する
   - 「オプション機能一覧」§ に `SECURITY_REVIEW_MODE`（既定 `advisory`）/
     `SECURITY_REVIEW_BLOCK_SEVERITY`（既定 `high`）行を追加
   - 新規ラベル `needs-security-fix` の追加に伴う `bash .github/scripts/idd-claude-labels.sh

@@ -79,9 +79,13 @@
 
 - [ ] 9. README にドキュメント追記（同一 PR 内で実施 / NFR 6.2）
   - 「Security Review Processor (#279)」節内の「既知の制約 - strict 拡張は別 Issue として分割済み」表記を撤去
+  - **既存「### 環境変数」表（`Security Review Processor (#279)` 節配下、`SECURITY_REVIEW_ENABLED` / `SECURITY_REVIEW_PROMPT` ... `SECURITY_REVIEW_EXEC_TIMEOUT` を列挙している既存 9 行の表）に以下 3 行を追記する**:
+    - `SECURITY_REVIEW_MODE` / 既定 `advisory` / strict モード切替の opt-in gate（`=strict` 厳密一致のみ有効、それ以外は WARN + advisory fallback）
+    - `SECURITY_REVIEW_BLOCK_SEVERITY` / 既定 `high` / ラベル付与判定の severity 閾値（許容値 `critical` / `high` / `medium` / `low` / `info`、不正値は WARN + `high` fallback）
+    - `SECURITY_REVIEW_BLOCK_LABEL` / 既定 `needs-security-fix` / strict 検出時に PR へ付与するマージ阻害ラベル名（運用者が手動剥がしで override 可）
+  - **既存「### 環境変数」表 **直下** の disclaimer 引用ブロック「> **strict 関連 env は本 spec では実装されない**: ...」（4 行）を撤去** し、「strict モード関連 env（`SECURITY_REVIEW_MODE` / `SECURITY_REVIEW_BLOCK_SEVERITY` / `SECURITY_REVIEW_BLOCK_LABEL`）の詳細は本節「strict モード（#281）」サブ節を参照」と 1 行で置換する
   - 新規サブ節「strict モード（#281）」を追加。含める内容:
     - 概要 / 既定 advisory / `SECURITY_REVIEW_MODE=strict` で有効化
-    - 環境変数表（`SECURITY_REVIEW_MODE` / `SECURITY_REVIEW_BLOCK_SEVERITY` / `SECURITY_REVIEW_BLOCK_LABEL`）
     - severity 閾値の意味（critical > high > medium > low > info の ordinal、既定 high）
     - 付与されるラベル（`needs-security-fix` + `needs-iteration` のペア / PR Iteration Processor 動線連携）
     - override 手順（GitHub UI からラベル手動剥がし、同一 SHA への再付与なし）
