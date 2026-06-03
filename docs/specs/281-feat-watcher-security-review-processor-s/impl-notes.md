@@ -44,3 +44,17 @@
 - 残存課題:
   - 本 task では `sec_run_review_for_pr` の strict 経路への配線は実施しない（task 6 の責務）。`sec_check_strict_request` の戻り値は task 8 で `process_security_review` 内のモジュール内グローバル `_sec_resolved_mode` に退避され、task 6 でループ内から参照される予定（design.md L472-475）。
   - 確認事項: モジュール冒頭の概要 comment（line 14 `# - strict 要求検出: sec_check_strict_request（advisory 固定 fallback、Req 5.3）`）は #281 task 4 で挙動を切り替えたため記述が古くなっているが、task 4 の Boundary（`sec_check_strict_request` 関数のみ）に厳密に従い本 task では編集を見送った（task 3 で追加した 3 関数も同概要に列挙されていないため、別 task / 別 PR で概要を一括更新するのが望ましい）。
+
+### Task 5
+
+- 採用方針: `sec_count_blocking_findings` 直後（severity / strict 系ヘルパが集約される位置）に新規関数 `sec_apply_block_labels` を追加。`gh pr edit --add-label "${SECURITY_REVIEW_BLOCK_LABEL},needs-iteration"` の 1 コマンドで 2 枚を原子付与し、hidden marker (`kind=security-block`) コメントを 1 件投稿して SHA 単位の冪等性を確立する設計（design.md L414-426 / Req 3.1 / 4.4 / NFR 4.1）。既存関数（`sec_run_review_for_pr` / `process_security_review` / `sec_post_*`）には一切手を入れず、関数定義の追加のみ（NFR 1.1）。
+- 重要な判断:
+  - **marker コメント本文の決定**: design.md には body 固定テンプレ指定がないため、(a) 冒頭に運用者向け視認用の `<!-- security-block marker for SHA <sha> -->` 注記行（visible / hidden 双方読める短い説明）、(b) 1 行サマリ「strict モードによりマージ阻害ラベル `<label>` / `needs-iteration` を付与しました（blocking=N threshold=high）」（運用者が gh UI / GitHub UI 双方で判断材料を得られる / Req 3.5 ログと整合）、(c) 末尾に `sec_build_marker` 出力（kind=security-block）を append、の 3 ブロック構成を採用。これは既存 `sec_post_clean_comment` の「短い説明 + 構造化メタ情報 + marker」と整合したパターン。
+  - **エラーハンドリング 2 段**: (a) `gh pr edit` 失敗 → WARN + return 1（次サイクルで再付与可、コメント投稿側を阻害しない fail-continue 既存規約）、(b) ラベル付与成功 + marker 投稿失敗 → WARN + return 1（design.md L589「次サイクルで再付与＝gh pr edit --add-label の冪等性により副作用なし」を明示的に注記）。後者の挙動は GitHub `gh pr edit --add-label` が同名ラベルの重複付与に対して **冪等**（既に付与済みなら何もせず exit 0）であることを利用して、自己回復可能なエラー設計とした。これを関数 docstring の「エラーハンドリング」節に明示。
+  - **stdout 汚染なし**: 本関数は stdout に何も出力しない（観測ログは sec_log/sec_warn の stderr のみ）。これは `sec_post_*_comment` と同じ契約で、呼び出し元 task 6 が rc を `|| true` で吸収できるよう設計（design.md L465 の使用例 `sec_apply_block_labels "$pr_number" "$sha" "$blocking_count" "$threshold" || true` と整合）。
+  - **shellcheck SC2016 抑制**: marker コメント body の printf format 文字列内に markdown コードフェンス用バッククォート（`` ` ``）リテラルが含まれるため、`# shellcheck disable=SC2016` を inline 付与。これは既存 `sec_substitute_placeholders` / `sec_run_review_for_pr` で確立済みのパターンを踏襲（root の `.shellcheckrc` は SC2317/SC2012 のみ disable しており SC2016 は対象外のため inline 抑制が必要）。
+  - smoke 検証（手動 4 ケース）: (1) 重複検出 → rc=0 + skip log 1 行、(2) `gh pr edit` 失敗 → rc=1 + WARN 1 行、(3) 全成功 → rc=0 + 成功 log 1 行（labels=needs-security-fix+needs-iteration blocking=5 threshold=medium sha=ghi789）、(4) edit ok / comment 失敗 → rc=1 + WARN 1 行（冪等性 fallback の注記付き）すべて期待値一致。stdout 出力ゼロも確認。
+- 残存課題:
+  - 本 task では `sec_run_review_for_pr` の strict 経路配線は実施しない（task 6 の責務）。task 6 で `if [ "$_sec_resolved_mode" = "strict" ] && [ "$total_findings" -gt 0 ]; then threshold=$(sec_resolve_block_severity); blocking_count=$(sec_count_blocking_findings "$severity_summary" "$threshold"); ... sec_apply_block_labels "$pr_number" "$sha" "$blocking_count" "$threshold" || true; fi` 形式で `sec_post_review_comment` 直後に挿入される予定（design.md L457-468）。
+  - 本関数は task 6 配線まで呼び出し元が存在しないため、`SECURITY_REVIEW_MODE != strict` 環境では関数定義が load されるだけで実行されず副作用ゼロ（NFR 1.1 byte 等価が構造的に保証される）。
+  - 確認事項: marker コメント冒頭の visible 注記（`<!-- security-block marker for SHA ... -->`）は HTML コメント記法のため GitHub UI 上では非表示。運用者が gh API レスポンス本文を直接見たときの可読性を狙ったものだが、UI 上は本文 1 行サマリのみが表示される。これは design.md にも明示されていない設計判断（裁量の範囲内）。
