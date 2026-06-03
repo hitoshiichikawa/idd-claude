@@ -52,34 +52,64 @@ sec_build_marker() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# sec_check_strict_request: strict 要求 env の有無を確認し advisory 固定で続行（task 2.3）
+# sec_check_strict_request: ゲート挙動 mode を解決して stdout に返す（#281 task 4）
 #   入力: 環境変数のみ
-#     - SECURITY_REVIEW_MODE: 期待値 "advisory"（未設定 / 空 / "advisory" 以外は WARN）
-#     - SECURITY_REVIEW_STRICT: 期待値 未設定 / 空（非空なら WARN）
-#   出力: stdout に常に "advisory" を 1 行
+#     - SECURITY_REVIEW_MODE: 期待値 "advisory" または "strict" 厳密一致。未設定 / 空 /
+#       "advisory" は advisory 解釈、"strict" は strict 解釈、それ以外は WARN + advisory
+#       fallback。
+#     - SECURITY_REVIEW_STRICT: #279 で導入された defensive env。本 spec では deprecated
+#       alias として WARN のみ出力し、mode 解決には一切影響させない（後方互換 / sudden
+#       break 回避）。
+#   出力: stdout に "advisory" または "strict" を 1 行
 #   戻り値: 0 固定
-#   AC: 5.1, 5.2, 5.3
+#   AC: 1.1, 1.2, 1.4, 1.5
 #
-#   本 spec では strict モード（severity 閾値ベースのマージ阻害ラベル付与）を実装しない。
-#   strict 要求 env が来ても WARN 1 行で「strict は本 spec 未実装 / 別 Issue #281 待ち」を
-#   記録した上で、stdout には常に advisory 固定値を返す（Req 5.3 確定）。
+#   解決順序:
+#     1. SECURITY_REVIEW_MODE == "strict" 厳密一致 → "strict" を返す（Req 1.2）
+#     2. SECURITY_REVIEW_MODE が "advisory" / 未設定 / 空 → "advisory" を返す（Req 1.1, 1.5、
+#        #279 と byte 等価）
+#     3. SECURITY_REVIEW_MODE が上記以外（typo / 大文字混在 / 空白混入等）→ sec_warn 1 行
+#        + "advisory" fallback（Req 1.4）
+#     4. SECURITY_REVIEW_STRICT が非空 → deprecated alias 警告 WARN 1 行のみ（mode は
+#        変更しない / #279 と byte 等価）
+#
+#   後方互換ポイント:
+#     - #279 では本関数は「strict 要求 env が来ても WARN + advisory 固定」の safe-fallback
+#       実装だったが、#281 で実 mode 解決に切替（Req 1.2 で strict 解釈の AC が明示された
+#       ため）。
+#     - SECURITY_REVIEW_MODE 未設定 / "advisory" 環境では引き続き advisory を返すため、
+#       既存運用に影響を与えない（NFR 1.1）。
+#     - SECURITY_REVIEW_STRICT=anything 環境は引き続き mode 変更なし + WARN 1 行のまま
+#       （#279 と byte 等価）。これにより #279 ユーザが誤って STRICT env を set した状態
+#       が sudden break を起こさない。
+#
 #   stdout は単一 token 契約のため、観測ログは sec_warn（stderr）のみを使用する。
 # ─────────────────────────────────────────────────────────────────────────────
 sec_check_strict_request() {
   local mode="${SECURITY_REVIEW_MODE:-}"
   local strict="${SECURITY_REVIEW_STRICT:-}"
+  local resolved
 
-  # SECURITY_REVIEW_MODE が advisory 以外の非空値 → WARN
-  if [ -n "$mode" ] && [ "$mode" != "advisory" ]; then
-    sec_warn "SECURITY_REVIEW_MODE='${mode}' を検出しましたが strict モードは本 spec 未実装です（別 Issue #281 待ち）。advisory 固定で続行します"
-  fi
+  case "$mode" in
+    strict)
+      resolved="strict"
+      ;;
+    advisory|"")
+      resolved="advisory"
+      ;;
+    *)
+      sec_warn "SECURITY_REVIEW_MODE='${mode}' は許容値（strict/advisory）に一致しません。既定 'advisory' で続行します"
+      resolved="advisory"
+      ;;
+  esac
 
-  # SECURITY_REVIEW_STRICT が非空 → WARN
+  # SECURITY_REVIEW_STRICT は deprecated alias。mode 解決には影響させず WARN のみ出す
+  # （#279 と byte 等価で sudden break 回避）。
   if [ -n "$strict" ]; then
-    sec_warn "SECURITY_REVIEW_STRICT='${strict}' を検出しましたが strict モードは本 spec 未実装です（別 Issue #281 待ち）。advisory 固定で続行します"
+    sec_warn "SECURITY_REVIEW_STRICT='${strict}' は deprecated alias です。mode 切替には SECURITY_REVIEW_MODE=strict を使用してください（本 env は mode 解決に影響しません）"
   fi
 
-  echo "advisory"
+  echo "$resolved"
   return 0
 }
 
