@@ -12,7 +12,7 @@
   - 既存 `modules/pr-reviewer.sh` 冒頭の comment スタイルに倣う
   - `set -euo pipefail` は本体側で宣言済みのため宣言しない
   - _Requirements: NFR 1.1, NFR 5.1_
-- [ ] 2.2 `sec_build_marker` を実装（`<!-- idd-claude:security-review sha=<sha> kind=<kind> -->` を stdout 出力）
+- [x] 2.2 `sec_build_marker` を実装（`<!-- idd-claude:security-review sha=<sha> kind=<kind> -->` を stdout 出力）
   - 引数: `$1 = sha`, `$2 = kind`（`security-review` / `security-review-clean` / `scan-failed`）
   - 末尾改行なし
   - _Requirements: 3.4, 6.1, 6.4_
