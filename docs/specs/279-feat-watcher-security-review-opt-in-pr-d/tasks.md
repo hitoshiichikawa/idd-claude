@@ -132,7 +132,7 @@
   - 言語方針に従い日本語ベース、env var 名は英語固定
   - _Requirements: NFR 6.1, NFR 6.2_
 
-- [ ] 6. 静的解析と手動スモークテスト
+- [x] 6. 静的解析と手動スモークテスト
   - `shellcheck local-watcher/bin/modules/security-review.sh local-watcher/bin/modules/core_utils.sh local-watcher/bin/issue-watcher.sh install.sh setup.sh .github/scripts/*.sh` が警告ゼロ
   - `actionlint .github/workflows/*.yml` が警告ゼロ（本機能で workflow 変更はないが既存ベースラインの非回帰確認）
   - `diff -r .claude/agents repo-template/.claude/agents` と `diff -r .claude/rules repo-template/.claude/rules` が空（本機能で agents/rules を編集しないことの確認 / NFR 7.2）
