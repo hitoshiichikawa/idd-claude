@@ -8,7 +8,7 @@
   - _Requirements: NFR 3.1, NFR 5.1_
 
 - [ ] 2. modules/security-review.sh を新規作成し、純粋関数群（marker / mode 解決 / 候補抽出 / 既存判定）を実装
-- [ ] 2.1 ファイル冒頭コメント（用途・配置先・依存・セットアップ参照先）と関数スケルトンを配置
+- [x] 2.1 ファイル冒頭コメント（用途・配置先・依存・セットアップ参照先）と関数スケルトンを配置
   - 既存 `modules/pr-reviewer.sh` 冒頭の comment スタイルに倣う
   - `set -euo pipefail` は本体側で宣言済みのため宣言しない
   - _Requirements: NFR 1.1, NFR 5.1_
