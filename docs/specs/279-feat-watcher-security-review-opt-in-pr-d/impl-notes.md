@@ -150,4 +150,43 @@
     ブロック全量（install.sh / setup.sh / .github/scripts/*.sh / actionlint /
     `diff -r .claude/...`）は次起動で実施する
 
+### Task 5
+
+- 採用方針: README の「オプション機能一覧 > opt-in」表に `SECURITY_REVIEW_ENABLED` 行を
+  PR Reviewer Processor (#261) 行の直後に追加し、新規 h2 セクション
+  「Security Review Processor (#279)」を `## PR Reviewer Processor (#261)` 直後に挿入。
+  既存 `## PR Reviewer Processor (#261)` 節の章立て（概要 / 完全な opt-in の注意 / 信頼境界
+  warning / 対象 PR 判定 / 動作フロー / 重複防止 marker / 環境変数表 / 利用方法 /
+  Migration Note）を完全に踏襲し、Security Review 固有の章（advisory 固定の挙動 / クリーン時
+  にもコメント投稿される / `security-notes.md` 成果物 / 既知の制約）を追加した。
+- 重要な判断:
+  - **配置先**: tasks.md 指定どおり `## PR Reviewer Processor (#261)` 節の **直後**（`---`
+    水平線の後、`## PR Iteration Processor (#26)` の前）に新規 h2 を挿入。これは dispatcher
+    の実行順（PR Reviewer → Security Review → PR Iteration）とも整合する
+  - **既定値の出典**: 環境変数表の各既定値は記憶からではなく
+    `local-watcher/bin/issue-watcher.sh` の Config ブロック（task 4.2 で追加された行 301〜
+    337）を Read で実機確認した上で記載。特に `SECURITY_REVIEW_MODEL=claude-opus-4-8`、
+    `SECURITY_REVIEW_HEAD_PATTERN=^claude/issue-`、`SECURITY_REVIEW_MAX_PRS=5`、
+    `SECURITY_REVIEW_GIT_TIMEOUT=120`、`SECURITY_REVIEW_EXEC_TIMEOUT=600` を確認
+  - **advisory-only の framing**: 「advisory 固定の挙動」と「既知の制約」の 2 箇所で strict
+    モード未実装を明示し、それぞれに別 Issue #281 リンクを記載。strict 拡張時のラベル名・
+    閾値 env 名は本 README で予約せず、別 Issue 側の設計に委ねる形を明文化（Req 5.1 / 5.2
+    の文書側担保）
+  - **クリーン時コメント投稿の独立節**: Req 3.3（検出 0 件でもコメント投稿）は運用者の関心
+    が高い挙動のため、動作フロー内ではなく独立節「クリーン時にもコメント投稿される」を
+    立てて、`kind=security-review` / `kind=security-review-clean` の marker 競合関係を箇条書き
+    で明示した
+  - **`security-notes.md` 配置の注意**: 本 spec 自身の `docs/specs/279-...` ではなく、各対象
+    PR の spec ディレクトリ配下に runtime で出力される点を独立節で強調（Req 3.5 の運用者
+    向け解説）。フォーマットは design.md「`security-notes.md` フォーマット」節のテンプレを
+    そのまま転載
+  - **Migration Note の安全側強調**: 既存 env / ラベル / cron / exit code の不変性を明示し、
+    かつ `modules/security-review.sh` 新規追加に伴う `install.sh --local` 再実行が必要な点を
+    PR Reviewer Processor #261 と同じ表現で記載（merge 後の deploy 漏れ事故を防止）
+- 残存課題:
+  - **task 6 の静的解析 + 二重管理ドリフト + cron-like PATH 解決のフルバッテリ verify** は
+    次起動で実施（本 task では README-only のため `diff -r .claude/agents repo-template/.claude/agents`
+    と `diff -r .claude/rules repo-template/.claude/rules` の clean 状態を確認するに留めた /
+    NFR 7.2）
+
 STATUS: complete
