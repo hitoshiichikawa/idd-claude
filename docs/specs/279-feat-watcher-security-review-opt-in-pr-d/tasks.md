@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. core_utils.sh に sec_log / sec_warn / sec_error ロガー 3 関数を追加
+- [x] 1. core_utils.sh に sec_log / sec_warn / sec_error ロガー 3 関数を追加
   - 既存 `pr_log` / `pi_log` / `mq_log` と同形式（`[$(date '+%F %T')] [$REPO] security-review: $*`）で末尾に追記
   - `sec_warn` / `sec_error` は `>&2` に出力
   - 既存ロガー関数は変更しない（追記のみ）
