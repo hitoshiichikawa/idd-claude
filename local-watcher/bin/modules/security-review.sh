@@ -243,6 +243,72 @@ sec_count_blocking_findings() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# sec_apply_block_labels: needs-security-fix + needs-iteration の 2 枚ペア付与（#281 task 5）
+#   入力: $1 = pr_number, $2 = sha, $3 = blocking_count, $4 = threshold
+#   出力: なし（観測ログのみ）
+#   戻り値: 0 = ok（重複 skip 含む）/ 1 = 付与失敗 or marker 投稿失敗
+#   AC: 3.1, 3.4, 3.5, 3.6, 4.4, NFR 4.1, NFR 4.2
+#   副作用:
+#     - 対象 PR に `${SECURITY_REVIEW_BLOCK_LABEL}` と `needs-iteration` をペア付与
+#       （`gh pr edit --add-label "$A,$B"` で 1 コマンド原子付与 / Req 3.1, 4.4）
+#     - 当該 PR に hidden marker (`kind=security-block`) を含むコメントを 1 件投稿
+#       （SHA 単位の冪等性確立 / NFR 4.1, 4.2）
+#     - sec_log で付与結果（blocking_count / threshold / 付与成否）を 1 行記録（Req 3.5）
+#
+#   内部処理:
+#     1. sec_already_processed "$pr_number" "$sha" "security-block" で重複判定
+#        → 既存なら sec_log で skip 通知して return 0（Req 3.6, NFR 4.1）
+#     2. gh pr edit --add-label "$SECURITY_REVIEW_BLOCK_LABEL,needs-iteration" で 1 コマンド
+#        原子付与（PR Iteration Processor 動線に流す / Req 3.1, 4.4）
+#     3. 失敗時は sec_warn + return 1（既存 fail-continue 規約。コメント投稿側を阻害しない）
+#     4. 成功時は hidden marker (kind=security-block) のコメントを 1 件投稿
+#        （以降の重複防止 + 監査）
+#     5. ラベル付与結果を sec_log で 1 行記録（Req 3.5 / NFR 3.1）
+#
+#   エラーハンドリング:
+#     - ラベル付与失敗 → WARN + return 1（次サイクルで再試行可 / コメント投稿側を阻害しない）
+#     - ラベル付与成功 + marker 投稿失敗 → WARN + return 1。次サイクルで marker 不在の
+#       ため再判定されるが、`gh pr edit --add-label` は同一ラベルの重複付与に対して冪等
+#       なため、再付与が走っても副作用は発生しない（design.md L589 のとおり）。
+# ─────────────────────────────────────────────────────────────────────────────
+sec_apply_block_labels() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local blocking_count="${3:-0}"
+  local threshold="${4:-}"
+
+  # AC 3.6 / NFR 4.1: 同一 (sha, kind=security-block) が既存なら再付与しない
+  if sec_already_processed "$pr_number" "$sha" "security-block"; then
+    sec_log "PR #${pr_number}: sha=${sha} は既に strict ラベル付与済み（kind=security-block marker 検出）。skip"
+    return 0
+  fi
+
+  # ラベル 2 枚を 1 コマンドで原子付与（Req 3.1, 4.4）
+  if ! timeout "$SECURITY_REVIEW_GIT_TIMEOUT" \
+      gh pr edit "$pr_number" --repo "$REPO" \
+      --add-label "${SECURITY_REVIEW_BLOCK_LABEL},needs-iteration" >/dev/null 2>&1; then
+    sec_warn "PR #${pr_number}: strict ラベル付与に失敗 labels=${SECURITY_REVIEW_BLOCK_LABEL}+needs-iteration blocking=${blocking_count} threshold=${threshold} sha=${sha}"
+    return 1
+  fi
+
+  # 重複防止 marker コメントを 1 件投稿（NFR 4.1, 4.2 / 監査用途）
+  local marker body
+  marker=$(sec_build_marker "$sha" "security-block")
+  # shellcheck disable=SC2016  # 単一引用符内のバッククォートは markdown コードフェンスのリテラル
+  body=$(printf '<!-- security-block marker for SHA %s -->\nstrict モードによりマージ阻害ラベル `%s` / `needs-iteration` を付与しました（blocking=%s threshold=%s）。\n\n%s' \
+    "$sha" "$SECURITY_REVIEW_BLOCK_LABEL" "$blocking_count" "$threshold" "$marker")
+
+  if ! timeout "$SECURITY_REVIEW_GIT_TIMEOUT" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+    sec_warn "PR #${pr_number}: strict ラベル付与は成功したが kind=security-block marker コメント投稿に失敗 sha=${sha}（次サイクルで再付与＝gh pr edit --add-label の冪等性により副作用なし）"
+    return 1
+  fi
+
+  sec_log "PR #${pr_number}: strict ラベル付与成功 labels=${SECURITY_REVIEW_BLOCK_LABEL}+needs-iteration blocking=${blocking_count} threshold=${threshold} sha=${sha}"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # sec_fetch_candidate_prs: 候補 PR を JSON 配列で返す（task 2.4）
 #   出力: stdout に jq 配列形式の JSON 1 行（候補なし / 失敗時は "[]"）
 #   戻り値: 0 固定（失敗は degraded path = "[]" + WARN に倒す）
