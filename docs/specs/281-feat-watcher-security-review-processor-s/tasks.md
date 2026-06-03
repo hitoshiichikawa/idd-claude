@@ -59,7 +59,7 @@
   - _Requirements: 1.2, 3.1, 3.2, 3.3, 3.4, 4.5, 6.1, NFR 1.1_
   - _Boundary: modules/security-review.sh sec_run_review_for_pr_
 
-- [ ] 7. `sec_write_security_notes` に Threshold Decision セクションを追加
+- [x] 7. `sec_write_security_notes` に Threshold Decision セクションを追加
   - 既存「Severity Summary」表の **下**に新規セクション「## Threshold Decision」を追加（design.md「security-notes.md フォーマット拡張」節のテンプレに従う）
   - 出力項目: `Mode` / `Threshold` / `Blocking Count` / `Decision`（`label-applied` / `label-skipped` / `advisory-only` / `n/a`）
   - 関数シグネチャに `mode` / `threshold` / `blocking_count` / `decision` 引数を追加（既存呼び出し元は task 6 で更新）
