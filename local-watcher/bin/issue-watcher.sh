@@ -1077,6 +1077,13 @@ process_design_review_release() {
 # （PR_REVIEWER_ENABLED!=true なら即 return 0 で本機能導入前と等価、NFR 1.1）。
 process_pr_reviewer || pr_warn "process_pr_reviewer が想定外のエラーで終了しました（後続 Issue 処理は継続）"
 
+# Security Review Processor (#279) を PR Reviewer の直後・PR Iteration の直前に実行。
+# advisory 固定動作（ラベル操作なし）のため PR Reviewer の needs-iteration 付与とは
+# 競合しない。PR タイムライン上で「外部 AI レビュー → セキュリティレビュー → iteration
+# 反復」の時系列が運用者に提示される（SECURITY_REVIEW_ENABLED!=true なら即 return 0 で
+# 本機能導入前と等価、NFR 1.1）。
+process_security_review || sec_warn "process_security_review が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+
 # Phase A 直後に PR Iteration Processor を実行（AC 8.1 / 8.2: 同一 flock 内で直列実行）
 process_pr_iteration || pi_warn "process_pr_iteration が想定外のエラーで終了しました（後続 Issue 処理は継続）"
 
