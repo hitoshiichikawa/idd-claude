@@ -58,7 +58,7 @@
     `(sha, kind)` 重複を事前判定し既存なら skip
   - 投稿失敗時は WARN + rc=1
   - _Requirements: 2.6, 3.1, 3.2, 3.3, 3.4, 6.1, 6.2, 6.4_
-- [ ] 3.3 `sec_write_security_notes` を実装（spec ディレクトリ配下に `security-notes.md` を出力）
+- [x] 3.3 `sec_write_security_notes` を実装（spec ディレクトリ配下に `security-notes.md` を出力）
   - 入力: pr_number / sha / spec_dir / finding_count / severity_summary / review_text
   - spec_dir が空文字またはディレクトリ不在 → WARN 1 行 + return 0（書き出し skip / 安全側）
   - 既存ファイルの先頭付近に `Last SHA: <sha>` 行が同一であれば overwrite skip（idempotency / NFR 4.1）
