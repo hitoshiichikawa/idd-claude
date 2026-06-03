@@ -713,15 +713,22 @@ sec_count_severities() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# sec_write_security_notes: security-notes.md を spec ディレクトリ配下に書き出す（task 3.3）
+# sec_write_security_notes: security-notes.md を spec ディレクトリ配下に書き出す（task 3.3 / task 7）
 #   入力: $1 = pr_number, $2 = sha, $3 = spec_dir, $4 = finding_count,
-#         $5 = severity_summary (sec_count_severities の出力形式), $6 = review_text
+#         $5 = severity_summary (sec_count_severities の出力形式), $6 = review_text,
+#         $7 = mode (advisory|strict), $8 = threshold (critical|high|medium|low|info|-),
+#         $9 = blocking_count (整数), $10 = decision (label-applied|label-skipped|advisory-only|n/a)
 #   戻り値: 0 = ok（spec_dir 不明時の skip 含む）/ 1 = 書き出し失敗
-#   AC: 3.5, NFR 4.1
+#   AC: 3.5, 5.4, NFR 1.1, NFR 4.1
 #
 #   - spec_dir 空文字 / ディレクトリ不在 → WARN 1 行 + return 0（書き出し skip / 安全側）
-#   - 既存ファイルの先頭付近に同一 `Last SHA: <sha>` 行があれば overwrite skip（idempotency）
-#   - フォーマット: design.md「security-notes.md フォーマット」節のテンプレ厳守
+#   - 既存ファイルの先頭付近に同一 `Last SHA: <sha>` 行があれば overwrite skip（idempotency / NFR 4.1）
+#   - フォーマット: design.md「security-notes.md フォーマット」節 + 「security-notes.md フォーマット拡張」節のテンプレ厳守
+#   - #281 task 7: Severity Summary 表の下に Threshold Decision セクションを追記
+#     - mode=advisory → decision=advisory-only / threshold=- / blocking_count=0
+#     - mode=strict + blocking_count=0 → decision=label-skipped / threshold=<resolved>
+#     - mode=strict + blocking_count>=1 → decision=label-applied / threshold=<resolved>
+#   - 既存 Severity Summary 表・Findings 本文・先頭メタデータ（Last SHA 等）は変更しない（NFR 1.1）
 # ─────────────────────────────────────────────────────────────────────────────
 sec_write_security_notes() {
   local pr_number="$1"
@@ -730,6 +737,11 @@ sec_write_security_notes() {
   local finding_count="$4"
   local severity_summary="$5"
   local review_text="$6"
+  # #281 task 7: 新規引数（既存呼び出し元は advisory のデフォルト値を渡す / NFR 1.1）
+  local mode="${7:-advisory}"
+  local threshold="${8:--}"
+  local blocking_count="${9:-0}"
+  local decision="${10:-advisory-only}"
 
   # AC 3.5 / Error handling: spec_dir 不明 → skip 安全側（PR コメント側は阻害しない）
   if [ -z "$spec_dir" ] || [ ! -d "$spec_dir" ]; then
@@ -782,6 +794,12 @@ sec_write_security_notes() {
     printf '| Medium | %s |\n' "$med"
     printf '| Low | %s |\n' "$low"
     printf '| Info | %s |\n\n' "$info"
+    # #281 task 7: Threshold Decision セクション（Severity Summary 表の直下に追加 / Req 5.4）
+    printf '## Threshold Decision\n\n'
+    printf -- '- Mode: %s\n' "$mode"
+    printf -- '- Threshold: %s\n' "$threshold"
+    printf -- '- Blocking Count: %s\n' "$blocking_count"
+    printf -- '- Decision: %s\n\n' "$decision"
     printf '## Findings\n\n'
     if [ "$finding_count" = "0" ]; then
       printf 'クリーン: スキャンで検出項目はありませんでした。\n'
@@ -796,7 +814,7 @@ sec_write_security_notes() {
     return 1
   fi
 
-  sec_log "PR #${pr_number}: security-notes.md 書き出し成功 findings=${finding_count} path=${notes_path}"
+  sec_log "PR #${pr_number}: security-notes.md 書き出し成功 findings=${finding_count} decision=${decision} path=${notes_path}"
   return 0
 }
 
@@ -938,7 +956,22 @@ sec_run_review_for_pr() {
     fi
     local zero_summary
     zero_summary='critical=0 high=0 medium=0 low=0 info=0 total=0'
-    sec_write_security_notes "$pr_number" "$sha" "$spec_dir" "0" "$zero_summary" "$review_text" || true
+    # #281 task 7: クリーン経路は strict 評価枝を通らないため、mode に応じた Threshold Decision を計算する。
+    # advisory: advisory-only / threshold=- / blocking_count=0
+    # strict + clean: strict 評価が走らない（total_findings=0 で gate）が、運用者観測のため
+    #                 threshold は解決値を記録し decision=label-skipped を渡す（label 付与なし状態）
+    local _clean_mode _clean_threshold _clean_decision
+    _clean_mode="${_sec_resolved_mode:-advisory}"
+    if [ "$_clean_mode" = "strict" ]; then
+      _clean_threshold=$(sec_resolve_block_severity)
+      _clean_decision="label-skipped"
+    else
+      _clean_mode="advisory"
+      _clean_threshold="-"
+      _clean_decision="advisory-only"
+    fi
+    sec_write_security_notes "$pr_number" "$sha" "$spec_dir" "0" "$zero_summary" "$review_text" \
+      "$_clean_mode" "$_clean_threshold" "0" "$_clean_decision" || true
     return 0
   fi
 
@@ -984,7 +1017,27 @@ sec_run_review_for_pr() {
     sec_apply_block_labels "$pr_number" "$sha" "$_strict_blocking_count" "$_strict_threshold" || true
   fi
 
-  sec_write_security_notes "$pr_number" "$sha" "$spec_dir" "$total_findings" "$severity_summary" "$review_text" || true
+  # #281 task 7: Threshold Decision を sec_write_security_notes に渡す。
+  # advisory 経路（mode != strict）: mode=advisory threshold=- blocking_count=0 decision=advisory-only（NFR 1.1）
+  # strict 経路 + blocking_count >= 1: mode=strict threshold=<resolved> blocking_count=N decision=label-applied
+  # strict 経路 + blocking_count = 0: mode=strict threshold=<resolved> blocking_count=0 decision=label-skipped
+  local _notes_mode _notes_threshold _notes_decision
+  if [ "${_sec_resolved_mode:-}" = "strict" ]; then
+    _notes_mode="strict"
+    _notes_threshold="${_strict_threshold:--}"
+    if [ "$_strict_blocking_count" -gt 0 ]; then
+      _notes_decision="label-applied"
+    else
+      _notes_decision="label-skipped"
+    fi
+  else
+    _notes_mode="advisory"
+    _notes_threshold="-"
+    _notes_decision="advisory-only"
+  fi
+
+  sec_write_security_notes "$pr_number" "$sha" "$spec_dir" "$total_findings" "$severity_summary" "$review_text" \
+    "$_notes_mode" "$_notes_threshold" "$_strict_blocking_count" "$_notes_decision" || true
 
   return 0
 }
