@@ -18,7 +18,7 @@
   - _Requirements: 1.1, 1.5, 2.1, 2.2, NFR 1.1, NFR 1.2, NFR 5.1_
   - _Boundary: issue-watcher.sh Config block_
 
-- [ ] 3. `modules/security-review.sh` に severity 閾値 / ordinal / 合算ヘルパを追加 (P)
+- [x] 3. `modules/security-review.sh` に severity 閾値 / ordinal / 合算ヘルパを追加 (P)
   - `sec_resolve_block_severity` を追加（env 未設定 / 不正値で WARN + `high` fallback / 出力は小文字 5 値のいずれか 1 行）
   - `sec_severity_at_or_above` を追加（ordinal map: critical=5 / high=4 / medium=3 / low=2 / info=1、戻り値 0 = 同等以上 / 1 = 未満 / 2 = 入力不正）
   - `sec_count_blocking_findings` を追加（`sec_count_severities` 出力形式と threshold から閾値以上件数を合算、stdout に整数 1 行）
