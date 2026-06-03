@@ -7,7 +7,7 @@
   - shellcheck `.github/scripts/idd-claude-labels.sh` が警告ゼロ
   - _Requirements: 4.4, NFR 1.2, NFR 5.1_
 
-- [ ] 2. `issue-watcher.sh` Config ブロックに strict 関連 env を追加 (P)
+- [x] 2. `issue-watcher.sh` Config ブロックに strict 関連 env を追加 (P)
   - 既存「`# ─── Security Review Processor 設定 (#279) ───`」節 **末尾**に以下 3 行を追加:
     - `SECURITY_REVIEW_MODE="${SECURITY_REVIEW_MODE:-advisory}"`（#279 で Config 未宣言だったため新規宣言、既定 `advisory` は #279 動作と byte 等価）
     - `SECURITY_REVIEW_BLOCK_SEVERITY="${SECURITY_REVIEW_BLOCK_SEVERITY:-high}"`
