@@ -728,3 +728,99 @@ sec_run_review_for_pr() {
 
   return 0
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# process_security_review: dispatcher から呼ばれるエントリ関数（task 4.1）
+#   入力: なし（env var 群を読む）
+#   出力: なし（log のみ）
+#   戻り値: 0 固定（後続 processor を阻害しないため / dispatcher fail-continue 契約）
+#   AC: 1.1, 1.2, 1.3, 1.4, 2.1, 2.5, 5.1, 5.2, 5.3, NFR 1.1, NFR 3.1
+#
+#   処理順:
+#     ① opt-in gate（SECURITY_REVIEW_ENABLED=true 厳密一致のみ。それ以外は早期 return）
+#        AC 1.1 / 1.4 / NFR 1.1
+#     ② sec_check_strict_request を呼び advisory 固定値を取得（strict 要求検出時の WARN 含む）
+#        AC 5.1 / 5.2 / 5.3
+#     ③ サイクル開始の 1 行サマリログ（mode / max_prs / timeouts / head_pattern / model）
+#        AC 5.2 / NFR 3.1
+#     ④ 候補 PR 列挙（AC 2.1 / 2.3）
+#     ⑤ 候補 0 件 → サマリログのみで return
+#     ⑥ MAX_PRS で truncate（total / target / overflow をログ、AC 2.5 / NFR 3.1）
+#     ⑦ レビュー loop（sec_run_review_for_pr）→ rc 集計 → サマリログ
+#     ⑧ 最後に保険で BASE_BRANCH に戻して return 0（dispatcher fail-continue）
+# ─────────────────────────────────────────────────────────────────────────────
+process_security_review() {
+  # ① AC 1.1 / 1.4 / NFR 1.1: opt-in gate（=true 厳密一致のみ有効。それ以外は全て OFF）
+  if [ "${SECURITY_REVIEW_ENABLED:-false}" != "true" ]; then
+    return 0
+  fi
+
+  # ② AC 5.1 / 5.2 / 5.3: strict 要求 env を検査（WARN 後 advisory 固定で続行）
+  local mode
+  mode=$(sec_check_strict_request)
+
+  # ③ AC 5.2 / NFR 3.1: サイクル開始の 1 行サマリログ
+  sec_log "cycle start: mode=${mode} strict=not-implemented (split to #281) max_prs=${SECURITY_REVIEW_MAX_PRS:-unset} git_timeout=${SECURITY_REVIEW_GIT_TIMEOUT:-unset}s exec_timeout=${SECURITY_REVIEW_EXEC_TIMEOUT:-unset}s head_pattern=${SECURITY_REVIEW_HEAD_PATTERN:-unset} model=${SECURITY_REVIEW_MODEL:-unset}"
+
+  # ④ 候補 PR 列挙（AC 2.1 / 2.3）
+  local prs_json total
+  prs_json=$(sec_fetch_candidate_prs)
+  total=$(echo "$prs_json" | jq 'length' 2>/dev/null || echo 0)
+
+  # ⑤ 候補 0 件 → サマリログのみで return
+  if [ "$total" -eq 0 ]; then
+    sec_log "サマリ: mode=${mode} reviewed=0 clean=0 skip=0 fail=0 errored=0 overflow=0 notes_written=0 notes_skipped=0（候補 PR なし）"
+    return 0
+  fi
+
+  # ⑥ AC 2.5 / NFR 3.1: MAX_PRS で truncate（total / target / overflow をログ）
+  local max_prs="${SECURITY_REVIEW_MAX_PRS:-5}"
+  local target_count="$total" skipped_overflow=0
+  if [ "$total" -gt "$max_prs" ]; then
+    target_count="$max_prs"
+    skipped_overflow=$((total - max_prs))
+    sec_log "対象候補 ${total} 件中、上限 ${max_prs} 件のみ処理（${skipped_overflow} 件は次回持ち越し）"
+  else
+    sec_log "対象候補 ${total} 件、処理対象 ${target_count} 件"
+  fi
+
+  # ⑦ レビュー loop
+  local reviewed=0 clean=0 skip=0 fail=0 errored=0
+  local pr_iter
+  pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]" 2>/dev/null || echo "")
+  if [ -z "$pr_iter" ]; then
+    sec_log "サマリ: mode=${mode} reviewed=0 clean=0 skip=0 fail=0 errored=0 overflow=${skipped_overflow} notes_written=0 notes_skipped=0（iterate 対象なし）"
+    return 0
+  fi
+
+  while IFS= read -r pr_json; do
+    [ -z "$pr_json" ] && continue
+    local rc=0
+    sec_run_review_for_pr "$pr_json" || rc=$?
+    # rc 値の意味:
+    #   0 = success（検出件数で reviewed / clean を区別するが、本 entrypoint では
+    #       run_review 関数の戻り値分解はせず合算で reviewed として扱う。clean の
+    #       内訳は sec_post_clean_comment ログから事後集計可能）
+    #   1 = failure（一時的・skip 相当）
+    #   2 = skip（重複検出 marker）
+    #   3 = scan-error（実行失敗 / workspace-modified / 空出力）
+    case $rc in
+      0) reviewed=$((reviewed + 1)) ;;
+      2) skip=$((skip + 1)) ;;
+      3) errored=$((errored + 1)) ;;
+      *) fail=$((fail + 1)) ;;
+    esac
+    # 各 PR 処理後に保険で base branch に戻す（スキャンは subshell 内で完結するが念のため）
+    git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
+  done <<< "$pr_iter"
+
+  # 本 entrypoint では clean の内訳は集計しない（sec_run_review_for_pr は 0/1/2/3 を
+  # 返すのみ。clean / non-clean の区別は marker kind = security-review-clean /
+  # security-review のログ行で事後識別する）。notes_written / notes_skipped も
+  # sec_write_security_notes のログ行で事後集計可能。本サマリは合算値のみを記録する。
+  sec_log "サマリ: mode=${mode} reviewed=${reviewed} clean=${clean} skip=${skip} fail=${fail} errored=${errored} overflow=${skipped_overflow} notes_written=0 notes_skipped=0"
+
+  # 念のため最終確認で base branch に戻す
+  git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
+  return 0
+}
