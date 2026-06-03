@@ -21,7 +21,7 @@
     （「strict は本 spec 未実装 / 別 Issue 待ち」）後、stdout に常に `advisory` を 1 行
   - 未設定 / 空 / `advisory` → 無言で `advisory` を stdout
   - _Requirements: 5.1, 5.2, 5.3_
-- [ ] 2.4 `sec_fetch_candidate_prs` を実装（`gh pr list` + jq フィルタ）
+- [x] 2.4 `sec_fetch_candidate_prs` を実装（`gh pr list` + jq フィルタ）
   - server-side: `--state open --search "-draft:true"`
   - client-side fail-safe: `select(.isDraft == false)` + `select(.headRefName | test($pattern))` + `select(.headRepositoryOwner.login == $owner)`
   - 取得失敗時は WARN + `echo "[]"` で degraded path
