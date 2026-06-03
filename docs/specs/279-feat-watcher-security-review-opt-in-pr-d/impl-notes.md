@@ -108,4 +108,46 @@
     `gh pr comment --body` で渡すため、PR コメント API の上限（65,536 文字）を超えるケース
     は未対応。実機で長大な review_text が観測された場合は truncate 処理を別 Issue で検討
 
+### Task 4
+
+- 採用方針: 既存 `process_pr_reviewer` (#261) の cycle / truncate / loop パターンを完全に
+  踏襲し、entrypoint `process_security_review` を `modules/security-review.sh` 末尾に追加、
+  issue-watcher.sh の Config ブロック（PR Reviewer 節の直後）+ REQUIRED_MODULES 末尾 +
+  dispatcher call site（PR Reviewer 直後・PR Iteration 直前）の 3 点配線を完了。
+- 重要な判断:
+  - **rc 集計の簡素化**: `sec_run_review_for_pr` の戻り値 `0/1/2/3` を
+    `reviewed/fail/skip/errored` の 4 カテゴリにのみ集計し、`clean` / `notes_written` /
+    `notes_skipped` の内訳は marker kind ログ（`kind=security-review-clean` /
+    `security-notes.md 書き出し成功` 等）から事後識別する設計とした。サマリログには
+    プレースホルダ値 0 を残し、運用者が grep でログ集計可能（pr-reviewer 同型の方針）。
+    完全な内訳集計を望む場合は別 Issue で追加する余地を残す
+  - **Config ブロックの SECURITY_REVIEW_PROMPT 既定値**: design.md「CLI 起動契約」節の
+    記述どおり、Skill tool 経由 `/security-review` 起動を誘発する英文 + 末尾の
+    `SECURITY_REVIEW_CLEAN` センチネル出力指示を 1 行で記述。`origin/${BASE_BRANCH:-main}`
+    の `${BASE_BRANCH:-main}` は Config 解決時に展開される（先行行で `BASE_BRANCH` が
+    既に解決済みのため）。一方 `SECURITY_REVIEW_CLAUDE_CMD` の `\$SECURITY_REVIEW_PROMPT`
+    はバックスラッシュエスケープでリテラル温存し、`bash -c` subshell が env から展開する
+    （pr-reviewer の `\$(cat '{PROMPT_FILE}')` と同形のリテラル温存パターン）
+  - **strict 関連 env を導入しない**: `SECURITY_REVIEW_MODE` / `SECURITY_REVIEW_BLOCK_SEVERITY`
+    / `SECURITY_REVIEW_BLOCK_LABEL` 等の strict 関連 env は本 spec で Config ブロックに
+    **含めない**（別 Issue #281 待ち）。`sec_check_strict_request` は env が来た場合のみ
+    WARN + advisory fallback で吸収するため、Config 側の宣言は不要（Req 5.3 確定）
+  - **dispatcher call site の配置根拠コメント**: 既存 `process_pr_reviewer` 直後・
+    `process_pr_iteration` 直前の理由（advisory のためラベル競合なし / PR タイムライン上の
+    時系列 / NFR 1.1 byte 等価）をコメントブロックに明示。将来 strict 拡張が別 Issue で
+    導入された際にも本配置を維持する根拠が読み取れる
+  - **dry run 検証**: REPO_DIR が GitHub remote を持たない環境では watcher が早期 fail する
+    ため、stub gh で `process_security_review` を単独呼び出して `cycle start: mode=advisory ...`
+    と `サマリ: ... reviewed=0 clean=0 ...（候補 PR なし）` の 2 行が記録されること、および
+    `SECURITY_REVIEW_ENABLED` 未設定時には 1 行も出ないこと（NFR 1.1 byte 等価）を確認済み
+- 残存課題:
+  - **README ドキュメント追記は task 5 範囲**: 「オプション機能一覧」§ と新規 h2
+    「Security Review Processor (#279)」節の追加は次 task 5 fresh 起動で実施する
+    （本 task では README に手を入れていない / NFR 6.1）
+  - **静的解析 + 二重管理ドリフト + cron-like PATH 解決のフルバッテリ verify は task 6 範囲**:
+    本 task では task 4 の AC 検証用に `shellcheck` 3 ファイル / `bash -n` / grep 配線確認 /
+    isolated process_security_review smoke の最小セットのみ実行。task 6 の構造化 verify
+    ブロック全量（install.sh / setup.sh / .github/scripts/*.sh / actionlint /
+    `diff -r .claude/...`）は次起動で実施する
+
 STATUS: complete
