@@ -68,15 +68,15 @@ opt-in で有効化したい, so that 既存運用リポジトリには一切影
 2. The Security Review Gate shall 投稿するコメント本文に、運用者が人間判断で識別できる
    見出し（例: `## セキュリティレビュー結果`）と、各検出項目の severity および修正方針相当
    の説明を含める
-3. When スキャン結果に検出項目が 1 件も含まれていなかった場合の挙動（無コメント / クリーン
-   である旨のコメント投稿）は Open Questions に従って運用設計時に決定するものとし、確定する
-   までは「コメントを投稿せずログにクリーンである旨を記録する」を安全側既定として採用する
+3. When スキャン結果に検出項目が 1 件も含まれていなかった場合, the Security Review Gate
+   shall 「クリーンである旨」を明示する見出し（例: `## セキュリティレビュー結果: クリーン`）
+   を含むコメントを対象 PR に 1 回投稿し、重複防止用の非表示 HTML マーカーを埋め込む
 4. The Security Review Gate shall コメント本文中に当該 PR の head コミット SHA を含む非表示
    HTML マーカーを埋め込み、同一 SHA に対する重複コメント投稿を冪等に防止する
-5. Where スキャン結果の構造化アーティファクト（仮称 `security-notes.md` 等）を成果物として
-   保存する運用が選択された場合, the Security Review Gate shall 当該成果物の配置場所と内容
-   仕様を Architect 段階で決定された規約に従って書き出す（成果物保存を採用するか否か自体は
-   Open Questions に従う）
+5. The Security Review Gate shall スキャン結果の構造化アーティファクト
+   `security-notes.md` を、対応する spec ディレクトリ（`docs/specs/<番号>-<slug>/`）配下に
+   書き出し、検出件数・severity 集計・各項目の要約を含める（spec ディレクトリが特定できない
+   PR の場合の挙動は Open Questions に従い、書き出しを skip する安全側既定とする）
 
 ### Requirement 4: Reviewer エージェントとの独立性
 
@@ -96,27 +96,22 @@ missing test / boundary 逸脱）と本機能を完全独立で運用したい, 
 4. The Security Review Gate shall 自身の処理失敗・スキャン失敗を Reviewer の判定結果に
    反映しない（Reviewer の差し戻し / 承認動線を変更しない）
 
-### Requirement 5: ゲート厳格度の挙動定義
+### Requirement 5: ゲート挙動（advisory 固定 / strict は別 Issue）
 
-**Objective:** As an idd-claude operator, I want 検出結果に対するゲート厳格度（advisory /
-strict）を明示的に切り替えたい, so that 導入初期は advisory で運用し、運用が安定したら strict
-へ段階移行できる
+**Objective:** As an idd-claude operator, I want 本 spec ではゲート挙動を advisory に固定し、
+検出件数に関わらずマージブロック操作を行わない初期実装とすることで、リスクを最小化した
+opt-in 導入を行いたい, so that 運用が安定してから strict 拡張を別 Issue で段階導入できる
 
 #### Acceptance Criteria
 
-1. While ゲート厳格度が `advisory`（既定値）の状態である間, the Security Review Gate shall
-   検出結果の severity に関わらず、対象 PR のマージを阻害するラベル付与およびマージブロック
-   操作を行わず、Requirement 3 のコメント投稿に処理を限定する
-2. While ゲート厳格度が `strict` の状態である間, the Security Review Gate shall 検出された
-   項目のうち severity が運用者の指定する閾値（既定値は Open Questions に従う）以上に該当する
-   場合に、対象 PR へマージ阻害を意図したラベル（既存 `needs-iteration` または新規ラベル名は
-   Architect 段階で確定）を付与する
-3. If `strict` 状態で severity 閾値に該当する検出が 0 件であった場合, the Security Review Gate
-   shall マージ阻害ラベルを付与せず、Requirement 3 のコメント投稿のみを行う
-4. The Security Review Gate shall ゲート厳格度の現在値（`advisory` / `strict`）および付与・
-   非付与の判定理由をログに記録する
-5. While ゲート厳格度の env var が未設定または `advisory` / `strict` 以外の値である状態で
-   ある間, the Security Review Gate shall 安全側として `advisory` 相当の挙動を採用する
+1. The Security Review Gate shall ゲート挙動を `advisory` 固定とし、検出結果の severity に
+   関わらず、対象 PR のマージを阻害するラベル付与およびマージブロック操作を行わない
+   （Requirement 3 のコメント投稿および security-notes.md 書き出しに処理を限定する）
+2. The Security Review Gate shall ゲート挙動値（`advisory`）および本 spec での strict 未実装
+   である旨をログに 1 行記録する
+3. While `strict` 拡張を要求する env var が設定された状態である間, the Security Review Gate
+   shall 警告ログを 1 行記録した上で `advisory` 相当の挙動を採用する（strict 実装は本 spec
+   の Out of Scope であり、別 Issue で段階拡張する前提）
 
 ### Requirement 6: 結果コメント投稿と冪等性
 
@@ -202,43 +197,42 @@ strict）を明示的に切り替えたい, so that 導入初期は advisory で
 - `/security-review` 公式実装自体の差し替え・改造（公式機構の出力を消費する経路のみを対象）
 - 既存 Reviewer の判定対象カテゴリ拡張（Reviewer は 3 カテゴリ判定のまま不変、本機能とは
   独立に動作する）
-- 既存 PR Iteration Processor 本体の動作変更（`strict` モードで `needs-iteration` を流用
-  する場合でも、その後の反復は既存 PR Iteration Processor に委譲する）
+- **strict モード（severity 閾値に基づくマージ阻害ラベル付与）の実装**: 本 spec では
+  advisory 固定とし、strict 拡張は **別 Issue #281 として段階導入する**。
+  本 spec の Requirement 5 でも strict 拡張時のラベル名・閾値 env var・PR Iteration への
+  接続点は規定しない
 - セキュリティ検出結果に基づくテレメトリの自動収集・外部送信
 - 既存リポジトリの過去 PR への遡及スキャン（本機能の対象は本機能有効化以降に open である
   PR に限定）
 
 ## Open Questions
 
-- 統合経路の最終選択: (a) 公式 `claude-code-security-review` GitHub Action を `pull_request`
-  イベントで起動する経路と、(b) watcher 内から `claude` CLI を headless 起動して
-  `/security-review` 相当を実行する経路のどちらを **primary path** とするか。Issue 本文では
-  (b) を希望としつつ判断を Architect に委ねる旨が記載されており、本要件では両経路で AC を
-  満たし得る抽象度に留めている
-- ゲート厳格度の既定値: 本要件では `advisory` を既定値・安全側として採用しているが、Issue
-  本文では「初期は advisory のみとし、将来 strict を追加するか」が判断保留となっている。
-  strict モードを当初から実装するか、後続 Issue に分割するかは Architect 段階で確定する
-- 結果保存先の最終選択: PR コメント単独 / `security-notes.md` 相当の成果物 / 両方併用、
-  のいずれを採用するか（Requirement 3.5 はいずれの選択でも AC を満たし得る形に留めている）
-- プロセッサ構造: 本機能を既存 PR Reviewer Processor (#261) の内部分岐として実装するか、
-  独立した Security Review Processor として `pr-reviewer.sh` から分離するか。env var
-  （`SECURITY_REVIEW_ENABLED`）を独立保持する点は Issue 本文で確定しているが、モジュール
-  分割粒度は Architect の判断領域
-- env var 命名の完全集合（最小: `SECURITY_REVIEW_ENABLED`）。厳格度切替の env var 名
-  （仮: `SECURITY_REVIEW_MODE=advisory|strict`）、severity 閾値の env var 名（仮:
-  `SECURITY_REVIEW_BLOCK_SEVERITY=high|critical`）、上限件数の env var 名（仮:
-  `SECURITY_REVIEW_MAX_PRS`）、検出時に付与するラベル名（既存 `needs-iteration` 流用か新規
-  `needs-security-fix` 追加か）はいずれも未確定
-- 検出ゼロ時の挙動最終選択（Requirement 3.3）: 「無コメント」「クリーンである旨の単発
-  コメント」「ログ記録のみ」のいずれを既定とするか。本要件では「コメント投稿せずログ記録
-  のみ」を安全側既定として採用している
-- `security-notes.md` 相当の成果物を採用する場合の配置先（`docs/specs/<番号>-<slug>/` 配下か、
-  PR ブランチ root 直下か、別ディレクトリか）と Reviewer / 人間レビュー時の参照経路
-- 公式 `/security-review` の出力スキーマ（severity 文字列の集合・修正方針フィールドの形式）に
-  依存する箇所のパース仕様。公式仕様変更時の追従方針（Architect が公式ドキュメントを直接
-  参照して確定する）
+> 本節は PR レビュー（#280 round 1）で **以下のとおり確定済み**。残課題は実装段階で
+> `impl-notes.md` に記録する。
+
+- ~~統合経路の最終選択~~ → **確定**: watcher 内から `claude` CLI headless 起動経路（公式
+  GitHub Action 経路は Non-Goals）
+- ~~ゲート厳格度の既定値~~ → **確定**: advisory 固定。strict 拡張は **別 Issue として分割**
+  （#281 として起票済み）
+- ~~結果保存先の最終選択~~ → **確定**: PR コメント + `security-notes.md` 成果物の両方を
+  併用。`security-notes.md` は対応 spec ディレクトリ（`docs/specs/<番号>-<slug>/`）配下に
+  書き出す（Req 3.5）
+- ~~プロセッサ構造~~ → **確定**: 独立 Security Review Processor として
+  `local-watcher/bin/modules/security-review.sh` 新規追加
+- ~~env var 命名の完全集合~~ → **確定**: `SECURITY_REVIEW_ENABLED` のみ本 spec で必須。
+  上限件数 `SECURITY_REVIEW_MAX_PRS` 等の調整 env は design.md「Environment Variables」表で
+  確定。strict 関連 env / 閾値 / ラベル名は別 Issue で扱う
+- ~~検出ゼロ時の挙動~~ → **確定**: 「クリーンである旨」を明示するコメントを 1 回投稿（Req 3.3）
+- ~~`security-notes.md` 配置先~~ → **確定**: `docs/specs/<番号>-<slug>/security-notes.md`
+  （spec ディレクトリが特定できない PR は書き出しを skip）
+- 残課題（実装段階で確定 / `impl-notes.md` 記録）: `claude` CLI headless での
+  `/security-review` 起動 prompt の正確な文字列。公式ドキュメント上「-p モードで slash command
+  は使えず、タスクを記述せよ」とされており、本 spec では「タスク記述 + Skill tool 経由
+  `/security-review` 起動を期待する prompt 文字列」を初期実装とし、実機の `claude` バージョン
+  ごとに微調整する余地を `SECURITY_REVIEW_PROMPT` env で残す
 
 ## 関連
 
 - Depends on: #261
 - Related: #13
+- Sibling: #281
