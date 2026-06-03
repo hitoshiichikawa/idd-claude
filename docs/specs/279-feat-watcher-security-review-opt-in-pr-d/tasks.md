@@ -16,7 +16,7 @@
   - 引数: `$1 = sha`, `$2 = kind`（`security-review` / `security-review-clean` / `scan-failed`）
   - 末尾改行なし
   - _Requirements: 3.4, 6.1, 6.4_
-- [ ] 2.3 `sec_check_strict_request` を実装（strict 要求 env が来ても WARN + advisory 固定で続行）
+- [x] 2.3 `sec_check_strict_request` を実装（strict 要求 env が来ても WARN + advisory 固定で続行）
   - `SECURITY_REVIEW_MODE` / `SECURITY_REVIEW_STRICT` 等の env が `advisory` 以外なら WARN 1 行
     （「strict は本 spec 未実装 / 別 Issue 待ち」）後、stdout に常に `advisory` を 1 行
   - 未設定 / 空 / `advisory` → 無言で `advisory` を stdout
