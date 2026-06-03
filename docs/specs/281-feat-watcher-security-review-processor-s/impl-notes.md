@@ -32,3 +32,15 @@
 - 残存課題:
   - 本 task では `sec_run_review_for_pr` の改修・呼び出し挿入は実施しない（task 6 の責務）。本 3 関数は task 6 で `if [ "$mode" = "strict" ] && [ "$total_findings" -gt 0 ]; then threshold=$(sec_resolve_block_severity); blocking_count=$(sec_count_blocking_findings "$severity_summary" "$threshold"); ...` 形式で組み合わせて使用される予定（design.md L457-468）。
   - 本 task の純粋関数 3 つはすべて既存 advisory 経路から呼ばれないため、`SECURITY_REVIEW_MODE != strict` 環境では関数定義が読み込まれるだけで実行されず副作用ゼロ（NFR 1.1 byte 等価が構造的に保証される）。
+
+### Task 4
+
+- 採用方針: `sec_check_strict_request` を `case "$mode" in strict) → "strict" / advisory|"" → "advisory" / *) → WARN + "advisory" esac` の純粋な mode 解決関数に書き換え、`SECURITY_REVIEW_STRICT` 非空時は deprecated alias WARN を 1 行だけ追加で出す形に統一（mode 解決には影響させない）。stdout 単一 token 契約（"strict" または "advisory" の 1 行）と既存 #279 advisory パス byte 等価（NFR 1.1）の両方を満たす。
+- 重要な判断:
+  - `SECURITY_REVIEW_MODE=""`（明示的空文字）は `advisory|""` の case 節でマッチさせ、未設定と同様に WARN なし advisory 解釈とした（Req 1.1 の "未設定 / 空文字 / `advisory`" 列挙に従う）。一方で `" strict "` のような空白混入値は厳密一致しないため不正値分岐で WARN + advisory fallback となり、Req 1.4 の design.md L612 テスト戦略「大文字混在 → WARN」と一貫した防御的設計を保持。
+  - `SECURITY_REVIEW_STRICT` 非空時の WARN メッセージは「deprecated alias / mode 切替には SECURITY_REVIEW_MODE=strict を使用してください / 本 env は mode 解決に影響しません」と運用者誘導を明示。#279 の WARN メッセージ（「strict は本 spec 未実装 / 別 Issue #281 待ち」）は #281 で実装完了したため文言ごと刷新したが、WARN 出力 1 行・stderr のみ・mode 変更なしという観測挙動は #279 と完全同一に保つ（sudden break 回避）。
+  - `STRICT=1 + MODE=strict` の組み合わせ（11 ケース smoke の Case 9）では「STRICT は無視されるが MODE で strict 解釈」となり WARN 1 行 + stdout "strict" を返す。これは「`SECURITY_REVIEW_STRICT` のみ set した運用者は #279 と同じく advisory のまま、`SECURITY_REVIEW_MODE=strict` を明示した運用者のみ strict 化する」という Req 1.2 / NFR 1.1 双方を満たす境界設計。
+  - smoke 検証（手動 11 ケース）: `MODE=strict` / 未設定 / 空 / `advisory` / `invalid` / `Strict`（typo） / `' strict '`（空白混入） / `STRICT=1` 単独 / `STRICT=1 + MODE=strict` / `STRICT=foo + MODE=invalid`（WARN 2 件） / `STRICT='' + MODE=strict`（空文字は WARN なし）すべて期待値一致。stdout / stderr 分離も確認済み（WARN は stderr のみ）。
+- 残存課題:
+  - 本 task では `sec_run_review_for_pr` の strict 経路への配線は実施しない（task 6 の責務）。`sec_check_strict_request` の戻り値は task 8 で `process_security_review` 内のモジュール内グローバル `_sec_resolved_mode` に退避され、task 6 でループ内から参照される予定（design.md L472-475）。
+  - 確認事項: モジュール冒頭の概要 comment（line 14 `# - strict 要求検出: sec_check_strict_request（advisory 固定 fallback、Req 5.3）`）は #281 task 4 で挙動を切り替えたため記述が古くなっているが、task 4 の Boundary（`sec_check_strict_request` 関数のみ）に厳密に従い本 task では編集を見送った（task 3 で追加した 3 関数も同概要に列挙されていないため、別 task / 別 PR で概要を一括更新するのが望ましい）。
