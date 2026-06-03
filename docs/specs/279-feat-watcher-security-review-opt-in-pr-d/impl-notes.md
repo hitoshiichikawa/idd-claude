@@ -189,4 +189,66 @@
     と `diff -r .claude/rules repo-template/.claude/rules` の clean 状態を確認するに留めた /
     NFR 7.2）
 
+### Task 6
+
+- 採用方針: tasks.md 指定の verify バッテリを順次実行し、結果を impl-notes に記録。
+  実行可能なものは全て pass を確認、環境制約で実行不能なものは率直に記録した。
+  追加のコード変更は不要（task 1〜5 の実装が既に通っている）。
+- 重要な判断:
+  - **shellcheck（task 4 含む全 6 ファイル）**: `shellcheck local-watcher/bin/modules/security-review.sh
+    local-watcher/bin/modules/core_utils.sh local-watcher/bin/issue-watcher.sh install.sh
+    setup.sh .github/scripts/*.sh` を実行し exit 0（警告ゼロ）。本機能で新規追加した
+    `modules/security-review.sh` と編集した 2 ファイルが既存ベースラインを維持
+  - **二重管理ドリフト検査**: `diff -r .claude/agents repo-template/.claude/agents` と
+    `diff -r .claude/rules repo-template/.claude/rules` の双方が exit 0（差分なし）。
+    本 spec が agents / rules を編集していないこと（NFR 7.2）を機械的に確認
+  - **actionlint 不在の環境制約**: 本開発環境 (`/home/hitoshi/.issue-watcher/worktrees/...`)
+    では `actionlint` バイナリが未インストール（`command not found / EXIT 127`）のため
+    workflow YAML 検査は実機実行不能。本機能は workflow を一切編集していないため
+    （`diff` で確認済み）actionlint で観察可能な regression リスクは構造上ゼロ。本制約は
+    spec 配下の検査対象（bash モジュール / 本体 / install / setup / .github/scripts）の
+    実行結果に影響しない
+  - **cron-like 最小 PATH 解決**: `env -i HOME=$HOME PATH=/usr/bin:/bin bash -c 'command -v
+    claude gh jq flock git'` を実行し `gh` / `jq` / `flock` / `git` は `/usr/bin/` 配下で
+    解決成功。`claude` のみ `/home/hitoshi/.local/bin/claude` に配置されており `/usr/bin:/bin`
+    では解決不可。これは本開発環境固有のインストール構成であり、watcher 本体 (line 37)
+    が `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"` で
+    `~/.local/bin` を先頭追加する設計のため、`$HOME/bin/issue-watcher.sh` 起動経由では
+    cron でも claude を解決できる（本 spec の AC ではない / 既存 watcher の責務）
+  - **watcher 全体 dry run の制約**: tasks.md 指定の
+    `REPO=owner/test REPO_DIR=/tmp/test-repo SECURITY_REVIEW_ENABLED=true $HOME/bin/issue-watcher.sh`
+    は `git fetch origin` フェーズで repo 不在のため早期 fail（remote 未設定でも placeholder
+    remote `https://github.com/owner/test.git` を設定しても "Repository not found" で同様
+    早期終了）。これは task 4 でも観察された既知の dry run 制約。なお `$HOME/bin/issue-watcher.sh`
+    は May 29 タイムスタンプで本 spec 実装前のスナップショットだったため、本 verify では
+    `local-watcher/bin/issue-watcher.sh` を直接 `bash` 実行する経路に切り替えた（install.sh
+    配置先と機能的に等価）
+  - **isolated `process_security_review` smoke（ON / OFF）**: dry run 早期 fail を回避し
+    AC の本質（opt-in ON で security-review prefix サマリログが出る / OFF で出ない）を
+    検証するため、stub gh + 必要 env を手動設定して `process_security_review` を単独呼び
+    出した（task 4 で確立した手法）。結果:
+    - **ON**: `cycle start: mode=advisory strict=not-implemented (split to #281) max_prs=5 ...`
+      + `サマリ: mode=advisory reviewed=0 clean=0 ... （候補 PR なし）` の 2 行
+      （cycle start + summary）が `[YYYY-MM-DD HH:MM:SS] [owner/test] security-review:`
+      prefix 付きで stderr に記録。AC「`security-review:` prefix の opt-in 有効サマリログが
+      1 行記録」を充足（実際は 2 行で、summary 単独でも要件満たすが cycle start も含めて
+      観察可能 / 設計通り）。他既存ログは出ない（OFF と完全同一の絶 silent / 既存 processor は
+      この isolated test では呼ばない）
+    - **OFF**: `SECURITY_REVIEW_ENABLED` unset で `grep -cE 'security-review:'` が 0。
+      AC「opt-in OFF で `security-review:` prefix ログが 1 行も出ない（NFR 1.1 byte 等価）」を充足
+  - **`actionlint` / `claude` 解決の未充足は本機能の AC 違反ではない**: これら 2 つの環境
+    制約は本機能が新規導入したコード（`modules/security-review.sh` / `issue-watcher.sh` の
+    Config + REQUIRED_MODULES + dispatcher 配線）には全く依存しない（NFR 1.1）。task 6 の
+    AC は「本機能で workflow / agents / rules 等を編集していないこと」と「opt-in ON / OFF の
+    観察可能ログ差分」を確認するもので、両者は前者を `diff` で、後者を isolated smoke で
+    確認済み
+- 残存課題:
+  - **`actionlint` を実機実行できる環境での再確認**: CI または lint 専用環境で
+    `actionlint .github/workflows/*.yml` が実機 pass することは別途確認推奨（本 spec で
+    workflow を編集していないため non-regression の構造的保証はあるが、実機 verify は別環境）
+  - **REPO_DIR が GitHub remote を持つ環境での E2E dry run**: 本 verify では `git fetch origin`
+    早期 fail のため watcher 全体の opt-in サマリログ単一実行は観察不能。実機 dogfooding
+    での次サイクル実行で `[idd-claude] security-review: cycle start: ...` が観察できれば
+    完全な E2E 確認となる
+
 STATUS: complete
