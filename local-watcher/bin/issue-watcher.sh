@@ -335,6 +335,33 @@ SECURITY_REVIEW_MAX_PRS="${SECURITY_REVIEW_MAX_PRS:-5}"
 SECURITY_REVIEW_GIT_TIMEOUT="${SECURITY_REVIEW_GIT_TIMEOUT:-120}"
 # スキャン実行コマンドの最大経過秒数（既存 PR_REVIEWER_EXEC_TIMEOUT と同値）。
 SECURITY_REVIEW_EXEC_TIMEOUT="${SECURITY_REVIEW_EXEC_TIMEOUT:-600}"
+# ─── Security Review Processor strict モード設定 (#281) ───
+# 上記 #279 advisory 動作の上に重ねる strict モード切替。本 3 env はすべて未設定 / 空 /
+# 不正値で advisory（#279）動作と byte 等価に倒れる完全 opt-in（Req 1.1 / 1.5 / NFR 1.1）。
+# 関数本体（mode 解決 / 閾値解決 / ラベル付与）は modules/security-review.sh 側で実装する。
+#
+# SECURITY_REVIEW_MODE: Security Review の挙動モード切替。
+#   - 既定値: advisory（#279 動作と byte 等価。未設定環境では本機能導入前と等価）
+#   - 許容値: advisory（advisory 固定）/ strict（severity 閾値以上検出時にラベル付与）
+#   - その他の値（typo / 大文字混在 / 空白混入等）は sec_check_strict_request が WARN を
+#     出した上で advisory に倒す（Req 1.4 safe-fallback、#279 と同等の防御挙動）
+#   - 厳密一致判定。`=strict` のみが strict 解釈となり、`=Strict` / `=STRICT` 等は不正値扱い
+#   - #279 では Config 未宣言で関数内 ${VAR:-} 直接参照だったため、本 spec で観測しやすさの
+#     ために明示宣言する（既定 advisory のため #279 動作と完全に byte 等価）
+SECURITY_REVIEW_MODE="${SECURITY_REVIEW_MODE:-advisory}"
+# SECURITY_REVIEW_BLOCK_SEVERITY: strict モード時のラベル付与判定 severity 閾値。
+#   - 既定値: high（critical / high の 2 段階を「閾値以上」として扱う / Req 2.2）
+#   - 許容値: critical / high / medium / low / info の 5 段階小文字 token に限定（Req 2.1）
+#   - ordinal: critical > high > medium > low > info（critical=5 ... info=1）
+#   - その他の値（typo / 大文字混在 / 空白混入等）は sec_resolve_block_severity が WARN を
+#     出した上で既定 high に倒す（Req 2.4 safe-fallback）
+SECURITY_REVIEW_BLOCK_SEVERITY="${SECURITY_REVIEW_BLOCK_SEVERITY:-high}"
+# SECURITY_REVIEW_BLOCK_LABEL: strict 検出時に対象 PR へ付与するマージ阻害ラベル名。
+#   - 既定値: needs-security-fix（.github/scripts/idd-claude-labels.sh で task 1 にて追加済み）
+#   - 運用者が既存ラベルへ振り替えたい場合の override 経路として env 化
+#   - `needs-iteration` は PR Iteration Processor (#26) 動線連携のため常時セットで付与され、
+#     本 env では制御しない（ハードコード）
+SECURITY_REVIEW_BLOCK_LABEL="${SECURITY_REVIEW_BLOCK_LABEL:-needs-security-fix}"
 
 # ─── Design Review Release Processor 設定 (#40) ───
 # 設計 PR が merge された Issue から `awaiting-design-review` ラベルを自動除去し、
