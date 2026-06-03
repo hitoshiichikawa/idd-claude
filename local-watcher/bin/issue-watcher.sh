@@ -298,6 +298,44 @@ PR_REVIEWER_GIT_TIMEOUT="${PR_REVIEWER_GIT_TIMEOUT:-120}"
 # レビュー実行コマンドの最大経過秒数。
 PR_REVIEWER_EXEC_TIMEOUT="${PR_REVIEWER_EXEC_TIMEOUT:-600}"
 
+# ─── Security Review Processor 設定 (#279) ───
+# Claude Code 公式 `/security-review` skill を `claude` CLI headless 起動経由で呼び出し、
+# open PR の diff に対するセキュリティレビューを PR コメントとして投稿する。本 spec では
+# **advisory 固定**動作（マージブロックなし）で、strict 拡張は別 Issue #281 として段階導入。
+# **完全な opt-in**（NFR 1.1）。SECURITY_REVIEW_ENABLED=true 厳密一致以外は env を読みもせず
+# process_security_review が早期 return するため、未設定環境では本機能導入前と挙動が等価。
+# 関数本体は modules/security-review.sh、ロガー sec_log / sec_warn / sec_error は core_utils.sh。
+# strict 関連 env（SECURITY_REVIEW_MODE / SECURITY_REVIEW_BLOCK_SEVERITY 等）は本 spec で
+# 導入せず（別 Issue #281 で確定）、sec_check_strict_request が WARN + advisory fallback する。
+SECURITY_REVIEW_ENABLED="${SECURITY_REVIEW_ENABLED:-false}"
+# スキャン指示プロンプト本文（Skill tool 経由 `/security-review` 起動を誘発する文字列）。
+# `Use the /security-review skill` を含めることで Claude Code 内部の Skill tool による
+# built-in slash command 起動が誘発される（design.md「CLI 起動契約」節）。検出 0 件時に
+# `SECURITY_REVIEW_CLEAN` センチネル行を出力させる prompt 規約を組み込み、
+# sec_run_review_for_pr がこの行の有無で clean / non-clean を分岐判定する。
+SECURITY_REVIEW_PROMPT="${SECURITY_REVIEW_PROMPT:-Use the /security-review skill to analyze the PR diff between origin/${BASE_BRANCH:-main} and HEAD for security vulnerabilities (injection / secret leak / auth bypass / XSS / dependency CVE 等). Report findings as markdown with severity (critical/high/medium/low/info) and concrete remediation. If no issues are found, output exactly the line: SECURITY_REVIEW_CLEAN.}"
+# `claude` CLI に渡すモデル（既定 claude-opus-4-8）。セキュリティ判断は false positive /
+# false negative 境界が微妙で reasoning 能力が検出品質に直結するため Opus 系を採用。
+# コスト最適化したい場合は SECURITY_REVIEW_MODEL=claude-sonnet-4-6 等への override 可。
+SECURITY_REVIEW_MODEL="${SECURITY_REVIEW_MODEL:-claude-opus-4-8}"
+# `claude` CLI に渡す --max-turns 値（Skill tool 経由起動 + 解析往復を吸収）。
+SECURITY_REVIEW_MAX_TURNS="${SECURITY_REVIEW_MAX_TURNS:-30}"
+# 実行コマンドテンプレート。プレースホルダ {BASE}/{HEAD}/{PR}/{PROMPT_FILE} を置換後に
+# bash -c で実行（eval 不使用、design.md Security Considerations）。`-p` モードでは
+# slash command 直接実行は無効のため、プロンプト本文で Skill tool 起動を依頼する経路を採る。
+# --permission-mode plan で write 系ツールの実行を Claude 側でブロックし、実行後の
+# `git status --porcelain` 検査と二重防御（read-only invariant）。
+# 既定値中の \$SECURITY_REVIEW_PROMPT はリテラル保持し、bash -c subshell が env から展開する。
+SECURITY_REVIEW_CLAUDE_CMD="${SECURITY_REVIEW_CLAUDE_CMD:-claude -p \"\$SECURITY_REVIEW_PROMPT\" --output-format text --max-turns ${SECURITY_REVIEW_MAX_TURNS} --model ${SECURITY_REVIEW_MODEL} --permission-mode plan}"
+# 対象 head ブランチ pattern（jq の test() 互換 POSIX ERE）。idd-claude 生成ブランチに限定。
+SECURITY_REVIEW_HEAD_PATTERN="${SECURITY_REVIEW_HEAD_PATTERN:-^claude/issue-}"
+# 1 サイクルあたりの処理上限（残りは次回サイクルへ持ち越し、AC 2.5）。
+SECURITY_REVIEW_MAX_PRS="${SECURITY_REVIEW_MAX_PRS:-5}"
+# git / gh 各操作の個別タイムアウト（秒）。スキャン実行自体は下の EXEC_TIMEOUT が支配。
+SECURITY_REVIEW_GIT_TIMEOUT="${SECURITY_REVIEW_GIT_TIMEOUT:-120}"
+# スキャン実行コマンドの最大経過秒数（既存 PR_REVIEWER_EXEC_TIMEOUT と同値）。
+SECURITY_REVIEW_EXEC_TIMEOUT="${SECURITY_REVIEW_EXEC_TIMEOUT:-600}"
+
 # ─── Design Review Release Processor 設定 (#40) ───
 # 設計 PR が merge された Issue から `awaiting-design-review` ラベルを自動除去し、
 # ステータスコメントを 1 件投稿する。標準機能としてデフォルト有効化（#112）。
@@ -584,7 +622,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（quota-aware / merge-queue / auto-rebase）、#181 Part 3 で切り出した
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "security-review.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -1038,6 +1076,13 @@ process_design_review_release() {
 # needs-iteration ラベルを同一 flock 内で直後の process_pr_iteration が引き継げる
 # （PR_REVIEWER_ENABLED!=true なら即 return 0 で本機能導入前と等価、NFR 1.1）。
 process_pr_reviewer || pr_warn "process_pr_reviewer が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+
+# Security Review Processor (#279) を PR Reviewer の直後・PR Iteration の直前に実行。
+# advisory 固定動作（ラベル操作なし）のため PR Reviewer の needs-iteration 付与とは
+# 競合しない。PR タイムライン上で「外部 AI レビュー → セキュリティレビュー → iteration
+# 反復」の時系列が運用者に提示される（SECURITY_REVIEW_ENABLED!=true なら即 return 0 で
+# 本機能導入前と等価、NFR 1.1）。
+process_security_review || sec_warn "process_security_review が想定外のエラーで終了しました（後続 Issue 処理は継続）"
 
 # Phase A 直後に PR Iteration Processor を実行（AC 8.1 / 8.2: 同一 flock 内で直列実行）
 process_pr_iteration || pi_warn "process_pr_iteration が想定外のエラーで終了しました（後続 Issue 処理は継続）"

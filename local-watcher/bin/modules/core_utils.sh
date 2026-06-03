@@ -132,6 +132,19 @@ pr_error() {
   echo "[$(date '+%F %T')] [$REPO] pr-reviewer: ERROR: $*" >&2
 }
 
+# security-review 専用ロガー（識別用 prefix と timestamp 形式を Issue Watcher と揃える）
+# Issue #279: 既存 `pr_log` / `mq_log` と同形式の `[YYYY-MM-DD HH:MM:SS] [$REPO] security-review:`
+# prefix を用いる。`sec_warn` / `sec_error` は `>&2` に出力。
+sec_log() {
+  echo "[$(date '+%F %T')] [$REPO] security-review: $*"
+}
+sec_warn() {
+  echo "[$(date '+%F %T')] [$REPO] security-review: WARN: $*" >&2
+}
+sec_error() {
+  echo "[$(date '+%F %T')] [$REPO] security-review: ERROR: $*" >&2
+}
+
 # ─── Issue #259: Claude API 529 Overloaded detector ───
 #
 # Claude API の一時的な過負荷 (HTTP 529 Overloaded) は claude CLI の stream-json
