@@ -26,7 +26,7 @@
   - client-side fail-safe: `select(.isDraft == false)` + `select(.headRefName | test($pattern))` + `select(.headRepositoryOwner.login == $owner)`
   - 取得失敗時は WARN + `echo "[]"` で degraded path
   - _Requirements: 2.1, 2.3_
-- [ ] 2.5 `sec_already_processed` を実装（既存コメント走査で `(sha, kind)` AND 一致を判定）
+- [x] 2.5 `sec_already_processed` を実装（既存コメント走査で `(sha, kind)` AND 一致を判定）
   - `gh api /repos/$REPO/issues/<n>/comments` + `jq -e any(.[]; (.body // "") | test("idd-claude:security-review sha=" + $sha + "[^>]*kind=" + $kind))`
   - kind 3 値（`security-review` / `security-review-clean` / `scan-failed`）すべてで動作
   - 取得失敗時は安全側で「既存扱い (rc=0)」に倒し重複投稿を防ぐ
