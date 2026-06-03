@@ -47,7 +47,7 @@
   - _Requirements: 3.1, 3.4, 3.5, 3.6, 4.4, NFR 4.1, NFR 4.2_
   - _Boundary: modules/security-review.sh sec_apply_block_labels_
 
-- [ ] 6. `sec_run_review_for_pr` の strict 経路を統合
+- [x] 6. `sec_run_review_for_pr` の strict 経路を統合
   - 既存「検出 ≥ 1 件と判定 → severity 集計 + コメント投稿 + notes 書き出し」分岐の `sec_post_review_comment` 呼び出し **直前**に strict 判定枝を挿入:
     - モジュール内グローバル `_sec_resolved_mode` を参照
     - `mode != strict` ならスキップ（既存 advisory 経路を温存 / NFR 1.1）
