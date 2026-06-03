@@ -95,7 +95,7 @@
   - 最後に保険で `git checkout "$BASE_BRANCH"` で復帰
   - return 0 固定（dispatcher fail-continue）
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 2.1, 2.5, 5.1, 5.2, 5.3, NFR 1.1, NFR 3.1_
-- [ ] 4.2 `issue-watcher.sh` Config ブロックに env var 群を追加 (P)
+- [x] 4.2 `issue-watcher.sh` Config ブロックに env var 群を追加 (P)
   - 既存 `# ─── PR Reviewer Processor 設定 (#261) ───` 節の **後** に新規節
     `# ─── Security Review Processor 設定 (#279) ───` を追加
   - env var を `${VAR:-default}` 形式で解決（design.md「Environment Variables」表に従う:
