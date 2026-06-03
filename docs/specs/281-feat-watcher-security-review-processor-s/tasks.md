@@ -37,7 +37,7 @@
   - _Requirements: 1.1, 1.2, 1.4, 1.5, NFR 1.1_
   - _Boundary: modules/security-review.sh sec_check_strict_request_
 
-- [ ] 5. `sec_apply_block_labels` を実装（2 枚ペア付与 + marker 投稿 + 重複防止）
+- [x] 5. `sec_apply_block_labels` を実装（2 枚ペア付与 + marker 投稿 + 重複防止）
   - 入力: `$1 = pr_number`, `$2 = sha`, `$3 = blocking_count`, `$4 = threshold`
   - 冒頭で `sec_already_processed "$pr_number" "$sha" "security-block"` 重複判定 → 既存なら sec_log で skip 通知して return 0（Req 3.6, NFR 4.1）
   - `gh pr edit "$pr_number" --repo "$REPO" --add-label "${SECURITY_REVIEW_BLOCK_LABEL},needs-iteration"` で 2 枚原子付与（Req 3.1, 4.4）
