@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. `.github/scripts/idd-claude-labels.sh` に新規ラベル `needs-security-fix` を追加
+- [x] 1. `.github/scripts/idd-claude-labels.sh` に新規ラベル `needs-security-fix` を追加
   - LABELS 配列末尾に `"needs-security-fix|d73a4a|【PR 用】 Security Review strict モード（#281）で severity 閾値以上の検出により付与される。手動剥がしで override 可"` を追加
   - 既存ラベル定義（name / color / description）は一切変更しない（NFR 1.2）
   - description 100 文字制限に収まることを確認
