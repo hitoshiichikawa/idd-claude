@@ -37,7 +37,7 @@
   - 戻り値 0 固定（特定不可は空文字で表現）
   - _Requirements: 3.5_
 
-- [ ] 3. スキャン実行とコメント投稿の関数群を実装
+- [x] 3. スキャン実行とコメント投稿の関数群を実装
 - [x] 3.1 `sec_execute_security_review` を実装（subshell + EXIT trap + read-only invariant 検査）
   - 引数: head_ref / base_ref / pr_number / out_file / err_file / result_file
   - subshell 内で `git fetch origin <head>` → `git checkout -B <head> origin/<head>` を timeout 付きで実行
