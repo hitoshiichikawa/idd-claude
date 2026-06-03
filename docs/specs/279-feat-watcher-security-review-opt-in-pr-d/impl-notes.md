@@ -56,3 +56,56 @@
     `sec_write_security_notes` / `sec_run_review_for_pr` / `process_security_review`）と
     issue-watcher.sh への配線（Config / REQUIRED_MODULES / dispatcher call site）は
     次 task 3〜4 fresh 起動で追加する。
+
+### Task 3
+
+- 採用方針: `pr-reviewer.sh` の `pr_build_prompt_file` / `pr_substitute_placeholders` /
+  `pr_execute_review_command` / `pr_post_review_comment` / `pr_post_error_comment` /
+  `pr_run_review_for_pr` を雛形に踏襲し、tool= 属性のない 2 引数 marker（task 2 で確立）と
+  単一実行ツール（claude CLI）前提に合わせて簡素化した。スキャン実行系（subshell + EXIT
+  trap + read-only invariant 検査）と severity 集計 + security-notes.md 書き出しを追加。
+- 重要な判断:
+  - **prompt 渡し経路の二段対応**: design.md「CLI 起動契約」節の既定
+    `SECURITY_REVIEW_CLAUDE_CMD` は `claude -p "$SECURITY_REVIEW_PROMPT" ...` の形で
+    parent shell の env 変数を `bash -c` の subshell に継承させる経路を期待している。
+    一方、pr-reviewer は `{PROMPT_FILE}` プレースホルダ + `$(cat '...')` 経路で argv に
+    渡す方式を採用している。本実装は両経路に対応できるよう、`sec_build_prompt_file` で
+    tempfile を作成 + `sec_substitute_placeholders` で `{PROMPT_FILE}` 置換 + `{BASE}/{HEAD}/{PR}`
+    置換を行い、tempfile path を含む resolved_cmd を生成する。design.md 既定値は
+    `SECURITY_REVIEW_PROMPT` env 経由でも動くため、運用者が `SECURITY_REVIEW_CLAUDE_CMD` を
+    override して `--prompt-file {PROMPT_FILE}` 経路を選んでも互換性を保つ
+  - **SECURITY_REVIEW_PROMPT の env 継承前提**: `sec_execute_security_review` は
+    `bash -c "$resolved_cmd"` で subshell を起動するが、bash は parent shell の env を
+    継承するため `$SECURITY_REVIEW_PROMPT` は subshell からも参照可能（export 不要）。
+    issue-watcher.sh 本体は単一プロセスで全 processor を直列実行する設計のため、
+    Config ブロックの `SECURITY_REVIEW_PROMPT="${SECURITY_REVIEW_PROMPT:-...}"` 解決
+    （task 4.2 で追加予定）が本実装の動作前提となる
+  - **severity 集計の近似実装**: review_text を完全 parse せず、`grep -E -i -c '\b<sev>\b'`
+    で行カウントする近似実装を採用。Req 3.2 の「severity を含める」は Claude 側の出力に
+    委ね、`security-notes.md` の Severity Summary 表は運用者向けの目安として記録する
+    （正確な集計は人間判断 / 別 Issue 拡張対象）。0 件時は全 0、total は 5 種合算
+  - **クリーン判定の単純センチネル**: `SECURITY_REVIEW_CLEAN` 行を grep `-qE` で検出する
+    単純判定（design.md「CLI 起動契約」節の prompt 規約に依拠）。出力スキーマに依存せず、
+    Skill tool 経由起動が失敗したケース（空出力）と区別できる
+  - **kind=scan-failed 一本化**: 本 spec で実際に使用するエラー kind は `scan-failed` のみ
+    （workspace-modified / exec-failed / empty-output / fetch-fail / checkout-fail を
+    すべて scan-failed marker に集約）。pr-reviewer は kind を分岐させていたが、Security
+    Review は marker 名前空間が独立しているため簡素化した。`sec_post_error_comment` の
+    kind 引数は将来拡張のためインタフェースとして残す
+  - **security-notes.md 原子書き出し**: tempfile に出力後 `mv` で置換し、書き込み途中
+    状態を残さない。idempotency は `head -n 20 | grep -qF "Last SHA: <sha>"` で先頭付近の
+    SHA 行と一致する場合 overwrite skip
+- 残存課題:
+  - **issue-watcher.sh 本体への配線は task 4 範囲**: 本 task では `process_security_review`
+    entrypoint および Config ブロック / REQUIRED_MODULES / dispatcher call site は実装
+    していない。`sec_run_review_for_pr` 単体では watcher サイクル全体は動作しない（次
+    task 4 fresh 起動で配線予定）
+  - **SECURITY_REVIEW_PROMPT 既定値の解決**: 本 task で実装した関数群は parent shell の
+    env に `SECURITY_REVIEW_PROMPT` / `SECURITY_REVIEW_CLAUDE_CMD` / `SECURITY_REVIEW_MODEL` /
+    `SECURITY_REVIEW_GIT_TIMEOUT` / `SECURITY_REVIEW_EXEC_TIMEOUT` が解決済みであることを
+    前提とする。task 4.2 で Config ブロック追加が完了するまで本機能は単体動作しない
+  - **review_text コメントへの直接投稿**: Claude 出力をそのまま PR コメント本文に
+    `gh pr comment --body` で渡すため、PR コメント API の上限（65,536 文字）を超えるケース
+    は未対応。実機で長大な review_text が観測された場合は truncate 処理を別 Issue で検討
+
+STATUS: complete
