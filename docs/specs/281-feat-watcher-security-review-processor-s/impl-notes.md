@@ -118,3 +118,18 @@
   - 確認事項 1: `### advisory 固定の挙動（マージブロックなし）` 節（README L2270-2284）は #279 spec の本文として書かれているため、本 task では撤去・更新を見送った。当該節は #281 strict モード実装後の現在「strict モードは ... 別 Issue #281 として分割」と stale な記述を持つ。Reviewer / PM レビューで「節の本文も更新すべき」と判断された場合は本 task の修正範囲を拡張して当該節も strict モードに言及するよう更新する（追加 commit で対応可能）。
   - 確認事項 2: オプション機能一覧の既存「Security Review Processor」行の説明文を minor 更新した（task 9 literal interpretation は「行を追加」のみだったが、既存行が誤情報となるのを避ける目的）。Reviewer が「既存行は触らないべき」と判断した場合は元の文言「**advisory 固定**でマージブロックは行わない / strict 拡張は別 Issue #281」に戻す（追加 commit で対応可能）。
   - 残存タスク: task 10（静的解析と手動スモークテスト）は per-task ループ内では別 task として扱われる。本 task の追加分は README.md のみであり shellcheck / actionlint / 二重管理整合性 (`diff -r .claude/agents repo-template/.claude/agents` 等) には影響しない（NFR 7.2 構造的に保証）。
+
+### Task 10
+
+- 採用方針: tasks.md task 10 で列挙された 6 種の検証（shellcheck / actionlint / 二重管理 diff × 2 / `idd-claude-labels.sh` の新規ラベル確認 / isolated smoke × 2）をすべて非破壊的に実行し、結果サマリのみを本セクションに記録。実装コードへの追加変更はゼロ（task 10 は検証のみのゲート task）。
+- 重要な判断:
+  - **shellcheck（5 ファイル）**: `local-watcher/bin/modules/security-review.sh local-watcher/bin/issue-watcher.sh install.sh setup.sh .github/scripts/*.sh` を一括実行し exit=0 / 出力ゼロを確認（PASS）。task 1〜9 の各 task で個別に shellcheck を通していた結果が、全モジュール一括実行でも警告ゼロを維持していることを最終確認。
+  - **actionlint**: `.github/workflows/*.yml` 全 workflow に対して exit=0 / 出力ゼロを確認（PASS）。本機能で workflow 変更はないが、非回帰確認として実行。
+  - **二重管理 diff（`.claude/agents` / `.claude/rules`）**: `diff -r .claude/agents repo-template/.claude/agents` と `diff -r .claude/rules repo-template/.claude/rules` の双方が exit=0 / 出力ゼロ（PASS）。本機能では agents / rules を 1 ファイルも編集していないことを構造的に確認（NFR 7.2）。
+  - **`idd-claude-labels.sh` の新規ラベル確認**: 本検証は `gh` CLI 認証 + 実 scratch repo 作成が必要なため、tasks.md 原文で許容された代替手段「スクリプトの LABELS 配列に `needs-security-fix` 行が含まれることを grep 検証する形でも可」を採用。`grep -n needs-security-fix .github/scripts/idd-claude-labels.sh` で line 81 にラベル定義行が存在することを確認（PASS）。実際の `gh label create` 動作は task 1 完了時に LABELS 配列形式（`name|color|description`）の規約準拠を確認済みであり、本 task では追加の実 API 呼び出しは不要と判断（NFR 5.1 観点では構造検証で十分）。
+  - **isolated smoke（cycle start ログ）**: `/tmp/smoke-281-task10.sh` を作成し、`sec_log` / `sec_warn` を最小スタブで定義 + `sec_fetch_candidate_prs` を `echo "[]"` でモックして候補 PR ゼロ状態を再現。`SECURITY_REVIEW_MODE=strict` で `cycle start: mode=strict threshold=high` を、`SECURITY_REVIEW_MODE` 未設定で `cycle start: mode=advisory threshold=high` を観測（双方 PASS）。サマリログの `blocked=0 skipped_blocked=0` カウンタも task 8 仕様通り両ケースで出力されることを確認。
+  - **#279 byte 等価性**: MODE 未設定時の cycle start ログは `mode=advisory threshold=high max_prs=unset ...` の形式で、#279 の cycle start ログ（`strict=not-implemented (split to #281)` 表記を持つ）と **literal な byte レベルでは差分がある**（task 8 で `strict=not-implemented` 表記を削除し `threshold=` を追加したため）。これは tasks.md task 8 が明示的に指示した変更であり、NFR 1.1 が要求する「観測可能な advisory 経路の挙動」自体（PR 検出件数 / コメント投稿 / security-notes 書き出し）は不変であることを task 6〜8 の smoke で確認済み。本 task の smoke は「cycle start ログのフォーマット仕様（`mode=...` / `threshold=...` トークン）が task 8 の意図通りであること」の確認であり、NFR 1.1 の意味的な byte 等価性（advisory 経路の review / label / notes 挙動）は task 6 / 7 / 8 の smoke で別途確認済み。
+- 残存課題:
+  - 本 task の検証はすべて PASS。本 spec の全 10 task が完了したため、後続 task は存在しない。
+  - 確認事項: tasks.md task 10 原文の「`bash .github/scripts/idd-claude-labels.sh --repo <test-repo>` で新規ラベル `needs-security-fix` が作成されること（scratch repo で確認）」については `gh` CLI 認証付き scratch repo 作成が必要なため未実施。代替として LABELS 配列の grep 検証で構造的に保証した。Reviewer / PM レビューで「実 API 呼び出しによる確認が必要」と判断された場合は、別途 dogfooding repo（idd-claude 自身）に対して `bash .github/scripts/idd-claude-labels.sh --force` を実行することで検証可能（merge 後の運用 deployment ステップに相当）。
+  - 検証用 fixture `/tmp/smoke-281-task10.sh` は `/tmp` 配下に置いた一時スクリプトであり、リポジトリには commit しない（既存の smoke fixture は spec 配下に保存する慣習だが、本 task の検証内容は impl-notes 本文で完全に再現可能であり、また `sec_log` / `sec_warn` のモック内容も上記に列挙したため、追加の fixture ファイルは不要と判断）。
