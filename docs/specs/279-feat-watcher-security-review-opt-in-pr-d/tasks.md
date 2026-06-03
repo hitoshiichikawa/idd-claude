@@ -109,7 +109,7 @@
   - 既存 env var の名前・既定値・既存 Config ブロックは変更しない
   - _Requirements: 1.1, 5.1, 5.3, NFR 1.1, NFR 1.2_
   - _Boundary: issue-watcher.sh Config block_
-- [ ] 4.3 `REQUIRED_MODULES` 配列に `"security-review.sh"` を追加 (P)
+- [x] 4.3 `REQUIRED_MODULES` 配列に `"security-review.sh"` を追加 (P)
   - 末尾追加（順序は機能的任意 / bash 遅延束縛）
   - _Requirements: NFR 1.1_
   - _Boundary: issue-watcher.sh REQUIRED_MODULES_
