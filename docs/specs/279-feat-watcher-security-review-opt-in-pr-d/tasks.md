@@ -113,7 +113,7 @@
   - 末尾追加（順序は機能的任意 / bash 遅延束縛）
   - _Requirements: NFR 1.1_
   - _Boundary: issue-watcher.sh REQUIRED_MODULES_
-- [ ] 4.4 dispatcher call site に `process_security_review` 呼び出しを 1 行追加
+- [x] 4.4 dispatcher call site に `process_security_review` 呼び出しを 1 行追加
   - 既存 `process_pr_reviewer || pr_warn "..."` の **直後**、
     `process_pr_iteration || pi_warn "..."` の **直前** に配置
   - `process_security_review || sec_warn "process_security_review が想定外のエラーで終了しました（後続 Issue 処理は継続）"`
