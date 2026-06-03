@@ -77,7 +77,7 @@
   - _Requirements: 1.3, 2.5, NFR 1.1, NFR 3.1_
   - _Boundary: modules/security-review.sh process_security_review_
 
-- [ ] 9. README にドキュメント追記（同一 PR 内で実施 / NFR 6.2）
+- [x] 9. README にドキュメント追記（同一 PR 内で実施 / NFR 6.2）
   - 「Security Review Processor (#279)」節内の「既知の制約 - strict 拡張は別 Issue として分割済み」表記を撤去
   - **既存「### 環境変数」表（`Security Review Processor (#279)` 節配下、`SECURITY_REVIEW_ENABLED` / `SECURITY_REVIEW_PROMPT` ... `SECURITY_REVIEW_EXEC_TIMEOUT` を列挙している既存 9 行の表）に以下 3 行を追記する**:
     - `SECURITY_REVIEW_MODE` / 既定 `advisory` / strict モード切替の opt-in gate（`=strict` 厳密一致のみ有効、それ以外は WARN + advisory fallback）
