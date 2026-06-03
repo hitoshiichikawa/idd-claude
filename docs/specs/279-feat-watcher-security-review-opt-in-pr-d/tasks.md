@@ -83,7 +83,7 @@
     のみ、PR コメントは通常投稿）
   - _Requirements: 2.2, 2.4, 2.6, 3.1, 3.2, 3.3, 3.4, 3.5, 6.1〜6.4_
 
-- [ ] 4. entrypoint `process_security_review` を実装し、issue-watcher.sh に配線
+- [x] 4. entrypoint `process_security_review` を実装し、issue-watcher.sh に配線
 - [x] 4.1 `process_security_review` を実装（opt-in gate / strict 検出 / 候補列挙 / truncate / ループ / サマリ）
   - 早期 return: `[ "${SECURITY_REVIEW_ENABLED:-false}" != "true" ] && return 0`（1 行ログ）
   - `sec_check_strict_request` を呼び advisory 固定値を取得（strict 要求検出時の WARN を含む）
