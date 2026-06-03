@@ -67,7 +67,7 @@
     ヘッダー + Severity Summary 表 + Findings 本文）
   - 書き出し失敗は WARN + rc=1（PR コメント投稿側を阻害しない）
   - _Requirements: 3.5, NFR 4.1_
-- [ ] 3.4 `sec_run_review_for_pr` を実装（1 PR 分のスキャン統括）
+- [x] 3.4 `sec_run_review_for_pr` を実装（1 PR 分のスキャン統括）
   - 重複判定（`kind=security-review` / `kind=security-review-clean` のいずれかの marker
     が既存なら rc=2 で skip）
   - prompt / cmd template 展開（`SECURITY_REVIEW_PROMPT` + `SECURITY_REVIEW_CLAUDE_CMD`
