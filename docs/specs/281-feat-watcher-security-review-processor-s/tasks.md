@@ -68,7 +68,7 @@
   - _Requirements: 5.4, NFR 1.1, NFR 4.1_
   - _Boundary: modules/security-review.sh sec_write_security_notes_
 
-- [ ] 8. `process_security_review` のサマリログ拡張
+- [x] 8. `process_security_review` のサマリログ拡張
   - cycle start ログから `strict=not-implemented (split to #281)` 表記を削除
   - 新規に `threshold=${threshold}` を追加し、`mode=${mode} threshold=${threshold}` を 1 行に含める（Req 1.3, 2.5, NFR 3.1）
   - 解決済み mode / threshold をモジュール内グローバル `_sec_resolved_mode` / `_sec_resolved_threshold` に退避（task 6 から参照）
