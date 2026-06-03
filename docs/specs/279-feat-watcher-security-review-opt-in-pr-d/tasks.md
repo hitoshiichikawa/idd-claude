@@ -46,7 +46,7 @@
   - 結果トークン: `fetch-fail` / `checkout-fail` / `ran:<rc>:clean` / `ran:<rc>:modified`
   - 既存 `pr_execute_review_command`（#261 pr-reviewer.sh）と同形パターン
   - _Requirements: 2.2, 2.6, NFR 4.1_
-- [ ] 3.2 `sec_post_review_comment` / `sec_post_clean_comment` / `sec_post_error_comment` を実装
+- [x] 3.2 `sec_post_review_comment` / `sec_post_clean_comment` / `sec_post_error_comment` を実装
   - 共通: 本文末尾に `sec_build_marker` で marker を埋め込む
   - `sec_post_review_comment`（kind=security-review）: 冒頭に `## セキュリティレビュー結果`
     見出し + 検出件数行 + review_text 本文
