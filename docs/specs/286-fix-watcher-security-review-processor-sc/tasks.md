@@ -46,7 +46,7 @@
   - _Requirements: 1.3, 3.3, NFR 2.2_
   - _Depends: 2_
 
-- [ ] 4. shellcheck 警告ゼロ確認 + コメント整合性確認
+- [x] 4. shellcheck 警告ゼロ確認 + コメント整合性確認
   - 変更ファイル 2 件（`local-watcher/bin/issue-watcher.sh` /
     `local-watcher/bin/modules/security-review.sh`）に対し `shellcheck` を実行し、警告ゼロを
     確認する（既存 `.shellcheckrc` で抑止された info 級は許容）
