@@ -17,7 +17,7 @@
     する
   - _Requirements: 1.1, 1.2, 4.1, 4.2, 4.3, NFR 1.1, NFR 1.2_
 
-- [ ] 2. `sec_execute_security_review` に空プロンプト・フェイルセーフを追加
+- [x] 2. `sec_execute_security_review` に空プロンプト・フェイルセーフを追加
   - `local-watcher/bin/modules/security-review.sh` の `sec_execute_security_review`
     （L559-L603）の subshell 内、`git checkout` 成功後・`timeout ... bash -c "$resolved_cmd"`
     起動の **直前** に空プロンプトガードを追加する
