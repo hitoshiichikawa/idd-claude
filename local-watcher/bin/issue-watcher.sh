@@ -313,7 +313,11 @@ SECURITY_REVIEW_ENABLED="${SECURITY_REVIEW_ENABLED:-false}"
 # built-in slash command 起動が誘発される（design.md「CLI 起動契約」節）。検出 0 件時に
 # `SECURITY_REVIEW_CLEAN` センチネル行を出力させる prompt 規約を組み込み、
 # sec_run_review_for_pr がこの行の有無で clean / non-clean を分岐判定する。
-SECURITY_REVIEW_PROMPT="${SECURITY_REVIEW_PROMPT:-Use the /security-review skill to analyze the PR diff between origin/${BASE_BRANCH:-main} and HEAD for security vulnerabilities (injection / secret leak / auth bypass / XSS / dependency CVE 等). Report findings as markdown with severity (critical/high/medium/low/info) and concrete remediation. If no issues are found, output exactly the line: SECURITY_REVIEW_CLEAN.}"
+# export 必須: sec_execute_security_review が `bash -c "$resolved_cmd"` で起動する子シェルは
+# 完全新規プロセスのため、parent shell の **非 export 変数を継承しない**。既定
+# SECURITY_REVIEW_CLAUDE_CMD のリテラル `"\$SECURITY_REVIEW_PROMPT"` を子シェル env から
+# 展開させるため、本変数は export して env 継承を確立する必要がある（#286 / Req 1.1, 1.2）。
+export SECURITY_REVIEW_PROMPT="${SECURITY_REVIEW_PROMPT:-Use the /security-review skill to analyze the PR diff between origin/${BASE_BRANCH:-main} and HEAD for security vulnerabilities (injection / secret leak / auth bypass / XSS / dependency CVE 等). Report findings as markdown with severity (critical/high/medium/low/info) and concrete remediation. If no issues are found, output exactly the line: SECURITY_REVIEW_CLEAN.}"
 # `claude` CLI に渡すモデル（既定 claude-opus-4-8）。セキュリティ判断は false positive /
 # false negative 境界が微妙で reasoning 能力が検出品質に直結するため Opus 系を採用。
 # コスト最適化したい場合は SECURITY_REVIEW_MODEL=claude-sonnet-4-6 等への override 可。
@@ -326,7 +330,10 @@ SECURITY_REVIEW_MAX_TURNS="${SECURITY_REVIEW_MAX_TURNS:-30}"
 # --permission-mode plan で write 系ツールの実行を Claude 側でブロックし、実行後の
 # `git status --porcelain` 検査と二重防御（read-only invariant）。
 # 既定値中の \$SECURITY_REVIEW_PROMPT はリテラル保持し、bash -c subshell が env から展開する。
-SECURITY_REVIEW_CLAUDE_CMD="${SECURITY_REVIEW_CLAUDE_CMD:-claude -p \"\$SECURITY_REVIEW_PROMPT\" --output-format text --max-turns ${SECURITY_REVIEW_MAX_TURNS} --model ${SECURITY_REVIEW_MODEL} --permission-mode plan}"
+# export 補強: 運用者が独自モジュールから直接参照する将来性 / 一貫性のため export 化に揃える
+# （NFR 1.1 観測挙動に変化なし。parent shell で $resolved_cmd に展開済みのため CLI 起動経路
+# 自体は export 不要だが、Config ブロック全体の env 継承契約を明確化する / #286 / Req 4.2）。
+export SECURITY_REVIEW_CLAUDE_CMD="${SECURITY_REVIEW_CLAUDE_CMD:-claude -p \"\$SECURITY_REVIEW_PROMPT\" --output-format text --max-turns ${SECURITY_REVIEW_MAX_TURNS} --model ${SECURITY_REVIEW_MODEL} --permission-mode plan}"
 # 対象 head ブランチ pattern（jq の test() 互換 POSIX ERE）。idd-claude 生成ブランチに限定。
 SECURITY_REVIEW_HEAD_PATTERN="${SECURITY_REVIEW_HEAD_PATTERN:-^claude/issue-}"
 # 1 サイクルあたりの処理上限（残りは次回サイクルへ持ち越し、AC 2.5）。
