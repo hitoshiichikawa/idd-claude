@@ -584,6 +584,17 @@ sec_execute_security_review() {
       exit 0
     fi
 
+    # 空プロンプト・フェイルセーフ（#286 / Req 1.3 / NFR 2.2）:
+    # SECURITY_REVIEW_PROMPT が空に解決される場合は claude CLI を起動せず
+    # 早期 short-circuit する。Config ブロックの export 漏れ再退行や運用者の
+    # 意図しない空 override を防御する defense-in-depth。CLI 未起動のため
+    # ワークツリー変更は構造的に発生せず、read-only invariant 検査は不要。
+    if [ -z "${SECURITY_REVIEW_PROMPT:-}" ]; then
+      sec_warn "head '${head_ref}': SECURITY_REVIEW_PROMPT が空文字列です（empty-prompt）。claude CLI を起動せず scan-failed として早期報告します"
+      printf 'empty-prompt\n' > "$result_file"
+      exit 0
+    fi
+
     # スキャン実行（eval 不使用 / SECURITY_REVIEW_PROMPT は parent env から継承）
     local exec_rc=0
     timeout "$SECURITY_REVIEW_EXEC_TIMEOUT" bash -c "$resolved_cmd" >"$out_file" 2>"$err_file" || exec_rc=$?
