@@ -552,9 +552,10 @@ sec_substitute_placeholders() {
 #     （design.md Security Considerations の read-only invariant）。
 #   - 既存 pr_execute_review_command との差分: tool 引数を持たない（単一実行ツール
 #     claude のみ）、SECURITY_REVIEW_* タイムアウト env を参照する点のみ。
-#   - SECURITY_REVIEW_PROMPT は parent shell の env に解決済み（Config ブロックで
-#     ${VAR:-default} 展開）であるため、bash -c "$resolved_cmd" の subshell から
-#     `$SECURITY_REVIEW_PROMPT` として参照可能（design.md「CLI 起動契約」節）。
+#   - SECURITY_REVIEW_PROMPT は Config ブロックで export 済み（issue-watcher.sh で
+#     `export VAR="${VAR:-default}"` 形式で宣言）であるため、bash -c "$resolved_cmd"
+#     の subshell に env として継承され、`$SECURITY_REVIEW_PROMPT` として参照可能
+#     （design.md「CLI 起動契約」節 / spec #286）。
 # ─────────────────────────────────────────────────────────────────────────────
 sec_execute_security_review() {
   local head_ref="$1"
