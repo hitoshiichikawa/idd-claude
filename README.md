@@ -4769,6 +4769,7 @@ cron / launchd の `REPO=... REPO_DIR=...` に `PER_TASK_LOOP_ENABLED=true` を 
 |---|---|---|---|
 | `PER_TASK_LOOP_ENABLED` | `false` | 試運転時のみ `true` | per-task ループの opt-in gate。`=true` 厳密一致のみ有効（`True` / `1` / typo 等は `false` 等価） |
 | `PER_TASK_MAX_TASKS` | `0`（無制限） | 異常検知時のみ正の整数 | 1 ループで処理する task 件数の上限（暴走防止用安全装置）。`0` / 空 / 未設定で無制限 |
+| `DEV_MAX_TURNS` | `60` | 多い場合はタスクが大きすぎる兆候。恒久引き上げより粒度是正を優先 | per-task ループの **1 タスクあたり** Claude 実行 turn 数上限。Issue 全体ではなく **タスク単位** で各 fresh session に適用される。値変更は **次回 watcher 起動時から有効** で、cron / launchd の再登録不要。チューニング指針は [`per-task-implementer-failed` / `error_max_turns` 対応](#per-task-implementer-failed--error_max_turns-対応) を参照（**#289 で項目化** / 既定値・名称・意味は本項目化前後で変更なし） |
 
 既存 env var（`DEV_MODEL` / `REVIEWER_MODEL` / `DEV_MAX_TURNS` / `REVIEWER_MAX_TURNS` /
 `IMPL_RESUME_*` / `STAGE_CHECKPOINT_*` / `QUOTA_AWARE_*` 等）の名前・既定値・意味は
@@ -5471,6 +5472,154 @@ Anthropic の既知バグの可能性（[#47019](https://github.com/anthropics/c
 - `REPO` env var を渡さずスクリプト内蔵のデフォルト値で走っている（全 repo が同じ lock を取り合う）
 
 常に同じユーザー・一貫した `REPO` env var で実行すること。
+
+### `per-task-implementer-failed` / `error_max_turns` 対応
+
+`PER_TASK_LOOP_ENABLED=true` の per-task Implementer ループ運用で、Issue に **補助ラベル**
+`per-task-implementer-failed` が付与され、合わせて `claude-failed` に遷移して停止した場合の
+切り分けと復旧手順をまとめます。本節は per-task ループ運用者が独力で原因切り分けから復旧操作
+までを完遂できるようにすることを目的としています（**#289 で新設**）。
+
+#### 症状
+
+- Issue / PR に `claude-failed` と補助ラベル `per-task-implementer-failed` が同時に付与され、
+  進行が停止している
+- watcher の Issue コメントに `per-task ループの Implementer が task=<id> で失敗しました
+  （claude 非 0 exit）` の旨が記録されている
+- `$HOME/.issue-watcher/logs/<repo-slug>/issue-<番号>-*.log` 末尾付近に
+  `error_max_turns` の文字列、または `per-task: task=<id> implementer end rc=<非 0>`
+  の行が記録されている
+
+#### 原因（最頻出: `error_max_turns`）
+
+`error_max_turns` は Claude CLI が **許容 turn 上限（`DEV_MAX_TURNS`、既定 60）に到達して exit
+した状態**を示すもので、**必ずしも実テスト失敗を意味しません**。per-task ループは各 task で
+fresh な Claude session を起動し、turn カウンタはタスク間で独立にリセットされるため、turn が
+尽きるのは「1 タスクの実装規模が `DEV_MAX_TURNS` に対して大きすぎる」「frontend / UI / テスト
+重めの責務を 1 task に束ねている」「子タスクを親に多重に押し込んでいる」等、設計時点での
+タスク粒度の不適合が主因です（詳細な粒度指針は [`.claude/rules/tasks-generation.md`](./repo-template/.claude/rules/tasks-generation.md)
+の「turn 予算ガイドライン」節を参照）。
+
+> **fresh session の含意**: 一度 `error_max_turns` で失敗したタスクは、再 pickup で再試行しても
+> **同一タスク内で再び 0 turn から開始**します。「前のタスクで余った turn を次のタスクに
+> 繰り越す」「Issue 全体の turn 枠を引き上げる」発想は本ループでは **無効**で、turn 予算は
+> 常に「1 タスクが `DEV_MAX_TURNS` に収まるか」だけが効きます。
+
+#### 診断手順（原因切り分け）
+
+ログ上のシグナルで以下 3 種類を区別します:
+
+| シグナル | 原因種別 | 一次対応 |
+|---|---|---|
+| `error_max_turns` 文字列がログ末尾に出る / `rc` が非 0 / 直前まで実装は進んでいた | `DEV_MAX_TURNS` 到達による Implementer 自発 exit | 後述「対応の優先順位」に従う |
+| `overloaded_error` / `529` / `quota` 関連の文字列 / `qa-reset` 一時ファイル参照 / 連続再 pickup でも同じ箇所で落ちる | 529 過負荷起因の一時失敗 | **同じ Issue を再 pickup**（`claude-failed` 除去）で回復する可能性あり。連続して同じ箇所で落ちる場合は本要約に該当しないため per-task ループとは別の障害（Anthropic 側障害 / ネットワーク）を疑う |
+| Vitest / Jest / pytest 等の **テストフレームワークの fail 出力** がログ中盤に出ている / `RESULT: reject` が `review-notes.md` 末尾にある | Developer 実行内の **実テスト失敗** | 後述「対応の優先順位」の (3) 手動仕上げ、または **Reviewer / Debugger 経路** での再走行を選ぶ（`DEBUGGER_ENABLED=true` 環境のみ） |
+
+> 上記いずれにも明確に該当しない場合は、ログ末尾の Claude CLI exit code および直前 10〜20 行を
+> Issue コメントに貼って人間判断にエスカレーションしてください。
+
+#### 対応の優先順位
+
+`error_max_turns` の場合、以下の **3 段階の優先順**で対応してください。安易な (2) の恒久化は
+タスク粒度の不適合を覆い隠す対症療法のため避けてください。
+
+##### (1) タスク粒度の是正（最優先）
+
+- **親タスクを細分化**して `DEV_MAX_TURNS=60` 以内に収まる粒度に分割する
+- **frontend / UI / テスト重めタスクは細かく切る**（目安: 「UI = 1 component + 1 test = 1 task」）
+- **重い子タスクは親に束ねず最上位 task に昇格**させる（独立 commit 単位として消化できる粒度に）
+- 具体的な粒度指針は [`.claude/rules/tasks-generation.md`](./repo-template/.claude/rules/tasks-generation.md)
+  の「turn 予算ガイドライン」節を参照
+- 是正後、（impl PR があれば）後述「復旧手順」のラベル操作順序で watcher に再 pickup させる
+
+##### (2) `DEV_MAX_TURNS` の一時引き上げ（その場限り）
+
+- 「次回 watcher 起動 1 回のみ」を想定した **一時的・その場限り**の措置として位置付ける
+- cron / launchd の登録文字列を **恒久的に書き換えるのは非推奨**（タスク粒度の不適合が温存される）
+- 一時引き上げの最小手順例（cron 環境で 1 回だけ大きい値で手動実行）:
+
+  ```bash
+  REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo PER_TASK_LOOP_ENABLED=true \
+    DEV_MAX_TURNS=120 $HOME/bin/issue-watcher.sh
+  ```
+
+- `DEV_MAX_TURNS` の **既定値（60）自体は変更しない**ことを推奨。値変更は次回 watcher 起動時
+  から有効で、その起動範囲のみに作用する（cron に焼き込むと以降の全 Issue で turn 上限が広がり、
+  粒度不適合の検知が遅れる）
+
+##### (3) 手動仕上げ（最終手段）
+
+- 自動経路で **同一タスクが 2 回連続 `error_max_turns` を起こす**等、(1)(2) を経ても解消しない
+  場合は手動仕上げに切り替える
+- 判断基準の目安: **同一タスクで `per-task-implementer-failed` が 2 回連続観測された**、
+  または `DEV_MAX_TURNS` を 1.5〜2 倍に引き上げても通過しない
+- 手動仕上げでは、対応するブランチを local checkout して残 task を人間が実装・push し、その後
+  ラベル操作で `ready-for-review` に遷移させる（後述「復旧手順」B 参照）
+
+各優先順位の後続挙動への影響:
+
+| 選択 | 次回 watcher 実行への影響 |
+|---|---|
+| (1) タスク粒度の是正 | `tasks.md` 更新を含む commit を push 後、`claude-failed` 除去で next tick から再 pickup。残未完了 task の先頭から impl-resume が継続する |
+| (2) `DEV_MAX_TURNS` 一時引き上げ | 当該手動実行 1 回限り有効。cron の常時実行ジョブには波及しない（cron 文字列を書き換えていない限り） |
+| (3) 手動仕上げ | 当該 task / 残 task は人間 commit + push で完結。watcher は `ready-for-review` 遷移後の review / merge フローのみ担当 |
+
+#### ラベルの意味と次アクション
+
+| ラベル | 意味 | 運用者の次アクション |
+|---|---|---|
+| `claude-failed` | watcher が当該 Issue / PR を停止状態に置いた | 補助ラベル（後述）と合わせて原因種別を判別し、復旧後に **本ラベルを除去**して再 pickup させる |
+| `per-task-implementer-failed` | per-task ループの Implementer が `error_max_turns` 等で非 0 exit したことを示す補助ラベル | 上述「診断手順」「対応の優先順位」に従う。**ラベル自体は復旧操作で削除して良い**（記録目的で残しても問題なし） |
+| `ready-for-review` | 実装が完了し人間レビュー待ちであることを示す | impl PR が既に存在する場合、復旧時に **先にこのラベルを付与してから** `claude-failed` を除去する（後述「復旧手順 B」参照） |
+
+#### 復旧手順（impl PR の有無別）
+
+> ⚠️ **警告（NFR 3.1, 3.2）**: impl PR が既に存在する状態で `claude-failed` を **先に** 除去すると、
+> watcher が次 tick で当該 Issue を resume 候補として再選択し、進行中の PR / ブランチに対して
+> 想定外の commit や `--force-with-lease` push を実施する可能性があります。**必ず**
+> `ready-for-review` を **先に** 付与してから `claude-failed` を除去してください。
+
+##### A. impl PR がまだ存在しないケース
+
+設計 PR まで作成された / 未だ実装フェーズが始まっていない / Stage A の早期失敗で
+PR 未生成のケース:
+
+```bash
+gh issue edit <番号> --repo owner/your-repo --remove-label claude-failed
+# 必要なら補助ラベルも除去（残置しても無害）
+gh issue edit <番号> --repo owner/your-repo --remove-label per-task-implementer-failed
+```
+
+復旧後の期待状態:
+
+- ラベル: `auto-dev` のみ（または `claude-picked-up` / `claude-claimed` の通常進行ラベル）
+- 次アクション: 次 tick の watcher が再 pickup し、`impl` または `impl-resume` モードを再起動
+
+##### B. impl PR が既に存在するケース
+
+per-task ループの途中で失敗したが、`claude/issue-<番号>-impl-<slug>` ブランチおよび実装途中の
+PR が既に push 済みのケース。**ラベル操作順序を必ず守ってください**:
+
+```bash
+# 1. 先に ready-for-review を付与
+gh issue edit <番号> --repo owner/your-repo --add-label ready-for-review
+
+# 2. その後に claude-failed を除去
+gh issue edit <番号> --repo owner/your-repo --remove-label claude-failed
+
+# 3. 補助ラベルも除去（残置しても無害）
+gh issue edit <番号> --repo owner/your-repo --remove-label per-task-implementer-failed
+```
+
+復旧後の期待状態:
+
+- ラベル: `ready-for-review`（impl PR は人間レビュー待ち）
+- 次アクション: 人間レビュアーが impl PR をレビューし、必要なら部分的に手動仕上げして merge
+  する。watcher は当該 Issue を再 pickup せず、PR レビューフロー側に処理が移る
+
+> 本節は **運用者が実行する操作（ラベル付与・除去の順序）として記述**しており、watcher
+> 内部の関数名・コードパスには踏み込んでいません（NFR 1.3 / Req 4.5）。watcher の状態遷移
+> 全体図は「ラベル状態遷移まとめ」節を参照してください。
 
 ---
 
