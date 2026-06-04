@@ -25,3 +25,27 @@
 - 採用方針: (a) `shellcheck local-watcher/bin/issue-watcher.sh local-watcher/bin/modules/security-review.sh` を実行し exit code 0 / 警告ゼロを確認した（NFR 3.1）。(b) `security-review.sh` L555-557 のコメント「parent shell の env に解決済み（${VAR:-default} 展開）」を、Config ブロックで `export VAR="${VAR:-default}"` 済みであることと bash -c subshell に env として継承される契約を明示する形へ書き換えた（NFR 4.1 / design.md「README / spec #279 design.md の同期」節）。(c) README の Security Review Processor env 表（L2418-L2429）と利用方法（opt-in 手順）節（L2435-L2451）を確認したが、env 表は運用者向けの env var 名・既定値・用途の説明であり internal export 有無を記述する箇所ではなく、cron 例は `VAR=value cmd` 形式で既に子プロセスへ環境変数が渡る前提のため、本修正と矛盾する記述は無いと判断し README 更新は行わなかった。
 - 重要な判断: (1) コメント更新は意味的変更（挙動への影響）を伴わない docs commit として独立させ、Conventional Commits 上は `docs(watcher):` scope を採用した（fix ではなく docs。実装挙動変更を含まない）。(2) README 更新の判断根拠は「env 表は user-facing 既定値と用途の説明」「cron 例の `VAR=value` 形式は環境変数として子プロセスへ伝播する POSIX シェル契約」の 2 点で、今回の internal export 化（idd-claude が watcher 内部で `bash -c` の子シェルへ env 継承を確立する目的）は user-facing な env 規約には影響しないため、文面更新は不要と判断した。(3) repo-template に README 重複は存在しないため二重管理対象外。
 - 残存課題: なし（Task 4 完了。NFR 3.1 = shellcheck 警告ゼロ / NFR 4.1 = コメント整合性が成立）。Task 5（スモーク fixture）と Task 6（opt-out no-op 回帰確認、deferrable）が残るが、いずれも本 task のスコープ外。
+
+### Task 5
+
+- 採用方針: `docs/specs/286-fix-watcher-security-review-processor-sc/test-fixtures/` を新規作成し、3 つの bash スモークスクリプトを配置した（design.md Testing Strategy 節 1〜2 + Integration Test 5 に対応）。いずれも `set -euo pipefail` / `command -v` ベース / 既存 #224 / #263 fixture と同じ「scratch dir + module 抽出 + 期待値 assert」パターンに揃え、成功時 `echo "OK: <name>"` / 失敗時 非ゼロ exit + stderr 詳細出力という慣習を維持した。
+- 重要な判断: (1) `test-export-inheritance.sh`: watcher main flow（lock 取得・cron ループ・logging）を起動せず、`grep -E '^export SECURITY_REVIEW_PROMPT='` で当該 Config 行だけを抽出し eval する方式を採用した。既存 #263 fixture が awk で関数本体を抽出した同パターンに揃えており、副作用ゼロで env 解決をシミュレートできる。assert は (a) parent shell で非空に解決、(b) `bash -c` 子シェルへ env 継承、(c) `Use the /security-review skill` prefix 一致、(d) parent / child 同一性（Req 1.2）の 4 点。(2) `test-empty-prompt-shortcircuit.sh`: 一時 bare repo + 作業 repo + base/head ブランチを構築して `sec_execute_security_review` を直接呼び出す。`claude` / `gh` が起動されない（空プロンプト早期 short-circuit）ため網外依存ゼロで再現可能。`resolved_cmd` には `echo "SHOULD_NOT_RUN" >&2; exit 99` を渡し、万一短絡を抜けて CLI 経路に流れた場合に stderr で検出できる二重防御を入れた。(3) `test-env-i-minimal.sh`: `env -i HOME=$HOME PATH=/usr/bin:/bin SECURITY_REVIEW_ENABLED=true SECURITY_REVIEW_PROMPT=test-prompt` で inner bash を起動し、`${VAR:-default}` の override 経路で test-prompt が採用されて子シェルに継承されることを確認する。NFR 1.3（cron-like 最小 PATH 動作）の回帰確認に直結する。
+- 残存課題: なし。3 fixture すべて単独で pass し、tasks.md 末尾の構造化 stage-a-verify ブロック（`shellcheck local-watcher/bin/issue-watcher.sh local-watcher/bin/modules/security-review.sh && bash <3 fixture>`）も最終確認で 4/4 OK で完了。shellcheck も fixture 自体（3 件）に対して警告ゼロ。Task 6（opt-out no-op 回帰確認）は deferrable のまま本 sub-issue のスコープ外。
+
+#### Requirement ID トレーサビリティ（Task 5 までで覆われた AC のテスト対応）
+
+| Req ID | カバー手段 | 検証スクリプト |
+|---|---|---|
+| 1.1 | export 継承による非空保証 | test-export-inheritance.sh |
+| 1.2 | parent / child 同値性 | test-export-inheritance.sh の同一性 assert |
+| 1.3 | 空プロンプト早期 short-circuit | test-empty-prompt-shortcircuit.sh + 既存 case 分岐 (`sec_run_review_for_pr`) |
+| 1.4 | opt-out gate | 既存 `process_security_review` 早期 return（変更なし。Task 6 deferrable で回帰確認予定） |
+| 2.1〜2.3 | コメント kind 区別 | 既存実装変更なし（design.md Traceability に従い本修正で復旧） |
+| 3.1〜3.6 | 不変条件 | export は env 継承のみ変更し既存挙動を温存（design.md Migration Strategy） |
+| 4.1〜4.3 | override 経路維持 | test-export-inheritance.sh + test-env-i-minimal.sh（override 値が継承されることを確認） |
+| NFR 1.1 | opt-out 完全互換 | `SECURITY_REVIEW_ENABLED != "true"` で process_security_review 早期 return（既存温存） |
+| NFR 1.2 | env var 名・既定値温存 | Task 1 で diff 確認済み |
+| NFR 1.3 | cron-like 最小 PATH | test-env-i-minimal.sh |
+| NFR 2.1〜2.2 | ログ識別 | sec_warn / sec_error の `empty-prompt` 識別語（Task 2, 3 で確認済み） |
+| NFR 3.1 | shellcheck 警告ゼロ | Task 4 + 本 task で改めて確認（fixture 3 件含む） |
+| NFR 4.1 | コメント整合性 | Task 4 で実施済み |
