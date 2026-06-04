@@ -266,6 +266,28 @@ watcher が連続失敗したことを示します。`$HOME/.issue-watcher/logs/
 gh issue edit <番号> --repo owner/your-repo --remove-label claude-failed
 ```
 
+### `per-task-implementer-failed` / `error_max_turns` が出た（per-task ループ運用時）
+
+`PER_TASK_LOOP_ENABLED=true` の per-task Implementer ループ運用で、Issue に補助ラベル
+`per-task-implementer-failed` が付いた状態で `claude-failed` 停止した場合は、Implementer が
+**許容 turn 上限（`DEV_MAX_TURNS`、既定 60）に到達して exit した状態**を示します。
+**必ずしも実テスト失敗ではありません**。
+
+最頻出ケースの対応要約:
+
+1. **タスク粒度の是正を最優先**（`tasks.md` を細かく切り直す）。frontend / UI / テスト重めは
+   「UI = 1 component + 1 test = 1 task」を目安に
+2. やむを得ない場合のみ **`DEV_MAX_TURNS` を一時引き上げ**（恒久的な cron 書き換えは非推奨）
+3. 同じ task で連続失敗が続くなら **手動仕上げ**に切り替える
+
+復旧時の **ラベル操作順序**は impl PR の有無で異なります。impl PR が既に存在する場合は
+**先に `ready-for-review` を付与してから** `claude-failed` を除去してください（順序を誤ると
+進行中 PR を破壊する恐れあり）。
+
+詳細手順・原因切り分け（529 過負荷 / 実テスト失敗との区別）・impl PR の有無別の復旧手順は
+README の **[`per-task-implementer-failed` / `error_max_turns` 対応](./README.md#per-task-implementer-failed--error_max_turns-対応)**
+節を参照してください。
+
 ---
 
 ## 7. 次に読むもの
@@ -275,3 +297,4 @@ gh issue edit <番号> --repo owner/your-repo --remove-label claude-failed
 - **README の `## 使い方`「Issue の書き方（PM を誤解させないコツ）」節** — Issue 作成時に PM エージェントを誤解させないための 3 原則
 - **README の `## Merge Queue Processor (Phase A)` 節** — approved PR の自動 rebase（opt-in 機能）
 - **README の `## PR Iteration Processor (#26)` 節** — レビューコメント起点の反復開発（opt-in 機能）
+- **README の `### per-task-implementer-failed / error_max_turns 対応` 節** — per-task ループ運用時の失敗対応詳細
