@@ -32,7 +32,7 @@
   - _Requirements: 1.3, NFR 2.2_
   - _Depends: 1_
 
-- [ ] 3. `sec_run_review_for_pr` の case 分岐に `empty-prompt` 経路を追加
+- [x] 3. `sec_run_review_for_pr` の case 分岐に `empty-prompt` 経路を追加
   - `local-watcher/bin/modules/security-review.sh` の `sec_run_review_for_pr` 内、result_file
     token 解析の case 文（L910-L915 周辺の `fetch-fail|checkout-fail)`）の後ろに
     `empty-prompt)` 分岐を追加する
