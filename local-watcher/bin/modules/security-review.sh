@@ -52,34 +52,265 @@ sec_build_marker() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# sec_check_strict_request: strict 要求 env の有無を確認し advisory 固定で続行（task 2.3）
+# sec_check_strict_request: ゲート挙動 mode を解決して stdout に返す（#281 task 4）
 #   入力: 環境変数のみ
-#     - SECURITY_REVIEW_MODE: 期待値 "advisory"（未設定 / 空 / "advisory" 以外は WARN）
-#     - SECURITY_REVIEW_STRICT: 期待値 未設定 / 空（非空なら WARN）
-#   出力: stdout に常に "advisory" を 1 行
+#     - SECURITY_REVIEW_MODE: 期待値 "advisory" または "strict" 厳密一致。未設定 / 空 /
+#       "advisory" は advisory 解釈、"strict" は strict 解釈、それ以外は WARN + advisory
+#       fallback。
+#     - SECURITY_REVIEW_STRICT: #279 で導入された defensive env。本 spec では deprecated
+#       alias として WARN のみ出力し、mode 解決には一切影響させない（後方互換 / sudden
+#       break 回避）。
+#   出力: stdout に "advisory" または "strict" を 1 行
 #   戻り値: 0 固定
-#   AC: 5.1, 5.2, 5.3
+#   AC: 1.1, 1.2, 1.4, 1.5
 #
-#   本 spec では strict モード（severity 閾値ベースのマージ阻害ラベル付与）を実装しない。
-#   strict 要求 env が来ても WARN 1 行で「strict は本 spec 未実装 / 別 Issue #281 待ち」を
-#   記録した上で、stdout には常に advisory 固定値を返す（Req 5.3 確定）。
+#   解決順序:
+#     1. SECURITY_REVIEW_MODE == "strict" 厳密一致 → "strict" を返す（Req 1.2）
+#     2. SECURITY_REVIEW_MODE が "advisory" / 未設定 / 空 → "advisory" を返す（Req 1.1, 1.5、
+#        #279 と byte 等価）
+#     3. SECURITY_REVIEW_MODE が上記以外（typo / 大文字混在 / 空白混入等）→ sec_warn 1 行
+#        + "advisory" fallback（Req 1.4）
+#     4. SECURITY_REVIEW_STRICT が非空 → deprecated alias 警告 WARN 1 行のみ（mode は
+#        変更しない / #279 と byte 等価）
+#
+#   後方互換ポイント:
+#     - #279 では本関数は「strict 要求 env が来ても WARN + advisory 固定」の safe-fallback
+#       実装だったが、#281 で実 mode 解決に切替（Req 1.2 で strict 解釈の AC が明示された
+#       ため）。
+#     - SECURITY_REVIEW_MODE 未設定 / "advisory" 環境では引き続き advisory を返すため、
+#       既存運用に影響を与えない（NFR 1.1）。
+#     - SECURITY_REVIEW_STRICT=anything 環境は引き続き mode 変更なし + WARN 1 行のまま
+#       （#279 と byte 等価）。これにより #279 ユーザが誤って STRICT env を set した状態
+#       が sudden break を起こさない。
+#
 #   stdout は単一 token 契約のため、観測ログは sec_warn（stderr）のみを使用する。
 # ─────────────────────────────────────────────────────────────────────────────
 sec_check_strict_request() {
   local mode="${SECURITY_REVIEW_MODE:-}"
   local strict="${SECURITY_REVIEW_STRICT:-}"
+  local resolved
 
-  # SECURITY_REVIEW_MODE が advisory 以外の非空値 → WARN
-  if [ -n "$mode" ] && [ "$mode" != "advisory" ]; then
-    sec_warn "SECURITY_REVIEW_MODE='${mode}' を検出しましたが strict モードは本 spec 未実装です（別 Issue #281 待ち）。advisory 固定で続行します"
-  fi
+  case "$mode" in
+    strict)
+      resolved="strict"
+      ;;
+    advisory|"")
+      resolved="advisory"
+      ;;
+    *)
+      sec_warn "SECURITY_REVIEW_MODE='${mode}' は許容値（strict/advisory）に一致しません。既定 'advisory' で続行します"
+      resolved="advisory"
+      ;;
+  esac
 
-  # SECURITY_REVIEW_STRICT が非空 → WARN
+  # SECURITY_REVIEW_STRICT は deprecated alias。mode 解決には影響させず WARN のみ出す
+  # （#279 と byte 等価で sudden break 回避）。
   if [ -n "$strict" ]; then
-    sec_warn "SECURITY_REVIEW_STRICT='${strict}' を検出しましたが strict モードは本 spec 未実装です（別 Issue #281 待ち）。advisory 固定で続行します"
+    sec_warn "SECURITY_REVIEW_STRICT='${strict}' は deprecated alias です。mode 切替には SECURITY_REVIEW_MODE=strict を使用してください（本 env は mode 解決に影響しません）"
   fi
 
-  echo "advisory"
+  echo "$resolved"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sec_resolve_block_severity: severity 閾値 env を解決し許容値に正規化する（#281 task 3）
+#   入力: 環境変数のみ
+#     - SECURITY_REVIEW_BLOCK_SEVERITY: 期待値 critical/high/medium/low/info の小文字 5 値
+#       のいずれか。未設定 / 空 / 不正値（typo / 大文字混在 / 空白混入等）は WARN + "high"
+#       fallback。
+#   出力: stdout に 5 値のいずれか 1 行（小文字 token）
+#   戻り値: 0 固定
+#   AC: 2.1, 2.2, 2.4
+#   副作用: 不正値検出時に sec_warn 1 行を stderr に出す
+#
+#   - 未設定 / 空 → WARN なしで既定 "high" 採用（Req 2.2 既定値 / 既存 #279 と byte 等価）。
+#   - 5 値以外（大文字混在 / typo / 空白混入等）→ sec_warn 1 行 + "high" fallback（Req 2.4）。
+#   - shell metacharacter / コマンドインジェクション対策はホワイトリスト照合で構造的に防御
+#     （design.md Security Considerations）。
+#   - stdout 単一 token 契約のため、観測ログは sec_warn（stderr）のみ使用。
+# ─────────────────────────────────────────────────────────────────────────────
+sec_resolve_block_severity() {
+  local raw="${SECURITY_REVIEW_BLOCK_SEVERITY:-}"
+
+  # 未設定 / 空 → 既定 high（WARN なし、本機能導入前と byte 等価）
+  if [ -z "$raw" ]; then
+    echo "high"
+    return 0
+  fi
+
+  case "$raw" in
+    critical|high|medium|low|info)
+      echo "$raw"
+      ;;
+    *)
+      sec_warn "SECURITY_REVIEW_BLOCK_SEVERITY='${raw}' は許容値（critical/high/medium/low/info）に一致しません。既定 'high' で続行します"
+      echo "high"
+      ;;
+  esac
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sec_severity_at_or_above: severity ordinal 比較ヘルパ（#281 task 3）
+#   入力: $1 = severity1, $2 = threshold（どちらも小文字 5 値のいずれか）
+#   出力: なし
+#   戻り値: 0 = $1 >= $2 / 1 = $1 < $2 / 2 = 入力値不正
+#   ordinal map: critical=5, high=4, medium=3, low=2, info=1
+#   AC: 2.3
+#
+#   - ホワイトリスト照合で正規化された値のみを受理する純粋関数。呼び出し元
+#     （sec_count_blocking_findings 等）が既に sec_resolve_block_severity 経由で
+#     正規化済みの値を渡すことを前提とするが、防御的に入力検証する。
+# ─────────────────────────────────────────────────────────────────────────────
+sec_severity_at_or_above() {
+  local sev="${1:-}"
+  local thr="${2:-}"
+  local sev_ord thr_ord
+
+  case "$sev" in
+    critical) sev_ord=5 ;;
+    high)     sev_ord=4 ;;
+    medium)   sev_ord=3 ;;
+    low)      sev_ord=2 ;;
+    info)     sev_ord=1 ;;
+    *)        return 2 ;;
+  esac
+
+  case "$thr" in
+    critical) thr_ord=5 ;;
+    high)     thr_ord=4 ;;
+    medium)   thr_ord=3 ;;
+    low)      thr_ord=2 ;;
+    info)     thr_ord=1 ;;
+    *)        return 2 ;;
+  esac
+
+  if [ "$sev_ord" -ge "$thr_ord" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sec_count_blocking_findings: severity_summary から閾値以上件数を合算する（#281 task 3）
+#   入力: $1 = severity_summary（"critical=N high=N medium=N low=N info=N total=N" 形式、
+#         既存 sec_count_severities の出力フォーマット）
+#         $2 = threshold（critical/high/medium/low/info の小文字 5 値のいずれか）
+#   出力: stdout に整数 1 行（閾値以上件数の合算）
+#   戻り値: 0 固定（合算失敗時は "0" を出力して安全側に倒す）
+#   AC: 5.1, 5.2
+#
+#   - 既存 sec_count_severities の出力（"critical=N high=N medium=N low=N info=N total=N"）
+#     を sed で各カウントに分解し、sec_severity_at_or_above で閾値以上判定された severity
+#     のカウントのみを合算する。
+#   - threshold が不正値（sec_severity_at_or_above が rc=2 を返す）の場合は "0" を返す
+#     安全側設計（呼び出し元は通常 sec_resolve_block_severity 経由で正規化済みを渡すため
+#     到達しない想定だが、防御的フォールバック）。
+#   - severity_summary から数値抽出に失敗した severity は 0 として扱う（malformed input
+#     でも "0" を返してラベル付与判定をスキップさせる / Req 5.3 安全側設計）。
+# ─────────────────────────────────────────────────────────────────────────────
+sec_count_blocking_findings() {
+  local summary="${1:-}"
+  local threshold="${2:-}"
+
+  # threshold 妥当性チェック（無効なら 0 件返して安全側 advisory に倒す）
+  case "$threshold" in
+    critical|high|medium|low|info) ;;
+    *) printf '0'; return 0 ;;
+  esac
+
+  local crit high med low info
+  crit=$(printf '%s' "$summary" | sed -n 's/.*critical=\([0-9][0-9]*\).*/\1/p')
+  high=$(printf '%s' "$summary" | sed -n 's/.*high=\([0-9][0-9]*\).*/\1/p')
+  med=$(printf  '%s' "$summary" | sed -n 's/.*medium=\([0-9][0-9]*\).*/\1/p')
+  low=$(printf  '%s' "$summary" | sed -n 's/.*low=\([0-9][0-9]*\).*/\1/p')
+  info=$(printf '%s' "$summary" | sed -n 's/.*info=\([0-9][0-9]*\).*/\1/p')
+  crit="${crit:-0}"; high="${high:-0}"; med="${med:-0}"; low="${low:-0}"; info="${info:-0}"
+
+  local total=0
+  local pair sev count
+  for pair in "critical:$crit" "high:$high" "medium:$med" "low:$low" "info:$info"; do
+    sev="${pair%%:*}"
+    count="${pair##*:}"
+    if sec_severity_at_or_above "$sev" "$threshold"; then
+      total=$((total + count))
+    fi
+  done
+
+  printf '%s' "$total"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# sec_apply_block_labels: needs-security-fix + needs-iteration の 2 枚ペア付与（#281 task 5）
+#   入力: $1 = pr_number, $2 = sha, $3 = blocking_count, $4 = threshold
+#   出力: なし（観測ログのみ）
+#   戻り値: 0 = ok（重複 skip 含む）/ 1 = 付与失敗 or marker 投稿失敗
+#   AC: 3.1, 3.4, 3.5, 3.6, 4.4, NFR 4.1, NFR 4.2
+#   副作用:
+#     - 対象 PR に `${SECURITY_REVIEW_BLOCK_LABEL}` と `needs-iteration` をペア付与
+#       （`gh pr edit --add-label "$A,$B"` で 1 コマンド原子付与 / Req 3.1, 4.4）
+#     - 当該 PR に hidden marker (`kind=security-block`) を含むコメントを 1 件投稿
+#       （SHA 単位の冪等性確立 / NFR 4.1, 4.2）
+#     - sec_log で付与結果（blocking_count / threshold / 付与成否）を 1 行記録（Req 3.5）
+#
+#   内部処理:
+#     1. sec_already_processed "$pr_number" "$sha" "security-block" で重複判定
+#        → 既存なら sec_log で skip 通知して return 0（Req 3.6, NFR 4.1）
+#     2. gh pr edit --add-label "$SECURITY_REVIEW_BLOCK_LABEL,needs-iteration" で 1 コマンド
+#        原子付与（PR Iteration Processor 動線に流す / Req 3.1, 4.4）
+#     3. 失敗時は sec_warn + return 1（既存 fail-continue 規約。コメント投稿側を阻害しない）
+#     4. 成功時は hidden marker (kind=security-block) のコメントを 1 件投稿
+#        （以降の重複防止 + 監査）
+#     5. ラベル付与結果を sec_log で 1 行記録（Req 3.5 / NFR 3.1）
+#
+#   エラーハンドリング:
+#     - ラベル付与失敗 → WARN + return 1（次サイクルで再試行可 / コメント投稿側を阻害しない）
+#     - ラベル付与成功 + marker 投稿失敗 → WARN + return 1。次サイクルで marker 不在の
+#       ため再判定されるが、`gh pr edit --add-label` は同一ラベルの重複付与に対して冪等
+#       なため、再付与が走っても副作用は発生しない（design.md L589 のとおり）。
+# ─────────────────────────────────────────────────────────────────────────────
+sec_apply_block_labels() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local blocking_count="${3:-0}"
+  local threshold="${4:-}"
+
+  # AC 3.6 / NFR 4.1: 同一 (sha, kind=security-block) が既存なら再付与しない
+  if sec_already_processed "$pr_number" "$sha" "security-block"; then
+    sec_log "PR #${pr_number}: sha=${sha} は既に strict ラベル付与済み（kind=security-block marker 検出）。skip"
+    # #281 task 8: cycle サマリの skipped_blocked カウンタをインクリメント
+    # （`process_security_review` で 0 リセットされたグローバル変数を呼び出し元から共有）。
+    _sec_skipped_blocked_count=$((${_sec_skipped_blocked_count:-0} + 1))
+    return 0
+  fi
+
+  # ラベル 2 枚を 1 コマンドで原子付与（Req 3.1, 4.4）
+  if ! timeout "$SECURITY_REVIEW_GIT_TIMEOUT" \
+      gh pr edit "$pr_number" --repo "$REPO" \
+      --add-label "${SECURITY_REVIEW_BLOCK_LABEL},needs-iteration" >/dev/null 2>&1; then
+    sec_warn "PR #${pr_number}: strict ラベル付与に失敗 labels=${SECURITY_REVIEW_BLOCK_LABEL}+needs-iteration blocking=${blocking_count} threshold=${threshold} sha=${sha}"
+    return 1
+  fi
+
+  # 重複防止 marker コメントを 1 件投稿（NFR 4.1, 4.2 / 監査用途）
+  local marker body
+  marker=$(sec_build_marker "$sha" "security-block")
+  # shellcheck disable=SC2016  # 単一引用符内のバッククォートは markdown コードフェンスのリテラル
+  body=$(printf '<!-- security-block marker for SHA %s -->\nstrict モードによりマージ阻害ラベル `%s` / `needs-iteration` を付与しました（blocking=%s threshold=%s）。\n\n%s' \
+    "$sha" "$SECURITY_REVIEW_BLOCK_LABEL" "$blocking_count" "$threshold" "$marker")
+
+  if ! timeout "$SECURITY_REVIEW_GIT_TIMEOUT" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+    sec_warn "PR #${pr_number}: strict ラベル付与は成功したが kind=security-block marker コメント投稿に失敗 sha=${sha}（次サイクルで再付与＝gh pr edit --add-label の冪等性により副作用なし）"
+    return 1
+  fi
+
+  sec_log "PR #${pr_number}: strict ラベル付与成功 labels=${SECURITY_REVIEW_BLOCK_LABEL}+needs-iteration blocking=${blocking_count} threshold=${threshold} sha=${sha}"
+  # #281 task 8: cycle サマリの blocked カウンタをインクリメント
+  # （重複 skip ではなく新規ラベル付与成功時のみカウント）。
+  _sec_blocked_count=$((${_sec_blocked_count:-0} + 1))
   return 0
 }
 
@@ -488,15 +719,22 @@ sec_count_severities() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# sec_write_security_notes: security-notes.md を spec ディレクトリ配下に書き出す（task 3.3）
+# sec_write_security_notes: security-notes.md を spec ディレクトリ配下に書き出す（task 3.3 / task 7）
 #   入力: $1 = pr_number, $2 = sha, $3 = spec_dir, $4 = finding_count,
-#         $5 = severity_summary (sec_count_severities の出力形式), $6 = review_text
+#         $5 = severity_summary (sec_count_severities の出力形式), $6 = review_text,
+#         $7 = mode (advisory|strict), $8 = threshold (critical|high|medium|low|info|-),
+#         $9 = blocking_count (整数), $10 = decision (label-applied|label-skipped|advisory-only|n/a)
 #   戻り値: 0 = ok（spec_dir 不明時の skip 含む）/ 1 = 書き出し失敗
-#   AC: 3.5, NFR 4.1
+#   AC: 3.5, 5.4, NFR 1.1, NFR 4.1
 #
 #   - spec_dir 空文字 / ディレクトリ不在 → WARN 1 行 + return 0（書き出し skip / 安全側）
-#   - 既存ファイルの先頭付近に同一 `Last SHA: <sha>` 行があれば overwrite skip（idempotency）
-#   - フォーマット: design.md「security-notes.md フォーマット」節のテンプレ厳守
+#   - 既存ファイルの先頭付近に同一 `Last SHA: <sha>` 行があれば overwrite skip（idempotency / NFR 4.1）
+#   - フォーマット: design.md「security-notes.md フォーマット」節 + 「security-notes.md フォーマット拡張」節のテンプレ厳守
+#   - #281 task 7: Severity Summary 表の下に Threshold Decision セクションを追記
+#     - mode=advisory → decision=advisory-only / threshold=- / blocking_count=0
+#     - mode=strict + blocking_count=0 → decision=label-skipped / threshold=<resolved>
+#     - mode=strict + blocking_count>=1 → decision=label-applied / threshold=<resolved>
+#   - 既存 Severity Summary 表・Findings 本文・先頭メタデータ（Last SHA 等）は変更しない（NFR 1.1）
 # ─────────────────────────────────────────────────────────────────────────────
 sec_write_security_notes() {
   local pr_number="$1"
@@ -505,6 +743,11 @@ sec_write_security_notes() {
   local finding_count="$4"
   local severity_summary="$5"
   local review_text="$6"
+  # #281 task 7: 新規引数（既存呼び出し元は advisory のデフォルト値を渡す / NFR 1.1）
+  local mode="${7:-advisory}"
+  local threshold="${8:--}"
+  local blocking_count="${9:-0}"
+  local decision="${10:-advisory-only}"
 
   # AC 3.5 / Error handling: spec_dir 不明 → skip 安全側（PR コメント側は阻害しない）
   if [ -z "$spec_dir" ] || [ ! -d "$spec_dir" ]; then
@@ -557,6 +800,12 @@ sec_write_security_notes() {
     printf '| Medium | %s |\n' "$med"
     printf '| Low | %s |\n' "$low"
     printf '| Info | %s |\n\n' "$info"
+    # #281 task 7: Threshold Decision セクション（Severity Summary 表の直下に追加 / Req 5.4）
+    printf '## Threshold Decision\n\n'
+    printf -- '- Mode: %s\n' "$mode"
+    printf -- '- Threshold: %s\n' "$threshold"
+    printf -- '- Blocking Count: %s\n' "$blocking_count"
+    printf -- '- Decision: %s\n\n' "$decision"
     printf '## Findings\n\n'
     if [ "$finding_count" = "0" ]; then
       printf 'クリーン: スキャンで検出項目はありませんでした。\n'
@@ -571,7 +820,7 @@ sec_write_security_notes() {
     return 1
   fi
 
-  sec_log "PR #${pr_number}: security-notes.md 書き出し成功 findings=${finding_count} path=${notes_path}"
+  sec_log "PR #${pr_number}: security-notes.md 書き出し成功 findings=${finding_count} decision=${decision} path=${notes_path}"
   return 0
 }
 
@@ -600,6 +849,11 @@ sec_write_security_notes() {
 #     8. 出力空 → kind=scan-failed エラーコメント + rc=3
 #     9. spec ディレクトリ解決は sec_resolve_spec_dir 経由（特定不可なら notes 書き出し
 #        skip / PR コメントは通常投稿）
+#
+#   #281 task 6 で strict 経路を統合: 検出 ≥ 1 件分岐の sec_post_review_comment 呼び出し
+#   直前に「モジュール内グローバル _sec_resolved_mode = strict かつ blocking_count > 0」
+#   の場合のみ override note を review_text に append し sec_apply_block_labels を呼ぶ
+#   枝を追加。_sec_resolved_mode 未定義 / 空 / "advisory" 環境では構造的に no-op（NFR 1.1）。
 # ─────────────────────────────────────────────────────────────────────────────
 sec_run_review_for_pr() {
   local pr_json="$1"
@@ -708,7 +962,22 @@ sec_run_review_for_pr() {
     fi
     local zero_summary
     zero_summary='critical=0 high=0 medium=0 low=0 info=0 total=0'
-    sec_write_security_notes "$pr_number" "$sha" "$spec_dir" "0" "$zero_summary" "$review_text" || true
+    # #281 task 7: クリーン経路は strict 評価枝を通らないため、mode に応じた Threshold Decision を計算する。
+    # advisory: advisory-only / threshold=- / blocking_count=0
+    # strict + clean: strict 評価が走らない（total_findings=0 で gate）が、運用者観測のため
+    #                 threshold は解決値を記録し decision=label-skipped を渡す（label 付与なし状態）
+    local _clean_mode _clean_threshold _clean_decision
+    _clean_mode="${_sec_resolved_mode:-advisory}"
+    if [ "$_clean_mode" = "strict" ]; then
+      _clean_threshold=$(sec_resolve_block_severity)
+      _clean_decision="label-skipped"
+    else
+      _clean_mode="advisory"
+      _clean_threshold="-"
+      _clean_decision="advisory-only"
+    fi
+    sec_write_security_notes "$pr_number" "$sha" "$spec_dir" "0" "$zero_summary" "$review_text" \
+      "$_clean_mode" "$_clean_threshold" "0" "$_clean_decision" || true
     return 0
   fi
 
@@ -720,11 +989,61 @@ sec_run_review_for_pr() {
 
   sec_log "PR #${pr_number}: 検出 ${total_findings} 件 (${severity_summary})"
 
+  # #281 task 6: strict 経路の判定枝。`_sec_resolved_mode` は task 8 で
+  # `process_security_review` から設定される予定（現時点では未配線）。
+  # `${_sec_resolved_mode:-}` で安全に参照し、未定義 / 空 / "advisory" / "advisory" 以外の値で
+  # あっても厳密一致 "strict" のみ枝に入る（NFR 1.1 byte 等価）。
+  # blocking_count > 0 → override note を review_text 末尾に append + ラベル 2 枚付与。
+  # blocking_count = 0 → ラベル付与なし、sec_log で記録（Req 3.2）。
+  local _strict_blocking_count=0
+  local _strict_threshold=""
+  if [ "${_sec_resolved_mode:-}" = "strict" ] && [ "$total_findings" -gt 0 ]; then
+    _strict_threshold=$(sec_resolve_block_severity)
+    _strict_blocking_count=$(sec_count_blocking_findings "$severity_summary" "$_strict_threshold")
+    if [ "$_strict_blocking_count" -gt 0 ]; then
+      sec_log "PR #${pr_number}: strict 判定 blocking=${_strict_blocking_count} threshold=${_strict_threshold}"
+      # Req 4.5: review_text 末尾に override note を append（design.md L496-501 のテンプレ）
+      local override_note
+      # shellcheck disable=SC2016  # 単一引用符内のバッククォートは markdown コードフェンスのリテラル
+      override_note=$(printf '> このコメントは Security Review strict モード (#281) によりマージ阻害ラベル\n> `%s` / `needs-iteration` が付与されています。false positive と\n> 判断する場合は GitHub UI から両ラベルを手動で剥がしてください（同一 SHA への再付与は\n> 行われません）。' \
+        "${SECURITY_REVIEW_BLOCK_LABEL:-needs-security-fix}")
+      review_text=$(printf '%s\n\n%s' "$review_text" "$override_note")
+    else
+      sec_log "PR #${pr_number}: strict 判定 blocking=0 threshold=${_strict_threshold}（閾値以上検出なし、ラベル付与なし）"
+    fi
+  fi
+
   if ! sec_post_review_comment "$pr_number" "$sha" "$review_text"; then
     return 1
   fi
 
-  sec_write_security_notes "$pr_number" "$sha" "$spec_dir" "$total_findings" "$severity_summary" "$review_text" || true
+  # #281 task 6: blocking_count > 0 の場合のみ、コメント投稿成功後にラベル 2 枚付与を実行
+  # （fail-continue / design.md L465: `|| true` で吸収して既存 advisory 経路を阻害しない）
+  if [ "${_sec_resolved_mode:-}" = "strict" ] && [ "$_strict_blocking_count" -gt 0 ]; then
+    sec_apply_block_labels "$pr_number" "$sha" "$_strict_blocking_count" "$_strict_threshold" || true
+  fi
+
+  # #281 task 7: Threshold Decision を sec_write_security_notes に渡す。
+  # advisory 経路（mode != strict）: mode=advisory threshold=- blocking_count=0 decision=advisory-only（NFR 1.1）
+  # strict 経路 + blocking_count >= 1: mode=strict threshold=<resolved> blocking_count=N decision=label-applied
+  # strict 経路 + blocking_count = 0: mode=strict threshold=<resolved> blocking_count=0 decision=label-skipped
+  local _notes_mode _notes_threshold _notes_decision
+  if [ "${_sec_resolved_mode:-}" = "strict" ]; then
+    _notes_mode="strict"
+    _notes_threshold="${_strict_threshold:--}"
+    if [ "$_strict_blocking_count" -gt 0 ]; then
+      _notes_decision="label-applied"
+    else
+      _notes_decision="label-skipped"
+    fi
+  else
+    _notes_mode="advisory"
+    _notes_threshold="-"
+    _notes_decision="advisory-only"
+  fi
+
+  sec_write_security_notes "$pr_number" "$sha" "$spec_dir" "$total_findings" "$severity_summary" "$review_text" \
+    "$_notes_mode" "$_notes_threshold" "$_strict_blocking_count" "$_notes_decision" || true
 
   return 0
 }
@@ -755,12 +1074,26 @@ process_security_review() {
     return 0
   fi
 
-  # ② AC 5.1 / 5.2 / 5.3: strict 要求 env を検査（WARN 後 advisory 固定で続行）
-  local mode
+  # ② AC 5.1 / 5.2 / 5.3: mode / threshold を解決し、モジュール内グローバルに退避
+  #    （task 6 / task 7 のクリーン / 検出経路から `_sec_resolved_mode` /
+  #     `_sec_resolved_threshold` 名で参照される / design.md L471-475, L484-485）。
+  local mode threshold
   mode=$(sec_check_strict_request)
+  threshold=$(sec_resolve_block_severity)
+  # shellcheck disable=SC2034  # _sec_resolved_threshold は将来の参照用（本 task 時点では _strict_threshold をローカル再評価しているため未使用だが、design.md L484 の契約に従い設定する）
+  _sec_resolved_mode="$mode"
+  # shellcheck disable=SC2034
+  _sec_resolved_threshold="$threshold"
+
+  # ②.5 AC 5.2 / NFR 3.1: blocked / skipped_blocked カウンタを 0 リセット
+  # （`sec_apply_block_labels` がインクリメントするモジュール内グローバル / Req NFR 3.1）。
+  _sec_blocked_count=0
+  _sec_skipped_blocked_count=0
 
   # ③ AC 5.2 / NFR 3.1: サイクル開始の 1 行サマリログ
-  sec_log "cycle start: mode=${mode} strict=not-implemented (split to #281) max_prs=${SECURITY_REVIEW_MAX_PRS:-unset} git_timeout=${SECURITY_REVIEW_GIT_TIMEOUT:-unset}s exec_timeout=${SECURITY_REVIEW_EXEC_TIMEOUT:-unset}s head_pattern=${SECURITY_REVIEW_HEAD_PATTERN:-unset} model=${SECURITY_REVIEW_MODEL:-unset}"
+  #    #281 task 8: `strict=not-implemented (split to #281)` 表記を削除し
+  #    `threshold=${threshold}` を追加（Req 1.3, 2.5, NFR 3.1）。
+  sec_log "cycle start: mode=${mode} threshold=${threshold} max_prs=${SECURITY_REVIEW_MAX_PRS:-unset} git_timeout=${SECURITY_REVIEW_GIT_TIMEOUT:-unset}s exec_timeout=${SECURITY_REVIEW_EXEC_TIMEOUT:-unset}s head_pattern=${SECURITY_REVIEW_HEAD_PATTERN:-unset} model=${SECURITY_REVIEW_MODEL:-unset}"
 
   # ④ 候補 PR 列挙（AC 2.1 / 2.3）
   local prs_json total
@@ -769,7 +1102,7 @@ process_security_review() {
 
   # ⑤ 候補 0 件 → サマリログのみで return
   if [ "$total" -eq 0 ]; then
-    sec_log "サマリ: mode=${mode} reviewed=0 clean=0 skip=0 fail=0 errored=0 overflow=0 notes_written=0 notes_skipped=0（候補 PR なし）"
+    sec_log "サマリ: mode=${mode} reviewed=0 clean=0 skip=0 fail=0 errored=0 overflow=0 notes_written=0 notes_skipped=0 blocked=${_sec_blocked_count} skipped_blocked=${_sec_skipped_blocked_count}（候補 PR なし）"
     return 0
   fi
 
@@ -789,7 +1122,7 @@ process_security_review() {
   local pr_iter
   pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]" 2>/dev/null || echo "")
   if [ -z "$pr_iter" ]; then
-    sec_log "サマリ: mode=${mode} reviewed=0 clean=0 skip=0 fail=0 errored=0 overflow=${skipped_overflow} notes_written=0 notes_skipped=0（iterate 対象なし）"
+    sec_log "サマリ: mode=${mode} reviewed=0 clean=0 skip=0 fail=0 errored=0 overflow=${skipped_overflow} notes_written=0 notes_skipped=0 blocked=${_sec_blocked_count} skipped_blocked=${_sec_skipped_blocked_count}（iterate 対象なし）"
     return 0
   fi
 
@@ -817,8 +1150,10 @@ process_security_review() {
   # 本 entrypoint では clean の内訳は集計しない（sec_run_review_for_pr は 0/1/2/3 を
   # 返すのみ。clean / non-clean の区別は marker kind = security-review-clean /
   # security-review のログ行で事後識別する）。notes_written / notes_skipped も
-  # sec_write_security_notes のログ行で事後集計可能。本サマリは合算値のみを記録する。
-  sec_log "サマリ: mode=${mode} reviewed=${reviewed} clean=${clean} skip=${skip} fail=${fail} errored=${errored} overflow=${skipped_overflow} notes_written=0 notes_skipped=0"
+  # sec_write_security_notes のログ行で事後集計可能。
+  # #281 task 8: 新規 strict カウンタ `blocked=N skipped_blocked=N` を追加
+  # （Req NFR 3.1 / design.md L602。`sec_apply_block_labels` 経由でインクリメントされる）。
+  sec_log "サマリ: mode=${mode} reviewed=${reviewed} clean=${clean} skip=${skip} fail=${fail} errored=${errored} overflow=${skipped_overflow} notes_written=0 notes_skipped=0 blocked=${_sec_blocked_count} skipped_blocked=${_sec_skipped_blocked_count}"
 
   # 念のため最終確認で base branch に戻す
   git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true

@@ -1,13 +1,13 @@
 # Implementation Plan
 
-- [ ] 1. `.github/scripts/idd-claude-labels.sh` に新規ラベル `needs-security-fix` を追加
+- [x] 1. `.github/scripts/idd-claude-labels.sh` に新規ラベル `needs-security-fix` を追加
   - LABELS 配列末尾に `"needs-security-fix|d73a4a|【PR 用】 Security Review strict モード（#281）で severity 閾値以上の検出により付与される。手動剥がしで override 可"` を追加
   - 既存ラベル定義（name / color / description）は一切変更しない（NFR 1.2）
   - description 100 文字制限に収まることを確認
   - shellcheck `.github/scripts/idd-claude-labels.sh` が警告ゼロ
   - _Requirements: 4.4, NFR 1.2, NFR 5.1_
 
-- [ ] 2. `issue-watcher.sh` Config ブロックに strict 関連 env を追加 (P)
+- [x] 2. `issue-watcher.sh` Config ブロックに strict 関連 env を追加 (P)
   - 既存「`# ─── Security Review Processor 設定 (#279) ───`」節 **末尾**に以下 3 行を追加:
     - `SECURITY_REVIEW_MODE="${SECURITY_REVIEW_MODE:-advisory}"`（#279 で Config 未宣言だったため新規宣言、既定 `advisory` は #279 動作と byte 等価）
     - `SECURITY_REVIEW_BLOCK_SEVERITY="${SECURITY_REVIEW_BLOCK_SEVERITY:-high}"`
@@ -18,7 +18,7 @@
   - _Requirements: 1.1, 1.5, 2.1, 2.2, NFR 1.1, NFR 1.2, NFR 5.1_
   - _Boundary: issue-watcher.sh Config block_
 
-- [ ] 3. `modules/security-review.sh` に severity 閾値 / ordinal / 合算ヘルパを追加 (P)
+- [x] 3. `modules/security-review.sh` に severity 閾値 / ordinal / 合算ヘルパを追加 (P)
   - `sec_resolve_block_severity` を追加（env 未設定 / 不正値で WARN + `high` fallback / 出力は小文字 5 値のいずれか 1 行）
   - `sec_severity_at_or_above` を追加（ordinal map: critical=5 / high=4 / medium=3 / low=2 / info=1、戻り値 0 = 同等以上 / 1 = 未満 / 2 = 入力不正）
   - `sec_count_blocking_findings` を追加（`sec_count_severities` 出力形式と threshold から閾値以上件数を合算、stdout に整数 1 行）
@@ -27,7 +27,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 5.1, 5.2, NFR 5.1_
   - _Boundary: modules/security-review.sh severity helpers_
 
-- [ ] 4. `sec_check_strict_request` の挙動を mode 解決に変更
+- [x] 4. `sec_check_strict_request` の挙動を mode 解決に変更
   - 既存実装（#279 advisory fallback + WARN）を以下に置換:
     - `SECURITY_REVIEW_MODE=strict` 厳密一致 → stdout に `strict` を出力（Req 1.2）
     - `SECURITY_REVIEW_MODE` 未設定 / 空 / `advisory` → stdout に `advisory`（Req 1.1, 1.5、#279 と byte 等価）
@@ -37,7 +37,7 @@
   - _Requirements: 1.1, 1.2, 1.4, 1.5, NFR 1.1_
   - _Boundary: modules/security-review.sh sec_check_strict_request_
 
-- [ ] 5. `sec_apply_block_labels` を実装（2 枚ペア付与 + marker 投稿 + 重複防止）
+- [x] 5. `sec_apply_block_labels` を実装（2 枚ペア付与 + marker 投稿 + 重複防止）
   - 入力: `$1 = pr_number`, `$2 = sha`, `$3 = blocking_count`, `$4 = threshold`
   - 冒頭で `sec_already_processed "$pr_number" "$sha" "security-block"` 重複判定 → 既存なら sec_log で skip 通知して return 0（Req 3.6, NFR 4.1）
   - `gh pr edit "$pr_number" --repo "$REPO" --add-label "${SECURITY_REVIEW_BLOCK_LABEL},needs-iteration"` で 2 枚原子付与（Req 3.1, 4.4）
@@ -47,7 +47,7 @@
   - _Requirements: 3.1, 3.4, 3.5, 3.6, 4.4, NFR 4.1, NFR 4.2_
   - _Boundary: modules/security-review.sh sec_apply_block_labels_
 
-- [ ] 6. `sec_run_review_for_pr` の strict 経路を統合
+- [x] 6. `sec_run_review_for_pr` の strict 経路を統合
   - 既存「検出 ≥ 1 件と判定 → severity 集計 + コメント投稿 + notes 書き出し」分岐の `sec_post_review_comment` 呼び出し **直前**に strict 判定枝を挿入:
     - モジュール内グローバル `_sec_resolved_mode` を参照
     - `mode != strict` ならスキップ（既存 advisory 経路を温存 / NFR 1.1）
@@ -59,7 +59,7 @@
   - _Requirements: 1.2, 3.1, 3.2, 3.3, 3.4, 4.5, 6.1, NFR 1.1_
   - _Boundary: modules/security-review.sh sec_run_review_for_pr_
 
-- [ ] 7. `sec_write_security_notes` に Threshold Decision セクションを追加
+- [x] 7. `sec_write_security_notes` に Threshold Decision セクションを追加
   - 既存「Severity Summary」表の **下**に新規セクション「## Threshold Decision」を追加（design.md「security-notes.md フォーマット拡張」節のテンプレに従う）
   - 出力項目: `Mode` / `Threshold` / `Blocking Count` / `Decision`（`label-applied` / `label-skipped` / `advisory-only` / `n/a`）
   - 関数シグネチャに `mode` / `threshold` / `blocking_count` / `decision` 引数を追加（既存呼び出し元は task 6 で更新）
@@ -68,7 +68,7 @@
   - _Requirements: 5.4, NFR 1.1, NFR 4.1_
   - _Boundary: modules/security-review.sh sec_write_security_notes_
 
-- [ ] 8. `process_security_review` のサマリログ拡張
+- [x] 8. `process_security_review` のサマリログ拡張
   - cycle start ログから `strict=not-implemented (split to #281)` 表記を削除
   - 新規に `threshold=${threshold}` を追加し、`mode=${mode} threshold=${threshold}` を 1 行に含める（Req 1.3, 2.5, NFR 3.1）
   - 解決済み mode / threshold をモジュール内グローバル `_sec_resolved_mode` / `_sec_resolved_threshold` に退避（task 6 から参照）
@@ -77,7 +77,7 @@
   - _Requirements: 1.3, 2.5, NFR 1.1, NFR 3.1_
   - _Boundary: modules/security-review.sh process_security_review_
 
-- [ ] 9. README にドキュメント追記（同一 PR 内で実施 / NFR 6.2）
+- [x] 9. README にドキュメント追記（同一 PR 内で実施 / NFR 6.2）
   - 「Security Review Processor (#279)」節内の「既知の制約 - strict 拡張は別 Issue として分割済み」表記を撤去
   - **既存「### 環境変数」表（`Security Review Processor (#279)` 節配下、`SECURITY_REVIEW_ENABLED` / `SECURITY_REVIEW_PROMPT` ... `SECURITY_REVIEW_EXEC_TIMEOUT` を列挙している既存 9 行の表）に以下 3 行を追記する**:
     - `SECURITY_REVIEW_MODE` / 既定 `advisory` / strict モード切替の opt-in gate（`=strict` 厳密一致のみ有効、それ以外は WARN + advisory fallback）
@@ -94,7 +94,7 @@
   - 言語方針に従い日本語ベース、env var 名・ラベル名は英語固定
   - _Requirements: 4.1, 4.5, NFR 6.1, NFR 6.2_
 
-- [ ] 10. 静的解析と手動スモークテスト
+- [x] 10. 静的解析と手動スモークテスト
   - `shellcheck local-watcher/bin/modules/security-review.sh local-watcher/bin/issue-watcher.sh install.sh setup.sh .github/scripts/*.sh` が警告ゼロ
   - `actionlint .github/workflows/*.yml` が警告ゼロ（本機能で workflow 変更なし、非回帰確認）
   - `diff -r .claude/agents repo-template/.claude/agents` と `diff -r .claude/rules repo-template/.claude/rules` が空（本機能で agents/rules を編集していないことの確認 / NFR 7.2）
