@@ -58,7 +58,7 @@
   - _Requirements: NFR 3.1, NFR 4.1_
   - _Depends: 3_
 
-- [ ] 5. スモーク fixture を追加（export 継承 + 空プロンプト・フェイルセーフ）
+- [x] 5. スモーク fixture を追加（export 継承 + 空プロンプト・フェイルセーフ）
   - `docs/specs/286-fix-watcher-security-review-processor-sc/test-fixtures/` ディレクトリを
     作成し、以下の bash スモークスクリプトを配置する:
     - `test-export-inheritance.sh`: Config ブロックを source した上で
