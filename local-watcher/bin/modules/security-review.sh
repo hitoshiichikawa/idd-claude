@@ -923,6 +923,17 @@ sec_run_review_for_pr() {
       sec_warn "PR #${pr_number}: head '${head_ref}' の取得に失敗 (${result})、当該 PR を skip"
       return 1
       ;;
+    empty-prompt)
+      # spec #286 Req 1.3 / NFR 2.2: sec_execute_security_review の早期 short-circuit ガードで
+      # SECURITY_REVIEW_PROMPT が空文字に解決されたことを検知した場合、CLI を起動せず
+      # scan-failed エラーコメントを 1 件投稿して既存 scan-error 集計に合流する。
+      # 識別語「empty-prompt」を sec_error / コメント本文に含めることで、他失敗原因（fetch-fail
+      # / checkout-fail / read-only invariant 違反 / 非ゼロ終了 / 空出力）と運用者が区別可能。
+      sec_error "PR #${pr_number}: SECURITY_REVIEW_PROMPT が空のため claude CLI を起動せず scan-failed として報告 (empty-prompt)"
+      sec_post_error_comment "$pr_number" "$sha" "scan-failed" \
+        "セキュリティレビューのプロンプトが空に解決されました（empty-prompt）。\`claude\` CLI を起動せず scan-failed として中断しました。watcher 親プロセスから子シェルへ \`SECURITY_REVIEW_PROMPT\` env が継承されていない可能性があります。watcher 起動環境で \`SECURITY_REVIEW_PROMPT\` が export されていること、または \`SECURITY_REVIEW_CLAUDE_CMD\` の \`{PROMPT_FILE}\` 経路への切替を検討してください。"
+      return 3
+      ;;
   esac
 
   local exec_rc wsmod
