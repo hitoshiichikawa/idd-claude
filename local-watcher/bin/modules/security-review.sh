@@ -552,9 +552,10 @@ sec_substitute_placeholders() {
 #     （design.md Security Considerations の read-only invariant）。
 #   - 既存 pr_execute_review_command との差分: tool 引数を持たない（単一実行ツール
 #     claude のみ）、SECURITY_REVIEW_* タイムアウト env を参照する点のみ。
-#   - SECURITY_REVIEW_PROMPT は parent shell の env に解決済み（Config ブロックで
-#     ${VAR:-default} 展開）であるため、bash -c "$resolved_cmd" の subshell から
-#     `$SECURITY_REVIEW_PROMPT` として参照可能（design.md「CLI 起動契約」節）。
+#   - SECURITY_REVIEW_PROMPT は Config ブロックで export 済み（issue-watcher.sh で
+#     `export VAR="${VAR:-default}"` 形式で宣言）であるため、bash -c "$resolved_cmd"
+#     の subshell に env として継承され、`$SECURITY_REVIEW_PROMPT` として参照可能
+#     （design.md「CLI 起動契約」節 / spec #286）。
 # ─────────────────────────────────────────────────────────────────────────────
 sec_execute_security_review() {
   local head_ref="$1"
@@ -581,6 +582,17 @@ sec_execute_security_review() {
     if ! timeout "$SECURITY_REVIEW_GIT_TIMEOUT" git checkout -B "$head_ref" "origin/${head_ref}" >/dev/null 2>&1; then
       sec_warn "head '${head_ref}' の checkout に失敗"
       printf 'checkout-fail\n' > "$result_file"
+      exit 0
+    fi
+
+    # 空プロンプト・フェイルセーフ（#286 / Req 1.3 / NFR 2.2）:
+    # SECURITY_REVIEW_PROMPT が空に解決される場合は claude CLI を起動せず
+    # 早期 short-circuit する。Config ブロックの export 漏れ再退行や運用者の
+    # 意図しない空 override を防御する defense-in-depth。CLI 未起動のため
+    # ワークツリー変更は構造的に発生せず、read-only invariant 検査は不要。
+    if [ -z "${SECURITY_REVIEW_PROMPT:-}" ]; then
+      sec_warn "head '${head_ref}': SECURITY_REVIEW_PROMPT が空文字列です（empty-prompt）。claude CLI を起動せず scan-failed として早期報告します"
+      printf 'empty-prompt\n' > "$result_file"
       exit 0
     fi
 
@@ -911,6 +923,17 @@ sec_run_review_for_pr() {
     fetch-fail|checkout-fail)
       sec_warn "PR #${pr_number}: head '${head_ref}' の取得に失敗 (${result})、当該 PR を skip"
       return 1
+      ;;
+    empty-prompt)
+      # spec #286 Req 1.3 / NFR 2.2: sec_execute_security_review の早期 short-circuit ガードで
+      # SECURITY_REVIEW_PROMPT が空文字に解決されたことを検知した場合、CLI を起動せず
+      # scan-failed エラーコメントを 1 件投稿して既存 scan-error 集計に合流する。
+      # 識別語「empty-prompt」を sec_error / コメント本文に含めることで、他失敗原因（fetch-fail
+      # / checkout-fail / read-only invariant 違反 / 非ゼロ終了 / 空出力）と運用者が区別可能。
+      sec_error "PR #${pr_number}: SECURITY_REVIEW_PROMPT が空のため claude CLI を起動せず scan-failed として報告 (empty-prompt)"
+      sec_post_error_comment "$pr_number" "$sha" "scan-failed" \
+        "セキュリティレビューのプロンプトが空に解決されました（empty-prompt）。\`claude\` CLI を起動せず scan-failed として中断しました。watcher 親プロセスから子シェルへ \`SECURITY_REVIEW_PROMPT\` env が継承されていない可能性があります。watcher 起動環境で \`SECURITY_REVIEW_PROMPT\` が export されていること、または \`SECURITY_REVIEW_CLAUDE_CMD\` の \`{PROMPT_FILE}\` 経路への切替を検討してください。"
+      return 3
       ;;
   esac
 

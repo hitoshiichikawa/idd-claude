@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Config ブロック: `SECURITY_REVIEW_PROMPT` / `SECURITY_REVIEW_CLAUDE_CMD` を export 化
+- [x] 1. Config ブロック: `SECURITY_REVIEW_PROMPT` / `SECURITY_REVIEW_CLAUDE_CMD` を export 化
   - `local-watcher/bin/issue-watcher.sh` の Security Review Processor 設定（L301-L337 周辺）
     のうち、L316 の `SECURITY_REVIEW_PROMPT="${SECURITY_REVIEW_PROMPT:-...}"` 宣言を
     `export SECURITY_REVIEW_PROMPT="${SECURITY_REVIEW_PROMPT:-...}"` 形式へ変更する
@@ -17,7 +17,7 @@
     する
   - _Requirements: 1.1, 1.2, 4.1, 4.2, 4.3, NFR 1.1, NFR 1.2_
 
-- [ ] 2. `sec_execute_security_review` に空プロンプト・フェイルセーフを追加
+- [x] 2. `sec_execute_security_review` に空プロンプト・フェイルセーフを追加
   - `local-watcher/bin/modules/security-review.sh` の `sec_execute_security_review`
     （L559-L603）の subshell 内、`git checkout` 成功後・`timeout ... bash -c "$resolved_cmd"`
     起動の **直前** に空プロンプトガードを追加する
@@ -32,7 +32,7 @@
   - _Requirements: 1.3, NFR 2.2_
   - _Depends: 1_
 
-- [ ] 3. `sec_run_review_for_pr` の case 分岐に `empty-prompt` 経路を追加
+- [x] 3. `sec_run_review_for_pr` の case 分岐に `empty-prompt` 経路を追加
   - `local-watcher/bin/modules/security-review.sh` の `sec_run_review_for_pr` 内、result_file
     token 解析の case 文（L910-L915 周辺の `fetch-fail|checkout-fail)`）の後ろに
     `empty-prompt)` 分岐を追加する
@@ -46,7 +46,7 @@
   - _Requirements: 1.3, 3.3, NFR 2.2_
   - _Depends: 2_
 
-- [ ] 4. shellcheck 警告ゼロ確認 + コメント整合性確認
+- [x] 4. shellcheck 警告ゼロ確認 + コメント整合性確認
   - 変更ファイル 2 件（`local-watcher/bin/issue-watcher.sh` /
     `local-watcher/bin/modules/security-review.sh`）に対し `shellcheck` を実行し、警告ゼロを
     確認する（既存 `.shellcheckrc` で抑止された info 級は許容）
@@ -58,7 +58,7 @@
   - _Requirements: NFR 3.1, NFR 4.1_
   - _Depends: 3_
 
-- [ ] 5. スモーク fixture を追加（export 継承 + 空プロンプト・フェイルセーフ）
+- [x] 5. スモーク fixture を追加（export 継承 + 空プロンプト・フェイルセーフ）
   - `docs/specs/286-fix-watcher-security-review-processor-sc/test-fixtures/` ディレクトリを
     作成し、以下の bash スモークスクリプトを配置する:
     - `test-export-inheritance.sh`: Config ブロックを source した上で
