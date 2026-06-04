@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Config ブロック: `SECURITY_REVIEW_PROMPT` / `SECURITY_REVIEW_CLAUDE_CMD` を export 化
+- [x] 1. Config ブロック: `SECURITY_REVIEW_PROMPT` / `SECURITY_REVIEW_CLAUDE_CMD` を export 化
   - `local-watcher/bin/issue-watcher.sh` の Security Review Processor 設定（L301-L337 周辺）
     のうち、L316 の `SECURITY_REVIEW_PROMPT="${SECURITY_REVIEW_PROMPT:-...}"` 宣言を
     `export SECURITY_REVIEW_PROMPT="${SECURITY_REVIEW_PROMPT:-...}"` 形式へ変更する
