@@ -289,6 +289,87 @@ _worktree_ensure() {
   return 0
 }
 
+# reset / clean を最大 3 回（初回 + 再試行 2 回）試行する内部ヘルパ（Issue #295）。
+# 各試行の stderr を一時ファイルへ捕捉し、失敗時は「操作種別 + 試行回数」を識別子と
+# する WARN ログに stderr 内容を残す。再試行間に 1 秒・2 秒の指数バックオフを挟む
+# （Req 2.1, 2.2 / NFR 2.1）。最終的に成功すれば 0、3 回使い切って失敗すれば 1 を返す
+# （Req 2.3, 2.4）。リトライ発生時のみ「最終試行回数 / 最終結果」を slot_log に残す
+# （Req 2.5）。初回成功ケースでは追加ログ・追加遅延を発生させない（Req 1.4 / NFR 1.2）。
+#
+# 引数:
+#   $1 = 操作種別ラベル（"reset" / "clean"）。WARN ログの prefix と最終サマリで使用
+#   $2.. = 実際に試行する git コマンドの argv（`git` を含む先頭から渡す）
+# 戻り値:
+#   0 = ok（初回 or 再試行で成功）
+#   1 = 3 回試行しても失敗（恒久失敗）
+# 副作用:
+#   - 失敗試行ごとに slot_warn で stderr の tail を運用者ログへ追記
+#   - 再試行による吸収 / 恒久失敗確定の双方で slot_log にサマリ 1 行を追記
+#
+# Req 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 2.5, NFR 1.2, NFR 2.1
+_worktree_reset_retry() {
+  local op="$1"
+  shift
+  local -a cmd=("$@")
+  local max_attempts=3
+  local attempt=1
+  local rc=0
+  local stderr_tmp
+  stderr_tmp="$(mktemp -t worktree-reset-XXXXXX.err 2>/dev/null || echo "")"
+
+  while [ "$attempt" -le "$max_attempts" ]; do
+    rc=0
+    if [ -n "$stderr_tmp" ]; then
+      # 同期リダイレクトで stderr を一時ファイルへ捕捉する。`set -euo pipefail` 下でも
+      # コマンド失敗を `|| rc=$?` で受けるため本関数自体は致命化しない。
+      "${cmd[@]}" >/dev/null 2>"$stderr_tmp" || rc=$?
+    else
+      # mktemp 失敗時の degraded フォールバック: stderr を直接運用者ログへ流す。
+      # 試行識別子の prefix は付けられないが、診断不能（旧実装）よりは可視性が高い。
+      "${cmd[@]}" >/dev/null || rc=$?
+    fi
+
+    if [ "$rc" -eq 0 ]; then
+      if [ "$attempt" -gt 1 ]; then
+        # リトライ吸収成功（Req 2.3, 2.5）。
+        slot_log "worktree-reset: ${op} がリトライ吸収で成功 (attempt=${attempt}/${max_attempts})"
+      fi
+      if [ -n "$stderr_tmp" ]; then
+        rm -f "$stderr_tmp" 2>/dev/null || true
+      fi
+      return 0
+    fi
+
+    # 失敗試行: stderr を「操作種別 + 試行回数」識別子付きで運用者ログへ残す（Req 1.1〜1.3）。
+    # tail で先頭が肥大化した stderr の末尾のみ残し、ログを汚しすぎないようにする
+    # （_hook_invoke と同じ 2KB 上限）。
+    local tail_text=""
+    if [ -n "$stderr_tmp" ] && [ -f "$stderr_tmp" ]; then
+      tail_text="$(tail -c 2000 "$stderr_tmp" 2>/dev/null || true)"
+    fi
+    slot_warn "worktree-reset: ${op} 失敗 (attempt=${attempt}/${max_attempts}, rc=${rc})"
+    if [ -n "$tail_text" ]; then
+      # 複数行 stderr を 1 つの WARN ブロックとして可視化（先頭行の prefix のみで十分）。
+      echo "[$(date '+%F %T')] slot-${IDD_SLOT_NUMBER:-?}: #${NUMBER:-?}: WARN: worktree-reset: ${op} stderr (attempt=${attempt}, tail):" >&2
+      echo "$tail_text" >&2
+    fi
+
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      # 指数バックオフ: 1s, 2s（Req 2.1, 2.2 / NFR 2.1）。
+      local backoff=$((attempt))
+      sleep "$backoff" || true
+    fi
+    attempt=$((attempt + 1))
+  done
+
+  # 3 回試行しても失敗 → 恒久失敗（Req 2.4, 2.5）。
+  slot_log "worktree-reset: ${op} が ${max_attempts} 回試行後も失敗（恒久失敗として呼び出し元へ返す）"
+  if [ -n "$stderr_tmp" ]; then
+    rm -f "$stderr_tmp" 2>/dev/null || true
+  fi
+  return 1
+}
+
 # Per-slot worktree を origin/$BASE_BRANCH の最新状態に強制リセットする
 # （Issue 投入時に毎回呼ぶ）。
 # 引数: $1 = worktree 絶対パス
@@ -296,7 +377,12 @@ _worktree_ensure() {
 # 副作用: 当該 worktree が origin/$BASE_BRANCH の最新コミットに head=detached、
 #   tracked / untracked / ignored すべて消去される
 #
-# Req 3.4
+# Issue #295: reset / clean それぞれを `_worktree_reset_retry` 経由で最大 3 回試行し、
+# transient 失敗を吸収する。失敗時の git stderr は識別子付きで運用者ログへ追記される。
+# 通常ケース（初回成功）は本修正導入前と挙動・所要時間が変化しない（NFR 1.2, NFR 3.1）。
+#
+# Req 3.4, 1.1, 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.4, 2.5, 3.1, 3.2, 3.3, 3.4,
+#      NFR 1.1, NFR 1.2, NFR 2.1, NFR 2.2, NFR 3.1
 _worktree_reset() {
   local wt="$1"
   if [ ! -d "$wt" ]; then
@@ -313,12 +399,14 @@ _worktree_reset() {
   # `cd "$REPO_DIR"; git fetch origin --prune`）で 1 回だけ実行済みであり、slot worktree は
   # その origin/$BASE_BRANCH 参照を共有して読むため、per-slot fetch なしでも reset 起点は
   # 確保できる（親 fetch から slot 起動までの遅延による ref stale は許容範囲）。
-  # 1. detached HEAD を origin/$BASE_BRANCH に強制移動
-  if ! git -C "$wt" reset --hard "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
+  #
+  # 1. detached HEAD を origin/$BASE_BRANCH に強制移動（最大 3 回試行 / Issue #295）
+  if ! _worktree_reset_retry "reset" git -C "$wt" reset --hard "origin/${BASE_BRANCH}"; then
     return 1
   fi
   # 2. untracked + ignored を消去（前回 Issue の build artifact / node_modules を残さない）
-  if ! git -C "$wt" clean -fdx >/dev/null 2>&1; then
+  #    こちらも最大 3 回試行する（Issue #295）
+  if ! _worktree_reset_retry "clean" git -C "$wt" clean -fdx; then
     return 1
   fi
   return 0
