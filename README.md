@@ -5621,6 +5621,150 @@ gh issue edit <番号> --repo owner/your-repo --remove-label per-task-implemente
 > 内部の関数名・コードパスには踏み込んでいません（NFR 1.3 / Req 4.5）。watcher の状態遷移
 > 全体図は「ラベル状態遷移まとめ」節を参照してください。
 
+#### 分割復旧手順（turn-heavy 親タスクが溢れたときの tasks.md フラット化手順）
+
+前述「対応の優先順位」(1) **タスク粒度の是正**に該当する具体操作手順です。turn-heavy な
+親タスク（`UI = 1 component + 1 test` の目安を超えた束ね / 子タスクを親に多重押し込みした
+構造 / frontend や snapshot が混ざる responsibility）が `error_max_turns` で詰まったとき、
+`tasks.md` を **フラット化**して未完了タスクを最上位 ID へ細分化し、watcher に再 pickup
+させて impl-resume で続行する流れを 6 ステップで提示します（**#291 で新設**）。検索キーワード:
+`turn-heavy` / `分割復旧` / `tasks.md フラット化`。
+
+> このサブセクションは「対応の優先順位」(1) の具体実行手順として接続します。(2) の
+> `DEV_MAX_TURNS` 一時引き上げや (3) 手動仕上げを選択した場合は対象外です。
+
+##### 粒度のみ変更で済むケース vs 設計まで作り直すケース（分岐基準）
+
+操作に入る前に、**in-branch 編集で済むのか / design iteration（Architect 再起動）が
+必要なのか** を見極めます。誤った分岐は不要な design iteration を起動するか、逆に設計
+影響のある変更を in-branch 編集だけで黙って通してしまう事故につながります。
+
+| 分岐 | 該当条件（観測可能） | 次アクション |
+|---|---|---|
+| **in-branch 編集で対応可能**（粒度のみ） | 親タスクを子タスク単位に分割する / 1 task を 2〜3 task に細分化する / `_Boundary:_` が指す既存 Components や design.md の File Structure Plan・Interfaces を **一切変更しない** / アノテーション (`_Requirements:_` / `_Boundary:_` / `_Depends:_` / `(P)`) を温存できる | 本サブセクションの 6 ステップに従い、impl ブランチ上で `tasks.md` を直接編集して push |
+| **design iteration が必要**（設計変更） | 新規 Components の追加が必要 / File Structure Plan の改訂が必要 / Components 間の Interfaces・契約変更が必要 / 既存 `_Boundary:_` の範囲を逸脱する / requirements.md 側に AC 追加が要る | impl ブランチでの編集はせず、Issue に `needs-decisions` ラベルを付与して人間判断にエスカレーション、または `design` モードでの Architect 再起動を依頼する |
+
+判断に迷うケース（粒度と設計のどちらの寄与が大きいか判定しづらい場合・両者にまたがる
+場合）は **推測で進めず**、PR 本文の「確認事項」セクションに当該迷いを明記して人間
+レビュアーに判断を委ねるか、Issue にコメントで PjM / Architect への差し戻しを提案して
+ください。
+
+##### ステップ 1: 診断（観測すべき入力）
+
+`error_max_turns` で詰まった親タスクの **どの責務が turn を食い潰したか** を切り分けます。
+本ステップに新規操作はなく、既存「診断手順（原因切り分け）」「対応の優先順位」節の
+判断材料を踏まえつつ、以下を確認します:
+
+- **ログ**: `$HOME/.issue-watcher/logs/<repo-slug>/issue-<番号>-*.log` 末尾の
+  `error_max_turns` 行直前 50〜100 行をスキャンし、turn を最も消費した責務（component の
+  描画 / state 配線 / snapshot test / lint・型エラーの応酬 等）を特定する
+- **ラベル**: `claude-failed` と補助ラベル `per-task-implementer-failed` が同時に付いて
+  いることを確認する。`per-task-implementer-failed` が無い場合は本サブセクションの対象外
+- **git 履歴**: `git log --oneline origin/<base>..origin/claude/issue-<番号>-impl-<slug>`
+  で当該 impl ブランチに既存 commit が積まれているかを確認する。`docs(tasks): mark <id>
+  as done` 系の進捗 commit がある場合、それより前の `- [x]` 行は **不変として保持**する
+
+##### ステップ 2: 分割設計（粒度の再設計）
+
+特定した turn-heavy 親タスクを、`DEV_MAX_TURNS=60` 以内に収まる粒度へ分割設計します。
+本ステップは在宅作業（紙 / メモ）で完結し、`tasks.md` への書き込みは次ステップで行います:
+
+- **目安**: 「UI = 1 component + 1 test = 1 task」「重い子タスクは親に束ねず最上位 task
+  に昇格」（[「対応の優先順位」(1)](#対応の優先順位) 参照）
+- **アノテーション温存方針**: 分割後の各タスクが元タスクの `_Requirements:_` /
+  `_Boundary:_` / `_Depends:_` / `(P)` をどう分配するかを **事前に紙上で決めておく**
+  （後段で機械的に編集を流し込むため）
+- **粒度のみで済むか再確認**: 分割設計の途中で「Components 追加が必要だ」「Interfaces
+  契約を変えないと分割できない」と判明した場合、in-branch 編集での対応を **諦めて**
+  上述「分岐基準」表の design iteration 側へ切り替える
+
+##### ステップ 3: tasks.md フラット化編集（書き換え規約）
+
+分割設計に従い、impl ブランチをローカル checkout して `tasks.md` を編集します。本ステップ
+には **進捗追跡・トレーサビリティ・並列マーカーを壊さないための規約** があり、これに
+従わないと impl-resume の進捗追跡（`- [ ]` ↔ `- [x]` を正本とする運用）や Architect が
+付与したアノテーションが破壊されます:
+
+- **`done 済み [x]` 行は不変**: `- [x]` で始まるタスク行は **一切編集対象に含めない**
+  （行の追加・削除・並び替え・ID 変更すべて禁止）。誤って削除すると impl-resume の進捗
+  追跡が当該タスクを未完了と誤認し、再実装してコンフリクトを起こす恐れがある
+- **アノテーション温存**: フラット化後の各タスク行は元タスクの `_Requirements:_` /
+  `_Boundary:_` / `_Depends:_` / `(P)` を **すべて保持**する（分配の場合も漏れなく分配）。
+  `_Boundary:_` の指す Components 名は design.md と整合させる
+- **numeric ID 採番方針**: 既存 ID（`1` / `1.1` / `1.2` / `2` 等）は温存する。フラット化で
+  **新規追加するタスクは最上位 ID として追番**する（既存最後の最上位 ID が `5` なら
+  新規分割タスクは `6` / `7` / `8` …）。途中 ID への割り込みや小数階層の引き直しは
+  避ける（impl-resume の TaskCreate / TaskUpdate と既存 commit メッセージの `mark <id>
+  as done` 参照を壊さないため）
+- **checkbox 形式の必須化**: 新規追加タスクも `- [ ] <numeric ID>. <タスク名>` 形式
+  （deferrable の場合は `- [ ]* <numeric ID> <タスク名>`）で記述する。markdown header
+  のみのタスク表現は禁止
+- **`tasks-generation.md` 既存規約との整合**: フラット化編集後の `tasks.md` は
+  [`repo-template/.claude/rules/tasks-generation.md`](./repo-template/.claude/rules/tasks-generation.md)
+  の checkbox 必須化・Budget overflow check（≤10 件 / 11〜13 件 / ≥14 件の閾値）・numeric
+  ID 階層規約と矛盾しないこと。Budget overflow check の最上位件数が 10 件を超える場合、
+  本手順を踏むこと自体が「設計まで作り直すケース」に該当する可能性が高いため上述
+  「分岐基準」表へ戻り再判定する
+- **design.md File Structure Plan との齟齬警告**: フラット化により tasks.md と design.md
+  の File Structure Plan の間で **記述粒度や責務の表現に齟齬が出る可能性がある**。粒度
+  のみの分割であれば File Structure Plan の改訂は不要のはずだが、編集中に「あれ、これは
+  Plan も書き換えないと辻褄が合わない」と感じた時点で design iteration 側へ切り替える
+  判断を行う
+
+> ⚠️ **警告**: `- [x]` 行や既存アノテーションを誤って削除すると、impl-resume の進捗追跡
+> が破壊されて **既に done のタスクが再実装対象に戻る**、または `_Boundary:_` 喪失で
+> Implementer が触れてよい境界を見失うといった事故が起きます。編集前に `git diff` で
+> `- [x]` 行・アノテーション行が変更対象に含まれていないかを必ず確認してください。
+
+##### ステップ 4: commit & push（進捗追跡コミット運用の継続）
+
+tasks.md フラット化編集の commit と、必要に応じた追加実装 commit を impl ブランチへ push
+します:
+
+- **編集 commit**: `docs(tasks): split turn-heavy parent task <id> into flat subtasks`
+  等の Conventional Commits 準拠の commit メッセージで、`tasks.md` のみを 1 commit に
+  まとめる（他ファイルを混ぜない）
+- **進捗追跡コミット（既存運用との継続性）**: 分割後の各タスクが完了した際、引き続き
+  `docs(tasks): mark <id> as done` を 1 タスク = 1 commit として積む運用は本サブセクション
+  経由後も **継続**する。フラット化前に既に積まれていた `docs(tasks): mark <id> as done`
+  commit は **rebase・squash・amend で書き換えない**こと
+- **push**: `git push origin claude/issue-<番号>-impl-<slug>`（`--force` / `--force-with-lease`
+  は不要。新規 commit を積むだけのため fast-forward push）
+
+##### ステップ 5: ラベル復旧（impl PR の有無別）
+
+ラベル操作は上述の **「復旧手順（impl PR の有無別）」と同一の順序規約**に従ってください
+（本サブセクションが固有のラベル契約を追加することはなく、既存 A / B を再利用します）。
+impl PR の有無で分岐します:
+
+- **impl PR が存在しないケース**: 上述「復旧手順 A」を参照。`claude-failed` を除去する
+  だけで次 tick の watcher が再 pickup する
+- **impl PR が既に存在するケース**: 上述「復旧手順 B」を参照。**必ず**
+  `ready-for-review` を **先に** 付与してから `claude-failed` を除去する。順序を誤ると
+  進行中の PR / ブランチに対して watcher が想定外の commit や `--force-with-lease` push を
+  実施する破壊事象のリスクがある
+
+> ⚠️ **警告（順序の重要性）**: impl PR 存在下で `claude-failed` を先に除去した場合、
+> watcher が次 tick で当該 Issue を impl-resume 候補として再選択し、進行中 PR に対して
+> 想定外の追加 commit や push を実施する可能性があります。**順序は必ず**
+> `ready-for-review` 先付与 → `claude-failed` 後除去 です。詳細は上述「復旧手順 B」の
+> 警告ブロックを参照。
+
+##### ステップ 6: 監視（復旧後の期待状態）
+
+ラベル復旧後の挙動を監視します。impl PR の有無別に期待状態を確認してください:
+
+- **impl PR が存在しないケース**: ラベルは `auto-dev` のみ（または `claude-picked-up`
+  / `claude-claimed`）。次 tick で watcher が `impl-resume` モードを起動し、フラット化
+  済み `tasks.md` の未完了 `- [ ]` 行の先頭から実装を継続する。完了済み `- [x]` 行は
+  そのまま温存される（#270 / #263 で確立された per-task ループ運用と整合）
+- **impl PR が既に存在するケース**: ラベルは `ready-for-review`。watcher は当該 Issue
+  を再 pickup せず、人間レビュアーが impl PR をレビュー / 部分的手動仕上げ / merge する
+  フローへ処理が移る
+- **再失敗時**: 分割後の最初の 1〜2 タスクで再び `error_max_turns` を観測した場合、
+  上述「対応の優先順位」(3) 手動仕上げへ切り替える判断基準（同一タスクで 2 回連続観測
+  / 1.5〜2 倍引き上げても通過しない）を適用する
+
 ---
 
 ## 運用フェーズ移行戦略
