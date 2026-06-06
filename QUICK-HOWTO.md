@@ -288,6 +288,12 @@ gh issue edit <番号> --repo owner/your-repo --remove-label claude-failed
 README の **[`per-task-implementer-failed` / `error_max_turns` 対応](./README.md#per-task-implementer-failed--error_max_turns-対応)**
 節を参照してください。
 
+特に **turn-heavy な親タスクが `error_max_turns` で詰まった場合**（`tasks.md` をフラット化
+して未完了タスクを最上位 ID に細分化 → impl-resume で続行する流れ）は、README の
+**[分割復旧手順（turn-heavy 親タスクが溢れたときの tasks.md フラット化手順）](./README.md#分割復旧手順turn-heavy-親タスクが溢れたときの-tasksmd-フラット化手順)**
+節に 6 ステップ（診断 → 分割設計 → tasks.md フラット化編集 → commit & push → ラベル復旧
+→ 監視）でまとまっています。
+
 ---
 
 ## 7. 次に読むもの
@@ -298,3 +304,4 @@ README の **[`per-task-implementer-failed` / `error_max_turns` 対応](./README
 - **README の `## Merge Queue Processor (Phase A)` 節** — approved PR の自動 rebase（opt-in 機能）
 - **README の `## PR Iteration Processor (#26)` 節** — レビューコメント起点の反復開発（opt-in 機能）
 - **README の `### per-task-implementer-failed / error_max_turns 対応` 節** — per-task ループ運用時の失敗対応詳細
+- **README の `#### 分割復旧手順（turn-heavy 親タスクが溢れたときの tasks.md フラット化手順）` 節** — turn-heavy 親タスクが詰まった際の 6 ステップ復旧手順（tasks.md フラット化規約 / ラベル復旧順序 / 粒度 vs 設計の分岐基準）
