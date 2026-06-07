@@ -4,7 +4,7 @@
 **user-scope のみ**（人間 Decision 2: Option A）。`repo-template/` への追加は本 Issue では
 **禁止**（Req 6.2 / 6.3 / NFR 4.1）。
 
-- [ ] 1. guard hook script (`idd-guard.sh`) と settings テンプレを新規作成
+- [x] 1. guard hook script (`idd-guard.sh`) と settings テンプレを新規作成
   - `local-watcher/hooks/idd-guard.sh` を新規作成。`set -euo pipefail` 宣言。stdin から
     PreToolUse JSON を `jq` で読み、`tool_name` で分岐
   - G1 push 解析: `git` global options (`-C` / `--git-dir=` / `--work-tree=` / `-c k=v`) を
