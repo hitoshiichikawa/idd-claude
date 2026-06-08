@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git push --force-with-lease=refs/heads/feature:abc123 origin feature"
+  },
+  "permission_mode": "bypassPermissions"
+}

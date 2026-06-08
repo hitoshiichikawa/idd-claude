@@ -1,0 +1,7 @@
+{
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "/tmp/some-other-file.txt"
+  },
+  "permission_mode": "bypassPermissions"
+}

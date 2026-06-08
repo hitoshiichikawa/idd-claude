@@ -1,0 +1,7 @@
+{
+  "tool_name": "Edit",
+  "tool_input": {
+    "file_path": "~/.idd-claude/hooks/idd-guard.sh"
+  },
+  "permission_mode": "bypassPermissions"
+}

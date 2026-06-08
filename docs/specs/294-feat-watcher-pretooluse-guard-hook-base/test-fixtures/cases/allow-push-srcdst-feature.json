@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git push origin HEAD:feature"
+  },
+  "permission_mode": "bypassPermissions"
+}
