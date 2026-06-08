@@ -172,3 +172,72 @@
     経路を guard hook 配下に置く場合は env テンプレートを `claude -p ... --settings <abs>`
     に拡張する **別タスク**（Task 5 の install 時に `SECURITY_REVIEW_CLAUDE_CMD` の default
     値を opt-in 時のみ書き換える等）が必要。Architect / 人間の判断を仰ぐ
+
+### Task 5
+
+- **採用方針**: design.md「Install Path Mapping」節の指示通り、`INSTALL_LOCAL` ブロックの
+  modules 配置直後に新規 helper `install_guard_hooks` を呼び出して `local-watcher/hooks/` 配下の
+  3 ファイル（`idd-guard.sh` / `idd-guard-settings.json` / `README.md`）を user-scope に配置する。
+  既定 dest は `$HOME/.idd-claude/hooks`、`IDD_CLAUDE_HOOKS_DIR` env で override 可能（hook 本体
+  `idd-guard.sh` / watcher module `guard-hook.sh` と同名 env を共有することで preflight・hook
+  起動時の dir 解決が一貫する）。配置後の hint メッセージは cron/launchd の platform 分岐外に
+  置き、opt-in 手順・fail-closed 挙動・consumer 配布が別 Issue 予定である旨を 1 ブロックで提示。
+- **重要判断**:
+  - **`idd-guard-settings.json` の placeholder 置換は専用 helper を新設**: 既存
+    `copy_template_file` は中身を書き換えない設計のため、`__IDD_HOOK_PATH__` 置換と冪等性を
+    両立できない。`copy_hook_settings_with_substitution` を新設し、`mktemp` 上に sed で置換済み
+    内容を書き出してから dest と cmp することで「既配置 dest は既に置換済み」状態でも正しく
+    SKIP 判定する。これにより再 install 時に毎回 OVERWRITE が走る事故を防ぐ（手動テストで
+    SKIP `(identical to substituted template)` を確認）。
+  - **sed 区切り文字**: 置換対象が絶対パス（`/` を含む）のため `sed` 区切りは `#` を採用。
+    `IDD_CLAUDE_HOOKS_DIR` が `#` を含む奇異な値で破綻するが、ファイルシステム実用上の制約
+    から外れるため許容範囲とした。
+  - **`resolve_hooks_install_dir` を install.sh 側にも持つ**: hook 本体 / watcher module と
+    同じ「末尾スラッシュ除去 + env override」契約を install.sh 内に重複実装する形を採用した。
+    install.sh はモジュール source の枠外で動くため、`source` で `modules/guard-hook.sh` を
+    取り込む経路を作ると install 時の依存が複雑になる。3 行程度の重複なら明示重複の方が
+    install.sh の自己完結性を保ちやすい。
+  - **hint 配置位置**: cron / launchd の platform-specific HEREDOC の **直後**（共通の
+    `if/else fi` 終端後）に 1 ブロックを置く形を採用。両 platform で同じ案内を出す方が
+    運用者の認知負荷が低い。`local` は関数外では使えないため `hooks_dest_for_hint` 変数は
+    script-level で代入する形にした。
+  - **hint 文字列内の `$HOME` / `\$HOME` の扱い**: `HOOKS_HINT` は unquoted HEREDOC のため
+    expand される。cron 行例で `\$HOME/work/...` のように展開させたくない箇所はバックスラッシュ
+    エスケープし、`$hooks_dest_for_hint` のように expand させる箇所だけ素のまま記述した。
+  - **shellcheck SC2034 等の抑止不要**: 全関数で適切に変数を使い切る形にしたため警告ゼロ。
+    既存 `copy_template_file` パターンを踏襲したことで lint 上の特殊対応も不要だった。
+- **検証**:
+  - `shellcheck install.sh` 警告ゼロ
+  - `bash -n install.sh` 構文エラーなし
+  - dry-run smoke: tmp HOME で `install.sh --dry-run --local` → 3 件すべて `[DRY-RUN] NEW`
+    で出現、`(substitute __IDD_HOOK_PATH__ → /abs/path)` note 付き
+  - 実 install smoke: tmp HOME で `install.sh --local` → 3 件配置 + jq で
+    `.hooks.PreToolUse[0].hooks[0].command` が絶対パスに置換されていることを確認
+  - 冪等性: 同じ tmp HOME で 2 回目 `install.sh --local` → 3 件すべて `SKIP`
+    （`identical to template` / `identical to substituted template`）
+  - `IDD_CLAUDE_HOOKS_DIR=/tmp/.../custom-hooks` override smoke → override 先に配置され、
+    settings.json の command も override 先の絶対パスに置換される
+  - `bash docs/specs/294-feat-watcher-pretooluse-guard-hook-base/test-fixtures/run-tests.sh`
+    で 29/29 green（hook 本体に regression なし）
+  - `repo-template/` に新規追加なし（`git diff --stat main..HEAD -- repo-template/` 空、
+    `find repo-template -name '*guard*'` 0 件、Req 6.2 / 6.3 / NFR 4.1 を満たす）
+- **残存課題**:
+  - **README 整備は Task 6 のスコープ**: 本 Task の hint は install 直後の最小限案内であり、
+    詳細（env var 一覧 / exit code 11/12/13 の意味 / 既知の限界 NFR 3.1〜3.4 / ロールバック手順）
+    は README.md の新節「Guard Hook (PreToolUse) opt-in」で網羅する
+  - **統合スモークは Task 7 のスコープ**: 本 Task の手動 smoke は dry-run / real install /
+    re-run idempotency / IDD_CLAUDE_HOOKS_DIR override の 4 系統。`IDD_CLAUDE_HOOKS_ENABLED=`
+    未設定で watcher 起動して既存挙動と diff なしを確認するのは Task 7 の責務
+- **Requirements カバレッジ** (Task 5 _Requirements:_ より):
+  - Req 1.4 (sudo 要求を追加しない): 既存 sudo 警告ロジックには触れず、新規 helper も
+    `cp` / `mkdir -p` / `chmod +x` / `sed` のみで完結。sudo を一切要求しない
+  - Req 6.1 (user-scope ディレクトリ配置): `$HOME/.idd-claude/hooks` 既定で配置、`install.sh
+    --local` の `INSTALL_LOCAL` ブロック内のみで実行（`INSTALL_REPO` ブロックには配置しない）
+  - Req 6.2 (`repo-template/` 配下に追加しない): `LOCAL_WATCHER_DIR/hooks/` のみを source とし、
+    `REPO_TEMPLATE_DIR` 配下には一切触れない
+  - Req 6.3 (consumer repo `.claude/` 配下に配布しない): `INSTALL_REPO` ブロックの
+    `copy_template_file` / `copy_agents_rules` シーケンスには本 helper を呼び出さない
+  - NFR 1.2 (sudo 要求なし): 上記 Req 1.4 と同じ実装で担保
+  - NFR 2.1 (shellcheck 警告ゼロ): `shellcheck install.sh` 警告ゼロを確認
+  - NFR 4.1 (二重管理規約に新規追加なし): `repo-template/.claude/` には一切ファイルを追加しない
+  - NFR 4.2 (consumer repo `.claude/` 配下に新規配置なし): 同上
