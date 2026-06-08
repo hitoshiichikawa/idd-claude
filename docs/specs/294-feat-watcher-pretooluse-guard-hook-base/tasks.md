@@ -81,7 +81,7 @@
   - _Requirements: 1.4, 6.1, 6.2, 6.3, NFR 1.2, NFR 2.1, NFR 4.1, NFR 4.2_
   - _Depends: 1_
 
-- [ ] 6. `README.md` に「Guard Hook (PreToolUse) opt-in」節を追加
+- [x] 6. `README.md` に「Guard Hook (PreToolUse) opt-in」節を追加
   - opt-in 手順（`install.sh --local` 再実行 → `claude --version` 確認 → cron に
     `IDD_CLAUDE_HOOKS_ENABLED=true` を追加）
   - env var 一覧（`IDD_CLAUDE_HOOKS_ENABLED` / `IDD_CLAUDE_HOOKS_DIR` /
