@@ -37,7 +37,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 3.1, 3.2, 3.3, 3.4, 4.1, 4.2, 4.3_
   - _Depends: 1_
 
-- [ ] 3. watcher module (`guard-hook.sh`) を新規作成
+- [x] 3. watcher module (`guard-hook.sh`) を新規作成
   - `local-watcher/bin/modules/guard-hook.sh` を新規作成（既存 module 分割パターン踏襲）
   - `gh_log` / `gh_warn` / `gh_error` ロガー（`guard-hook:` prefix、`[$REPO]` 3 段書式）
   - `gh_is_enabled`: `IDD_CLAUDE_HOOKS_ENABLED` の **厳密 `true` 一致**判定（typo 安全側）
