@@ -66,7 +66,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 5.1, 5.2, 5.3, 5.4, 5.5, NFR 1.1, NFR 2.1_
   - _Depends: 3_
 
-- [ ] 5. `install.sh` に hook 一式の user-scope 配置を追加
+- [x] 5. `install.sh` に hook 一式の user-scope 配置を追加
   - `INSTALL_LOCAL` ブロックに `local-watcher/hooks/*` を `$IDD_CLAUDE_HOOKS_DIR`（既定
     `$HOME/.idd-claude/hooks`）に配置する処理を追加（既存 `copy_template_file` 再利用）
   - `idd-guard.sh` は `--executable` 付与
