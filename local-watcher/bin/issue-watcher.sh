@@ -3155,17 +3155,21 @@ run_per_task_implementer() {
 # 戻り値:
 #   0  = approve
 #   1  = reject
-#   2  = 異常終了（claude crash / parse 失敗 / RESULT 行欠落）
+#   2  = 異常終了（claude crash / parse 失敗 = 装飾起因 parse 失敗）
 #   3  = diff range 解決失敗（marker commit が単記でも連記でも見つからない / Issue #164）
+#   4  = ファイル不在で 1 回限定リトライ後も生成されず（Issue #296 Req 2 / Req 4.2 で導入）
 #   99 = quota 超過
 #
-# 戻り値 2 と 3 の使い分け（Issue #164 Req 4）:
-#   - rc=2: claude プロセスが起動した後の異常終了（呼び出し側は既存の
-#     `per-task-reviewer-error` カテゴリで `claude-failed` 付与）
-#   - rc=3: claude プロセス起動前に diff range が解決できなかった（marker 不在）。
+# 戻り値 2 / 3 / 4 の使い分け:
+#   - rc=2: claude プロセスが起動した後の異常終了（claude crash / RESULT 行欠落 = 装飾起因 parse 失敗）。
+#     呼び出し側は既存の `per-task-reviewer-error` カテゴリで `claude-failed` 付与。
+#   - rc=3: claude プロセス起動前に diff range が解決できなかった（marker 不在 / Issue #164 Req 4）。
 #     呼び出し側は専用の復旧手順付き Issue コメントで `claude-failed` 付与する。
 #     NFR 3.1 に従い「reflog で push 前 commit を回収」「1 commit = 1 task ID で分割」
 #     旨を運用者向けに 5 分以内に判断できる粒度で出力する。
+#   - rc=4: review-notes.md がファイル不在で 1 回限定リトライ後も生成されず（Issue #296 Req 2.3 /
+#     Req 4.2）。呼び出し側は `per-task-reviewer-missing-file` カテゴリで `claude-failed` 付与し、
+#     NFR 2.2 に従い装飾起因 parse 失敗（rc=2）と grep で区別可能な reason を出力する。
 #
 # Requirements: 3.1, 3.2, 3.3, NFR 2.1, NFR 2.2, NFR 2.3, Issue #164 Req 4.1, 4.2, 4.3, NFR 2.2
 run_per_task_reviewer() {
@@ -3197,50 +3201,76 @@ run_per_task_reviewer() {
   fi
 
   pt_log "task=$task_id reviewer start round=$round model=$REVIEWER_MODEL max-turns=$REVIEWER_MAX_TURNS range=${range_start:0:7}..${range_end:0:7}" >> "$LOG"
-  echo "--- per-task Reviewer 実行 (task=$task_id, round=$round) ---" >> "$LOG"
 
   local prompt
   prompt=$(build_per_task_reviewer_prompt "$task_id" "$range_start" "$range_end" "$round" "$prev_result")
 
-  local _qa_reset_file _qa_rc=0 _qa_ts _qa_stage_label
-  _qa_ts=$(date +%Y%m%d-%H%M%S)
-  _qa_reset_file="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-pt-rev-${task_id}-r${round}-${_qa_ts}"
-  _qa_stage_label="PerTask-Rev-${task_id}-r${round}"
-  qa_run_claude_stage "$_qa_stage_label" "$_qa_reset_file" -- \
-    claude \
-      --print "$prompt" \
-      --model "$REVIEWER_MODEL" \
-      --permission-mode bypassPermissions \
-      --max-turns "$REVIEWER_MAX_TURNS" \
-      --output-format stream-json \
-      --verbose \
-      >> "$LOG" 2>&1 || _qa_rc=$?
+  # Issue #296 Req 2.4 / NFR 3.1 / Req 4.2: per-task 経路でもファイル不在起因の再起動は
+  # 同一 round 内で最大 1 回まで（単発経路 run_reviewer_stage と対称）。
+  local attempt
+  local parsed=""
+  local parse_rc
+  for attempt in 1 2; do
+    if [ "$attempt" = "2" ]; then
+      pt_log "task=$task_id reviewer round=$round attempt=2 retry reason=missing-file" >> "$LOG"
+      echo "--- per-task Reviewer 実行 (task=$task_id, round=$round, retry attempt=2 / missing-file) ---" >> "$LOG"
+    else
+      echo "--- per-task Reviewer 実行 (task=$task_id, round=$round) ---" >> "$LOG"
+    fi
 
-  case "$_qa_rc" in
-    0)
-      rm -f "$_qa_reset_file"
-      ;;
-    99)
-      local _qa_epoch
-      _qa_epoch=$(cat "$_qa_reset_file")
-      qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label" "$_qa_epoch"
-      rm -f "$_qa_reset_file"
-      pt_log "task=$task_id reviewer end round=$round result=quota-exceeded" >> "$LOG"
-      return 99
-      ;;
-    *)
-      rm -f "$_qa_reset_file"
-      pt_log "task=$task_id reviewer end round=$round result=error reason=claude-exit-nonzero rc=$_qa_rc" >> "$LOG"
-      return 2
-      ;;
-  esac
+    local _qa_reset_file _qa_rc=0 _qa_ts _qa_stage_label
+    _qa_ts=$(date +%Y%m%d-%H%M%S)
+    _qa_reset_file="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-pt-rev-${task_id}-r${round}-a${attempt}-${_qa_ts}"
+    _qa_stage_label="PerTask-Rev-${task_id}-r${round}-a${attempt}"
+    qa_run_claude_stage "$_qa_stage_label" "$_qa_reset_file" -- \
+      claude \
+        --print "$prompt" \
+        --model "$REVIEWER_MODEL" \
+        --permission-mode bypassPermissions \
+        --max-turns "$REVIEWER_MAX_TURNS" \
+        --output-format stream-json \
+        --verbose \
+        >> "$LOG" 2>&1 || _qa_rc=$?
 
-  # review-notes.md を parse
-  local parsed
-  if ! parsed=$(parse_review_result "$notes_path"); then
-    pt_log "task=$task_id reviewer end round=$round result=error reason=parse-failed" >> "$LOG"
-    return 2
-  fi
+    case "$_qa_rc" in
+      0)
+        rm -f "$_qa_reset_file"
+        ;;
+      99)
+        local _qa_epoch
+        _qa_epoch=$(cat "$_qa_reset_file")
+        qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label" "$_qa_epoch"
+        rm -f "$_qa_reset_file"
+        pt_log "task=$task_id reviewer end round=$round attempt=$attempt result=quota-exceeded" >> "$LOG"
+        return 99
+        ;;
+      *)
+        rm -f "$_qa_reset_file"
+        pt_log "task=$task_id reviewer end round=$round attempt=$attempt result=error reason=claude-exit-nonzero rc=$_qa_rc" >> "$LOG"
+        return 2
+        ;;
+    esac
+
+    # review-notes.md を parse
+    parse_rc=0
+    parsed=$(parse_review_result "$notes_path") || parse_rc=$?
+    case "$parse_rc" in
+      0) break ;;
+      3)
+        if [ "$attempt" = "1" ]; then
+          pt_log "task=$task_id reviewer round=$round attempt=1 result=missing-file" >> "$LOG"
+          continue
+        fi
+        pt_log "task=$task_id reviewer end round=$round attempt=2 result=missing-file-after-retry" >> "$LOG"
+        return 4
+        ;;
+      *)
+        # rc=2: 装飾起因 parse 失敗（ファイルあり）。リトライしない（Req 5.3）。
+        pt_log "task=$task_id reviewer end round=$round attempt=$attempt result=error reason=parse-failed" >> "$LOG"
+        return 2
+        ;;
+    esac
+  done
 
   local result categories targets
   result=$(echo "$parsed" | cut -f1)
@@ -3759,6 +3789,14 @@ run_per_task_loop() {
                   pt_mark_diff_range_resolve_failed "$task_id" 3
                   return 1
                   ;;
+                4)
+                  # Issue #296 Req 2.3 / Req 4.2, 4.3 / NFR 2.2: ファイル不在 + 1 回限定リトライ後も生成されず
+                  # → `per-task-reviewer-missing-file` カテゴリで `claude-failed`（round=3 / Debugger 経由）。
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=missing-file-after-retry" >> "$LOG"
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) ファイル不在（リトライ後も未生成）→ claude-failed (per-task-reviewer-missing-file)" | tee -a "$LOG"
+                  mark_issue_failed "per-task-reviewer-missing-file" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+                  return 1
+                  ;;
                 *)
                   dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=error" >> "$LOG"
                   echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) 異常終了 → claude-failed" | tee -a "$LOG"
@@ -3796,6 +3834,13 @@ run_per_task_loop() {
             pt_mark_diff_range_resolve_failed "$task_id" 2
             return 1
             ;;
+          4)
+            # Issue #296 Req 2.3 / Req 4.2 / NFR 2.2: ファイル不在 + 1 回限定リトライ後も生成されず
+            # → `per-task-reviewer-missing-file` カテゴリで `claude-failed`（round=2）。
+            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) ファイル不在（リトライ後も未生成）→ claude-failed (per-task-reviewer-missing-file)" | tee -a "$LOG"
+            mark_issue_failed "per-task-reviewer-missing-file" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+            return 1
+            ;;
           *)
             echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) 異常終了 → claude-failed" | tee -a "$LOG"
             mark_issue_failed "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
@@ -3807,6 +3852,13 @@ run_per_task_loop() {
         # diff-range-resolve-failed (Issue #164) → 専用の復旧手順付き失敗ハンドラ
         echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) diff range 解決失敗 → claude-failed (diff-range-resolve-failed)" | tee -a "$LOG"
         pt_mark_diff_range_resolve_failed "$task_id" 1
+        return 1
+        ;;
+      4)
+        # Issue #296 Req 2.3 / Req 4.2 / NFR 2.2: ファイル不在 + 1 回限定リトライ後も生成されず
+        # → `per-task-reviewer-missing-file` カテゴリで `claude-failed`（round=1）。
+        echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) ファイル不在（リトライ後も未生成）→ claude-failed (per-task-reviewer-missing-file)" | tee -a "$LOG"
+        mark_issue_failed "per-task-reviewer-missing-file" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
         return 1
         ;;
       *)
@@ -4761,15 +4813,24 @@ extract_review_result_token() {
 #
 # 戻り値:
 #   0 = 抽出成功
-#   2 = ファイル無 / RESULT トークン欠落 / 値不正
+#   2 = ファイル有だが RESULT トークン欠落 / 値不正（装飾起因の parse 失敗）
+#   3 = ファイル不在（Reviewer subagent が Write 漏れ / Issue #296 で導入）
+#
+# rc=2 と rc=3 の使い分け（Issue #296 Req 1）:
+#   - rc=2 は #63 で確立した装飾耐性パースを経た上でも RESULT 行が抽出できなかった
+#     ケース（「装飾起因 parse 失敗」）。
+#   - rc=3 は `review-notes.md` 自体が存在しないケース（Reviewer subagent の Write 漏れ）。
+#     呼び出し側で 1 回限定リトライを試みる経路を発火させるためのシグナル。
 parse_review_result() {
   local path="$1"
   if [ ! -f "$path" ]; then
-    return 2
+    # Issue #296 Req 1.1: ファイル不在は装飾起因 parse 失敗（rc=2）とは区別して rc=3 で返す。
+    return 3
   fi
 
   local result
   if ! result=$(extract_review_result_token "$path"); then
+    # Issue #296 Req 1.2: ファイル存在下での RESULT 抽出失敗は装飾起因 parse 失敗として rc=2。
     return 2
   fi
   case "$result" in
@@ -4811,7 +4872,17 @@ parse_review_result() {
 # 戻り値:
 #   0 = approve
 #   1 = reject
-#   2 = 異常終了（claude crash / parse 失敗 / RESULT 行欠落）
+#   2 = 異常終了（claude crash / parse 失敗 / RESULT 行欠落 = 装飾起因 parse 失敗）
+#   4 = ファイル不在で 1 回限定リトライ後も生成されず（Issue #296 Req 2 で導入）
+#   99 = quota 超過
+#
+# Issue #296（ファイル不在検出 + 1 回限定リトライ）:
+#   - 初回起動後 `parse_review_result` が rc=3（ファイル不在）を返した場合、同一 round 内で
+#     Reviewer を 1 回だけ再起動して救済を試みる（Req 2.1, 2.4, NFR 3.1）。
+#   - 再起動でファイルが生成されれば通常経路（approve / reject）に合流する（Req 2.2）。
+#   - 再起動後も rc=3 のままなら本関数は rc=4 を返し、呼び出し側で `reviewer-missing-file`
+#     カテゴリの `claude-failed` 付与に分岐する（Req 2.3, NFR 2.2 で reason 区別が必須）。
+#   - rc=2（装飾起因 parse 失敗 = ファイルあり）経路はリトライ対象としない（Req 5.3）。
 run_reviewer_stage() {
   local round="$1"
   local prev_result="(none)"
@@ -4832,53 +4903,83 @@ run_reviewer_stage() {
   local prompt
   prompt=$(build_reviewer_prompt "$round" "$prev_result")
 
-  echo "--- Reviewer 実行 (round=$round) ---" >> "$LOG"
-  # Issue #66: Quota-Aware Watcher 経由で claude を起動。99 を受領した場合は
-  # quota 超過検出として呼び出し側（run_impl_pipeline）に伝搬する。
-  local _qa_reset_file_rv _qa_rc_rv=0 _qa_ts_rv _qa_stage_label_rv
-  _qa_ts_rv=$(date +%Y%m%d-%H%M%S)
-  _qa_reset_file_rv="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-reviewer-r${round}-${_qa_ts_rv}"
-  _qa_stage_label_rv="Reviewer-r${round}"
-  qa_run_claude_stage "$_qa_stage_label_rv" "$_qa_reset_file_rv" -- \
-    claude \
-      --print "$prompt" \
-      --model "$REVIEWER_MODEL" \
-      --permission-mode bypassPermissions \
-      --max-turns "$REVIEWER_MAX_TURNS" \
-      --output-format stream-json \
-      --verbose \
-      >> "$LOG" 2>&1 || _qa_rc_rv=$?
-  case "$_qa_rc_rv" in
-    0)
-      rm -f "$_qa_reset_file_rv"
-      ;;
-    99)
-      local _qa_epoch_rv
-      _qa_epoch_rv=$(cat "$_qa_reset_file_rv")
-      qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label_rv" "$_qa_epoch_rv"
-      rm -f "$_qa_reset_file_rv"
-      rv_log "round=$round result=quota-exceeded → needs-quota-wait" >> "$LOG"
-      # run サマリ: Reviewer quota（独立 context で起動したが quota 超過 / Req 3.1, 3.3）
-      rs_record_reviewer independent quota "$round"
-      return 99
-      ;;
-    *)
-      rm -f "$_qa_reset_file_rv"
-      rv_log "round=$round result=error reason=claude-exit-nonzero" >> "$LOG"
-      # run サマリ: Reviewer degraded（claude 異常終了で verdict 取得不能 / Req 3.4）
-      rs_record_reviewer degraded "" "$round"
-      return 2
-      ;;
-  esac
+  # Issue #296 Req 2.4 / NFR 3.1: ファイル不在起因の再起動は同一 round 内で最大 1 回まで。
+  # ループ展開はせず attempt=1（初回）/ attempt=2（リトライ）の 2 段固定で実装する。
+  local attempt
+  local parsed=""
+  local parse_rc
+  for attempt in 1 2; do
+    if [ "$attempt" = "2" ]; then
+      # 再起動前のログ（NFR 2.1: 単発経路でのファイル不在起因リトライを観測可能にする）
+      rv_log "round=$round attempt=2 retry reason=missing-file" >> "$LOG"
+      echo "--- Reviewer 実行 (round=$round, retry attempt=2 / missing-file) ---" >> "$LOG"
+    else
+      echo "--- Reviewer 実行 (round=$round) ---" >> "$LOG"
+    fi
 
-  # review-notes.md を parse
-  local parsed
-  if ! parsed=$(parse_review_result "$notes_path"); then
-    rv_log "round=$round result=error reason=parse-failed" >> "$LOG"
-    # run サマリ: Reviewer degraded（parse 失敗で verdict 取得不能 / Req 3.4）
-    rs_record_reviewer degraded "" "$round"
-    return 2
-  fi
+    # Issue #66: Quota-Aware Watcher 経由で claude を起動。99 を受領した場合は
+    # quota 超過検出として呼び出し側（run_impl_pipeline）に伝搬する。
+    local _qa_reset_file_rv _qa_rc_rv=0 _qa_ts_rv _qa_stage_label_rv
+    _qa_ts_rv=$(date +%Y%m%d-%H%M%S)
+    _qa_reset_file_rv="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-reviewer-r${round}-a${attempt}-${_qa_ts_rv}"
+    _qa_stage_label_rv="Reviewer-r${round}-a${attempt}"
+    qa_run_claude_stage "$_qa_stage_label_rv" "$_qa_reset_file_rv" -- \
+      claude \
+        --print "$prompt" \
+        --model "$REVIEWER_MODEL" \
+        --permission-mode bypassPermissions \
+        --max-turns "$REVIEWER_MAX_TURNS" \
+        --output-format stream-json \
+        --verbose \
+        >> "$LOG" 2>&1 || _qa_rc_rv=$?
+    case "$_qa_rc_rv" in
+      0)
+        rm -f "$_qa_reset_file_rv"
+        ;;
+      99)
+        local _qa_epoch_rv
+        _qa_epoch_rv=$(cat "$_qa_reset_file_rv")
+        qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label_rv" "$_qa_epoch_rv"
+        rm -f "$_qa_reset_file_rv"
+        rv_log "round=$round attempt=$attempt result=quota-exceeded → needs-quota-wait" >> "$LOG"
+        # run サマリ: Reviewer quota（独立 context で起動したが quota 超過 / Req 3.1, 3.3）
+        rs_record_reviewer independent quota "$round"
+        return 99
+        ;;
+      *)
+        rm -f "$_qa_reset_file_rv"
+        rv_log "round=$round attempt=$attempt result=error reason=claude-exit-nonzero" >> "$LOG"
+        # run サマリ: Reviewer degraded（claude 異常終了で verdict 取得不能 / Req 3.4）
+        rs_record_reviewer degraded "" "$round"
+        return 2
+        ;;
+    esac
+
+    # review-notes.md を parse
+    parse_rc=0
+    parsed=$(parse_review_result "$notes_path") || parse_rc=$?
+    case "$parse_rc" in
+      0) break ;;  # 抽出成功 → ループを抜けて通常経路へ
+      3)
+        # ファイル不在 → 1 回だけリトライ。リトライ後も rc=3 なら rc=4 で抜ける。
+        if [ "$attempt" = "1" ]; then
+          rv_log "round=$round attempt=1 result=missing-file" >> "$LOG"
+          continue
+        fi
+        rv_log "round=$round attempt=2 result=missing-file-after-retry" >> "$LOG"
+        # run サマリ: Reviewer degraded（ファイル不在で verdict 取得不能）
+        rs_record_reviewer degraded "" "$round"
+        return 4
+        ;;
+      *)
+        # rc=2: 装飾起因の parse 失敗（ファイルあり）。リトライしない（Req 5.3）。
+        rv_log "round=$round attempt=$attempt result=error reason=parse-failed" >> "$LOG"
+        # run サマリ: Reviewer degraded（parse 失敗で verdict 取得不能 / Req 3.4）
+        rs_record_reviewer degraded "" "$round"
+        return 2
+        ;;
+    esac
+  done
 
   local result categories targets
   result=$(echo "$parsed" | cut -f1)
@@ -6083,6 +6184,15 @@ run_impl_pipeline() {
                     rs_set_result needs-iteration
                     return 1
                     ;;
+                  4)
+                    # Issue #296 Req 2.3 / Req 4.3 / NFR 2.2: ファイル不在 + 1 回限定リトライ後も生成されず
+                    # → `reviewer-missing-file` カテゴリで `claude-failed`。装飾起因 parse 失敗
+                    # （reviewer-error）と grep で区別可能な reason を発行する。
+                    dbg_log "trigger=round2-reject issue=#${NUMBER} task=none round3 result=missing-file-after-retry" >> "$LOG"
+                    echo "❌ #$NUMBER: Reviewer round=3 ファイル不在（リトライ後も未生成）→ claude-failed (reviewer-missing-file)" | tee -a "$LOG"
+                    mark_issue_failed "reviewer-missing-file" "Debugger 経由の Reviewer round=3 が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+                    return 1
+                    ;;
                   *)
                     dbg_log "trigger=round2-reject issue=#${NUMBER} task=none round3 result=error" >> "$LOG"
                     echo "❌ #$NUMBER: Reviewer round=3 異常終了 → claude-failed" | tee -a "$LOG"
@@ -6123,6 +6233,13 @@ run_impl_pipeline() {
                 return 1
               fi
               ;;
+            4)
+              # Issue #296 Req 2.3 / Req 4.1 / NFR 2.2: ファイル不在 + 1 回限定リトライ後も生成されず
+              # → `reviewer-missing-file` カテゴリで `claude-failed`（round=2）。
+              echo "❌ #$NUMBER: Reviewer round=2 ファイル不在（リトライ後も未生成）→ claude-failed (reviewer-missing-file)" | tee -a "$LOG"
+              mark_issue_failed "reviewer-missing-file" "Reviewer round=2 が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+              return 1
+              ;;
             *)
               # round=2 reviewer error
               echo "❌ #$NUMBER: Reviewer round=2 異常終了 → claude-failed" | tee -a "$LOG"
@@ -6130,6 +6247,13 @@ run_impl_pipeline() {
               return 1
               ;;
           esac
+          ;;
+        4)
+          # Issue #296 Req 2.3 / Req 4.1 / NFR 2.2: ファイル不在 + 1 回限定リトライ後も生成されず
+          # → `reviewer-missing-file` カテゴリで `claude-failed`（round=1）。
+          echo "❌ #$NUMBER: Reviewer round=1 ファイル不在（リトライ後も未生成）→ claude-failed (reviewer-missing-file)" | tee -a "$LOG"
+          mark_issue_failed "reviewer-missing-file" "Reviewer round=1 が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+          return 1
           ;;
         *)
           # round=1 reviewer error → claude-failed + Issue コメント (要件 4.8)
