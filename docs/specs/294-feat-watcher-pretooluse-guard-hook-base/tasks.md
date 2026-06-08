@@ -25,7 +25,7 @@
   - shellcheck 警告ゼロ
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.1, 3.2, 3.3, 3.4, 3.5, 4.1, 4.2, 4.3, 4.4, NFR 2.1_
 
-- [ ] 2. test fixtures（29 件マトリクス）と driver スクリプトを作成
+- [x] 2. test fixtures（29 件マトリクス）と driver スクリプトを作成
   - `docs/specs/294-feat-watcher-pretooluse-guard-hook-base/test-fixtures/cases/*.json` を
     29 件作成（G0:5 / G1:6 / G2:5 / Allow:13）。Issue #294 本文の PoC 29 件マトリクスに準拠
   - `expected.tsv` で各ケースの期待 verdict（deny|allow）と reason 部分一致文字列を宣言
