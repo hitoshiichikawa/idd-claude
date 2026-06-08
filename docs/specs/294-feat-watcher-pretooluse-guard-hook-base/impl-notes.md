@@ -241,3 +241,81 @@
   - NFR 2.1 (shellcheck 警告ゼロ): `shellcheck install.sh` 警告ゼロを確認
   - NFR 4.1 (二重管理規約に新規追加なし): `repo-template/.claude/` には一切ファイルを追加しない
   - NFR 4.2 (consumer repo `.claude/` 配下に新規配置なし): 同上
+
+### Task 6
+
+- **採用方針**: `README.md` の **Feature Flag Protocol 節直後** に新節「Guard Hook (PreToolUse)
+  opt-in (#294)」を追加（既存「---」区切りで Feature Flag Protocol と「サブエージェント構成」
+  の中間に挿入）。tasks.md L84-99 の指示通り、(a) opt-in 手順 3 step / (b) env var 5 種の
+  一覧表 / (c) fail-closed 挙動 + exit code 11/12/13 表 / (d) 既知の限界（NFR 3.1〜3.4 全件）
+  / (e) ロールバック手順 / (f) Migration Note（consumer 配布が後続 Issue で別途承認・起票
+  必要 = Req 6.4 / 人間 Decision 2 Option A 承認条件）/ (g) 詳細ドキュメントへの相互参照 /
+  (h) merge 後の `install.sh --local` 再実行案内 の 8 サブ節で構成。
+- **重要判断**:
+  - **配置位置**: 「オプション機能一覧」表（L1273〜 opt-in 表）への 1 行追加だけでは
+    Req 6.4 / NFR 3.x の網羅文書化要件を満たせないため、独立した h2 節として配置。
+    Feature Flag Protocol 直後を採用した理由は (1) 両方とも opt-in 制で対比理解が容易 /
+    (2) その直後の「サブエージェント構成」が agent 詳細セクション群の始点で、運用機能
+    セクション群（Merge Queue 〜 Feature Flag Protocol）の末尾に並べると一貫性が出る
+  - **「オプション機能一覧」表への新規行は追加しない**: 既存表は env-var-based opt-in
+    （`MERGE_QUEUE_ENABLED` 等）が中心で、本機能の制御変数 `IDD_CLAUDE_HOOKS_ENABLED` は
+    同列に並ぶ性質を持つが、本 Task の指示範囲は「新節を追加」のみであり、表行追加は
+    spec 範囲外。表への追加は consumer 配布 Issue で本機能が「user-scope only の限界」を
+    解消した時点で改めて整理する方が混乱を避けられる（現状の表は user-scope only であることを
+    表現する列を持たないため、誤解を招く可能性がある）。確認事項として後述
+  - **env var 5 種の表**: design.md「Env Var Contract」表（`IDD_CLAUDE_HOOKS_ENABLED` /
+    `IDD_CLAUDE_HOOKS_DIR` / `IDD_CLAUDE_HOOKS_MIN_VERSION` / `IDD_HOOK_BASE_BRANCH` /
+    `IDD_HOOK_LOG`）と Owner / Default / Override 方法を 1:1 で対応させた。typo 安全側
+    （`True` / `1` / `yes` は無効）と user-scope 既定値（`$HOME/.idd-claude/hooks`）を
+    明示することで運用者が install.sh 再実行のタイミングを判断しやすくしている
+  - **exit code 11/12/13 表**: design.md Error Handling 節の rc 表をそのまま流用しつつ、
+    各 rc に対応する「復旧手順」列を運用者向けに 1 行で追加（11=Claude 更新 or env 緩める /
+    12=`install.sh --local` 再実行 / 13=hook 改変を疑い再 install）。既存 exit code（0/1/99）
+    との非干渉を明示する文も含めた（Req 1.3）
+  - **既知の限界 4 件**: NFR 3.1〜3.4 を 1:1 で箇条書き化。特に NFR 3.4 の「role/spec /
+    secrets guard / `bypassPermissions` 廃止は本初版に含まない」は、運用者が本機能を
+    導入後も既存 review ループは必要である旨を理解させるために強調表現で記述
+  - **Migration Note**: 「self-hosting 環境でのみ有効 / 他リポで idd-claude を install
+    している運用者は本機能を有効化しても当該 consumer repo のエージェントには適用されない」
+    旨を明確化（Req 6.4 / 6.2 / 6.3）。これにより consumer 配布 Issue が承認されるまでの
+    暫定期間における誤解を未然に防ぐ
+  - **言語方針**: 日本語ベース。env var 名 / コマンド名 / exit code 数値 / EARS keyword 等は
+    英語固定（CLAUDE.md「言語方針」と整合）。絵文字は `⚠️` 1 件のみ使用（既存
+    「⚠️ merge 後の再配置が必要」見出し慣習に倣う / Issue 趣旨に反しない）
+- **検証**:
+  - `bash docs/specs/294-feat-watcher-pretooluse-guard-hook-base/test-fixtures/run-tests.sh`
+    で **29/29 green**（hook 本体に regression なし。本 Task は README のみ変更）
+  - 真の h1 が 1 件のみ（`^# [^!#]` grep で line 1 の `# idd-claude` 以降は全て fenced
+    code block 内の bash comment）であること確認
+  - コードフェンス balance: `^```` のカウントが 258（偶数）で fence 開閉ペアが揃っていること確認
+  - 内部リンク健全性: 既存節を参照する `(#feature-flag-protocol-23-phase-4)` 形式の anchor
+    は本 Task では新規追加せず、既存節への明示的アンカーリンクは控えた（README 末尾の節は
+    位置変化なし）
+- **AC カバレッジ** (Task 6 _Requirements:_ より):
+  - Req 6.4 (consumer 配布の後続 Issue 必要性を明示): Migration Note 節で
+    「consumer 配布は後続 Issue で別途承認・起票される前提」を明文化
+  - NFR 1.3 (`IDD_CLAUDE_HOOKS_MIN_VERSION` を env で override 可能であることを明記):
+    env var 表で「上書き方法 = env で semver 文字列指定」を明示
+  - NFR 3.1 (top-level Bash 文字列のみ解析 / `sh -c` / `$(...)` / wrapper 内部は捕捉不能):
+    「既知の限界」1 項目目
+  - NFR 3.2 (bare `git push` で現ブランチが偶然 base と一致するケースは literal 解析不可):
+    「既知の限界」2 項目目
+  - NFR 3.3 (G0 の Bash 経由 mutation 検出は best-effort): 「既知の限界」3 項目目
+  - NFR 3.4 (本初版は role/spec / secrets guard / `bypassPermissions` 廃止を含まない):
+    「既知の限界」4 項目目
+- **残存課題**:
+  - **Task 7 (統合スモークテスト) は本 Task 外**: `install.sh --dry-run --local` の NEW 行確認、
+    使い捨て `$HOME` での実 install 検証、`IDD_CLAUDE_HOOKS_ENABLED=` 未設定での既存挙動
+    diff なし確認、`IDD_CLAUDE_HOOKS_ENABLED=true` + 偽 MIN_VERSION での exit 11 確認、
+    cron-like minimal PATH 依存解決確認は Task 7 のスコープ。本 Task は README 文書化のみ
+  - **consumer 配布 Issue の起票**: Req 6.4 の「人間 Decision 2 Option A 承認条件」として
+    consumer 配布の別 Issue 起票が必要だが、起票責務は PM / 人間運用者にあり Developer の
+    本 Task スコープ外（PR 本文の「確認事項」で別 Issue 起票が必要な旨を PjM が記載する想定）
+- **確認事項**:
+  - 「オプション機能一覧」表（L1273〜 opt-in 表）への新規行追加は本 Task では実施しなかった。
+    理由は (a) tasks.md L84-99 の指示は「新節を追加」のみで表行追加を含まない /
+    (b) 本機能は user-scope only の初版で、既存表は consumer repo 適用前提の env-var-based
+    opt-in を一覧化する性質を持つため、本機能を同列に並べると「user-scope only」という
+    限界が運用者に伝わりにくくなる可能性がある。consumer 配布 Issue が完了した時点で
+    「opt-in」表に正規行として追加する方が運用者の認知負荷が低い。PR 本文「確認事項」で
+    Architect / 人間判断を仰ぐことを推奨
