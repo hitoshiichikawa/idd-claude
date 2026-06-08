@@ -5254,6 +5254,179 @@ cd ~/.idd-claude && git pull && ./install.sh --local
 
 ---
 
+## Guard Hook (PreToolUse) opt-in (#294)
+
+idd-claude の watcher が起動する Claude Code エージェント（Triage / PM / Architect / Developer
+/ Reviewer / Iteration / Security Review 等）に対し、Claude Code の `PreToolUse` フック機構を
+介して **base ブランチ宛 push**・**無条件 force push**・**guard install dir の自己改変** を
+機械的に deny する初版です（G0 + G1 + G2 同一初版）。違反を事後 Reviewer ループで検出する
+従来パターン（1 違反 = Developer + Reviewer 1 サイクル分の turn 浪費）を、実行前点で潰します。
+
+> **注**: 本機能は **user-scope 専用配布** の初版です（`~/.idd-claude/hooks/` 等）。
+> `repo-template/` 経由で consumer repo に配布する適用は本 Issue では扱わず、**後続の別 Issue
+> として起票が必要**です（Req 6.4 / 人間 Decision 2 の承認条件）。下記「Migration Note」
+> 節を参照。
+
+### 既定値と opt-in 制
+
+本機能は **既定 OFF** です（`IDD_CLAUDE_HOOKS_ENABLED` 環境変数の値が文字列 `true` と
+**完全一致** したときのみ有効。未設定 / 空文字 / `false` / `True` / `1` 等はすべて OFF として
+解釈される typo 安全側設計）。OFF のときは watcher が claude CLI を起動するときの引数列・
+環境変数集合は本機能導入前と **完全に同一** で、既存 cron 登録文字列・既存 env var 名・
+既存ラベル名・既存 exit code 意味は不変です（Req 1.1〜1.3 / NFR 1.1）。
+
+### opt-in 手順
+
+1. **hook 一式を user-scope に配置**: `install.sh --local` を再実行する
+   （`local-watcher/hooks/idd-guard.sh` / `idd-guard-settings.json` / `README.md` の 3 ファイルが
+   `$HOME/.idd-claude/hooks/` 配下に配置され、`settings.json` の `__IDD_HOOK_PATH__`
+   placeholder は絶対パスに sed 置換される）
+
+   ```bash
+   cd ~/.idd-claude && git pull && ./install.sh --local
+   ```
+
+2. **`claude --version` を確認**: `2.1.167` 以上であること（PoC 検証バージョン。
+   `IDD_CLAUDE_HOOKS_MIN_VERSION` env で override 可能）
+
+   ```bash
+   claude --version
+   ```
+
+   不足する場合は `npm install -g @anthropic-ai/claude-code` 等で更新するか、`IDD_CLAUDE_HOOKS_MIN_VERSION`
+   を緩めてください。
+
+3. **cron / launchd の env に `IDD_CLAUDE_HOOKS_ENABLED=true` を追加**
+
+   cron 例:
+
+   ```cron
+   */2 * * * * REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo \
+     IDD_CLAUDE_HOOKS_ENABLED=true \
+     $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+   ```
+
+   launchd の場合は plist の `EnvironmentVariables` に `IDD_CLAUDE_HOOKS_ENABLED=true` を追記。
+
+4. 次サイクルから guard 有効。違反検知時は claude 側に block reason が返り、エージェントが
+   別経路を取ります。
+
+### 環境変数一覧
+
+| Var | スコープ | 既定 | 上書き方法 | 用途 |
+|---|---|---|---|---|
+| `IDD_CLAUDE_HOOKS_ENABLED` | watcher 全体 | （未設定 = 無効） | env / cron / launchd の env に `true` を **lowercase 厳密一致** で記述 | opt-in gate。`True` / `1` / `yes` / typo はすべて無効として解釈される（安全側） |
+| `IDD_CLAUDE_HOOKS_DIR` | watcher / install / hook | `$HOME/.idd-claude/hooks` | env で絶対パス指定 | guard hook の install dir。watcher・hook・install.sh が同名 env を共有し、3 経路で一貫した dir 解決を行う |
+| `IDD_CLAUDE_HOOKS_MIN_VERSION` | watcher（preflight） | `2.1.167`（PoC 検証バージョン） | env で semver 文字列指定 | preflight が `claude --version` と比較する最低 version。下回ると exit 11 で fail-closed |
+| `IDD_HOOK_BASE_BRANCH` | hook（内部用） | `$BASE_BRANCH` の値（watcher が export） | 通常変更不要。watcher が preflight 通過後に 1 度だけ `export` する | G1 で deny 対象とする base ブランチ名。claude プロセス → PreToolUse hook プロセスへ継承される |
+| `IDD_HOOK_LOG` | hook（任意） | （未設定 = no-op） | env で絶対パス指定 | 設定時、hook が判定結果を 1 行 append（運用観察用） |
+
+### fail-closed 挙動と exit code
+
+`IDD_CLAUDE_HOOKS_ENABLED=true` の状態で watcher が起動準備するとき、watcher は claude CLI 起動
+**前** に preflight を実行します。preflight に失敗した場合は **黙って fallback せず非ゼロ
+exit** で watcher を停止します（Req 5.5 / NFR 1.1 の silent fallback 禁止）。
+
+| Exit Code | 理由 | 復旧手順 |
+|---|---|---|
+| **11** | claude CLI version が `IDD_CLAUDE_HOOKS_MIN_VERSION` 未満 | Claude Code を更新（`npm install -g @anthropic-ai/claude-code`）、または `IDD_CLAUDE_HOOKS_MIN_VERSION` を env で緩める |
+| **12** | hook install dir が不完全（`idd-guard.sh` / `idd-guard-settings.json` のいずれかが不在 / 実行不可） | `install.sh --local` を再実行して user-scope 配置を完成させる |
+| **13** | smoke test 失敗（hook が固定 fixture JSON に対して期待する allow を返さない） | stderr に hook stdout/stderr 末尾が添えられる。hook script / settings.json の改変を疑い、`install.sh --local` を再実行 |
+
+> 既存 exit code（`run_per_task_implementer` の 0 / 1 / 99 等）の意味は本機能導入により
+> **変更しません**（Req 1.3）。新規 exit code 11 / 12 / 13 は guard hook preflight 専用です。
+
+### deny 時のエージェント側挙動
+
+guard が deny したとき、hook は decision JSON `{"decision":"block","reason":"..."}` を返し、
+Claude Code は当該 Bash / Edit / Write / NotebookEdit ツール呼び出しを実行前にブロックします。
+エージェントは block reason をフィードバックとして受け取り、別経路（例: `git push --force-with-lease`
+への切替、別ブランチへの push）を試行します。watcher 自身は停止せず、当該サイクルは継続
+します。
+
+deny reason の prefix（運用観察用）:
+
+- `base branch push denied: ...` — G1（base ブランチ宛 push）
+- `unconditional force push denied: use --force-with-lease` — G2（無条件 force push）
+- `guard install dir self-mutation denied: ...` — G0（install dir 自己改変）
+
+### 既知の限界（NFR 3.1〜3.4）
+
+本初版は **literal 解析ベースの best-effort 機械 deny** であり、以下の限界があります。これらは
+意図的なスコープ外として PoC / 設計段階で明示されており、後続 Issue での拡張対象です。
+
+- **top-level Bash 文字列のみ解析する（NFR 3.1）**: `sh -c "git push ..."` / `$(git push ...)` /
+  シェル関数 / wrapper script 内部の push は **literal 解析では捕捉できません**。
+  エージェントが意図的に隠す経路を作ると bypass できる点を理解してください
+- **bare `git push`（引数なし）で現ブランチが偶然 base と一致するケースは literal 解析不可
+  （NFR 3.2）**: `git push` に refspec が無い場合、push 先 ref は実行時の current branch /
+  `branch.<name>.merge` 設定で動的に決まるため、hook 側では確定的に判定できません。
+  運用上は watcher が `claude/issue-*` ブランチで作業する前提のため、通常は base が
+  current branch にならない構造で回避できます
+- **G0 の Bash 経由 mutation 検出は best-effort（NFR 3.3）**: `rm` / `mv` / `sed -i` / `chmod` /
+  リダイレクト / `tee` 等のキーワードと install dir リテラルの両方を含む場合のみ deny
+  します。`bash -c "$(echo r m /path)"` のような難読化や、`cd $hooks_dir; rm idd-guard.sh`
+  のような複合コマンドは全件捕捉を保証しません。Edit / Write / NotebookEdit 経由の自己改変は
+  path 一致で robust に deny されます
+- **本初版は role/spec guard / secrets guard / `bypassPermissions` 廃止を含みません（NFR 3.4）**:
+  Reviewer の read-only 強制、`.env` / `*.pem` 等の staged path ブロック、`--permission-mode
+  bypassPermissions` の廃止と全 tool allowlist 化は **後続 Issue で別途承認・実装**されます。
+  本 Issue は guard の最初の機械化レイヤを user-scope 専用で先行検証することが目的です
+
+### ロールバック（即時 opt-out）
+
+`IDD_CLAUDE_HOOKS_ENABLED` を env から外す（または `true` 以外の値に変更する）だけで、
+次サイクルから本機能は完全に無効化されます。hook ファイル削除は **不要** です（残置しても
+opt-out 時は一切参照されない）。
+
+cron 例（opt-out 戻し）:
+
+```cron
+*/2 * * * * REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo \
+  $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+```
+
+env var を 1 行外すだけで本機能導入前と user-observable に同一の挙動に戻ります（Req 1.1〜1.3
+/ NFR 1.1）。
+
+### Migration Note（consumer repo への配布は後続 Issue）
+
+**本初版は user-scope 専用配布です**（`$HOME/.idd-claude/hooks/` 配下のみ。
+`repo-template/.claude/` / consumer repo の `.claude/` 配下には一切ファイルを追加しません /
+Req 6.2 / 6.3 / NFR 4.1 / 4.2）。consumer repo の watcher 配下で hook を有効化する適用
+（`repo-template/` 経由の自動配布 / consumer 側 settings 合成等）は **後続の別 Issue として
+独立に承認・起票される前提** です（Req 6.4 / 人間 Decision 2 Option A の承認条件として明示）。
+
+self-hosting 環境（idd-claude 自身の watcher 配下）では本節の opt-in 手順で本機能を有効化
+できますが、**他リポジトリで idd-claude を install している運用者は本機能を有効化しても
+当該 consumer repo のエージェントには適用されません**（user-scope の hook は idd-claude
+self-hosting の watcher 経由でのみ参照される）。後続 Issue 承認後に consumer 配布経路が
+整備されるまで待つか、user-scope での先行検証にとどめてください。
+
+### 詳細ドキュメント
+
+- 配置先・env var 契約・検査範囲の短文: `local-watcher/hooks/README.md`（hook 本体と同梱）
+- hook script 本体: `local-watcher/hooks/idd-guard.sh`
+- settings テンプレ: `local-watcher/hooks/idd-guard-settings.json`
+- watcher 配線モジュール: `local-watcher/bin/modules/guard-hook.sh`
+- 設計詳細: `docs/specs/294-feat-watcher-pretooluse-guard-hook-base/design.md`
+- 29 件テストマトリクス: `docs/specs/294-feat-watcher-pretooluse-guard-hook-base/test-fixtures/`
+- 起源: [Issue #294](https://github.com/hitoshiichikawa/idd-claude/issues/294)
+
+### ⚠️ merge 後の再配置が必要
+
+他の watcher 機能と同様、本機能の PR を merge しただけでは `$HOME/bin/issue-watcher.sh` /
+`$HOME/.idd-claude/hooks/` 配下は古いままです。反映するには:
+
+```bash
+cd ~/.idd-claude && git pull && ./install.sh --local
+```
+
+`install.sh --local` 再実行で watcher 本体・modules・hook 一式が user-scope に同期されます
+（既存配置は `.bak` 退避や cmp ベースの SKIP 判定で保護されるため冪等）。
+
+---
+
 ## サブエージェント構成
 
 | 役割 | 目的 | 主なツール | 推奨モデル | 起動条件 |
