@@ -319,3 +319,71 @@
     限界が運用者に伝わりにくくなる可能性がある。consumer 配布 Issue が完了した時点で
     「opt-in」表に正規行として追加する方が運用者の認知負荷が低い。PR 本文「確認事項」で
     Architect / 人間判断を仰ぐことを推奨
+
+### Task 7
+
+- **採用方針**: 本 Task は新規コード変更を伴わず、Task 1〜6 の成果物に対する **6 系統の
+  統合スモークテスト + 結果記録** のみで完結させた。tasks.md L101-115 の指示通り 6 件を
+  順次実行し、いずれも期待通りの結果が得られたため、コード/ドキュメント側の追加修正は
+  不要と判断した（既存 commit を温存）。
+- **重要判断**:
+  - **smoke 3 (opt-out diff なし) は「タイムスタンプ以外の content 一致」を判定基準とした**:
+    watcher の通常ログ出力には ISO 8601 timestamp prefix が必ず付くため、`IDD_CLAUDE_HOOKS_ENABLED`
+    未設定の場合と `=false` 明示の場合の 2 回連続実行では timestamp 差分が必ず diff に
+    出る。本 spec の Req 1.1 / 1.2 / NFR 1.1 が要求するのは「guard hook を参照する設定が
+    一切付与されないこと」「同一の引数列・同一の環境変数集合で claude CLI を起動すること」
+    であり、timestamp 差分は本質的に regression ではない。両 run とも guard-hook 関連の
+    log 行（`guard-hook:` prefix / preflight 関連メッセージ）が **一切出現していない**
+    ことが対照確認の本質であり、それを確認できた。
+  - **smoke 5 (cron-like minimal PATH) の評価範囲**: `env -i HOME=$HOME PATH=/usr/bin:/bin
+    bash -c ...` の素 PATH では `gh / jq / flock / git` 4 件が `/usr/bin` 配下で解決され、
+    `claude` は素 PATH 配下に存在しない（`~/.local/bin/claude`）。`local-watcher/bin/issue-watcher.sh`
+    冒頭 L37 の `export PATH="$HOME/.local/bin:/usr/local/bin:/opt/homebrew/bin:$PATH"`
+    prepend を経由した時のみ `claude` が解決される設計を再確認した。watcher prepend を
+    再現した検証では 5 CLI 全件が解決できる（cron / launchd 環境の依存解決契約を満たす）。
+- **検証結果（6 smoke、すべて期待通り）**:
+  1. **`install.sh --dry-run --local` の hook 配置確認**: 使い捨て `$HOME` で実行し、
+     `[DRY-RUN] NEW       <tmp_home>/.idd-claude/hooks/idd-guard.sh (chmod +x)` /
+     `[DRY-RUN] NEW       <tmp_home>/.idd-claude/hooks/idd-guard-settings.json (substitute __IDD_HOOK_PATH__ → ...)` /
+     `[DRY-RUN] NEW       <tmp_home>/.idd-claude/hooks/README.md` の 3 行が出現することを確認。
+     placeholder 置換予定が note 付きで明示されることも確認
+  2. **使い捨て `$HOME` での実 `install.sh --local`**: tmp HOME で実行し、`<tmp>/.idd-claude/hooks/`
+     配下に 3 ファイル配置（`idd-guard.sh` 実行ビット付き / `idd-guard-settings.json` /
+     `README.md`）を確認。`jq -r '.hooks.PreToolUse[0].hooks[0].command'` で settings.json の
+     command が `<tmp>/.idd-claude/hooks/idd-guard.sh` の絶対パスに置換されていることを確認。
+     残存 `__IDD_HOOK_PATH__` placeholder 件数 `grep -c '__IDD_HOOK_PATH__'` は **0** を確認
+  3. **`IDD_CLAUDE_HOOKS_ENABLED=` 未設定 vs `=false` の watcher 起動差分**: 偽 origin
+     remote を持つ tmp repo で watcher を 2 回実行し、`diff -u` の結果が timestamp 行
+     （行先頭の `[YYYY-MM-DD HH:MM:SS]`）以外で **content 完全一致**することを確認。両 run
+     とも `guard-hook:` prefix の log 行が一切出現せず、preflight も実行されない（opt-in
+     制が正しく gate されている）。exit code はいずれも 1（GraphQL 404 by `owner/test` 偽
+     REPO 起因 / guard 由来ではない）で一致
+  4. **`IDD_CLAUDE_HOOKS_ENABLED=true` + `IDD_CLAUDE_HOOKS_MIN_VERSION=99.0.0` で exit 11**:
+     `exit=11` を観測。stderr に次の 2 行が出力されることを確認:
+     - `guard-hook: ERROR: claude version 2.1.168 は最小要件 99.0.0 を満たしません`
+     - `guard-hook: ERROR: Claude Code を 99.0.0 以上に更新するか、IDD_CLAUDE_HOOKS_MIN_VERSION を緩めてください`
+     fail-closed が黙って fallback せず、運用者向け復旧ヒントも含まれることを確認
+     （Req 5.1, 5.2, 5.5）
+  5. **cron-like minimal PATH での依存解決**: `env -i HOME=$HOME PATH=/usr/bin:/bin bash -c
+     'command -v claude gh jq flock git'` 直接実行では `gh / jq / flock / git` の 4 件が
+     `/usr/bin` 配下で解決される。`claude` は素 PATH 配下に存在しないが、watcher 起動時
+     L37 の PATH prepend を経由すれば `~/.local/bin/claude` で解決される設計を再確認。
+     watcher prepend を再現した `export PATH="$HOME/.local/bin:$HOME/bin:$PATH"` 付き
+     再実行では 5 CLI 全件が解決できることを確認
+  6. **`run-tests.sh` で 29/29 green**: `bash docs/specs/294-feat-watcher-pretooluse-guard-hook-base/test-fixtures/run-tests.sh`
+     を再実行し、G0:5 / G1:6 / G2:5 / Allow:13 の合計 29 ケースすべて PASS、最終行
+     `29/29 green` を確認（Task 6 の README 編集および本 Task のスモーク経由でも hook 本体に
+     regression なし）
+- **AC カバレッジ** (Task 7 _Requirements:_ より):
+  - Req 1.1 / 1.2 (opt-out 時の完全互換): smoke 3 で unset / =false の content 一致を確認
+  - Req 5.1 / 5.2 (claude version 比較 + 未満時 exit 11): smoke 4 で exit=11 と stderr 確認
+  - Req 5.3 / 5.4 (smoke test + 失敗時 exit): smoke 4 で先に version 不足を捕捉したため
+    smoke test 経路の検証は本 Task では未実行だが、Task 3 の inline smoke で rc=13 経路
+    （`gh_preflight` smoke 失敗）は確認済み（先行 task の verification で吸収）
+  - Req 5.5 (silent fallback なし): smoke 4 で exit 11 が確実に発生し fallback なしを確認
+  - Req 6.1 (user-scope 配置): smoke 1, 2 で `<tmp_home>/.idd-claude/hooks/` 配下配置を確認
+- **残存課題**: 本 Task で発見した bug / 修正対象は **なし**。Task 1〜6 の成果物が本初版
+  spec を満たしていることを 6 系統 smoke で確認した
+- **確認事項**: なし
+
+STATUS: complete
