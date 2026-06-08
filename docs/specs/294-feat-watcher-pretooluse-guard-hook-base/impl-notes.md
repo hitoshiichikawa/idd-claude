@@ -54,3 +54,49 @@
 - **残存課題**: 本 fixture は hook の単体テストであり、watcher の `--settings` 注入経路や
   install.sh の placeholder 置換などは Task 4/5 で別途検証する。本 driver は Task 7 の統合
   smoke でも `bash docs/specs/.../run-tests.sh` として再利用される前提。
+
+### Task 3
+
+- **採用方針**: design.md 「Watcher Module: guard-hook.sh」節の関数 4 + ロガー 3 件 を、
+  既存 `stage-a-verify.sh` / `scaffolding-health.sh` と同形式の 3 段 prefix ロガー
+  （`[YYYY-MM-DD HH:MM:SS] [$REPO] guard-hook:`）と共に `local-watcher/bin/modules/guard-hook.sh`
+  に集約。本体への `source` 経由で読み込まれる前提（単体起動しない / `set -euo pipefail` は
+  本体側宣言を流用）。本モジュールは preflight と引数構築のみを責務とし、hook の評価ロジック
+  は `local-watcher/hooks/idd-guard.sh`（Task 1 で導入済み）に閉じる単一責任構造。
+- **重要判断**:
+  - **semver 比較は数値ベース**で実装（辞書順だと `2.1.167` < `2.1.99` になるため）。
+    `gh_compare_semver` は `.` で 3 セグメント split し、各セグメント先頭の整数だけ取り出して
+    数値比較する（`2.1.167-beta` 等の suffix 付きにも保守的に対応）。戻り値 0/1/2 で
+    `pass / fail / parse 失敗` を分離。
+  - **claude --version の出力 parse は awk で先頭の `<num>.<num>` を抽出**する設計。`claude
+    2.1.167` / `2.1.167 (Claude Code)` 等の代表的書式をどちらも吸収できることを smoke で
+    確認した。抽出失敗は rc=11 で fail-closed（運用者向けヒント付き）。
+  - **smoke test は jq に依存しない**設計を選択。hook 本体側 (idd-guard.sh) が jq 必須で
+    fail-closed する独立レイヤを持つため、watcher 側は `grep '"decision"'` リテラル検査のみで
+    十分（allow 期待 = decision フィールド不在 = grep 不一致）。これにより watcher の preflight
+    が jq 不在環境でも正しく動作する（hook 起動時は hook 本体が独立に fail-closed）。
+  - **CLAUDE_HOOK_ARGS の SC2034 抑止**: 同変数は Task 4 で `issue-watcher.sh` の全 claude 起動箇所
+    から `"${CLAUDE_HOOK_ARGS[@]}"` として展開される。本モジュール単体では消費側が無いため
+    shellcheck が unused 警告を出す。これは設計上の必然なので、行単位の `# shellcheck disable=SC2034`
+    で抑止（`.shellcheckrc` への追加はしない方針＝既存 hook 側 SC2088/SC2016 抑止と同じ哲学）。
+  - **install dir の executable 検査も rc=12 配下に含める**。設計の rc=12（install dir 不完全）
+    は「ファイル不在」と「ファイル存在するが実行できない」の双方を含む実装にした。後者は
+    install.sh のバグや手動権限変更で発生し得、smoke test が exec 失敗で rc=13 に化ける前に
+    rc=12 で fail-fast する方が運用者にとって recovery hint が明確になる。
+- **検証**:
+  - `shellcheck local-watcher/bin/modules/guard-hook.sh` 警告ゼロ
+  - 関数別の inline smoke で `gh_is_enabled` typo 安全 / `gh_resolve_dir` 末尾 slash 除去 /
+    `gh_compare_semver` の境界 6 ケース（equal / patch ±1 / minor ±1 / major ±1）/
+    `gh_build_args` の opt-in/out 配列構築をすべて pass 確認
+  - `gh_preflight` の rc 経路を 4 系統で確認: pass / rc=11 (version unmet) / rc=12
+    (install dir or exec missing) / rc=13 (smoke test deny)。stderr 出力にも復旧ヒント
+    （`install.sh --local 再実行` / `Claude Code を更新` 等）が含まれることを目視確認
+  - Task 2 の `run-tests.sh` を再実行し 29/29 green（hook 側 regression なし）
+- **残存課題**:
+  - 本モジュールは Task 4 (`issue-watcher.sh` への配線) で初めて生きる。`REQUIRED_MODULES`
+    末尾追加 + 起動初期化フェーズでの `gh_is_enabled && gh_preflight || exit $?` 連鎖 +
+    `export IDD_HOOK_BASE_BRANCH="$BASE_BRANCH"` + `gh_build_args` 呼び出しが Task 4 のスコープ
+  - install.sh への hook 配置（Task 5）が未済の環境では preflight が rc=12 で fail-closed する。
+    これは仕様通り（NFR 1.1 の silent fallback 禁止）だが、Task 5 完了までは watcher を
+    `IDD_CLAUDE_HOOKS_ENABLED=true` で起動できない点を運用者に明示する必要がある（README は
+    Task 6 で整備）
