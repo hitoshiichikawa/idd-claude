@@ -151,6 +151,16 @@ fresh な Claude session で Implementer が起動され、各タスクの turn 
 > 是正で対処することが推奨される（詳細な対応優先順は README「`per-task-implementer-failed` /
 > `error_max_turns` 対応」節を参照）。
 
+### Architect 自己レビュー時の検出観点との相互参照（#292）
+
+本節（タスク生成段階の粒度指針）と対になる **Architect 自己レビュー段階の検出観点** は、
+[`design-review-gate.md`](./design-review-gate.md) の「Task turn 予算 sanity check（過大 task
+検出）」節を参照してください。同節では本節の粒度指針を踏まえた上で、`tasks.md` 確定直前に
+点検すべき 5 つの検出シグナル（異種責務同居 / 兄弟比突出 / 新規ファイル件数の目安 / 重い子タスク
+同居 / turn コスト密度差）と是正方針（責務不変の粒度分割）を観点として列挙しています。生成
+（本節）と自己レビュー検出（`design-review-gate.md` 側）の双方を参照することで、過大 task の
+発生確率を運用前に下げられます。
+
 ## 構造化 verify ブロック（stage-a-verify gate の input 契約）
 
 stage-a-verify gate (#125) は Stage A（Developer 実装）完了直前に、`tasks.md` 中の
