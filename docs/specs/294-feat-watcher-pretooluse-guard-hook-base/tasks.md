@@ -98,7 +98,7 @@
   - ロールバック（env を外せば即 opt-out）
   - _Requirements: 6.4, NFR 1.3, NFR 3.1, NFR 3.2, NFR 3.3, NFR 3.4_
 
-- [ ] 7. 統合スモークテスト・手動検証
+- [x] 7. 統合スモークテスト・手動検証
   - `install.sh --dry-run --local` で hook 配置が NEW/SKIP/OVERWRITE 行に現れる
   - 使い捨て `$HOME` で `install.sh --local` 実行 → 配置済みファイル存在 + settings.json の
     placeholder 置換確認
