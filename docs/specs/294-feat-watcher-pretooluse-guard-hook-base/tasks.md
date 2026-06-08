@@ -49,7 +49,7 @@
   - shellcheck 警告ゼロ
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 5.1, 5.2, 5.3, 5.4, 5.5, NFR 1.1, NFR 1.3, NFR 2.1_
 
-- [ ] 4. `issue-watcher.sh` を guard hook 対応に編集
+- [x] 4. `issue-watcher.sh` を guard hook 対応に編集
   - Config ブロックに env var の default 宣言を追加（`IDD_CLAUDE_HOOKS_ENABLED` /
     `IDD_CLAUDE_HOOKS_DIR` / `IDD_CLAUDE_HOOKS_MIN_VERSION=2.1.167` / `IDD_HOOK_LOG`）。
     **既存 env var 名・既定値は一切変更しない**
