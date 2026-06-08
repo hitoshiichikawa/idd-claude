@@ -296,7 +296,20 @@ _worktree_ensure() {
 # 副作用: 当該 worktree が origin/$BASE_BRANCH の最新コミットに head=detached、
 #   tracked / untracked / ignored すべて消去される
 #
-# Req 3.4
+# Issue #295: root 所有 docker bind-mount 生成物（`frontend/node_modules/` /
+# `frontend/.next/` 等）が残った場合、`git clean -fdx` が EACCES で非 0 終了する。
+# 旧実装は stderr を `/dev/null` に握り潰しており、失敗理由が SLOT_LOG に残らず
+# 無関係な次 Issue に `claude-failed` が付く偽陽性が発生していた。本改修は:
+#   - 失敗時 stderr を SLOT_LOG（呼び出し元サブシェルが stderr→tee で SLOT_LOG に
+#     合流させているため、stderr を素通しすれば自動的に SLOT_LOG に追記される）に
+#     残す（Req 1.1, 1.2, 1.3）。成功時は stdout/stderr とも従来どおり静か（Req 1.4）
+#   - `WORKTREE_DOCKER_CLEANUP_ENABLED=true` opt-in 時のみ docker 経路で root 所有
+#     artifact を削除する escalation を追加（Req 2 / Req 3）
+#   - docker 経路が使えない／失敗した場合は `git worktree remove --force` →
+#     `git worktree add --detach` の fallback で worktree を作り直す（Req 4）
+#   - 通常ケース（root 所有 artifact なし）は追加処理を起動しない（Req 5.1）
+#
+# Req 1.1, 1.2, 1.3, 1.4, 3.4, 5.1, 5.2, 5.3, 5.4
 _worktree_reset() {
   local wt="$1"
   if [ ! -d "$wt" ]; then
@@ -313,14 +326,173 @@ _worktree_reset() {
   # `cd "$REPO_DIR"; git fetch origin --prune`）で 1 回だけ実行済みであり、slot worktree は
   # その origin/$BASE_BRANCH 参照を共有して読むため、per-slot fetch なしでも reset 起点は
   # 確保できる（親 fetch から slot 起動までの遅延による ref stale は許容範囲）。
-  # 1. detached HEAD を origin/$BASE_BRANCH に強制移動
-  if ! git -C "$wt" reset --hard "origin/${BASE_BRANCH}" >/dev/null 2>&1; then
+  #
+  # 1. detached HEAD を origin/$BASE_BRANCH に強制移動。
+  #    Issue #295: stderr は SLOT_LOG に残すため `2>/dev/null` を外す（Req 1.1, 1.3）。
+  #    成功時 git reset --hard は stderr に書かないため標準出力量は増えない（Req 1.4）。
+  if ! git -C "$wt" reset --hard "origin/${BASE_BRANCH}" >/dev/null; then
+    echo "[$(date '+%F %T')] worktree-reset: git reset --hard failed (wt=$wt)" >&2
     return 1
   fi
-  # 2. untracked + ignored を消去（前回 Issue の build artifact / node_modules を残さない）
-  if ! git -C "$wt" clean -fdx >/dev/null 2>&1; then
+  # 2. untracked + ignored を消去（前回 Issue の build artifact / node_modules を残さない）。
+  #    EACCES 起因の失敗を検出して escalated cleanup に分岐するため、stderr を tmp file に
+  #    キャプチャしてから内容を SLOT_LOG（>&2 経由）にも転写する。
+  local clean_stderr=""
+  clean_stderr="$(mktemp -t worktree-reset-clean-XXXXXX.err 2>/dev/null || echo "")"
+  local clean_rc=0
+  if [ -n "$clean_stderr" ]; then
+    git -C "$wt" clean -fdx >/dev/null 2>"$clean_stderr" || clean_rc=$?
+  else
+    # mktemp 失敗（極端な disk full 等）の保険: 直接 stderr 素通しに fallback。
+    # この経路では EACCES 判定ができず、従来同様の挙動（失敗時 return 1）となる。
+    git -C "$wt" clean -fdx >/dev/null || clean_rc=$?
+  fi
+
+  if [ "$clean_rc" -eq 0 ]; then
+    # 成功パス: tmp file が空である前提（git clean は成功時 stderr に書かない）。
+    # ただし fail-safe で tmp file が非空の場合は SLOT_LOG に転写しておく。
+    if [ -n "$clean_stderr" ] && [ -s "$clean_stderr" ]; then
+      cat "$clean_stderr" >&2 || true
+    fi
+    if [ -n "$clean_stderr" ]; then
+      rm -f "$clean_stderr" 2>/dev/null || true
+    fi
+    return 0
+  fi
+
+  # 失敗パス: stderr を SLOT_LOG（>&2）に転写（Req 1.2, 1.3）。
+  if [ -n "$clean_stderr" ] && [ -s "$clean_stderr" ]; then
+    echo "[$(date '+%F %T')] worktree-reset: git clean -fdx failed (wt=$wt, rc=$clean_rc):" >&2
+    cat "$clean_stderr" >&2 || true
+  else
+    echo "[$(date '+%F %T')] worktree-reset: git clean -fdx failed (wt=$wt, rc=$clean_rc, no stderr captured)" >&2
+  fi
+
+  # EACCES / permission 起因か判定（Req 3.1, 3.5）。
+  # tmp file が無い／読めない場合は permission 失敗とは判定できないため従来どおり return 1。
+  local is_perm_fail=0
+  if [ -n "$clean_stderr" ] && [ -s "$clean_stderr" ]; then
+    if grep -qE 'EACCES|[Pp]ermission denied|Operation not permitted' "$clean_stderr" 2>/dev/null; then
+      is_perm_fail=1
+    fi
+  fi
+  if [ -n "$clean_stderr" ]; then
+    rm -f "$clean_stderr" 2>/dev/null || true
+  fi
+
+  if [ "$is_perm_fail" -ne 1 ]; then
+    # permission 起因でなければ従来どおり非 0 終了（Req 3.5）。
     return 1
   fi
+
+  echo "[$(date '+%F %T')] worktree-reset: permission-denied detected, starting escalated cleanup (wt=$wt)" >&2
+
+  # 3. Docker 経路（opt-in / Req 2 / Req 3.2）。
+  #    `WORKTREE_DOCKER_CLEANUP_ENABLED=true`（lowercase 完全一致のみ有効 / NFR 4.1）
+  #    かつ docker コマンドが利用可能なときのみ起動。
+  #    成功時は再度 reset を試みて、なお失敗なら worktree 再作成 fallback に進む。
+  if [ "${WORKTREE_DOCKER_CLEANUP_ENABLED:-false}" = "true" ]; then
+    if command -v docker >/dev/null 2>&1; then
+      if _worktree_reset_docker_cleanup "$wt"; then
+        # docker cleanup 成功 → 通常パスで再度 reset + clean を試行。
+        # ここでの stderr も SLOT_LOG に流す（>/dev/null だけで stderr は素通し）。
+        if git -C "$wt" reset --hard "origin/${BASE_BRANCH}" >/dev/null \
+          && git -C "$wt" clean -fdx >/dev/null; then
+          echo "[$(date '+%F %T')] worktree-reset: docker cleanup + retry reset 成功 (wt=$wt)" >&2
+          return 0
+        fi
+        echo "[$(date '+%F %T')] worktree-reset: docker cleanup 後の reset/clean が再度失敗 (wt=$wt)" >&2
+      else
+        echo "[$(date '+%F %T')] worktree-reset: docker cleanup 試行が失敗 (wt=$wt)" >&2
+      fi
+    else
+      echo "[$(date '+%F %T')] worktree-reset: WORKTREE_DOCKER_CLEANUP_ENABLED=true だが docker コマンド未検出、fallback へ (wt=$wt)" >&2
+    fi
+  else
+    echo "[$(date '+%F %T')] worktree-reset: WORKTREE_DOCKER_CLEANUP_ENABLED=true 未宣言、docker 経路 skip して fallback へ (wt=$wt)" >&2
+  fi
+
+  # 4. worktree 再作成 fallback（Req 4）。
+  if _worktree_reset_recreate "$wt"; then
+    echo "[$(date '+%F %T')] worktree-reset: worktree 再作成 fallback で復旧 (wt=$wt)" >&2
+    return 0
+  fi
+  echo "[$(date '+%F %T')] worktree-reset: ERROR: escalated cleanup 全経路が失敗 (wt=$wt) — _worktree_reset を非 0 終了" >&2
+  return 1
+}
+
+# `WORKTREE_DOCKER_CLEANUP_ENABLED=true` の opt-in 時に呼ばれる docker 経路。
+# 一時的な busybox / alpine コンテナを `--rm` で起動し、worktree 配下の root 所有
+# artifact を削除する。
+#
+# 引数: $1 = worktree 絶対パス
+# 戻り値: 0 = cleanup 成功 / 1 = 失敗（docker 起動失敗 / コンテナ rm 失敗）
+# 副作用: docker pull が発生し得る（ローカルキャッシュに無い場合）。
+#
+# 設計判断:
+#   - イメージは `busybox` をデフォルトとし、`WORKTREE_DOCKER_CLEANUP_IMAGE` で差し替え可
+#     （airgap 環境 / 社内 registry 利用向け）。
+#   - bind-mount で worktree の `.` を `/wt` に mount し、worktree の `.git` を巻き込まない
+#     よう `.git` 自体は除外して `find /wt -mindepth 1 -maxdepth 1` 列挙で削る。
+#   - host の uid/gid は与えない（コンテナは root として動かして root 所有 artifact を消す
+#     ことが目的）。
+#   - コンテナのネットワークは不要なので `--network=none` を付ける。
+#
+# Req 2.4, 3.2, 3.3
+_worktree_reset_docker_cleanup() {
+  local wt="$1"
+  local image="${WORKTREE_DOCKER_CLEANUP_IMAGE:-busybox}"
+  # `.git` ディレクトリ／ファイル（worktree の場合は file pointer）は **絶対に消さない**。
+  # それ以外の最上位エントリを列挙してすべて rm -rf する。
+  # `sh -c` のスクリプトは固定文字列で組み立て、worktree パスは bind-mount に閉じ込めて
+  # シェル展開させない（NFR 2.3 / 安全性）。
+  # stdout/stderr とも素通しして SLOT_LOG（呼び出し元サブシェルが tee）に流す。
+  if ! docker run --rm --network=none \
+    -v "$wt":/wt \
+    "$image" \
+    sh -c 'set -e; cd /wt && find . -mindepth 1 -maxdepth 1 ! -name ".git" -exec rm -rf {} +'; then
+    return 1
+  fi
+  return 0
+}
+
+# Docker cleanup が利用不可／失敗したときの最終 fallback として、worktree を作り直す
+# （Req 4）。
+#
+# 引数: $1 = worktree 絶対パス
+# 戻り値: 0 = 再作成成功 / 1 = 失敗
+# 副作用: `git worktree remove --force` で git 側登録解除 → 既存 dir を rm（root 所有
+#   artifact が残っていれば rm も EACCES で失敗し得るが、その場合は明示的に return 1）
+#   → `git worktree add --detach <wt> origin/$BASE_BRANCH` で再登録。
+#
+# Req 4.1, 4.2, 4.3, 4.4, 4.5
+_worktree_reset_recreate() {
+  local wt="$1"
+  echo "[$(date '+%F %T')] worktree-reset: 再作成 fallback 開始 (wt=$wt)" >&2
+
+  # git worktree remove --force（git 側の登録解除）。
+  # 既存登録が無くても `git worktree prune` で吸収できるよう、失敗は warn 扱い。
+  if ! git -C "$REPO_DIR" worktree remove --force "$wt" >/dev/null 2>&1; then
+    echo "[$(date '+%F %T')] worktree-reset: git worktree remove --force が失敗（既存未登録の可能性、prune で継続） (wt=$wt)" >&2
+    git -C "$REPO_DIR" worktree prune >/dev/null 2>&1 || true
+  fi
+
+  # 残存 dir を rm -rf。root 所有 artifact が残っているとここも EACCES で失敗するため、
+  # 失敗時は明示エラーで return 1（Req 4.4）。stderr は呼び出し元サブシェルが SLOT_LOG に
+  # tee しているため素通しで OK。
+  if [ -e "$wt" ]; then
+    if ! rm -rf "$wt"; then
+      echo "[$(date '+%F %T')] worktree-reset: ERROR: 既存 worktree dir の rm に失敗（root 所有残存の可能性） (wt=$wt)" >&2
+      return 1
+    fi
+  fi
+
+  # worktree を再登録（origin/$BASE_BRANCH から detached HEAD）。
+  if ! git -C "$REPO_DIR" worktree add --detach "$wt" "origin/${BASE_BRANCH}" >/dev/null; then
+    echo "[$(date '+%F %T')] worktree-reset: ERROR: git worktree add 再作成に失敗 (wt=$wt)" >&2
+    return 1
+  fi
+  echo "[$(date '+%F %T')] worktree-reset: 再作成 fallback 完了 (wt=$wt, base=origin/${BASE_BRANCH})" >&2
   return 0
 }
 
