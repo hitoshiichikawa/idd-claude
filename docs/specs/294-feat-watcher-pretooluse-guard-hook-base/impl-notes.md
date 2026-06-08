@@ -100,3 +100,75 @@
     これは仕様通り（NFR 1.1 の silent fallback 禁止）だが、Task 5 完了までは watcher を
     `IDD_CLAUDE_HOOKS_ENABLED=true` で起動できない点を運用者に明示する必要がある（README は
     Task 6 で整備）
+
+### Task 4
+
+- **採用方針**: design.md / tasks.md の指示通り、`local-watcher/bin/issue-watcher.sh` を
+  以下の 4 点で編集して guard hook を配線:
+  1. Config ブロック（Debugger 設定直後）に guard hook 系 env var 4 種の default 宣言を追加
+     （`IDD_CLAUDE_HOOKS_ENABLED` 既定空 / `IDD_CLAUDE_HOOKS_DIR` 既定 `$HOME/.idd-claude/hooks`
+     / `IDD_CLAUDE_HOOKS_MIN_VERSION` 既定 `2.1.167` / `IDD_HOOK_LOG` 既定空）。
+     既存「デフォルト有効化フラグの値正規化」ループには **含めない**（opt-in 制 / 既定 false）
+  2. `REQUIRED_MODULES` 配列末尾に `guard-hook.sh` を追加
+  3. モジュール source 直後（TRIAGE_TEMPLATE 存在チェックの直前）に
+     `gh_is_enabled && { gh_preflight || exit $?; export IDD_HOOK_BASE_BRANCH="$BASE_BRANCH"; }`
+     相当の処理 + `gh_build_args` 呼び出しを追加
+  4. 全 11 箇所の `qa_run_claude_stage ... -- claude --print ...` 起動箇所
+     （PerTask-Impl / PerTask-Review / Debugger / Reviewer / StageA / StageA-prime-blocked /
+     StageA-redo / StageA-pp / StageC / Triage / design）の末尾、`>> "$LOG" 2>&1` リダイレクトの
+     直前に `"${CLAUDE_HOOK_ARGS[@]}" \` を 1 行挿入
+- **重要判断**:
+  - **env var 値正規化ループに加えない**: 既存ループは「`=false` 明示以外はすべて true 既定」の
+    9 種（MERGE_QUEUE_ENABLED 等）が対象で、本機能は逆方向（既定空 = opt-out、`=true` 明示のみ
+    opt-in）の opt-in 制。正規化に混ぜると `IDD_CLAUDE_HOOKS_ENABLED=` 未設定が `false` 文字列に
+    強制され gh_is_enabled の厳密 `true` 一致判定との整合は取れるが、design.md Env Var Contract
+    の「未設定 = 無効」表現と齟齬が出るため、Config 段階では `:-` 既定空のまま `gh_is_enabled` 側で
+    厳密判定する形を採用（Task 3 で確認した typo 安全側設計と整合）。
+  - **preflight + arg 構築の配置点**: TRIAGE_TEMPLATE 存在チェックの **直前**を採用した。
+    理由は (a) 必須モジュール source 完了直後で `gh_*` 関数が利用可能 / (b) `BASE_BRANCH` は既に
+    確定（108 行目で `:-main` 既定が適用済み）/ (c) `TRIAGE_TEMPLATE` 等の他テンプレ存在チェックが
+    失敗するよりも前に preflight を fail-closed させた方が運用者に対する原因切り分けが容易
+    （hook 設定不備と template 不備を別 exit code で分離可能）。
+  - **CLAUDE_HOOK_ARGS の注入位置**: 各 claude 起動オプションの **末尾**（リダイレクト直前）に
+    挿入。`--print` / `--model` / `--permission-mode` / `--max-turns` / `--output-format` /
+    `--verbose` の後で `>> "$LOG" 2>&1` の前。これにより既存オプションの解釈順序に影響を
+    与えず、Claude Code は `--settings <path>` を後勝ち優先で受け取る。10 箇所は `--verbose \`
+    の後に挿入、Triage の 1 箇所のみ `--verbose` を持たないため `--max-turns ...` の後に挿入。
+  - **Security Review (`SECURITY_REVIEW_CLAUDE_CMD`) は本 Task のスコープ外**: 同経路は
+    `bash -c` 経由で env テンプレート文字列を expand する構造で、`"${CLAUDE_HOOK_ARGS[@]}"` の
+    配列展開を直接埋め込めない。tasks.md 本文の「全 `claude --print "$prompt" ... --max-turns
+    ...` 起動箇所」の対象には含まれず、配線対象外として扱った（後述「確認事項」参照）。
+  - **opt-out 時の空配列展開 (`"${CLAUDE_HOOK_ARGS[@]}"`)**: `set -euo pipefail` 配下でも
+    bash 4.4+ で安全（CLAUDE.md bash 4+ 要求）。本機能未配置の環境では `gh_build_args` が呼ばれず
+    `CLAUDE_HOOK_ARGS` が undefined のままになる可能性を排除するため、`gh_is_enabled` が false
+    でも `gh_build_args` を **無条件で呼ぶ**設計とし、opt-out 時は明示的に空配列を作る
+    （design.md gh_build_args 契約と整合）。
+- **検証**:
+  - `shellcheck local-watcher/bin/issue-watcher.sh` 警告ゼロ
+  - `shellcheck local-watcher/bin/modules/guard-hook.sh` 警告ゼロ
+  - `bash -n local-watcher/bin/issue-watcher.sh` 構文エラーなし
+  - `bash docs/specs/294-feat-watcher-pretooluse-guard-hook-base/test-fixtures/run-tests.sh`
+    で 29/29 green（hook 本体に regression なし）
+  - `grep -nE 'CLAUDE_HOOK_ARGS\[@\]' local-watcher/bin/issue-watcher.sh` で 11 件の注入を
+    確認（コメント言及 2 件除く）。各サイトに対応する `qa_run_claude_stage` ラベル:
+    PerTask-Impl / PerTask-Review / Debugger / Reviewer / StageA / StageA-prime-blocked /
+    StageA-redo / StageA-pp / StageC / Triage / design
+  - inline smoke で `gh_build_args` の opt-out / opt-in / typo (`True`) を確認: opt-out=空配列 /
+    opt-in=`(--settings <abs>)` / typo=空配列（typo 安全側）
+- **残存課題**:
+  - **install.sh による hook 一式の user-scope 配置（Task 5）が未済**のため、本機能を
+    `IDD_CLAUDE_HOOKS_ENABLED=true` で実際に有効化すると preflight が rc=12（install dir
+    不完全）で fail-closed する。これは仕様通り（NFR 1.1 の silent fallback 禁止）。Task 5
+    完了後に opt-in 起動可能となる
+  - README 整備は Task 6 のスコープ
+- **確認事項**:
+  - `SECURITY_REVIEW_CLAUDE_CMD` 経路（`modules/security-review.sh:910` の
+    `bash -c "$cmd_template"` 実行）は env テンプレートに `--settings` を埋め込まないため、
+    本 Task の配線対象から外している。design.md 「Modified Files」節は「全 `claude --print
+    ...` 起動行に `"${CLAUDE_HOOK_ARGS[@]}"` を付与（既存 15+ 箇所）」と記述しているが、
+    実際の `qa_run_claude_stage ... -- claude` パターンは現状 11 箇所であり、Security Review
+    は別レイヤ（Skill tool 経由 + env テンプレ）。本 Task では設計指示の本旨である
+    「watcher が直接組み立てる `claude --print` 引数列」11 箇所を網羅した。Security Review
+    経路を guard hook 配下に置く場合は env テンプレートを `claude -p ... --settings <abs>`
+    に拡張する **別タスク**（Task 5 の install 時に `SECURITY_REVIEW_CLAUDE_CMD` の default
+    値を opt-in 時のみ書き換える等）が必要。Architect / 人間の判断を仰ぐ
