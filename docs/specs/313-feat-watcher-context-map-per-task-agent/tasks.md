@@ -76,7 +76,7 @@ dedicated regression test task として位置付けます。
   - _Requirements: 3.4, 4.2, 4.3_
   - _Boundary: reviewer.md_
 
-- [ ] 5. `docs/specs/313-feat-watcher-context-map-per-task-agent/test-fixtures/` 配下に
+- [x] 5. `docs/specs/313-feat-watcher-context-map-per-task-agent/test-fixtures/` 配下に
        fixture とスモークスクリプトを追加する（Task 1 / Task 2 で deferred された behavioral
        regression test を集約する dedicated regression test task）
   - 本 task は Task 1 の `_Requirements_partial: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.9, 2.10,
