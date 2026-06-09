@@ -6,7 +6,7 @@ test task（Task 5）に集約しており、先行 task は `_Requirements_part
 追加を Task 5 に deferred している旨を明示しています。Task 5 はこの partial 解消を担う
 dedicated regression test task として位置付けます。
 
-- [ ] 1. `modules/context-map.sh` を新規追加し、`cm_enabled` / 内部 resolver / `cm_compose` /
+- [x] 1. `modules/context-map.sh` を新規追加し、`cm_enabled` / 内部 resolver / `cm_compose` /
        `cm_generate` / `cm_render_prompt_section` の関数定義を実装する
   - `local-watcher/bin/modules/context-map.sh` を新規作成し、冒頭コメントで用途 / 配置先 /
     依存 / セットアップ参照先を明示する（既存 `modules/stage-a-verify.sh` 等と同形式）
