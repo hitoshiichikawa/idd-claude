@@ -55,7 +55,7 @@
   - _Boundary: issue-watcher.sh (build_per_task_implementer_prompt)_
   - _Depends: 1, 2_
 
-- [ ] 4. `run_per_task_implementer_redo` wrapper + `run_per_task_loop` 呼び出し点改修
+- [x] 4. `run_per_task_implementer_redo` wrapper + `run_per_task_loop` 呼び出し点改修
   - 既存 `run_per_task_implementer <task_id>` は **無改変**（NFR 1.1 を構造保証）
   - 新規 wrapper `run_per_task_implementer_redo <task_id> <redo_mode>` を追加。内部処理は
     `run_per_task_implementer` をほぼコピーし、`build_per_task_implementer_prompt "$task_id"
