@@ -27,7 +27,7 @@
   - 単体動作確認: `test-post-marker-detect.sh` の case-1, case-2 が pass
   - _Requirements: 2.1, NFR 1.3, NFR 2.1_
 
-- [ ] 3. watcher への recovery dispatcher の追加（`pt_handle_post_marker_commits`）
+- [x] 3. watcher への recovery dispatcher の追加（`pt_handle_post_marker_commits`）
   - `local-watcher/bin/issue-watcher.sh` の `pt_detect_post_marker_commits` 直後に
     `pt_handle_post_marker_commits <task_id> <round> <range_start> <marker_sha> <post_marker_list>` を追加
   - env `POST_MARKER_RECOVERY_MODE` を読み（default=`fail-with-diagnostic`、不正値も default 化）、
