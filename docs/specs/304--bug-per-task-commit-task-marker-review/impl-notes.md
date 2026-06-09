@@ -73,3 +73,36 @@ per-task ループの 1 タスクごとの learning を記録する。
   `fail-with-diagnostic` 分岐から呼び出す経路の組み込み判断が残る。design.md は
   `run_per_task_reviewer`（task 5）側で呼ぶ設計に倒しているが、task 4 完了後に task 5 で
   両者を接続するため、本関数自体は task 3 時点の signature / rc 体系で確定）。
+
+### Task 4
+
+- **採用方針**: `pt_mark_diff_range_resolve_failed`（3498 行〜）直後に
+  `pt_mark_post_marker_commits_detected <task_id> <round> <marker_sha> <post_marker_list>`
+  を追加。HTML marker `<!-- idd-claude:per-task-post-marker-commits-detected:#<issue>:<task> -->`
+  による重複コメント抑制、`gh issue edit` で `LABEL_CLAIMED` / `LABEL_PICKED` 除去 +
+  `LABEL_FAILED` 付与、復旧手順本文の組み立てまで既存 `pt_mark_diff_range_resolve_failed`
+  と byte レベルで対応する構造に揃えた。
+- **重要な判断**:
+  - 復旧手順は「reflog で push 前 commit を確認 → marker refresh（`git reset --soft <marker^>`
+    または `git rebase -i ${BASE_BRANCH}`）→ \`docs(tasks): mark ${task_id} as done\` が
+    \`${BASE_BRANCH}..HEAD\` の最終 commit になっているかを `git log --oneline` で確認」
+    という順序付きフローに固定した。design.md の `Components and Interfaces` ＞
+    `pt_mark_post_marker_commits_detected` 記載の「reflog で push 前 commit 確認 → marker
+    refresh 手順 → marker contract 再周知」を該当 subsection に過不足なくマップ。
+  - 切替 env (`POST_MARKER_RECOVERY_MODE`) の説明を末尾に追加し、運用者が
+    `fail-with-diagnostic`（default）/ `extend-range` の意味と推奨度（marker contract 違反を
+    黙って吸収する extend-range は通常変更不要）を Issue コメント内で判断できる形にした。
+    task 3 の env 命名 / 不正値の default 化と整合。
+  - post-marker SHA リストは CSV と bullet 表記の **両方** を本文に含める設計とした。CSV
+    は grep 用、bullet は人間レビュー用で、`pt_mark_diff_range_resolve_failed` よりも
+    情報密度を上げる方向に振った（marker contract 違反のような構造的失敗では運用者の
+    手動 rescue が重要になるため）。
+  - 本 commit 時点では本関数の呼び出し側は task 5 で `run_per_task_reviewer` の rc=5 経路
+    （または `pt_handle_post_marker_commits` 内）から組み込む予定。task 3 の
+    `pt_handle_post_marker_commits` は `return 5` のみで本関数を呼ばない設計のため、
+    現状コードベース上では unused-function 状態だが、これは task 3 ↔ task 4 ↔ task 5 の
+    順序依存（design.md `_Depends:_`）に従う中間状態。shellcheck warning は出ない
+    （関数定義は使われない状態でも警告対象外）。
+- **残存課題**: なし（task 5 で `run_per_task_reviewer` から本関数または
+  `pt_handle_post_marker_commits` 経由で本関数を呼ぶ経路を接続する責務が残る。本関数の
+  signature / 副作用は task 4 時点で確定）。
