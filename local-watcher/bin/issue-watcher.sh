@@ -494,6 +494,17 @@ PATH_OVERLAP_BUSY_WAIT_THRESHOLD="${PATH_OVERLAP_BUSY_WAIT_THRESHOLD:-5}"
 PER_TASK_LOOP_ENABLED="${PER_TASK_LOOP_ENABLED:-false}"
 PER_TASK_MAX_TASKS="${PER_TASK_MAX_TASKS:-0}"
 
+# ─── #304: per-task post-marker commit recovery mode ───
+# per-task Reviewer 起動前の `pt_detect_post_marker_commits` で marker 後の未レビュー commit
+# が検出されたときの復旧モードを切り替える env（Req 2.2, 2.3）。idd-codex #14 と同型の
+# silent range truncation（修正 commit が古い marker 後ろに積まれ Reviewer から漏れる）を
+# 防ぐ safety net の挙動を運用者が制御できる。
+#
+# - POST_MARKER_RECOVERY_MODE: 既定 `fail-with-diagnostic`。明示的 `extend-range` で opt-in
+#   切替。不正値・未設定はすべて default の `fail-with-diagnostic` にフォールバックする
+#   （安全側に倒す / Req 2.2 abort 経路の決定論性）。
+POST_MARKER_RECOVERY_MODE="${POST_MARKER_RECOVERY_MODE:-fail-with-diagnostic}"
+
 # LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
 # 環境変数で明示上書きもできる。
 LOG_DIR="${LOG_DIR:-$HOME/.issue-watcher/logs/$REPO_SLUG}"
@@ -2754,6 +2765,80 @@ pt_detect_post_marker_commits() {
   fi
   printf '%s\n' "$post_list"
   return 0
+}
+
+# ─── pt_handle_post_marker_commits <task_id> <round> <range_start> <marker_sha> <post_marker_list> ───
+#
+# `pt_detect_post_marker_commits` で marker 後の未レビュー commit が検出された場合の
+# recovery dispatcher。env `POST_MARKER_RECOVERY_MODE` に応じて以下のいずれかに分岐する:
+#
+#   - `extend-range`: stdout に新 `<range_start>\t<HEAD_SHA>` を出力し rc=0 を返す。
+#     呼び出し側は marker を捨てて HEAD まで range を拡張し、`extended=true` で
+#     Reviewer prompt を組み立てる
+#   - `fail-with-diagnostic` (default): 後続タスク（#304 task 4）で追加される
+#     `pt_mark_post_marker_commits_detected` を呼んで claude-failed を付与した上で rc=5
+#     を返す。本 task 3 時点では当該関数が未実装のため、本実装は rc=5 を返すまでに留め、
+#     `run_per_task_reviewer` 経路の組み込み（task 5）または `pt_mark_post_marker_commits_detected`
+#     追加（task 4）で `mark` 呼び出しを補完する
+#
+# 不正値 / 未設定はすべて default の `fail-with-diagnostic` にフォールバックする
+# （安全側に倒す / Req 2.2）。
+#
+# Contract（design.md「pt_handle_post_marker_commits」節 / Req 2.2, 2.3, 3.3, NFR 1.1, NFR 2.1）:
+#   引数: <task_id> <round> <range_start> <marker_sha> <post_marker_list>
+#   env:  POST_MARKER_RECOVERY_MODE (default=fail-with-diagnostic, 不正値も default 化)
+#   stdout: extend-range 時のみ <new_range_start>\t<new_range_end>（HEAD まで拡張済み）
+#   stderr: NFR 2.1 準拠の単一行イベントログ（後述）
+#   rc=0: extend-range で続行（呼び出し側は新しい range で Reviewer 起動）
+#   rc=5: fail-with-diagnostic で停止（後段で claude-failed を付与）
+#
+# NFR 2.1 ログ書式（fixture 参照実装 line 158 と同一書式 / `pt_warn` の WARN: 接頭辞を付けない
+# 単一行イベントログとして出力する）:
+#   `[YYYY-MM-DD HH:MM:SS] per-task: post-marker-commits-detected task_id=<id> round=<n>
+#    marker=<sha> post_marker_shas=<csv> recovery=<mode>`
+#
+# 参照実装:
+#   - 本関数は `docs/specs/304--bug-per-task-commit-task-marker-review/test-fixtures/
+#     test-post-marker-detect.sh` 内の参照実装と algorithm body を byte 同期させる責務がある
+#     （stderr 行の `[smoke]` warn prefix のみ `pt_warn` で置換、NFR 2.1 メインログは
+#     fixture と同一書式を保つ / 既存 #164 fixture と同方針）
+#
+# Requirements: 2.2, 2.3, 3.3, NFR 1.1, NFR 2.1
+pt_handle_post_marker_commits() {
+  local task_id="$1"
+  local round="$2"
+  local range_start="$3"
+  local marker_sha="$4"
+  local post_marker_list="$5"
+
+  local mode="${POST_MARKER_RECOVERY_MODE:-fail-with-diagnostic}"
+  case "$mode" in
+    extend-range|fail-with-diagnostic) ;;
+    *)
+      pt_warn "post-marker-commits-detect: invalid POST_MARKER_RECOVERY_MODE='${mode}', falling back to fail-with-diagnostic"
+      mode="fail-with-diagnostic"
+      ;;
+  esac
+
+  local ts post_csv
+  ts=$(date '+%F %T')
+  post_csv=$(printf '%s' "$post_marker_list" | tr '\n' ',' | sed 's/,$//')
+  echo "[${ts}] per-task: post-marker-commits-detected task_id=${task_id} round=${round} marker=${marker_sha} post_marker_shas=${post_csv} recovery=${mode}" >&2
+
+  if [ "$mode" = "extend-range" ]; then
+    local head_sha
+    if ! head_sha=$(git rev-parse HEAD 2>/dev/null); then
+      pt_warn "post-marker-commits-detect: git rev-parse HEAD failed (range_start=${range_start})"
+      return 5
+    fi
+    printf '%s\t%s\n' "$range_start" "$head_sha"
+    return 0
+  fi
+
+  # fail-with-diagnostic: task 4 で `pt_mark_post_marker_commits_detected` 追加後に
+  # `run_per_task_reviewer` 経路（task 5）または本関数の改修でここから mark を呼ぶ。
+  # 本 task 3 時点では rc=5 を返すのみで終わる（fixture 参照実装も同様）。
+  return 5
 }
 
 # ─── pt_has_subtasks <tasks_md_path> <task_id> ───
