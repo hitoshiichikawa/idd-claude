@@ -54,7 +54,7 @@ dedicated regression test task として位置付けます。
   - _Boundary: issue-watcher.sh_
   - _Depends: 1_
 
-- [ ] 3. `.claude/agents/developer.md` と `repo-template/.claude/agents/developer.md` の両系統に
+- [x] 3. `.claude/agents/developer.md` と `repo-template/.claude/agents/developer.md` の両系統に
        context map 参照ルールを byte 一致で追記する
   - root の `.claude/agents/developer.md` の「実装ルール」節
     `変更前に grep / glob で既存実装・影響範囲を必ず把握する` の直後に、design.md
