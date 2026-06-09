@@ -159,3 +159,53 @@ per-task ループの 1 タスクごとの learning を記録する。
     立てて挙動確認することが推奨だが、本 task では smoke test の case-3 / case-4 で
     `pt_handle_post_marker_commits` 単体の rc / stdout を検証している。`run_per_task_reviewer`
     の rc=5 全経路を smoke で検証するには `gh` mock が必要で本 fixture のスコープ外。
+
+### Task 6
+
+- **採用方針**: `build_per_task_reviewer_prompt`（3188 行付近）に第 6 引数 `extended`
+  （省略時 "false"）を追加し、prompt 本文に (a) `## 判定対象 SHA range（machine-parseable）`
+  subsection、(b) range 外 commit 判定対象外の **Warning** block、(c) `extended=true` 時の
+  `### Extended range` 説明 block の 3 点を追加。`run_per_task_reviewer`（3459 行付近）の
+  prompt builder 呼び出しに 6 番目の引数として `"$extended"` を追加（task 5 で導入済みの
+  ローカル変数）。
+- **重要な判断**:
+  - **extended_explanation の差し込み方式**: heredoc 中で if/else 分岐すると bash 構文が
+    崩れるため、`extended=true` の場合のみ explanation 文字列をローカル変数
+    `extended_explanation` に組み立て、外側 heredoc 内で `${extended_explanation}` として
+    展開する方式を採用。normal 経路（extended="false"）では空文字列のまま外側 heredoc に
+    展開され、prompt 末尾に余分な空行が 1 行追加されるのみ（markdown レンダリング上は
+    無害で、Reviewer の解釈にも影響しない）。
+  - **quoted heredoc（`'EXTENDED_EOF'`）の使用**: extended_explanation は単独で組み立てた
+    後、外側 heredoc に **変数展開済みの文字列** として埋め込まれる。この入れ子構造で
+    内側を unquoted heredoc にすると `$` や バッククォートが二重 escape 必要になり可読性
+    が低下するため、内側を quoted heredoc にして markdown のバッククォートを literal で
+    保持する方針を採用（外側 heredoc で `${extended_explanation}` を展開する時点では
+    再度の変数展開・コマンド置換は走らないため安全）。
+  - **machine-parseable block の表記**: design.md `Components and Interfaces` ＞
+    `build_per_task_reviewer_prompt` の Service Interface に明示された通り、
+    `range_start_sha:` / `range_end_sha:` / `range_extended:` の 3 行構成で fenced code
+    block 内に配置。値の整列はラベル後の空白で揃え、Reviewer 側の正規表現
+    （例: `^range_extended:\s+(true|false)$`）でパース可能な形式とした。
+  - **Warning の配置位置**: 既存「reviewer は **本 range のみ** を判定対象としてください」
+    記述の直後（同 subsection 内）に blockquote（`> **Warning（Issue #304 Req 3.2）**:`）
+    として配置。design.md の `Components and Interfaces` 記述（Req 3.2 の警告強化）と
+    位置・文言を整合させた。
+  - **後方互換性**: 第 6 引数 `extended` は `local extended="${6:-false}"` で省略時
+    `"false"` にフォールバックするため、`build_per_task_reviewer_prompt` を 5 引数で呼ぶ
+    既存 / テスト経路（もしあれば）は破壊されない。`run_per_task_reviewer` 経由の唯一の
+    本番呼び出しでは task 5 で導入された `extended` ローカル変数を明示的に渡す。
+  - **smoke 検証**: bash 構文チェック（`bash -n`）、shellcheck 警告ゼロ、および
+    function を sed で切り出して default / extended=true 双方の出力を手動レンダリング
+    し、(a) machine-parseable block に SHA 値と extended 値が正しく差し込まれること、
+    (b) Warning が「本 range のみ」記述の直後に配置されること、(c) extended=true 時のみ
+    `### Extended range` block が出現し、normal 経路では出現しないこと、を確認した。
+- **残存課題**:
+  - task 7 / 8（agent prompt docs 更新と repo-template ミラー反映）が別 task として残る。
+    task 7 で reviewer.md の「判定対象 diff range の限定」 subsection に `range_extended:
+    true` シグナルの解釈と range 外 commit の判定対象外性の追記が予定されている。task 8
+    では root と repo-template/ の byte 一致を維持する。
+  - `build_per_task_reviewer_prompt` の prompt rendering の E2E 観測は idd-claude
+    self-hosting 上で post-marker recovery 経路を踏ませる必要があり、本 task では
+    static rendering（heredoc 展開結果）の確認に留めた。実 Reviewer エージェントが
+    machine-parseable block / Warning / Extended range 説明を正しく解釈することの確認は
+    将来の dogfooding 観測で担保する。
