@@ -3173,7 +3173,7 @@ ${learnings_block}
 EOF
 }
 
-# ─── build_per_task_reviewer_prompt <task_id> <range_start_sha> <range_end_sha> <round> <prev_result> ───
+# ─── build_per_task_reviewer_prompt <task_id> <range_start_sha> <range_end_sha> <round> <prev_result> [<extended>] ───
 #
 # per-task Reviewer 用の prompt を heredoc で組み立てて stdout に出力。
 # 既存 `build_reviewer_prompt` の形式を踏襲しつつ、以下を明示する:
@@ -3183,6 +3183,8 @@ EOF
 #   - `_Boundary:_` 違反は depth に関わらず常に reject 対象
 #   - 既存 reviewer.md の 3 カテゴリ（AC 未カバー / missing test / boundary 逸脱）と
 #     RESULT 行 / review-notes.md 出力契約を流用
+#   - 第 6 引数 `extended`（"true"/"false"、省略時 "false"）: watcher が marker 後の
+#     post-marker commit を検出して HEAD ベースに range を拡張したか否か（Issue #304 Req 3.3）
 #
 # Requirements: 3.1, 3.2, 3.3
 build_per_task_reviewer_prompt() {
@@ -3191,6 +3193,34 @@ build_per_task_reviewer_prompt() {
   local range_end="$3"
   local round="$4"
   local prev_result="$5"
+  # Issue #304 Req 3.3: 第 6 引数 `extended` は省略時 "false"（既存呼び出し互換）。
+  # watcher が post-marker commit を検出して range を HEAD まで拡張した場合のみ "true" が
+  # 渡される。値は prompt 本文の `range_extended:` 行と extended-range 説明文に反映される。
+  local extended="${6:-false}"
+
+  # Issue #304 Req 3.3: extended=true 時の追加説明 block（normal 経路では空文字列）。
+  # heredoc 中で条件分岐すると bash 構文が崩れるため、変数で差し込む方式を採用。
+  # 変数の中身は外側の `cat <<EOF` で変数展開された後の最終 prompt にそのまま埋め込まれる。
+  # quoted heredoc（'EXTENDED_EOF'）を使うことで $ / ` / \ が一切解釈されず、markdown の
+  # バッククォートも literal で保持される（外側 heredoc の二重 escape 不要）。
+  local extended_explanation=""
+  if [ "$extended" = "true" ]; then
+    extended_explanation=$(cat <<'EXTENDED_EOF'
+
+### Extended range（watcher による range 拡張通知）
+
+watcher が当該 task の `docs(tasks): mark` marker commit より後ろに **未レビューの
+post-marker commit** を検出したため、env `POST_MARKER_RECOVERY_MODE=extend-range` の
+recovery 経路により range_end を marker SHA ではなく **HEAD まで拡張** しています
+（Issue #304 Req 3.3）。
+
+上記 `range_end_sha` は marker commit ではなく **HEAD の SHA** であり、上記
+`range_start_sha..range_end_sha` の範囲には marker 後に積まれた修正 commit も含まれます。
+extended 状態でも本 Reviewer の判定基準は変わりません（range 内 commit のみを判定根拠と
+してください）。
+EXTENDED_EOF
+)
+  fi
 
   cat <<EOF
 あなたはこのリポジトリの Claude Code オーケストレーターです。
@@ -3214,10 +3244,29 @@ build_per_task_reviewer_prompt() {
 
 - **対象 task ID**: \`${task_id}\`
 - **range_start_sha**: \`${range_start}\` （= 直前の \`docs(tasks): mark\` commit、または初回時は \`${BASE_BRANCH}\` の SHA）
-- **range_end_sha**:   \`${range_end}\`   （= 当該 task の \`docs(tasks): mark ${task_id} as done\` commit）
+- **range_end_sha**:   \`${range_end}\`   （= 当該 task の \`docs(tasks): mark ${task_id} as done\` commit、ただし extended=true の場合は HEAD）
 
 reviewer は **本 range のみ** を判定対象としてください。HEAD 全体は対象外（全体観点は
 最終 Stage B Reviewer が別途担当します）。
+
+> **Warning（Issue #304 Req 3.2）**: 上記 \`range_start_sha..range_end_sha\` の **外側** に
+> ある commit（HEAD が range_end より後ろにある場合等）は本 Reviewer の **判定対象外** です。
+> range 外 commit の内容を理由に approve / reject を出してはいけません。HEAD 全体観点は
+> 最終 Stage B Reviewer が担当します。本 Reviewer は \`range_start_sha..range_end_sha\` 内
+> commit のみを判定根拠としてください。
+
+## 判定対象 SHA range（machine-parseable）
+
+以下は watcher → Reviewer 間の range 引き継ぎを機械パース可能な形で再掲した block です
+（Issue #304 Req 3.1）。Reviewer は本 block の値を判定対象 SHA range の正本として扱って
+ください。
+
+\`\`\`
+range_start_sha: ${range_start}
+range_end_sha:   ${range_end}
+range_extended:  ${extended}
+\`\`\`
+${extended_explanation}
 
 ## 必読ファイル
 
@@ -3456,7 +3505,10 @@ run_per_task_reviewer() {
   pt_log "task=$task_id reviewer start round=$round model=$REVIEWER_MODEL max-turns=$REVIEWER_MAX_TURNS range=${range_start:0:7}..${range_end:0:7} extended=${extended}" >> "$LOG"
 
   local prompt
-  prompt=$(build_per_task_reviewer_prompt "$task_id" "$range_start" "$range_end" "$round" "$prev_result")
+  # Issue #304 Req 3.3: post-marker recovery で extend-range 経路に入った場合は extended="true"。
+  # normal 経路では extended="false"（task 5 で初期化済み）。`build_per_task_reviewer_prompt`
+  # の 6 番目の引数として渡し、prompt の `range_extended:` 行と extended-range 説明文に反映。
+  prompt=$(build_per_task_reviewer_prompt "$task_id" "$range_start" "$range_end" "$round" "$prev_result" "$extended")
 
   # Issue #296 Req 2.4 / NFR 3.1 / Req 4.2: per-task 経路でもファイル不在起因の再起動は
   # 同一 round 内で最大 1 回まで（単発経路 run_reviewer_stage と対称）。
