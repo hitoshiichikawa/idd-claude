@@ -84,7 +84,7 @@
   - _Requirements: 3.1, 3.2, 3.3_
   - _Depends: 5_
 
-- [ ] 7. developer.md / reviewer.md への marker contract 節と range 警告追記（root 系統）
+- [x] 7. developer.md / reviewer.md への marker contract 節と range 警告追記（root 系統）
   - `.claude/agents/developer.md` の「per-task ループ下での Implementer の責務」節（369 行以降）
     に新 subsection `## Marker contract（marker は task の終端 commit）` を追加
     - 1.1: marker は task 終端 commit である契約
