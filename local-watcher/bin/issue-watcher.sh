@@ -3820,7 +3820,7 @@ run_per_task_loop() {
                   parsed3pt=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
                   cat3pt=$(echo "$parsed3pt" | cut -f2)
                   tgt3pt=$(echo "$parsed3pt" | cut -f3)
-                  mark_issue_failed "per-task-reviewer-reject3" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) も reject を出したため、自動 iteration を打ち切り人間判断に委ねます（Debugger は 1 task あたり 1 回のみ起動するため再起動しません / Req 3.5, 6.3）。
+                  publish_terminal_failure_artifacts "per-task-reviewer-reject3" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) も reject を出したため、自動 iteration を打ち切り人間判断に委ねます（Debugger は 1 task あたり 1 回のみ起動するため再起動しません / Req 3.5, 6.3）。
 
 - 対象 task ID: ${task_id}
 - 対象 requirement ID: ${tgt3pt:-(unknown)}
@@ -3846,13 +3846,13 @@ run_per_task_loop() {
                   # → `per-task-reviewer-missing-file` カテゴリで `claude-failed`（round=3 / Debugger 経由）。
                   dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=missing-file-after-retry" >> "$LOG"
                   echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) ファイル不在（リトライ後も未生成）→ claude-failed (per-task-reviewer-missing-file)" | tee -a "$LOG"
-                  mark_issue_failed "per-task-reviewer-missing-file" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+                  publish_terminal_failure_artifacts "per-task-reviewer-missing-file" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
                   return 1
                   ;;
                 *)
                   dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=error" >> "$LOG"
                   echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) 異常終了 → claude-failed" | tee -a "$LOG"
-                  mark_issue_failed "per-task-reviewer-error" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+                  publish_terminal_failure_artifacts "per-task-reviewer-error" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
                   return 1
                   ;;
               esac
@@ -3866,7 +3866,7 @@ run_per_task_loop() {
               parsed2=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
               cat2=$(echo "$parsed2" | cut -f2)
               tgt2=$(echo "$parsed2" | cut -f3)
-              mark_issue_failed "per-task-reviewer-reject2" "per-task ループの Reviewer が task=\`${task_id}\` で 2 回連続 reject を出したため、残りの未完了 task の処理を停止し人間判断に委ねます。
+              publish_terminal_failure_artifacts "per-task-reviewer-reject2" "per-task ループの Reviewer が task=\`${task_id}\` で 2 回連続 reject を出したため、残りの未完了 task の処理を停止し人間判断に委ねます。
 
 - 対象 task ID: ${task_id}
 - 対象 requirement ID: ${tgt2:-(unknown)}
@@ -3890,12 +3890,12 @@ run_per_task_loop() {
             # Issue #296 Req 2.3 / Req 4.2 / NFR 2.2: ファイル不在 + 1 回限定リトライ後も生成されず
             # → `per-task-reviewer-missing-file` カテゴリで `claude-failed`（round=2）。
             echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) ファイル不在（リトライ後も未生成）→ claude-failed (per-task-reviewer-missing-file)" | tee -a "$LOG"
-            mark_issue_failed "per-task-reviewer-missing-file" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+            publish_terminal_failure_artifacts "per-task-reviewer-missing-file" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
             return 1
             ;;
           *)
             echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) 異常終了 → claude-failed" | tee -a "$LOG"
-            mark_issue_failed "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+            publish_terminal_failure_artifacts "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
             return 1
             ;;
         esac
@@ -3910,13 +3910,13 @@ run_per_task_loop() {
         # Issue #296 Req 2.3 / Req 4.2 / NFR 2.2: ファイル不在 + 1 回限定リトライ後も生成されず
         # → `per-task-reviewer-missing-file` カテゴリで `claude-failed`（round=1）。
         echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) ファイル不在（リトライ後も未生成）→ claude-failed (per-task-reviewer-missing-file)" | tee -a "$LOG"
-        mark_issue_failed "per-task-reviewer-missing-file" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+        publish_terminal_failure_artifacts "per-task-reviewer-missing-file" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
         return 1
         ;;
       *)
         # round=1 reviewer error → claude-failed
         echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) 異常終了 → claude-failed" | tee -a "$LOG"
-        mark_issue_failed "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+        publish_terminal_failure_artifacts "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
         return 1
         ;;
     esac
@@ -4366,7 +4366,7 @@ run_debugger_stage() {
   # debugger-notes.md の必須セクション verify
   if ! validate_debugger_notes "$notes_path" "$task_id"; then
     dbg_log "trigger=$trigger issue=#${NUMBER} task=${task_label} debugger-notes.md validation failed" >> "$LOG"
-    mark_issue_failed "debugger-notes-invalid" "Debugger が \`${SPEC_DIR_REL}/debugger-notes.md\` を期待形式で出力しませんでした（必須 4 セクション \`根本原因\` / \`修正手順\` / \`検証方法\` / \`関連参考資料\` のいずれかが欠落、もしくはファイル自体が不在）。\`$LOG\` の Debugger 実行ログを確認してください。"
+    publish_terminal_failure_artifacts "debugger-notes-invalid" "Debugger が \`${SPEC_DIR_REL}/debugger-notes.md\` を期待形式で出力しませんでした（必須 4 セクション \`根本原因\` / \`修正手順\` / \`検証方法\` / \`関連参考資料\` のいずれかが欠落、もしくはファイル自体が不在）。\`$LOG\` の Debugger 実行ログを確認してください。"
     return 1
   fi
   dbg_log "trigger=$trigger issue=#${NUMBER} task=${task_label} debugger-notes.md verified (sections=4)" >> "$LOG"
@@ -5060,6 +5060,311 @@ run_reviewer_stage() {
       return 2
       ;;
   esac
+}
+
+# ─── per-task terminal failure 時の診断 artifact 保全ヘルパー (Issue #306) ───
+#
+# per-task ループの terminal failure 経路（`per-task-reviewer-reject2` /
+# `per-task-reviewer-reject3` / `per-task-reviewer-error` /
+# `per-task-reviewer-missing-file` / `debugger-notes-invalid` 等）で
+# `mark_issue_failed` を呼び出す **直前** に経由するラッパー。Reviewer / Debugger
+# サブエージェントには git / gh 権限を付与しない設計（Req 3.1, 3.2, 3.3）のため、
+# watcher 側が以下を担う:
+#
+#   1. push state（branch / local HEAD / origin HEAD / ahead / worktree path）を
+#      失敗コメントに常時埋め込む（Req 2.1, 2.4 / NFR 1.2）
+#   2. `review-notes.md` / `debugger-notes.md` が untracked または未 commit / 未 push なら
+#      diagnostic commit を 1 件作成し origin branch に push する（Req 1.1, 1.3）
+#   3. diagnostic commit の commit / push が失敗したら artifact 本文（または長文時は
+#      先頭・末尾要約）を Issue コメント本文に埋め込んで fallback する（Req 1.4, NFR 3.1）
+#   4. 既に tracked かつ pushed 済みの artifact は重複保全しない（Req 1.2）
+#   5. 保全処理が失敗しても `mark_issue_failed` を必ず呼ぶ（Req 1.5, NFR 2.1）
+#
+# 本ヘルパーは `mark_issue_failed` の **ラッパー** として動作し、
+# 呼び出し側は `mark_issue_failed` の代わりに本関数を呼ぶだけで artifact 保全と
+# push state 可視化を行える（call site 変更最小化）。
+#
+# 引数:
+#   $1 = stage 識別子（既存 mark_issue_failed と同じ。例: per-task-reviewer-reject2）
+#   $2 = 既存 extra_body（call site が組み立てる失敗コメント追加情報）
+#
+# 戻り値: 0 always（best-effort、既存 mark_issue_failed と同方針）
+#
+# 副作用:
+#   - cwd が `$REPO_DIR`（slot worktree）であることを前提とする（_slot_run_issue が cd 済）
+#   - push state 情報と artifact 状態を $2 (extra_body) に append してから
+#     `mark_issue_failed` を呼び出す
+#   - diagnostic commit 作成 / push を試行する（必要時のみ）
+#   - 保全処理の各段階を `$LOG` に grep 可能な形で 1 行記録する（NFR 2.2）
+#   - `git reset` / `git rebase` / force push は **使わない**（Req 3.4）
+#
+# 設計判断:
+#   - 既存 `verify_pushed_or_retry` は ahead 数の verify と自動 push リトライに責務を
+#     絞っており、artifact の commit / 本文埋め込みまでは扱わない。本関数は
+#     **新規ヘルパー**として導入し、`verify_pushed_or_retry` の意味論は変更しない
+#     （Req 4.3 / NFR 1.1）
+#   - artifact 本文の埋め込み閾値は 16384 文字（NFR 3.1: GitHub Issue コメント 65,536
+#     文字制限の余裕を取った保守的しきい値）。超過時は先頭 80 行 + 末尾 80 行の抜粋に
+#     切り替える（Open Question の design 確定）
+#   - 既存 `verify_pushed_or_retry` 風の `timeout` 既存検出ロジックを踏襲し、
+#     `command -v timeout` で GNU coreutils の有無を判定（NFR 1.2）
+publish_terminal_failure_artifacts() {
+  local stage="$1"
+  local extra_body="$2"
+
+  # 防御: BRANCH / REPO_DIR / SPEC_DIR_REL が未設定でも処理を完遂する（Req 1.5 / NFR 2.1）
+  local branch="${BRANCH:-}"
+  local spec_dir_rel="${SPEC_DIR_REL:-}"
+  local repo_dir="${REPO_DIR:-}"
+
+  local _git_timeout=()
+  if command -v timeout >/dev/null 2>&1; then
+    _git_timeout=(timeout 30)
+  fi
+
+  # ── push state 収集（Req 2.1, 2.3, 2.4）──
+  # ahead 数 / origin HEAD SHA を取得。エラー時は安全側で "(unknown)" 等を埋める
+  local local_head="(unknown)" origin_head="未 push" ahead_count="(unknown)"
+  local worktree_path="${repo_dir:-(unknown)}"
+
+  local _lh
+  _lh=$("${_git_timeout[@]}" git rev-parse HEAD 2>/dev/null || true)
+  if [ -n "$_lh" ]; then
+    local_head="$_lh"
+  fi
+
+  # origin branch HEAD を取得する。fetch せず ls-remote で軽量に確認する（NFR 2.1）
+  local _origin_out _origin_rc=0
+  if [ -n "$branch" ]; then
+    _origin_out=$("${_git_timeout[@]}" git ls-remote origin "refs/heads/$branch" 2>/dev/null) || _origin_rc=$?
+    if [ "$_origin_rc" -eq 0 ] && [ -n "$_origin_out" ]; then
+      origin_head=$(echo "$_origin_out" | awk '{print $1}' | head -n 1)
+      if [ -z "$origin_head" ]; then
+        origin_head="未 push"
+      fi
+    fi
+  fi
+
+  # ahead count を算出
+  if [ "$origin_head" = "未 push" ]; then
+    # 初回 push 前: BASE_BRANCH..HEAD の commit 数を使う（Req 2.3）
+    local _base_ahead
+    _base_ahead=$("${_git_timeout[@]}" git rev-list --count "${BASE_BRANCH:-main}..HEAD" 2>/dev/null || true)
+    if [[ "$_base_ahead" =~ ^[0-9]+$ ]]; then
+      ahead_count="$_base_ahead"
+    fi
+  else
+    local _ah
+    _ah=$("${_git_timeout[@]}" git rev-list --count "${origin_head}..HEAD" 2>/dev/null || true)
+    if [[ "$_ah" =~ ^[0-9]+$ ]]; then
+      ahead_count="$_ah"
+    fi
+  fi
+
+  echo "[$(date '+%F %T')] terminal-failure-artifacts: stage=${stage} issue=#${NUMBER:-?} branch=${branch} local_head=${local_head} origin_head=${origin_head} ahead=${ahead_count}" >> "$LOG" 2>/dev/null || true
+
+  # ── artifact 単位の保全処理（Req 1.1, 1.2, 1.3）──
+  # artifact ごとに status を判定し、必要なら commit / push を試みる。失敗時は
+  # 本文を extra_body に埋め込んで fallback。各 artifact ごとに以下を保存:
+  #   <name> <status_token> <content_or_summary_or_empty>
+  # status_token: tracked-pushed | tracked-unpushed | untracked | absent | embedded | committed
+  local artifact_lines=""
+  local artifact_embed=""
+  local _need_commit=0
+
+  _ptfa_artifact_status() {
+    # echo "<status_token>" — file 状態を判定して返す
+    local rel_path="$1"
+    local abs_path="${repo_dir}/${rel_path}"
+    if [ ! -f "$abs_path" ]; then
+      echo "absent"
+      return 0
+    fi
+    # tracked check: ls-files で確認
+    local _tracked
+    _tracked=$("${_git_timeout[@]}" git ls-files --error-unmatch -- "$rel_path" 2>/dev/null || true)
+    if [ -z "$_tracked" ]; then
+      echo "untracked"
+      return 0
+    fi
+    # 変更が staged / unstaged に残っているか
+    local _status_out
+    _status_out=$("${_git_timeout[@]}" git status --porcelain -- "$rel_path" 2>/dev/null || true)
+    if [ -n "$_status_out" ]; then
+      echo "modified"
+      return 0
+    fi
+    # commit 済み: origin に到達しているか
+    if [ "$origin_head" = "未 push" ]; then
+      echo "tracked-unpushed"
+      return 0
+    fi
+    # 当該ファイルの最新 commit が origin に到達しているか:
+    # log <origin_head>..HEAD で当該ファイルを変更した commit が出れば unpushed
+    local _unpushed
+    _unpushed=$("${_git_timeout[@]}" git log --oneline "${origin_head}..HEAD" -- "$rel_path" 2>/dev/null || true)
+    if [ -n "$_unpushed" ]; then
+      echo "tracked-unpushed"
+      return 0
+    fi
+    echo "tracked-pushed"
+    return 0
+  }
+
+  # artifact 一覧（順序保証）
+  local _artifacts=("review-notes.md" "debugger-notes.md")
+  local artifact_rel artifact_status artifact_rel_full
+  local _need_save_list=()
+  for artifact_rel in "${_artifacts[@]}"; do
+    artifact_rel_full="${spec_dir_rel}/${artifact_rel}"
+    artifact_status=$(_ptfa_artifact_status "$artifact_rel_full")
+    artifact_lines="${artifact_lines}- \`${artifact_rel_full}\`: ${artifact_status}"$'\n'
+    echo "[$(date '+%F %T')] terminal-failure-artifacts: artifact=${artifact_rel_full} status=${artifact_status} stage=${stage} issue=#${NUMBER:-?}" >> "$LOG" 2>/dev/null || true
+    case "$artifact_status" in
+      untracked|modified|tracked-unpushed)
+        _need_commit=1
+        _need_save_list+=("$artifact_rel_full")
+        ;;
+      *) ;;
+    esac
+  done
+
+  # ── 保全が必要なら diagnostic commit を試みる（Req 1.1, 1.3）──
+  local _commit_pushed=0
+  if [ "$_need_commit" = "1" ] && [ -n "$branch" ] && [ -n "$spec_dir_rel" ]; then
+    local _add_rc=0 _commit_rc=0 _push_rc=0
+    local _commit_msg="docs(spec): preserve terminal-failure diagnostics (#${NUMBER:-?} / stage=${stage})"
+
+    # add: 対象 artifact のみ stage する
+    local _save_path
+    for _save_path in "${_need_save_list[@]}"; do
+      "${_git_timeout[@]}" git add -- "$_save_path" 2>/dev/null || _add_rc=$?
+    done
+
+    if [ "$_add_rc" -eq 0 ]; then
+      # commit を作成（user.email / user.name は cron 環境で global 設定済み前提）
+      "${_git_timeout[@]}" git -c commit.gpgsign=false commit -m "$_commit_msg" -- \
+        "${_need_save_list[@]}" >/dev/null 2>&1 || _commit_rc=$?
+      if [ "$_commit_rc" -eq 0 ]; then
+        "${_git_timeout[@]}" git push origin "$branch" >/dev/null 2>&1 || _push_rc=$?
+        if [ "$_push_rc" -eq 0 ]; then
+          _commit_pushed=1
+          echo "[$(date '+%F %T')] terminal-failure-artifacts: diagnostic-commit pushed branch=${branch} stage=${stage} issue=#${NUMBER:-?}" >> "$LOG" 2>/dev/null || true
+          # push 成功後の origin_head / ahead を更新（コメント上の情報を最新化）
+          local _new_origin
+          _new_origin=$("${_git_timeout[@]}" git ls-remote origin "refs/heads/$branch" 2>/dev/null | awk '{print $1}' | head -n 1)
+          if [ -n "$_new_origin" ]; then
+            origin_head="$_new_origin"
+          fi
+          local _new_local
+          _new_local=$("${_git_timeout[@]}" git rev-parse HEAD 2>/dev/null || true)
+          if [ -n "$_new_local" ]; then
+            local_head="$_new_local"
+          fi
+          ahead_count="0"
+          # artifact_lines を再生成（status を更新）
+          artifact_lines=""
+          for artifact_rel in "${_artifacts[@]}"; do
+            artifact_rel_full="${spec_dir_rel}/${artifact_rel}"
+            local _newst
+            _newst=$(_ptfa_artifact_status "$artifact_rel_full")
+            # commit/push 成功直後は committed として明示
+            case "$_newst" in
+              tracked-pushed) _newst="committed" ;;
+              *) ;;
+            esac
+            artifact_lines="${artifact_lines}- \`${artifact_rel_full}\`: ${_newst}"$'\n'
+          done
+        else
+          echo "[$(date '+%F %T')] terminal-failure-artifacts: WARN diagnostic-commit push 失敗 push_rc=${_push_rc} stage=${stage} issue=#${NUMBER:-?}" >> "$LOG" 2>/dev/null || true
+        fi
+      else
+        echo "[$(date '+%F %T')] terminal-failure-artifacts: WARN diagnostic-commit commit 失敗 commit_rc=${_commit_rc} stage=${stage} issue=#${NUMBER:-?}" >> "$LOG" 2>/dev/null || true
+      fi
+    else
+      echo "[$(date '+%F %T')] terminal-failure-artifacts: WARN diagnostic-commit add 失敗 add_rc=${_add_rc} stage=${stage} issue=#${NUMBER:-?}" >> "$LOG" 2>/dev/null || true
+    fi
+  fi
+
+  # ── push / commit が失敗（または skip）した場合の fallback 埋め込み（Req 1.3, 1.4, NFR 3.1）──
+  if [ "$_need_commit" = "1" ] && [ "$_commit_pushed" != "1" ]; then
+    local _save_path _abs _content _content_len
+    local _max_chars=16384  # 約 16KB 上限（GitHub Issue コメント 65,536 文字制限の余裕保守値）
+    for _save_path in "${_need_save_list[@]}"; do
+      _abs="${repo_dir}/${_save_path}"
+      if [ ! -f "$_abs" ]; then
+        continue
+      fi
+      _content=$(cat "$_abs" 2>/dev/null || true)
+      _content_len=${#_content}
+      if [ "$_content_len" -gt "$_max_chars" ]; then
+        # 長文時: 先頭 80 行 + 末尾 80 行に切り替える（NFR 3.1）
+        local _head_part _tail_part
+        _head_part=$(echo "$_content" | head -n 80)
+        _tail_part=$(echo "$_content" | tail -n 80)
+        artifact_embed="${artifact_embed}
+
+#### \`${_save_path}\` の内容（要約 / 長文のため先頭 80 行 + 末尾 80 行）
+
+\`\`\`
+${_head_part}
+
+… (中略 / 全文 ${_content_len} 文字) …
+
+${_tail_part}
+\`\`\`"
+      else
+        artifact_embed="${artifact_embed}
+
+#### \`${_save_path}\` の内容（全文）
+
+\`\`\`
+${_content}
+\`\`\`"
+      fi
+    done
+    echo "[$(date '+%F %T')] terminal-failure-artifacts: artifact 本文を Issue コメントに fallback 埋め込み stage=${stage} issue=#${NUMBER:-?}" >> "$LOG" 2>/dev/null || true
+  fi
+
+  # ── extra_body に append する情報ブロックを組み立て ──
+  local push_state_block
+  push_state_block="### 診断 artifact / push 状態（Issue #306）
+
+- 実装 branch: \`${branch:-(unknown)}\`
+- local HEAD : \`${local_head}\`
+- origin HEAD: \`${origin_head}\`
+- ahead count: ${ahead_count}
+- worktree  : \`${worktree_path}\`
+
+#### artifact 状態
+
+${artifact_lines}"
+
+  if [ "$_commit_pushed" = "1" ]; then
+    push_state_block="${push_state_block}
+> ℹ️ watcher が未 push の診断 artifact を検出し、diagnostic commit を作成して origin に push しました。
+> 上記 SHA / ahead 数は push 後の状態を反映しています。"
+  elif [ "$_need_commit" = "1" ]; then
+    push_state_block="${push_state_block}
+> ⚠️ watcher が未 push の診断 artifact を検出しましたが、diagnostic commit / push に失敗しました。
+> 下記の artifact 本文（または抜粋）が fallback として埋め込まれています。"
+  fi
+
+  local merged_body="$extra_body"
+  if [ -n "$merged_body" ]; then
+    merged_body="${merged_body}
+
+${push_state_block}"
+  else
+    merged_body="$push_state_block"
+  fi
+  if [ -n "$artifact_embed" ]; then
+    merged_body="${merged_body}${artifact_embed}"
+  fi
+
+  # ── 必ず claude-failed ラベルを付与する（Req 1.5, NFR 2.1）──
+  mark_issue_failed "$stage" "$merged_body"
+  return 0
 }
 
 # ─── Stage 完了直後の push 状態 verify ヘルパー (Issue #106) ───
