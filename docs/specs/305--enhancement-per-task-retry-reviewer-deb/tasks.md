@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. `pt_extract_findings_block` ヘルパー実装 + 単体テスト fixture 整備
+- [x] 1. `pt_extract_findings_block` ヘルパー実装 + 単体テスト fixture 整備
   - `local-watcher/bin/issue-watcher.sh` の per-task ブロック末尾（既存 `pt_extract_learnings`
     関数の近傍 / 行 2606 付近）に `pt_extract_findings_block <review_notes_path>` を追加
   - awk で `^## Findings[[:space:]]*$` 〜 次の `^## ` 直前まで抽出。`pt_extract_learnings` の
