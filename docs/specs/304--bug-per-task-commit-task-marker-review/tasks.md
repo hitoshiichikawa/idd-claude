@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. 回帰テスト fixture の追加（idd-codex #14 同型 commit shape）
+- [x] 1. 回帰テスト fixture の追加（idd-codex #14 同型 commit shape）
   - `docs/specs/304--bug-per-task-commit-task-marker-review/test-fixtures/test-post-marker-detect.sh`
     を新規作成し、以下 5 ケースを assert で検証する
     - case-1: marker 後に commit 無し → 検出 0 件で既存挙動温存
@@ -17,7 +17,7 @@
   - 末尾で `SMOKE_RESULT: pass` / `fail` を出力
   - _Requirements: 5.1, 5.2, 5.3_
 
-- [ ] 2. watcher への post-marker 検出関数の追加（`pt_detect_post_marker_commits`）
+- [x] 2. watcher への post-marker 検出関数の追加（`pt_detect_post_marker_commits`）
   - `local-watcher/bin/issue-watcher.sh` の `pt_resolve_diff_range`（2638 行付近）直後に
     新規関数 `pt_detect_post_marker_commits <marker_sha>` を追加
   - `git log --format=%H <marker_sha>..HEAD` で post-marker commit を列挙
@@ -27,7 +27,7 @@
   - 単体動作確認: `test-post-marker-detect.sh` の case-1, case-2 が pass
   - _Requirements: 2.1, NFR 1.3, NFR 2.1_
 
-- [ ] 3. watcher への recovery dispatcher の追加（`pt_handle_post_marker_commits`）
+- [x] 3. watcher への recovery dispatcher の追加（`pt_handle_post_marker_commits`）
   - `local-watcher/bin/issue-watcher.sh` の `pt_detect_post_marker_commits` 直後に
     `pt_handle_post_marker_commits <task_id> <round> <range_start> <marker_sha> <post_marker_list>` を追加
   - env `POST_MARKER_RECOVERY_MODE` を読み（default=`fail-with-diagnostic`、不正値も default 化）、
@@ -41,7 +41,7 @@
   - _Requirements: 2.2, 2.3, 3.3, NFR 1.1, NFR 2.1_
   - _Depends: 2_
 
-- [ ] 4. 失敗カテゴリ通知関数の追加（`pt_mark_post_marker_commits_detected`）
+- [x] 4. 失敗カテゴリ通知関数の追加（`pt_mark_post_marker_commits_detected`）
   - `local-watcher/bin/issue-watcher.sh` の `pt_mark_diff_range_resolve_failed`（3374 行付近）と
     同セクション末尾に新規関数 `pt_mark_post_marker_commits_detected <task_id> <round> <marker_sha> <post_marker_list>` を追加
   - HTML marker `<!-- idd-claude:per-task-post-marker-commits-detected:#<issue>:<task> -->` で
@@ -55,7 +55,7 @@
   - _Requirements: 2.3, NFR 2.1_
   - _Depends: 3_
 
-- [ ] 5. `run_per_task_reviewer` への post-marker hook 組込みと rc=5 対応
+- [x] 5. `run_per_task_reviewer` への post-marker hook 組込みと rc=5 対応
   - `run_per_task_reviewer`（3226 行付近）内、`pt_resolve_diff_range` 成功直後に
     `pt_detect_post_marker_commits "$range_end"` を呼ぶ
   - 検出 0 件（rc=1）または git エラー（rc=2）: 既存ルートで Reviewer 起動（NFR 1.3 fail-safe）
@@ -70,7 +70,7 @@
   - _Requirements: 2.1, 2.2, 2.3, NFR 1.1, NFR 1.3_
   - _Depends: 4_
 
-- [ ] 6. Reviewer prompt への range 明示と extended フラグ対応
+- [x] 6. Reviewer prompt への range 明示と extended フラグ対応
   - `build_per_task_reviewer_prompt`（3060 行付近）の signature に第 6 引数 `extended`
     （"true"/"false"、省略時 "false"）を追加
   - prompt 本文に `## 判定対象 SHA range（machine-parseable）` subsection を追加し、
@@ -84,7 +84,7 @@
   - _Requirements: 3.1, 3.2, 3.3_
   - _Depends: 5_
 
-- [ ] 7. developer.md / reviewer.md への marker contract 節と range 警告追記（root 系統）
+- [x] 7. developer.md / reviewer.md への marker contract 節と range 警告追記（root 系統）
   - `.claude/agents/developer.md` の「per-task ループ下での Implementer の責務」節（369 行以降）
     に新 subsection `## Marker contract（marker は task の終端 commit）` を追加
     - 1.1: marker は task 終端 commit である契約
@@ -97,7 +97,7 @@
     （Req 3.3）を追記
   - _Requirements: 1.1, 1.2, 1.3, 3.2, 3.3_
 
-- [ ] 8. developer.md / reviewer.md の repo-template ミラー反映（byte 一致）
+- [x] 8. developer.md / reviewer.md の repo-template ミラー反映（byte 一致）
   - タスク 7 で root 系統に加えた変更を、`repo-template/.claude/agents/developer.md` /
     `repo-template/.claude/agents/reviewer.md` に **byte 一致** で適用する
   - 反映後に `diff -r .claude/agents repo-template/.claude/agents` が空であることを確認
