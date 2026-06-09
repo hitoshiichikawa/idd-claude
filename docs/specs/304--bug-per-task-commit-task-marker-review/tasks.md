@@ -41,7 +41,7 @@
   - _Requirements: 2.2, 2.3, 3.3, NFR 1.1, NFR 2.1_
   - _Depends: 2_
 
-- [ ] 4. 失敗カテゴリ通知関数の追加（`pt_mark_post_marker_commits_detected`）
+- [x] 4. 失敗カテゴリ通知関数の追加（`pt_mark_post_marker_commits_detected`）
   - `local-watcher/bin/issue-watcher.sh` の `pt_mark_diff_range_resolve_failed`（3374 行付近）と
     同セクション末尾に新規関数 `pt_mark_post_marker_commits_detected <task_id> <round> <marker_sha> <post_marker_list>` を追加
   - HTML marker `<!-- idd-claude:per-task-post-marker-commits-detected:#<issue>:<task> -->` で
