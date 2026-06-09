@@ -2642,6 +2642,50 @@ pt_extract_findings_block() {
   return 0
 }
 
+# ─── pt_extract_debugger_section <debugger_notes_path> <task_id> ───
+#
+# debugger-notes.md の `## Task <task_id>` セクション（次の `## ` 見出し直前まで）を
+# stdout に出力する。per-task retry の Debugger Gate 経由 round=3 経路で
+# Developer prompt に当該 task の Fix Plan を inline 注入するために使用する
+# （Issue #305 Req 1.2, 1.5, NFR 4.2）。
+#
+# - 抽出成功時: 0 を返し、stdout に `## Task <task_id>` 見出しを含む本文を出力
+# - ファイル不在 or 当該 `## Task <task_id>` 見出し不在: 1 を返し、stdout は空
+# - 他 task の `## Task <other_id>` セクションには触れない（NFR 4.2 を構造保証）
+# - task_id の `.` は awk 正規表現メタを避けるため shell 側で `[.]` にエスケープして
+#   から awk pattern に埋め込む（例: `1.2` → `1[.]2`）
+#
+# 既存 `detect_debugger_already_invoked` の `^## Task <id>$` 行頭マッチ regex と
+# 整合させているため、Debugger が書き出すセクション規約を共有する。
+#
+# Requirements: 1.2, 1.5, 5.2, NFR 4.2
+pt_extract_debugger_section() {
+  local debugger_notes="$1"
+  local task_id="$2"
+  if [ ! -f "$debugger_notes" ]; then
+    return 1
+  fi
+  # task_id 内の `.` を `[.]` にエスケープして awk 正規表現メタを無効化する。
+  # numeric 階層 ID（例: `1`, `1.2`, `2.1.3`）以外の入力は本関数の責務外
+  # （呼び出し側で validated される前提）。
+  local escaped_id="${task_id//./[.]}"
+  local heading_pattern="^## Task ${escaped_id}$"
+  # 該当見出しが存在するかを先に確認（不在なら return 1）。
+  if ! grep -qE "$heading_pattern" "$debugger_notes"; then
+    return 1
+  fi
+  # awk で `## Task <task_id>` セクションを抽出。
+  # - 該当見出し行を見つけたら print 開始
+  # - print 開始後に別の `## ` 見出しが来たら print 停止
+  # - 末尾まで他の `## ` が来なければファイル末尾まで print
+  awk -v pat="$heading_pattern" '
+    $0 ~ pat { in_section = 1; print; next }
+    in_section && /^## / { exit }
+    in_section { print }
+  ' "$debugger_notes"
+  return 0
+}
+
 # ─── pt_resolve_diff_range <task_id> ───
 #
 # per-task Reviewer に渡す diff range の開始 SHA / 終了 SHA を解決して
