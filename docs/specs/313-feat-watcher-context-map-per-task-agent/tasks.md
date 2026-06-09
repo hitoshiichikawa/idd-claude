@@ -109,7 +109,7 @@ dedicated regression test task として位置付けます。
   - _Boundary: test-fixtures/_
   - _Depends: 1, 2_
 
-- [ ] 6. `README.md` の「オプション機能一覧」節（または同等の節）に `CONTEXT_MAP_ENABLED` の
+- [x] 6. `README.md` の「オプション機能一覧」節（または同等の節）に `CONTEXT_MAP_ENABLED` の
        説明を追記する
   - `CONTEXT_MAP_ENABLED` env var の意味と既定値（未設定＝無効）を記載する
   - 動作前提として `PER_TASK_LOOP_ENABLED=true` 環境のみで動作する旨を明記する
