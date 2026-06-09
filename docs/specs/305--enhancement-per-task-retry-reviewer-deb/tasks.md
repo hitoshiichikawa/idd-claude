@@ -101,7 +101,7 @@
   - _Boundary: issue-watcher.sh (pt_* namespace), local-watcher/test/_
   - _Depends: 1_
 
-- [ ] 6. `run_per_task_loop` の round=2 reject 直後に fail-fast 経路を組み込む
+- [x] 6. `run_per_task_loop` の round=2 reject 直後に fail-fast 経路を組み込む
   - `run_per_task_loop` の round=2 redo の **直前** に
     `prev_snapshot=$(pt_snapshot_review_notes "$task_id" 1)` を呼び snapshot 取得
   - round=2 redo Implementer 起動 **直前**の HEAD SHA を `sha_before=$(git -C "$REPO_DIR" rev-parse HEAD)`
