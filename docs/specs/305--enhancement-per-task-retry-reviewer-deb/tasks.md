@@ -141,7 +141,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 4.1, 4.4, NFR 2.1_
   - _Boundary: .claude/agents/developer.md, repo-template/.claude/agents/developer.md_
 
-- [ ] 8. impl-notes.md 整備 + 既存挙動温存の手動スモーク確認
+- [x] 8. impl-notes.md 整備 + 既存挙動温存の手動スモーク確認
   - `docs/specs/305--enhancement-per-task-retry-reviewer-deb/impl-notes.md` に以下を記録:
     - 採用方針（注入ブロック構造 / fail-fast 判定基準）
     - 既存 `build_per_task_implementer_prompt` の 1 引数呼び出し後方互換性の検証結果
