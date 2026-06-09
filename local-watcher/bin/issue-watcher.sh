@@ -2686,6 +2686,270 @@ pt_extract_debugger_section() {
   return 0
 }
 
+# ─── pt_snapshot_review_notes <task_id> <round> ───
+#
+# round=2 redo / Debugger 経路 redo 起動の **直前** に現在の review-notes.md を
+# 一時ファイルに退避し、redo 後の Reviewer が同名ファイルを上書きしても
+# fail-fast inspector が「直前 round の Findings」を参照できるようにする
+# （Issue #305 Req 3.1）。
+#
+# - 退避先: `/tmp/idd-claude-${REPO_SLUG}-${NUMBER}-pt-snapshot-${task_id}-round${round}-${ts}.md`
+# - 退避元が存在しない場合は退避せず stdout に空文字 + return 0
+#   （fail-fast 判定側で prev snapshot 不在を非マッチとして扱う / Req 3.4）
+# - REPO_SLUG / NUMBER / task_id / round / ts の 5 要素で隔離して衝突回避
+# - stdout: 退避先 path（空文字なら退避なし）
+#
+# Requirements: 3.1
+pt_snapshot_review_notes() {
+  local task_id="$1"
+  local round="$2"
+  local review_notes="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
+  if [ ! -f "$review_notes" ]; then
+    # 退避元不在 → 空文字を返す（fail-fast 判定側で「snapshot 不在」として扱う）
+    return 0
+  fi
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+  local snapshot_path="/tmp/idd-claude-${REPO_SLUG}-${NUMBER}-pt-snapshot-${task_id}-round${round}-${ts}.md"
+  if cp "$review_notes" "$snapshot_path" 2>/dev/null; then
+    printf '%s\n' "$snapshot_path"
+  fi
+  return 0
+}
+
+# ─── pt_check_fail_fast <task_id> <prev_snapshot_path> <curr_review_notes_path> <sha_before> <sha_after> ───
+#
+# 連続 2 round（round=1 reject + round=2 reject）の Findings が「同一カテゴリ かつ
+# 同一 target」を 1 件以上共有 かつ 直近 round の Developer 再実行で
+# **テストファイル**に差分が積まれていないことを検出する（Issue #305 Req 3.1, 3.2,
+# 3.4, 3.5）。
+#
+# - 入力:
+#   - $1 task_id              : 対象 task（log 出力用）
+#   - $2 prev_snapshot_path   : round=1 直後に取得した review-notes.md スナップショット
+#                               （空文字 / ファイル不在なら不成立）
+#   - $3 curr_review_notes_path: round=2 reject 直後の review-notes.md
+#                                （空文字 / ファイル不在なら不成立）
+#   - $4 sha_before           : round=2 redo Developer 起動 **直前**の HEAD SHA
+#   - $5 sha_after            : round=2 reject **時点**の HEAD SHA（= 現在の HEAD）
+#
+# - アルゴリズム:
+#   1. 両 review-notes.md から `### Finding <n>` ブロックを抽出し、各 Finding の
+#      `Target` 行 + `Category` 行を `<category>\t<target>` の tuple set として取得
+#   2. 両 set の積集合が空ならば return 1（不成立 / Req 3.4 / stdout に
+#      `task=<id> fail-fast skip reason=no-shared-finding`）
+#   3. `git diff --name-only "$sha_before".."$sha_after"` で変更ファイル一覧を取得
+#   4. 変更ファイル一覧に「テストファイル」が **1 件も含まれない** ならば return 0
+#      （fail-fast 成立 / Req 3.2 / stdout に grep 可能 1 行
+#       `task=<id> fail-fast match category=<cat> target=<tgt> test-diff-empty range=<before>..<after>`）
+#   5. 1 件以上含まれるなら return 1（不成立 / stdout に
+#      `task=<id> fail-fast skip reason=test-diff-present`）
+#
+# - テストファイル判定基準（design.md「テストファイル判定基準」節 / Req 3.5）:
+#   拡張子 OR ディレクトリの 2 軸:
+#   - 拡張子: `_test.sh` / `.test.ts` / `.test.tsx` / `.test.js` / `.test.jsx` /
+#             `.spec.ts` / `.spec.tsx` / `.spec.js` / `.spec.jsx` /
+#             `_test.go` / `_test.py` / `test_*.py`
+#   - ディレクトリ: パスに `/test/` / `/tests/` / `/__tests__/` / `/spec/` のいずれかを含む
+#   - 加えて `local-watcher/test/fixtures/**` も「テスト関連差分」として扱う
+#
+# Requirements: 3.1, 3.2, 3.4, 3.5
+pt_check_fail_fast() {
+  local task_id="$1"
+  local prev_snapshot_path="$2"
+  local curr_review_notes_path="$3"
+  local sha_before="$4"
+  local sha_after="$5"
+
+  # snapshot 不在 / 読取不能なら不成立（Req 3.4 / 安全側）
+  if [ -z "$prev_snapshot_path" ] || [ ! -f "$prev_snapshot_path" ]; then
+    printf 'task=%s fail-fast skip reason=prev-snapshot-missing\n' "$task_id"
+    return 1
+  fi
+  if [ -z "$curr_review_notes_path" ] || [ ! -f "$curr_review_notes_path" ]; then
+    printf 'task=%s fail-fast skip reason=curr-review-notes-missing\n' "$task_id"
+    return 1
+  fi
+
+  # 両 review-notes.md から (category, target) tuple set を抽出する helper
+  # `### Finding <n>` ブロック配下の `**Target**: <val>` + `**Category**: <val>` を
+  # pair でまとめ、`<category>\t<target>` 1 行ずつ stdout に出す。
+  _pt_ff_extract_tuples() {
+    local file="$1"
+    awk '
+      /^### / {
+        # `### ` 見出しに遷移したら、直前の Finding が揃っていれば確定出力
+        if (in_finding && cur_target != "" && cur_category != "") {
+          print cur_category "\t" cur_target
+        }
+        cur_target = ""; cur_category = ""
+        if ($0 ~ /^### Finding[[:space:]]/) { in_finding = 1 } else { in_finding = 0 }
+        next
+      }
+      /^## / {
+        # `## ` 見出しで Finding ブロック群終端
+        if (in_finding && cur_target != "" && cur_category != "") {
+          print cur_category "\t" cur_target
+        }
+        cur_target = ""; cur_category = ""
+        in_finding = 0
+        next
+      }
+      in_finding {
+        # `**Target**: <val>` / `**Category**: <val>` （行頭 `- ` 任意）
+        if (match($0, /\*\*Target\*\*:[[:space:]]*/)) {
+          val = substr($0, RSTART + RLENGTH)
+          sub(/[[:space:]]+$/, "", val)
+          cur_target = val
+        } else if (match($0, /\*\*Category\*\*:[[:space:]]*/)) {
+          val = substr($0, RSTART + RLENGTH)
+          sub(/[[:space:]]+$/, "", val)
+          cur_category = val
+        }
+      }
+      END {
+        if (in_finding && cur_target != "" && cur_category != "") {
+          print cur_category "\t" cur_target
+        }
+      }
+    ' "$file"
+  }
+
+  local prev_tuples curr_tuples shared
+  prev_tuples="$(_pt_ff_extract_tuples "$prev_snapshot_path" | sort -u)"
+  curr_tuples="$(_pt_ff_extract_tuples "$curr_review_notes_path" | sort -u)"
+
+  # 積集合の算出（両方に存在する tuple のみ）
+  if [ -z "$prev_tuples" ] || [ -z "$curr_tuples" ]; then
+    printf 'task=%s fail-fast skip reason=no-shared-finding\n' "$task_id"
+    return 1
+  fi
+  shared="$(comm -12 <(printf '%s\n' "$prev_tuples") <(printf '%s\n' "$curr_tuples"))"
+  if [ -z "$shared" ]; then
+    printf 'task=%s fail-fast skip reason=no-shared-finding\n' "$task_id"
+    return 1
+  fi
+
+  # 最初の共有 tuple を採用（log 用）
+  local first_pair shared_category shared_target
+  first_pair="$(printf '%s\n' "$shared" | head -n 1)"
+  shared_category="$(printf '%s' "$first_pair" | cut -f1)"
+  shared_target="$(printf '%s' "$first_pair" | cut -f2)"
+
+  # テストファイル差分判定
+  local diff_files
+  if ! diff_files="$(git diff --name-only "${sha_before}..${sha_after}" 2>/dev/null)"; then
+    # git diff 失敗時は安全側に倒して不成立扱い（不要 claude-failed を避ける / Req 3.4）
+    printf 'task=%s fail-fast skip reason=git-diff-failed\n' "$task_id"
+    return 1
+  fi
+
+  local has_test_file=0
+  if [ -n "$diff_files" ]; then
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      case "$f" in
+        # 拡張子マッチ
+        *_test.sh|*.test.ts|*.test.tsx|*.test.js|*.test.jsx|\
+        *.spec.ts|*.spec.tsx|*.spec.js|*.spec.jsx|\
+        *_test.go|*_test.py)
+          has_test_file=1; break ;;
+      esac
+      # `test_*.py` パターン（ファイル名先頭 test_ + .py）
+      case "$f" in
+        */test_*.py|test_*.py)
+          has_test_file=1; break ;;
+      esac
+      # ディレクトリマッチ
+      case "$f" in
+        */test/*|*/tests/*|*/__tests__/*|*/spec/*)
+          has_test_file=1; break ;;
+      esac
+      # local-watcher/test/fixtures/** もテスト関連扱い
+      case "$f" in
+        local-watcher/test/fixtures/*)
+          has_test_file=1; break ;;
+      esac
+    done <<< "$diff_files"
+  fi
+
+  if [ "$has_test_file" -eq 0 ]; then
+    printf 'task=%s fail-fast match category=%s target=%s test-diff-empty range=%s..%s\n' \
+      "$task_id" "$shared_category" "$shared_target" "$sha_before" "$sha_after"
+    return 0
+  fi
+
+  printf 'task=%s fail-fast skip reason=test-diff-present\n' "$task_id"
+  return 1
+}
+
+# ─── pt_mark_fail_fast_failed <task_id> <category> <target> ───
+#
+# fail-fast 検出時に `claude-failed` 化 + 運用者向け診断 Issue コメントを投稿する
+# （Issue #305 Req 3.3, NFR 1.3, NFR 3.2）。
+#
+# 既存 `pt_mark_no_progress_failed` / `pt_mark_diff_range_resolve_failed` と
+# 同パターンで `mark_issue_failed` に `per-task-implementer-fail-fast-loop`
+# カテゴリで委譲する。新規カテゴリ追加であり既存カテゴリの意味は変更しない
+# （NFR 1.3）。
+#
+# Args:
+#   $1 = task_id  (例: `1.2`)
+#   $2 = category (連続 reject 対象の Finding カテゴリ / AC 未カバー / missing test
+#                  / boundary 逸脱 等)
+#   $3 = target   (連続 reject 対象の Finding target / numeric requirement ID
+#                  または `boundary:<component>`)
+#
+# 副作用（mark_issue_failed と等価 / NFR 1.3）:
+#   1. claude-claimed / claude-picked-up を除去し claude-failed を付与
+#   2. 復旧手順付き Issue コメントを 1 件投稿
+#
+# Requirements: 3.3, NFR 1.3, NFR 3.2
+pt_mark_fail_fast_failed() {
+  local task_id="$1"
+  local category="$2"
+  local target="$3"
+
+  local extra_body
+  extra_body=$(cat <<EOF
+## 失敗カテゴリ
+- カテゴリ: \`per-task-implementer-fail-fast-loop\`
+- 対象 task ID: \`${task_id}\`
+- 連続 reject 対象 Finding: Category=\`${category}\` / Target=\`${target}\`
+- ログ: \`$LOG\`
+
+## 検出条件
+per-task ループの round=1 と round=2 の **連続 2 round**で Reviewer Findings が
+「同一カテゴリ かつ 同一 target」を 1 件以上共有しており、かつ round=2 redo の
+Developer 再実行（直前の \`run_per_task_implementer_redo\` 起動）で **テスト
+ファイルに差分が積まれていない**ことを検出しました（Issue #305 Req 3.2 / 3.3）。
+
+このまま Debugger Gate 経由 round=3 redo に進んでも、同一指摘が再度 reject される
+構造になっており、turn 予算を無駄に消費するため自動進行を停止しました。
+
+## 参照ファイル
+- \`${SPEC_DIR_REL}/review-notes.md\` — 直近 round の Reviewer Findings
+- \`${SPEC_DIR_REL}/debugger-notes.md\` — Debugger 経路を経た場合のみ存在
+- \`${SPEC_DIR_REL}/impl-notes.md\` — Developer の Finding Closure Matrix と learning
+- \`$LOG\` — watcher ログ全文（fail-fast 検出 1 行 + 直前の Reviewer 判定行）
+
+## 次の手順
+1. \`${SPEC_DIR_REL}/review-notes.md\` と \`${SPEC_DIR_REL}/impl-notes.md\` を読み、
+   連続 reject されている Finding（Category=\`${category}\` / Target=\`${target}\`）の
+   妥当性を確認する
+2. **妥当な指摘**であれば、手動で修正 commit を積み、対応テストを追加した上で
+   \`claude-failed\` ラベルを外す（次サイクルで watcher が当該 Issue を再 pickup）
+3. **妥当でない指摘**（Reviewer の誤判定 / 要件側の曖昧さ）であれば、Architect /
+   PM への差し戻しを判断し、必要なら requirements.md / design.md / tasks.md の
+   再検討を実施する
+EOF
+)
+
+  pt_log "task=${task_id} fail-fast → claude-failed (per-task-implementer-fail-fast-loop) category=${category} target=${target}" >> "$LOG"
+
+  mark_issue_failed "per-task-implementer-fail-fast-loop" "$extra_body"
+}
+
 # ─── pt_resolve_diff_range <task_id> ───
 #
 # per-task Reviewer に渡す diff range の開始 SHA / 終了 SHA を解決して
