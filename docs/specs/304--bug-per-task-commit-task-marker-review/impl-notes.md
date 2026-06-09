@@ -43,3 +43,33 @@ per-task ループの 1 タスクごとの learning を記録する。
 - **残存課題**: なし（task 3 で `pt_handle_post_marker_commits`、task 4 で
   `pt_mark_post_marker_commits_detected` を追加する際に本関数の rc 体系を前提として呼び出す
   予定。本関数自体の API / log 書式は確定）。
+
+### Task 3
+
+- **採用方針**: `pt_detect_post_marker_commits` 直後（2745 行付近）に
+  `pt_handle_post_marker_commits <task_id> <round> <range_start> <marker_sha> <post_marker_list>`
+  を追加。env `POST_MARKER_RECOVERY_MODE`（default=`fail-with-diagnostic`、不正値も default 化）で
+  `extend-range` / `fail-with-diagnostic` に case 分岐し、algorithm body は fixture 参照実装
+  line 139〜172 と byte 同期させた。env 宣言は `PER_TASK_LOOP_ENABLED` 直後（497〜506 行）に
+  `POST_MARKER_RECOVERY_MODE="${POST_MARKER_RECOVERY_MODE:-fail-with-diagnostic}"` を 1〜2 行
+  コメント付きで追加。
+- **重要な判断**:
+  - stderr ログは「NFR 2.1 メインイベントログ」と「warn ログ」を **書式分離** した。
+    メインログは fixture line 158 と同じ `[YYYY-MM-DD HH:MM:SS] per-task:
+    post-marker-commits-detected ...` 書式の単一行を直接 `echo` で出す（`pt_warn` の `WARN:`
+    接頭辞を **付けない** 設計）。一方、不正 env 値検知 / `git rev-parse HEAD` 失敗等の
+    abnormal 通知は `pt_warn`（`WARN:` 接頭辞付き）に置換した。Task 2 で確立した
+    「algorithm body は byte 同期 / stderr 表面文字列は対応許容」precedent を踏襲しつつ、
+    NFR 2.1 のメインイベントログは fixture と書式一致させる方針。
+  - `fail-with-diagnostic` 分岐は `pt_mark_post_marker_commits_detected`（task 4 で追加）を
+    呼ばず単に `return 5` で終わる設計とした。task 4 の関数追加後に `run_per_task_reviewer`
+    経路（task 5）または本関数の改修で `mark` 呼び出しを補完する。fixture 参照実装も
+    同じ設計（line 170〜171）であり前方参照を作らない。
+  - `extend-range` 経路で `git rev-parse HEAD` が失敗した場合は `extend-range` を諦めて
+    rc=5 を返す保守的設計とした（fixture line 162〜164 と同一）。HEAD が取れない状況での
+    range 拡張は意味を持たないため、`fail-with-diagnostic` 相当の rc に倒すことで
+    呼び出し側（task 5 で組み込む `run_per_task_reviewer`）の分岐を統一できる。
+- **残存課題**: なし（task 4 で `pt_mark_post_marker_commits_detected` を追加する際、本関数の
+  `fail-with-diagnostic` 分岐から呼び出す経路の組み込み判断が残る。design.md は
+  `run_per_task_reviewer`（task 5）側で呼ぶ設計に倒しているが、task 4 完了後に task 5 で
+  両者を接続するため、本関数自体は task 3 時点の signature / rc 体系で確定）。
