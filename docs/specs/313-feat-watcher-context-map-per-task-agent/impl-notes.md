@@ -59,6 +59,29 @@
   （`_Requirements_partial: 2.1, 3.1, 3.2_` で Task 5 に deferred 明示済み）。Task 5 が
   `test-cm-generate.sh` / `test-cm-inject.sh` で当該 AC をカバーする責務を持つ。
 
+### Task 3
+
+- **採用方針**: design.md「Agent 仕様改訂」節で示された追記ブロックを、root の
+  `.claude/agents/developer.md` と `repo-template/.claude/agents/developer.md` の
+  「実装ルール」節 `変更前に grep / glob で既存実装・影響範囲を必ず把握する` の **直後** に
+  byte 一致で挿入。CLAUDE.md「root/repo-template 二重管理」規約と Req 4.1 / 4.3 に整合。
+- **重要な判断**:
+  - 挿入位置は design.md の指示通り「`変更前に grep / glob ...` の直後」とし、その後に続く
+    `依存ライブラリを追加する場合は...` 行との間に新規 bullet 1 件を挿入する形にした
+    （bullet レベルを既存兄弟と揃え、サブ箇条書きにはしない）。設計上は context map 参照は
+    grep / glob ルールの **修飾**として読まれる方が意図に近いが、bullet ネストを変えると
+    既存兄弟 bullet との視覚的整合性が崩れるため平 bullet を選択。
+  - 文体は design.md のブロックをほぼ逐語で採用し、本リポジトリの既存散文（全角括弧 `（）` /
+    `Req X.Y` 形式の参照）に揃えた。`(` 半角括弧と `（` 全角括弧の混在は CLAUDE.md
+    「root/repo-template 二重管理」規約上 byte 一致が崩れる原因になるため、両系統で全角括弧
+    `（）` のみを使用し `diff` が空になることを確認。
+  - 追記内容は静的な散文のみで実行コードを含まないため、本 task 内に追加すべき regression
+    test は **存在しない**（CLAUDE.md「root と repo-template の二重管理」節が要求する
+    `diff -r .claude/agents repo-template/.claude/agents` が空であることは、Task 5 の
+    stage-a-verify ブロック内で検証される）。
+- **残存課題**: なし。本 task は agent 仕様の散文追記のみで完結。AC 3.3 / 4.1 / 4.3 は本 task で
+  実装側の責務を完了し、4.3 の機械検証は Task 5 の verify block で行われる。
+
 ## 確認事項
 
 特になし（design.md と requirements.md の整合性は確認済み。tasks.md の本 task 仕様も
