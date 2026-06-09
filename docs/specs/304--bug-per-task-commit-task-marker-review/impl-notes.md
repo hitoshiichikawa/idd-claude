@@ -263,3 +263,24 @@ per-task ループの 1 タスクごとの learning を記録する。
     self-hosting 上で実際に marker contract 違反シナリオを通すことが必要。task 5 で
     導入した watcher 側 safety net（`per-task-post-marker-commits-detected`）の発火と
     本 task で追記した推奨 refresh 手順の妥当性は、将来運用観測で担保する。
+
+### Task 8
+
+- **採用方針**: `cp .claude/agents/developer.md repo-template/.claude/agents/developer.md` /
+  `cp .claude/agents/reviewer.md repo-template/.claude/agents/reviewer.md` の単純コピーで
+  task 7 の root 系統追記を repo-template 系統に **byte 一致** で反映。Edit による部分
+  パッチ適用ではなく丸ごとコピーを選んだ理由は、CLAUDE.md「二重管理規約」の検証点が
+  `diff -r .claude/agents repo-template/.claude/agents` の空集合一致であり、丸ごとコピー
+  なら手動 patch 順序ミス（subsection 位置ずれ等）が原理的に発生しないため。
+- **重要な判断**:
+  - **rules 側は無変更**: tasks.md 記載の通り本 Issue では `.claude/rules/` 側の変更は
+    行わない。`diff -r .claude/rules repo-template/.claude/rules` は task 7 以前の状態と
+    同様に空（変更前後で同じ状態を維持）であることを verify ブロックで確認した。
+  - **stage-a-verify 全項目を実行**: 単に diff だけでなく shellcheck（task 2〜5 の
+    watcher 変更）、`test-post-marker-detect.sh`（task 1 fixture、14/14 pass）、
+    `test-pt-resolve.sh`（#164 fixture、19/19 pass 非回帰）を含む構造化 verify ブロックを
+    手元で連結実行し、`SMOKE_RESULT: pass` を 2 件確認。NFR 1.1（既存挙動非回帰）を本 task
+    完了直前にも担保した。
+- **残存課題**: なし（本 task で Issue #304 の per-task ループ marker contract 強化と
+  repo-template ミラーが完了。後続は Reviewer / PjM 起動による per-task review と
+  PR 作成 stage に渡される）。
