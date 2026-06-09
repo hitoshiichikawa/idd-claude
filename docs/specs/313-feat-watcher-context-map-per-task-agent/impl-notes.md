@@ -131,6 +131,40 @@
 - **残存課題**: なし。本 task でカバーした AC は下記「AC カバレッジ（Task 5 スコープ分）」
   参照。Task 1 の latent bug は確認事項に escalation 済み。
 
+### Task 6
+
+- **採用方針**: `_Boundary: README.md_` を厳守し、README.md の「オプション機能（標準有効 /
+  常時有効）一覧」節の opt-in 表に `CONTEXT_MAP_ENABLED` 行を追加した上で、`Per-task TDD
+  Implementation Loop (#21)` 直後 / `Debugger Subagent (Phase 3, #22)` 直前に独立 h2 詳細
+  セクション `## Context Map for per-task agents (#313)` を新設し、Req 5.1〜5.4 + Task 6 詳細
+  項目（上限値 / 見直し予定）を運用者向け散文として整理した。
+- **重要な判断**:
+  - opt-in 表の挿入位置は **Phase 3: Debugger Subagent 直後**とした。本機能は per-task ループ
+    （#21）配下でのみ動作するため #21 系統の opt-in 機能群（PER_TASK_LOOP_ENABLED /
+    DEBUGGER_ENABLED）と隣接させると依存関係が読み取りやすい。Phase A〜E（Auto Rebase /
+    Path Overlap 等）系統には混ぜなかった。
+  - 詳細セクションの h2 アンカー `(#313)` は既存 #21 / #22 の命名規約に揃えた
+    （`## Per-task TDD Implementation Loop (#21)` / `## Debugger Subagent (Phase 3, #22)`）。
+    opt-in 表の「詳細」列 markdown link
+    `[Context Map for per-task agents (#313)](#context-map-for-per-task-agents-313)` は
+    GitHub の anchor 正規化規則（lowercase + space→hyphen + `#` 除去）で解決される。
+  - 「動作前提として `PER_TASK_LOOP_ENABLED=true` 環境のみで動作する旨」（Req 5.2）は
+    複数箇所に重複明記した: (1) opt-in 表の「追加 env」列の **前提**強調、(2) 詳細セクション
+    冒頭の「注」block の Req 1.4 参照、(3) opt-in 手順の cron 例で両 env を併記、(4) 環境変数
+    表の補足行。運用者が表だけ見ても本文だけ見ても同じ結論に到達できるようにした。
+  - 「上限値 200 行 / 8 KB と運用後に観測データで見直す予定」（Task 6 詳細項目）は専用の
+    `### 出力サイズ上限` セクションを立て、初期確定値の根拠（per-task prompt の 5〜10 %）と
+    見直し方針（観測指標: 占有割合 / truncate 発生率 / 追加 Read 発生率）を明示した。NFR 4.1
+    の「具体閾値は design.md で確定」を README にも反映する位置付け。
+  - Scope-out 列挙（Req 5.4）は箇条書きで 4 項目（reasoning effort 変更 / 並列度 default 変更 /
+    LLM scout / repo-wide index）を逐語的に明示。requirements.md の Out of Scope 節および
+    design.md の Non-Goals 節と同じ語彙を採用して traceability を確保した。
+  - 追記内容は静的な散文のみで実行コードを含まないため、本 task 内に追加すべき regression
+    test は **存在しない**（README は test スコープ外。Req 6.1〜6.3 の bash test は Task 5 で
+    完了済み）。stage-a-verify ブロックは README に依存しない。
+- **残存課題**: なし。本 task は README の散文追記のみで完結。Req 5.1〜5.4 はドキュメント側
+  責務として本 task でカバー完了。
+
 ## 確認事項
 
 ### Task 5 で発見した latent bug（cm_compose 内 `_Boundary:_` bullet 展開の取り扱い）
