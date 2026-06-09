@@ -101,10 +101,91 @@
 - **残存課題**: なし。本 task は agent 仕様の散文追記のみで完結。AC 3.4 / 4.2 / 4.3 は本 task で
   実装側の責務を完了し、4.3 の機械検証は Task 5 の verify block で行われる。
 
+### Task 5
+
+- **採用方針**: `_Boundary: test-fixtures/_` を厳密に守り、`docs/specs/313-.../test-fixtures/`
+  配下にのみファイルを追加。3 本のスモークスクリプト（test-cm-generate.sh /
+  test-cm-disabled.sh / test-cm-inject.sh）と 2 つの fixture（tasks-sample.md /
+  design-sample.md）で、Task 1 / Task 2 で `_Requirements_partial:_` に列挙された全 AC を
+  集約検証する。inject 系テストでは `issue-watcher.sh` の prompt builder を副作用なしで
+  source する手段として **awk による関数定義抽出**（一時ファイル経由で source）を採用した
+  （watcher 本体は末尾で `_dispatcher_run` を直接実行するため straight source できない）。
+- **重要な判断**:
+  - 冪等性テスト（NFR 2.1）の「同一入力」は **spec dir の内容が同一の状態**と解釈し、
+    2 つの fresh temp dir に同一 fixture を配置して独立に `cm_generate` を呼び比較する形に
+    した。同一 spec dir で 2 回呼ぶ素朴な実装は、1 回目で生成された context-map.md が
+    `cm_resolve_candidate_docs` の find 結果に紛れ込むため「同一入力」前提が崩れる。
+  - shellcheck SC2030 / SC2031（subshell 内 env 改変の info 警告）はテスト設計上意図的に
+    subshell で env を隔離する箇所が大量にあり、false-positive。プロジェクトの
+    `.shellcheckrc` を変更せず、各 fixture スクリプトの冒頭で個別 `# shellcheck disable=`
+    することで scope を最小化した。
+  - prompt builder の関数抽出は `awk -v fname=... 'index($0, fname "()") == 1 ... && /^}$/ {exit}'`
+    のシンプルなパターンで完結する。Tasks 1 / 2 の wiring（context-map block を末尾に
+    embed）が壊れていれば inject テストの strip 比較で即座に検出される設計とした。
+  - `cm_compose` の `_Boundary:_` セクション内 bullet 展開には **latent な印字バグ**を
+    確認した（後述「確認事項」参照）。本 task の boundary（test-fixtures/）外のため修正は
+    行わず、Req 2.3 の検証は **`cm_resolve_boundary` の CSV 抽出が boundary を正しく
+    返すこと** + **`## Boundary` セクション見出しの存在**を assert する形で代替した。
+    候補ファイル列（Req 2.4）の boundary 解決結果は `## Candidate files` 側で正しく
+    展開されるため、Req 2.4 のテストは経由側で担保できている。
+- **残存課題**: なし。本 task でカバーした AC は下記「AC カバレッジ（Task 5 スコープ分）」
+  参照。Task 1 の latent bug は確認事項に escalation 済み。
+
 ## 確認事項
 
-特になし（design.md と requirements.md の整合性は確認済み。tasks.md の本 task 仕様も
-矛盾なく実装可能だった）。
+### Task 5 で発見した latent bug（cm_compose 内 `_Boundary:_` bullet 展開の取り扱い）
+
+`cm_compose` 内の以下のコード片（`local-watcher/bin/modules/context-map.sh:316`）には、
+**末尾トークンが消失する**バグが残存している:
+
+```bash
+printf '%s' "$boundary" | tr ',' '\n' | while IFS= read -r token; do
+```
+
+`printf '%s'` は trailing newline を付与しないため、`while IFS= read -r token` は末尾の
+token（newline 終端されていない最後の行）を読み飛ばす。結果として:
+
+- 単一トークン boundary（例: `"context-map.sh"`）: bullet が **1 件も出力されない**
+- 複数トークン boundary（例: `"a, b, c"`）: 末尾 `c` の bullet が出力されない
+
+修正案: `printf '%s' "$boundary"` を `printf '%s\n' "$boundary"` に変更（trailing newline
+追加 / 1 文字差分）。
+
+**Task 5 のスコープ外（boundary 違反）のため本 task では修正していない**。Architect /
+人間レビュワーに以下のいずれかを判断委ねる:
+
+1. follow-up Issue（hotfix）を切る。修正は 1 行のため small PR で対応可能
+2. Task 1 を再 Implementer 起動して修正する（per-task ループ再走）
+3. Req 2.3 / 2.4 の実装側 contract を「heading のみで足りる」と緩める（recommended せず）
+
+本 task の test-cm-generate.sh は本 latent bug を踏まえた assertion 設計（`cm_resolve_boundary`
+の CSV 抽出と `## Boundary` heading の存在で代替検証 / `## Candidate files` 側で boundary
+ベースの解決結果が観測されることを確認）にしているため、現状のまま全 24 assert が pass する。
+bug が修正されれば、追加で `## Boundary` セクション内に `- context-map.sh` bullet を assert
+する強化テストを task 5 後続で追加できる。
+
+## AC カバレッジ（Task 5 スコープ分）
+
+| Requirement | 担保手段（test-fixtures/） |
+|---|---|
+| 2.1 | test-cm-generate.sh case1 で `cm_generate` が context-map.md を生成することを検証 |
+| 2.2 | test-cm-generate.sh case1 が `## Task` / `- ID: 1` / Task Name を grep で検証 |
+| 2.3 | test-cm-generate.sh case1 が `## Boundary (from tasks.md` heading + `cm_resolve_boundary` CSV を assert（latent bug は確認事項に escalation 済み） |
+| 2.4 | test-cm-generate.sh case1 で boundary 派生の candidate files セクション内に `context-map.sh` が出ることを awk で抽出して検証 |
+| 2.5 | test-cm-generate.sh case1 で `## Candidate tests` heading を grep |
+| 2.6 | test-cm-generate.sh case1 で `## Candidate docs` heading + `- tasks.md` を grep |
+| 2.7 | test-cm-generate.sh case1 で `## Search constraints` + `READ FIRST:` を grep |
+| 2.9 | test-cm-generate.sh case3 で `_Boundary:_` 不在 task（Task 3）に対し `(resolution: none` 明示が出ることを検証 |
+| 2.10 / NFR 4.1 | test-cm-generate.sh case4 で 300 行 / 約 12 KB 入力が 202 行（200 cap + 改行 + truncate marker）に縮約され、`truncated by cm_truncate_if_oversize` marker と原行数 / 原バイト数が末尾に追記されることを検証 |
+| 3.1 | test-cm-inject.sh が `build_per_task_implementer_prompt` を flag-on で呼び、stdout に `## Context Map` が含まれることを確認 |
+| 3.2 | test-cm-inject.sh が `build_per_task_reviewer_prompt` を flag-on で呼び、stdout に `## Context Map` が含まれることを確認 |
+| 3.5 / NFR 1.1 | test-cm-inject.sh が flag-off で `## Context Map` 不在を確認 + 「flag-on prompt から `## Context Map` 以降を strip した結果」と「flag-off prompt」が一致することを Implementer / Reviewer 両方で検証 |
+| 6.1 | test-cm-generate.sh 全体（24 assert）で生成 contract を機械検証 |
+| 6.2 | test-cm-inject.sh 全体（7 assert）で prompt 注入 contract を機械検証 |
+| 6.3 | test-cm-disabled.sh 全体（20 assert）で gate-closed 時の context-map.md 非生成 + prompt 注入なしを機械検証 |
+| NFR 2.1 | test-cm-generate.sh case2 が同一 fixture を別々の fresh temp dir に配置して 2 回独立に `cm_generate` を呼び、出力が byte 一致することを検証 |
+| NFR 2.3 | test-cm-generate.sh case5a / 5b / 5c で SPEC_DIR_REL 不在 / tasks-design 不在 / 空 task_id の全異常入力で `cm_generate` rc=0 終了を検証 |
+| NFR 3.1 | `shellcheck docs/specs/313-.../test-fixtures/*.sh` 警告ゼロ（SC2030 / 2031 info は意図的 false-positive を file-scope disable で抑止） |
 
 ## AC カバレッジ（Task 1 スコープ分）
 
