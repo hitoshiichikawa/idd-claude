@@ -17,7 +17,7 @@
   - 末尾で `SMOKE_RESULT: pass` / `fail` を出力
   - _Requirements: 5.1, 5.2, 5.3_
 
-- [ ] 2. watcher への post-marker 検出関数の追加（`pt_detect_post_marker_commits`）
+- [x] 2. watcher への post-marker 検出関数の追加（`pt_detect_post_marker_commits`）
   - `local-watcher/bin/issue-watcher.sh` の `pt_resolve_diff_range`（2638 行付近）直後に
     新規関数 `pt_detect_post_marker_commits <marker_sha>` を追加
   - `git log --format=%H <marker_sha>..HEAD` で post-marker commit を列挙
