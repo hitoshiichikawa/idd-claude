@@ -2717,6 +2717,45 @@ pt_resolve_diff_range() {
   return 0
 }
 
+# ─── pt_detect_post_marker_commits <marker_sha> ───
+#
+# 指定 marker SHA より後ろ（`<marker_sha>..HEAD`）に存在する commit を列挙する safety net。
+# per-task Reviewer reject 後の Implementer 再実行で、修正 commit が古い marker より後ろに
+# 積まれた場合（idd-codex #14 と同型）に silent range truncation を防ぐための検出 hook。
+#
+# Contract（design.md「pt_detect_post_marker_commits」節 / Req 2.1, NFR 1.3, NFR 2.1）:
+#   引数: <marker_sha>
+#   stdout: post-marker SHA list（newline 区切り、git log と同じ「新しい順」/ HEAD 側が先頭）
+#   stderr: 警告ログ（NFR 2.1 / git エラー時のみ）
+#   rc=0: 1 件以上検出
+#   rc=1: 0 件（fall-through OK / NFR 1.3 既存挙動温存）
+#   rc=2: git エラー（fail-safe / 呼び出し側は rc=1 と同様に扱える）
+#
+# 後方互換性（NFR 1.3）:
+#   - post-marker commit が 0 件のケース（典型シナリオ）では rc=1 / stdout 空となるため、
+#     呼び出し側は既存ルートを温存できる
+#
+# 参照実装:
+#   - 本関数は `docs/specs/304--bug-per-task-commit-task-marker-review/test-fixtures/
+#     test-post-marker-detect.sh` 内の参照実装と algorithm body を byte 同期させる責務がある
+#     （stderr 行の prefix のみ `[smoke]` ↔ `[YYYY-MM-DD HH:MM:SS] per-task:` で差を許容、
+#     既存 #164 fixture と同方針）
+#
+# Requirements: 2.1, NFR 1.3, NFR 2.1
+pt_detect_post_marker_commits() {
+  local marker_sha="$1"
+  local post_list
+  if ! post_list=$(git log --format=%H "${marker_sha}..HEAD" 2>/dev/null); then
+    pt_warn "post-marker-commits-detect: git log error marker=${marker_sha}"
+    return 2
+  fi
+  if [ -z "$post_list" ]; then
+    return 1
+  fi
+  printf '%s\n' "$post_list"
+  return 0
+}
+
 # ─── pt_has_subtasks <tasks_md_path> <task_id> ───
 #
 # tasks.md 上で指定 task_id を numeric 階層 prefix とする子タスク行が 1 件以上存在するか
