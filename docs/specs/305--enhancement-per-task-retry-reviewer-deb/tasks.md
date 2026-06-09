@@ -17,7 +17,7 @@
   - _Requirements: 1.1, 1.3, 1.5, 5.1, 5.5, NFR 4.1_
   - _Boundary: issue-watcher.sh (pt_* namespace), local-watcher/test/_
 
-- [ ] 2. `pt_extract_debugger_section` ヘルパー実装 + 単体テスト fixture 整備
+- [x] 2. `pt_extract_debugger_section` ヘルパー実装 + 単体テスト fixture 整備
   - 同 namespace に `pt_extract_debugger_section <debugger_notes_path> <task_id>` を追加
   - awk で `^## Task <escaped_task_id>$` 行頭マッチから次の `^## ` 直前まで抽出
   - task_id の `.` は awk の正規表現メタを避けるため shell 側で `[.]` にエスケープしてから awk に渡す
