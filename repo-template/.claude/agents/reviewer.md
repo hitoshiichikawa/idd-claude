@@ -311,6 +311,33 @@ per-task ループの Reviewer は判定 depth が以下に絞り込まれます
 - **`_Boundary:_` 違反**: depth に関わらず **常に reject 対象**
   （task 単位境界の逸脱検出が本ループの主目的）
 
+## task-test 境界整合と partial 明示の取り扱い（Issue #303）
+
+per-task Reviewer は `missing test` カテゴリ判定時、当該 task の `_Requirements:_` 列挙 AC に
+対応するテスト追加が当該 task の diff range 内（`range_start_sha`..`range_end_sha`）にある
+かを確認します。Architect が実装 task とテスト追加 task を分割した場合の取り扱いは以下の
+通り:
+
+- **`_Requirements_partial:_` 明示 AC は `missing test` reject 理由としない**: 当該 task の
+  詳細項目に `_Requirements_partial: <numeric ID 列挙>_` が宣言されている場合、当該 ID は
+  「テスト追加が後続 task に deferred されている」と解釈し、当該 task の per-task review で
+  **`missing test` の reject 理由にしない**（partial 解消は後続 task の Reviewer 起動時に
+  確認される）
+- **partial 明示の subset 妥当性確認**: `_Requirements_partial:_` に列挙された numeric ID は
+  必ず同 task の `_Requirements:_` の subset でなければならない。`_Requirements:_` に
+  存在しない ID が partial 宣言されている場合は **`boundary 逸脱` カテゴリ**（細目: partial
+  spec violation）で reject する
+- **partial 明示 **なし** AC は通常通り `missing test` 判定**: `_Requirements_partial:_` で
+  明示されていない `_Requirements:_` 列挙 AC は、対応テスト追加が当該 task の diff range
+  内に存在しない場合、通常通り `missing test` カテゴリで reject する
+- **dedicated regression test task の境界**: 後続 test task の per-task review では、当該
+  test task の `_Requirements:_` 列挙 AC（先行 task で partial 明示された AC を解消する
+  関係）に対応するテスト追加が当該 task diff range 内にあるかを通常通り判定する
+
+詳細規約は [`tasks-generation.md`](../rules/tasks-generation.md) の「task-test 境界整合の
+規約」節を参照してください。Architect / Developer / Reviewer は同一の task-boundary contract
+として本節を参照します。
+
 ## 既存規約の流用
 
 per-task ループでも既存の 3 カテゴリ判定 / RESULT 行規約 / 出力契約をそのまま流用します:

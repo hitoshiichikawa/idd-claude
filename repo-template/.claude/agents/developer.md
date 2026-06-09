@@ -402,6 +402,30 @@ fresh な Claude session** で本 Developer サブエージェントが起動さ
 - `## Implementation Notes` 見出し自体が無ければ初回 Implementer が追加してよい
   （`impl-notes.md` 自体が存在しなければ作成する）
 
+## task-test 境界整合の責務（Issue #303）
+
+per-task Reviewer は当該 task の `_Requirements:_` 列挙 AC について「対応テストが当該 task の
+diff range 内にあるか」を `missing test` カテゴリで判定します（[`reviewer.md`](./reviewer.md)
+の per-task ループ節）。Developer は以下の責務を負います:
+
+- **当該 task 内のテスト実装責務**: 当該 task の `_Requirements:_` に列挙された AC のうち
+  `_Requirements_partial:_` に **含まれない** ID については、当該 task 内で対応テストを実装
+  すること。「実装は本 task / テストは後続 task で」という分割は、`_Requirements_partial:_`
+  が明示されている AC ID に **限り** 許容されます
+- **partial 明示の解釈**: `_Requirements_partial:_` で明示された AC は、当該 task 内では
+  実装のみ行い、対応テスト追加は後続 task に deferred されている状態です。当該 task では
+  partial 明示された AC のテスト追加を強制されません
+- **同 task 内テストが書けないとき**: 当該 task の `_Requirements:_` 列挙 AC（partial 除外
+  後）に対応するテストが、当該 task の boundary 内で実装できないと判断した場合、
+  `tasks.md` を **書き換えず** PR 本文「確認事項」または Issue コメントで Architect への
+  差し戻しを提案すること（spec 書き換え禁止規約と整合）
+- **AC 範囲外のテストを書かない**: `_Requirements:_` に列挙されていない AC のテストを当該
+  task で追加しないこと（範囲外 AC は別 task の責務）
+
+詳細規約は [`tasks-generation.md`](../rules/tasks-generation.md) の「task-test 境界整合の
+規約」節を参照してください。Architect / Developer / Reviewer は同一の task-boundary contract
+として本節を参照します。
+
 ## 既存 learnings の利用
 
 - prompt に inline 埋め込みされた「これまで完了した task 群の learnings」を必ず参照し、
