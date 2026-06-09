@@ -2998,7 +2998,7 @@ pt_should_skip_reviewer() {
   return 0
 }
 
-# ─── build_per_task_implementer_prompt <task_id> ───
+# ─── build_per_task_implementer_prompt <task_id> [<redo_mode>] ───
 #
 # per-task Implementer 用の prompt を heredoc で組み立てて stdout に出力。
 # 既存 `build_dev_prompt_a` の形式を踏襲しつつ、以下を明示する:
@@ -3011,9 +3011,27 @@ pt_should_skip_reviewer() {
 #   - 既存 learnings の inline 埋め込み（Req 4.3）
 #   - PR 作成禁止 / spec 書き換え禁止（既存 Stage A 制約と同等）
 #
-# Requirements: 2.2, 2.3, 2.4, 2.5, 4.1, 4.2, 4.3, 4.4
+# redo_mode 引数（Issue #305 で追加 / 既定 "initial"）:
+#   - "initial"        : 初回 Implementer 起動。Findings / Fix Plan 注入ブロックを追加しない
+#                        （既存 1 引数呼び出しと **完全に同一**の prompt を生成 / NFR 1.1）
+#   - "after-round1"   : Reviewer round=1 reject 後の redo。`## 直前 round の Reviewer Findings`
+#                        ブロックと `## Finding Closure Matrix の記録義務` ブロックを注入
+#   - "after-debugger" : Debugger Gate 経由 round=3 の redo。上記 2 ブロックに加えて
+#                        `## Debugger の Fix Plan` ブロックを注入 + Matrix 5 列目指示を追記
+#   - 未知の値は安全側に "initial" へ fallback
+#
+# Requirements: 2.2, 2.3, 2.4, 2.5, 4.1, 4.2, 4.3, 4.4,
+#               1.1, 1.2, 1.3, 1.4, 1.5, 4.3 (Issue #305),
+#               NFR 1.1, NFR 3.1, NFR 4.1, NFR 4.2 (Issue #305)
 build_per_task_implementer_prompt() {
   local task_id="$1"
+  local redo_mode="${2:-initial}"
+  # 安全側 fallback: 未知の値は initial 扱い
+  case "$redo_mode" in
+    initial|after-round1|after-debugger) ;;
+    *) redo_mode=initial ;;
+  esac
+
   local learnings
   learnings=$(pt_extract_learnings "$REPO_DIR/$SPEC_DIR_REL/impl-notes.md")
   local learnings_block
@@ -3037,6 +3055,142 @@ EOF
 （先行 task の learnings はまだ存在しません。本 task が最初の per-task 実装です）
 EOF
 )
+  fi
+
+  # ─── redo_mode != initial 時のみ Findings / Fix Plan / Matrix 規約ブロックを構築 ───
+  #
+  # 注入ブロックは redo 経路（after-round1 / after-debugger）でのみ prompt 本文に追加され、
+  # redo_mode=initial では空文字のまま heredoc に埋まる（= 既存 1 引数呼び出しと完全等価 / NFR 1.1）。
+  #
+  # NFR 3.1: 注入実施事実を grep 可能な 1 行で watcher ログに出力する。round 番号は本関数の引数
+  # に含めず redo_mode に紐付ける形で省略する（after-round1 ≒ round=2 redo /
+  # after-debugger ≒ round=3 redo の対応関係は run_per_task_loop 側で構造的に保証される）。
+  # design.md 行 528 は `redo_mode=<mode> inject=<comma-sep-files> round=<N>` を例示するが、本
+  # build 関数は round を引数で受け取らない設計（呼び出し側の wrapper で stage_label に
+  # redo_mode を埋め込む / 後方互換性の単純化）のため round はログから省略する。
+  local findings_block_section=""
+  local debugger_block_section=""
+  local closure_matrix_section=""
+  if [ "$redo_mode" != "initial" ]; then
+    local _inject_files=""
+    # ── Reviewer Findings 注入（after-round1 / after-debugger 共通） ──
+    local _review_notes_path="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
+    local _findings_block
+    if _findings_block=$(pt_extract_findings_block "$_review_notes_path"); then
+      findings_block_section=$(cat <<EOF
+
+## 直前 round の Reviewer Findings（review-notes.md より）
+
+per-task Reviewer が直前 round で reject 判定を返した際の Findings セクションを以下に
+inline で運びます。各 Finding の **Target / Category / Detail / Required Action** を確認し、
+本起動で **必ず対応**してください（同じ指摘が次 round で再度 reject されないように、
+fix commit + 追加テスト + 検証結果を Finding Closure Matrix に記録します。後述）。
+
+\`\`\`markdown
+${_findings_block}
+\`\`\`
+EOF
+)
+      _inject_files="review-notes"
+    else
+      findings_block_section=$(cat <<'EOF'
+
+## 直前 round の Reviewer Findings（review-notes.md より）
+
+(review-notes.md が見つかりません / 抽出失敗のため Findings の inline 注入を諦めました。
+spec ディレクトリ配下の review-notes.md を直接読み、直前 round の Findings を参照してください)
+EOF
+)
+      pt_log "task=$task_id redo_mode=$redo_mode inject=skipped reason=findings-extract-failed" >> "$LOG"
+    fi
+
+    # ── Debugger Fix Plan 注入（after-debugger のみ） ──
+    if [ "$redo_mode" = "after-debugger" ]; then
+      local _debugger_notes_path="$REPO_DIR/$SPEC_DIR_REL/debugger-notes.md"
+      local _debugger_block
+      if _debugger_block=$(pt_extract_debugger_section "$_debugger_notes_path" "$task_id"); then
+        debugger_block_section=$(cat <<EOF
+
+## Debugger の Fix Plan（debugger-notes.md より）
+
+Debugger サブエージェントが当該 task について生成した Fix Plan を以下に inline で運びます。
+\`### 根本原因\` / \`### 修正手順\` / \`### 検証方法\` / \`### 残存リスク\` を読み、本起動で
+修正手順を順に実施し、検証方法で挙動を確認してください。Debugger は **コード修正権限を
+持たない**ため、Fix Plan の実装は本起動の Developer が担います。
+
+\`\`\`markdown
+${_debugger_block}
+\`\`\`
+EOF
+)
+        if [ -n "$_inject_files" ]; then
+          _inject_files="${_inject_files},debugger-notes"
+        else
+          _inject_files="debugger-notes"
+        fi
+      else
+        debugger_block_section=$(cat <<EOF
+
+## Debugger の Fix Plan（debugger-notes.md より）
+
+(debugger-notes.md または \`## Task ${task_id}\` セクションが見つかりません / 抽出失敗
+のため Fix Plan の inline 注入を諦めました。spec ディレクトリ配下の debugger-notes.md を
+直接読み、当該 task の Fix Plan を参照してください)
+EOF
+)
+        pt_log "task=$task_id redo_mode=$redo_mode inject=skipped reason=debugger-section-not-found" >> "$LOG"
+      fi
+    fi
+
+    # ── 注入実施を 1 行で記録（NFR 3.1） ──
+    if [ -n "$_inject_files" ]; then
+      pt_log "task=$task_id redo_mode=$redo_mode inject=$_inject_files" >> "$LOG"
+    fi
+
+    # ── Finding Closure Matrix の記録義務（redo 経路共通） ──
+    #
+    # 詳細規約は developer.md の「per-task retry 時の Finding Closure Matrix 記録義務」節
+    # （Issue #305 の task 7 で追加予定）を canonical source として参照する。本 prompt では
+    # 規約への参照と最小限の指示を 1〜2 段落で運ぶ。
+    if [ "$redo_mode" = "after-debugger" ]; then
+      closure_matrix_section=$(cat <<EOF
+
+## Finding Closure Matrix の記録義務（per-task retry 経路）
+
+本起動は per-task retry 経路（redo_mode=${redo_mode}）です。直前 round の Reviewer Findings
+（および Debugger Fix Plan）に対する対応状況を、**Finding Closure Matrix** として
+\`${SPEC_DIR_REL}/impl-notes.md\` の \`### Task ${task_id}\` セクション末尾に追記してください。
+規約詳細は \`.claude/agents/developer.md\` の「per-task retry 時の Finding Closure Matrix
+記録義務」節を canonical source として参照すること。
+
+Matrix の各行には直前 round の Reviewer Finding ごとに **Finding / Target / Fix Commit /
+Added/Updated Test / Verification** の 4 項目（5 列）を対応付け、本起動は Debugger Gate
+経由 round=3 のため **5 列目「Fix Plan Step」**（対応する Debugger Fix Plan の修正手順番号）も
+**必ず追記**してください。fix commit が存在しない Finding には「未対応」「対応不可（理由）」
+「次 round へ持ち越し」のいずれかを Fix Commit 列で明示します。先行 task の Matrix および
+先行 round の Matrix 既存行は **改変・削除・並び替え禁止**（新規 round の Matrix は新規
+見出しで追加）。
+EOF
+)
+    else
+      closure_matrix_section=$(cat <<EOF
+
+## Finding Closure Matrix の記録義務（per-task retry 経路）
+
+本起動は per-task retry 経路（redo_mode=${redo_mode}）です。直前 round の Reviewer Findings
+に対する対応状況を、**Finding Closure Matrix** として
+\`${SPEC_DIR_REL}/impl-notes.md\` の \`### Task ${task_id}\` セクション末尾に追記してください。
+規約詳細は \`.claude/agents/developer.md\` の「per-task retry 時の Finding Closure Matrix
+記録義務」節を canonical source として参照すること。
+
+Matrix の各行には直前 round の Reviewer Finding ごとに **Finding / Target / Fix Commit /
+Added/Updated Test / Verification** の 4 項目（4 列）を対応付け、fix commit が存在しない
+Finding には「未対応」「対応不可（理由）」「次 round へ持ち越し」のいずれかを Fix Commit
+列で明示します。先行 task の Matrix および先行 round の Matrix 既存行は **改変・削除・
+並び替え禁止**（新規 round の Matrix は新規見出しで追加）。
+EOF
+)
+    fi
   fi
 
   cat <<EOF
@@ -3123,6 +3277,7 @@ ${learnings_block}
 - \`git reset\` / \`git rebase\` / branch の切り替えは **禁止**
 - 既存 commit と矛盾する変更が必要な場合は、既存 commit を打ち消す追加 commit を積むか、
   impl-notes.md の「確認事項」に矛盾内容を記載して人間判断を仰ぐ
+${findings_block_section}${debugger_block_section}${closure_matrix_section}
 EOF
 }
 
