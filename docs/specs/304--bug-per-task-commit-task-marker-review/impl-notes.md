@@ -209,3 +209,57 @@ per-task ループの 1 タスクごとの learning を記録する。
     static rendering（heredoc 展開結果）の確認に留めた。実 Reviewer エージェントが
     machine-parseable block / Warning / Extended range 説明を正しく解釈することの確認は
     将来の dogfooding 観測で担保する。
+
+### Task 7
+
+- **採用方針**: `.claude/agents/developer.md` の「per-task ループ下での Implementer の責務」
+  節の「適用範囲」（`1 commit = 1 task ID` 記述で終わる）直後に新規 h2 subsection
+  `## Marker contract（marker は task の終端 commit）（Issue #304 / idd-codex #14 同型再発防止）`
+  を追加し、`.claude/agents/reviewer.md` の `## 判定対象 diff range の限定` subsection 末尾
+  （HEAD 全体観点を Stage B Reviewer に委ねる記述の直後）に h3 `### range 外 commit の
+  判定対象外性（Issue #304 Req 3.2）` と `### Extended range シグナルの解釈（Issue #304
+  Req 3.3）` を追加した。両ファイルとも root 系統のみで編集し、repo-template ミラーは
+  task 8 で同期する。
+- **重要な判断**:
+  - **subsection 階層の選び方**: developer.md の「per-task ループ下での Implementer の責務」
+    は h1（`#`）、配下既存 subsection（適用範囲 / learning 追記の責務 / task-test 境界整合
+    の責務 / 既存 learnings の利用）はすべて h2（`##`）。design.md の File Structure Plan
+    記載「`1 commit = 1 task ID` 記述直後に新たな subsection として配置」に従い、既存階層と
+    整合する h2 で `## Marker contract（marker は task の終端 commit）` を作成。reviewer.md
+    側は「判定対象 diff range の限定」が h2 のため、その配下に追記する Req 3.2 / Req 3.3 の
+    2 ブロックは h3（`###`）を選択（同階層に既存 h3 がないため新規導入だが、判定 depth
+    の絞り込み等の隣接 h2 と階層的に整合）。
+  - **文言の引用元**: 推奨 refresh 手順（旧 marker 特定 → 修正 commit → `git reset --soft`
+    or `git rebase -i` で剥がし新 marker 末尾作成 → push）は design.md `Components and
+    Interfaces` ＞ `developer.md` ＞「推奨 refresh 手順（順序付き）」の 4 ステップを
+    過不足なく転記。禁止例（marker 後ろに修正を残す / marker のみ先行 push /
+    同一 task ID の marker 重複）は design.md と tasks.md の文言を統合した 3 例を列挙。
+    Reviewer 側の「判定基準は変わらない / range 内 commit のみを判定根拠 / Implementer
+    契約違反の事実は観察できるが reject 理由にしない / `range_extended: false` または
+    欠落時は normal 経路」の 4 点は design.md `Components and Interfaces` ＞
+    `reviewer.md` の「extended range シグナル（Req 3.3）」と「range 外 commit の取扱い
+    （Req 3.2）」を吸収。
+  - **Req traceability**: Req 1.1（marker 作成タイミング）/ Req 1.2（retry 時の marker
+    refresh）/ Req 1.3（prompt に marker contract を明示）の 3 点を developer.md 側の
+    3 subsection（marker 作成タイミングの契約 / retry 時の marker refresh 契約 / 推奨
+    refresh 手順 + 禁止例）と watcher 側 safety net 説明で網羅。Req 3.2（range 外 commit
+    判定対象外）/ Req 3.3（extended range 解釈）は reviewer.md 側 2 ブロックに分離。
+    各 subsection 見出しに `Issue #304 Req X.Y` を明示し、将来の review-notes.md / Issue
+    遡及で AC traceability を即座に取れる形にした。
+  - **watcher 側 safety net への参照**: developer.md の marker contract 節末尾に
+    「`pt_detect_post_marker_commits` / `pt_handle_post_marker_commits` /
+    `per-task-post-marker-commits-detected` / env `POST_MARKER_RECOVERY_MODE`」の関数 / カテゴリ /
+    env 名を列挙し、Implementer 契約と watcher safety net が defense-in-depth として
+    両面で機能する設計思想を 1 段落で記述。task 2〜5 で導入済みの実装と prompt 文言の
+    対応関係を明文化することで、将来契約違反が発生した際の運用者の調査経路を短縮できる。
+- **残存課題**:
+  - **task 8 で repo-template ミラー反映が必要**: 本 task 完了時点で
+    `diff -r .claude/agents repo-template/.claude/agents` は **差分あり** の状態
+    （`developer.md` の Marker contract 節 / `reviewer.md` の range 外警告 + extended
+    range subsection が root 系統のみ）。CLAUDE.md「二重管理規約」に従い task 8 で
+    repo-template 系統に byte 一致で反映する責務が残る。
+  - **E2E 観測**: 本 task は agent prompt docs（markdown）の追記のみで、実 Implementer /
+    Reviewer エージェントが本契約・本解釈を正しく解釈するかの dogfooding は idd-claude
+    self-hosting 上で実際に marker contract 違反シナリオを通すことが必要。task 5 で
+    導入した watcher 側 safety net（`per-task-post-marker-commits-detected`）の発火と
+    本 task で追記した推奨 refresh 手順の妥当性は、将来運用観測で担保する。
