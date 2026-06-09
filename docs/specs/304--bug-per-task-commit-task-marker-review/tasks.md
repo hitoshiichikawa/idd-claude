@@ -55,7 +55,7 @@
   - _Requirements: 2.3, NFR 2.1_
   - _Depends: 3_
 
-- [ ] 5. `run_per_task_reviewer` への post-marker hook 組込みと rc=5 対応
+- [x] 5. `run_per_task_reviewer` への post-marker hook 組込みと rc=5 対応
   - `run_per_task_reviewer`（3226 行付近）内、`pt_resolve_diff_range` 成功直後に
     `pt_detect_post_marker_commits "$range_end"` を呼ぶ
   - 検出 0 件（rc=1）または git エラー（rc=2）: 既存ルートで Reviewer 起動（NFR 1.3 fail-safe）
