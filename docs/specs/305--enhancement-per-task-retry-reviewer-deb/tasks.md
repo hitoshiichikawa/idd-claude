@@ -31,7 +31,7 @@
   - _Boundary: issue-watcher.sh (pt_* namespace), local-watcher/test/_
   - _Depends: 1_
 
-- [ ] 3. `build_per_task_implementer_prompt` の signature 拡張 + 注入ブロック実装
+- [x] 3. `build_per_task_implementer_prompt` の signature 拡張 + 注入ブロック実装
   - 既存関数 `build_per_task_implementer_prompt` の signature を
     `build_per_task_implementer_prompt <task_id> [<redo_mode>]` に拡張（既定 `redo_mode=initial`）
   - 関数冒頭で `redo_mode` を local に取り、`case "$redo_mode" in initial|after-round1|after-debugger) ;;
