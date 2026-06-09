@@ -2605,6 +2605,43 @@ pt_extract_learnings() {
   return 0
 }
 
+# ─── pt_extract_findings_block <review_notes_path> ───
+#
+# review-notes.md の `## Findings` セクション（次の `## ` 見出し直前まで）を
+# stdout に出力する。per-task retry 経路で Developer prompt に直前 round の
+# Reviewer Findings を inline 注入するために使用する（Issue #305 Req 1.1, 1.3,
+# 1.5, NFR 4.1）。
+#
+# - 抽出成功時: 0 を返し、stdout に `## Findings` 見出しを含む本文を出力
+# - ファイル不在 or `## Findings` 見出し不在: 1 を返し、stdout は空
+# - 末尾の RESULT 行や他セクション（`## Summary` 等）には触れない（次の `## `
+#   見出し直前で停止する）
+#
+# `pt_extract_learnings` の awk pattern を踏襲しているため、テスト容易性と
+# 実装方針を揃えている。
+#
+# Requirements: 1.1, 1.3, 1.5, 5.1, 5.5, NFR 4.1
+pt_extract_findings_block() {
+  local review_notes="$1"
+  if [ ! -f "$review_notes" ]; then
+    return 1
+  fi
+  # `## Findings` 見出しが存在するかを先に確認（不在なら return 1）。
+  if ! grep -qE '^## Findings[[:space:]]*$' "$review_notes"; then
+    return 1
+  fi
+  # awk で `## Findings` セクションを抽出。
+  # - `## Findings` 行を見つけたら print 開始
+  # - print 開始後に別の `## ` 見出しが来たら print 停止
+  # - 末尾まで他の `## ` が来なければファイル末尾まで print
+  awk '
+    /^## Findings[[:space:]]*$/ { in_section = 1; print; next }
+    in_section && /^## / { exit }
+    in_section { print }
+  ' "$review_notes"
+  return 0
+}
+
 # ─── pt_resolve_diff_range <task_id> ───
 #
 # per-task Reviewer に渡す diff range の開始 SHA / 終了 SHA を解決して
