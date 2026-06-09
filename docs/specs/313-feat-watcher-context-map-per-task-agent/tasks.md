@@ -65,7 +65,7 @@ dedicated regression test task として位置付けます。
   - _Requirements: 3.3, 4.1, 4.3_
   - _Boundary: developer.md_
 
-- [ ] 4. `.claude/agents/reviewer.md` と `repo-template/.claude/agents/reviewer.md` の両系統に
+- [x] 4. `.claude/agents/reviewer.md` と `repo-template/.claude/agents/reviewer.md` の両系統に
        context map 参照ルールを byte 一致で追記する
   - root の `.claude/agents/reviewer.md` の「必ず先に読むルール」節の必読ファイル一覧の末尾に、
     design.md「Agent 仕様改訂」節で示した追記項目（`docs/specs/<番号>-<slug>/context-map.md` を
