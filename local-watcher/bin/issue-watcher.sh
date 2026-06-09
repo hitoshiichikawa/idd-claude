@@ -3433,6 +3433,78 @@ run_per_task_implementer() {
   esac
 }
 
+# ─── run_per_task_implementer_redo <task_id> <redo_mode> ───
+#
+# Reviewer reject / Debugger 経由 redo 経路専用の Implementer 起動 wrapper。
+# `run_per_task_implementer` をベースに以下 2 点のみ差分:
+#
+#   1. prompt 組み立て時に `build_per_task_implementer_prompt "$task_id" "$redo_mode"` を呼び、
+#      Reviewer Findings / Debugger Fix Plan / Finding Closure Matrix 規約節を inline 注入する
+#      （注入ロジックは build 関数側に実装済み / Issue #305 task 3 で実装）
+#   2. stage_label を `PerTask-Impl-Redo-${task_id}-${redo_mode}` に変更し、quota log /
+#      grep フィルタで初回起動 (`PerTask-Impl-${task_id}`) と区別可能にする
+#
+# `redo_mode` は build 関数側で `initial|after-round1|after-debugger` のみ受け付け、未知の値は
+# 安全側に `initial` へ fallback する。本 wrapper はその値を stage_label 用にもそのまま使うが、
+# stage_label への ASCII 制約は redo_mode の値域が事前定義されているため別途検証しない。
+#
+# 既存 `run_per_task_implementer <task_id>` は **無改変**（NFR 1.1 を構造保証）。
+# BLOCKED 経路 (`run_per_task_loop` の `_pt_blocked_reason` 分岐) は本 wrapper を呼ばず
+# 既存 `run_per_task_implementer` を継続使用する（BLOCKED は Reviewer reject ではないため
+# Findings 注入対象外 / Issue #305 task 4）。
+#
+# 戻り値:
+#   0  = success
+#   1  = claude 非 0 exit / 規約違反（claude-failed は呼び出し側で付与）
+#   99 = quota 超過（既存 #66 規約に従い呼び出し側に伝搬）
+#
+# Requirements: 1.1, 1.2, 4.3 (Issue #305), NFR 1.1, NFR 1.2
+run_per_task_implementer_redo() {
+  local task_id="$1"
+  local redo_mode="$2"
+  local prompt
+  prompt=$(build_per_task_implementer_prompt "$task_id" "$redo_mode")
+
+  pt_log "task=$task_id implementer-redo start (model=$DEV_MODEL, max-turns=$DEV_MAX_TURNS, redo_mode=$redo_mode)" >> "$LOG"
+  echo "--- per-task Implementer Redo 実行 (task=$task_id, redo_mode=$redo_mode) ---" >> "$LOG"
+
+  local _qa_reset_file _qa_rc=0 _qa_ts _qa_stage_label
+  _qa_ts=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-pt-impl-redo-${task_id}-${redo_mode}-${_qa_ts}"
+  _qa_stage_label="PerTask-Impl-Redo-${task_id}-${redo_mode}"
+  qa_run_claude_stage "$_qa_stage_label" "$_qa_reset_file" -- \
+    claude \
+      --print "$prompt" \
+      --model "$DEV_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$DEV_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      "${CLAUDE_HOOK_ARGS[@]}" \
+      >> "$LOG" 2>&1 || _qa_rc=$?
+
+  case "$_qa_rc" in
+    0)
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer-redo end rc=0 redo_mode=$redo_mode" >> "$LOG"
+      return 0
+      ;;
+    99)
+      local _qa_epoch
+      _qa_epoch=$(cat "$_qa_reset_file")
+      qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label" "$_qa_epoch"
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer-redo end rc=99 redo_mode=$redo_mode result=quota-exceeded" >> "$LOG"
+      return 99
+      ;;
+    *)
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer-redo end rc=$_qa_rc redo_mode=$redo_mode result=error" >> "$LOG"
+      return 1
+      ;;
+  esac
+}
+
 # ─── run_per_task_reviewer <task_id> <round> ───
 #
 # 当該 task の diff range のみを対象に fresh Claude session で Reviewer を起動。
@@ -3950,7 +4022,7 @@ run_per_task_loop() {
         echo "🔁 #$NUMBER: per-task Reviewer (task=$task_id, round=1) reject → Implementer 再実行" | tee -a "$LOG"
 
         local impl2_rc=0
-        run_per_task_implementer "$task_id" || impl2_rc=$?
+        run_per_task_implementer_redo "$task_id" "after-round1" || impl2_rc=$?
         case "$impl2_rc" in
           0)
             # Issue #263: Reviewer reject 後の Implementer 再実行も rc=0 で抜けたが進捗ゼロ
@@ -4006,10 +4078,13 @@ run_per_task_loop() {
                   ;;
               esac
 
-              # Implementer 再起動（Fix Plan 注入は per-task Implementer の prompt builder には未対応のため、
-              # debugger-notes.md の存在を Implementer が `### Task <id>` セクションで読むことに依拠する）
+              # Implementer 再起動（Issue #305 task 4 で `run_per_task_implementer_redo` に置換。
+              # `redo_mode=after-debugger` で review-notes.md の Findings と debugger-notes.md
+              # の `## Task <id>` セクションを prompt に inline 注入する。これにより従来
+              # `### Task <id>` の自発参照に依拠していた弱い情報注入を、prompt 内 inline 運搬に
+              # 切り替える）
               local impl3_rc=0
-              run_per_task_implementer "$task_id" || impl3_rc=$?
+              run_per_task_implementer_redo "$task_id" "after-debugger" || impl3_rc=$?
               case "$impl3_rc" in
                 0)
                   # Issue #263: Debugger 経由 Implementer 再実行も rc=0 で抜けたが進捗ゼロ
