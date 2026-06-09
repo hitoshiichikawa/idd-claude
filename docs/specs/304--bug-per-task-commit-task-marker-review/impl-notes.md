@@ -24,3 +24,22 @@ per-task ループの 1 タスクごとの learning を記録する。
     fixture と同方針）。
 - **残存課題**: なし（task 2 以降で `issue-watcher.sh` に参照実装と同じシグネチャ・rc 体系で
   関数を追加する際に、本 fixture の参照実装と byte 一致させる責務が残る）。
+
+### Task 2
+
+- **採用方針**: `pt_resolve_diff_range`（2638 行付近）直後に `pt_detect_post_marker_commits
+  <marker_sha>` を追加し、`git log --format=%H <marker_sha>..HEAD` の結果で rc=0/1/2 を返す
+  最小実装に集約。algorithm body は fixture 参照実装と byte 同期し、stderr の log prefix のみ
+  既存 `pt_warn` を使うことで NFR 2.1 を満たす。
+- **重要な判断**:
+  - stderr 行の prefix は fixture 側 `[smoke] post-marker-commits-detect: ...` と本体側
+    `[YYYY-MM-DD HH:MM:SS] per-task: WARN: post-marker-commits-detect: ...` で差を許容した。
+    既存 #164 `test-pt-resolve.sh` ↔ `pt_resolve_diff_range` でも同じ差異が確立済みで、
+    fixture は smoke コンテキスト識別のために `[smoke]` prefix を使う precedent と整合する
+    （algorithm body のみ byte 同期、stderr 表面文字列は対応を許容）。
+  - git エラー時は `pt_warn` で stderr に出して rc=2 を返し、呼び出し側（task 5 で
+    `run_per_task_reviewer` に組み込む経路）が fail-safe で fall-through できるようにした
+    （NFR 1.3 と同方針）。
+- **残存課題**: なし（task 3 で `pt_handle_post_marker_commits`、task 4 で
+  `pt_mark_post_marker_commits_detected` を追加する際に本関数の rc 体系を前提として呼び出す
+  予定。本関数自体の API / log 書式は確定）。
