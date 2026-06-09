@@ -70,7 +70,7 @@
   - _Requirements: 2.1, 2.2, 2.3, NFR 1.1, NFR 1.3_
   - _Depends: 4_
 
-- [ ] 6. Reviewer prompt への range 明示と extended フラグ対応
+- [x] 6. Reviewer prompt への range 明示と extended フラグ対応
   - `build_per_task_reviewer_prompt`（3060 行付近）の signature に第 6 引数 `extended`
     （"true"/"false"、省略時 "false"）を追加
   - prompt 本文に `## 判定対象 SHA range（machine-parseable）` subsection を追加し、
