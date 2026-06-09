@@ -4163,6 +4163,12 @@ run_per_task_loop() {
   while IFS= read -r task_id; do
     [ -n "$task_id" ] || continue
 
+    # Issue #305 task 6: 当該 task の前 cycle 残骸 snapshot を防御的に削除
+    # （/tmp の OS cleanup を待たず冒頭で除去。新規 snapshot 取得時は ts で
+    # 名前衝突を回避するため実害はないが、長期 watcher 稼働で /tmp が肥大化
+    # するのを抑止する）
+    rm -f "/tmp/idd-claude-${REPO_SLUG}-${NUMBER}-pt-snapshot-${task_id}-"* 2>/dev/null || true
+
     # ── round=1: Implementer + Reviewer ──
     local impl_rc=0
     run_per_task_implementer "$task_id" || impl_rc=$?
@@ -4285,6 +4291,16 @@ run_per_task_loop() {
         # reject 1 回目 → Implementer 再起動 + Reviewer round=2
         echo "🔁 #$NUMBER: per-task Reviewer (task=$task_id, round=1) reject → Implementer 再実行" | tee -a "$LOG"
 
+        # Issue #305 task 6: 連続 reject fail-fast 用の prev snapshot 取得 +
+        # round=2 redo Implementer 起動直前の HEAD SHA を記録（Req 3.1）。
+        # snapshot 取得失敗時は空文字が返り、pt_check_fail_fast 側で
+        # prev-snapshot-missing として不成立扱いとなる（Req 3.4 安全側）。
+        # git rev-parse 失敗時も `|| echo ""` で空文字に倒し、pt_check_fail_fast
+        # 側で git-diff-failed 経由 return 1（既存 Debugger Gate 経路に進む）。
+        local _pt_ff_prev_snapshot _pt_ff_sha_before
+        _pt_ff_prev_snapshot="$(pt_snapshot_review_notes "$task_id" 1)"
+        _pt_ff_sha_before="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+
         local impl2_rc=0
         run_per_task_implementer_redo "$task_id" "after-round1" || impl2_rc=$?
         case "$impl2_rc" in
@@ -4322,6 +4338,35 @@ run_per_task_loop() {
             return 0
             ;;
           1)
+            # Issue #305 task 6: 連続 reject + テスト差分なしの fail-fast 判定
+            # （Debugger Gate 判定の前 / Req 3.2 / 3.3）。成立時は Debugger Gate
+            # 経由 round=3 redo に進まず即 claude-failed 化して turn 予算消費を
+            # 停止する。不成立時は既存 Debugger Gate / per-task-reviewer-reject2
+            # 経路へ進む（Req 3.4 / 既存挙動温存）。
+            local _pt_ff_sha_after _pt_ff_out _pt_ff_rc=0
+            _pt_ff_sha_after="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+            _pt_ff_out="$(pt_check_fail_fast "$task_id" \
+              "$_pt_ff_prev_snapshot" \
+              "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" \
+              "$_pt_ff_sha_before" \
+              "$_pt_ff_sha_after" 2>&1)" || _pt_ff_rc=$?
+            # pt_check_fail_fast の stdout（grep 可能 1 行）を LOG に転記
+            # （Physical Data Model 行 528-530 / NFR 3.1）
+            if [ -n "$_pt_ff_out" ]; then
+              printf '[%s] [%s] per-task: %s\n' "$(date '+%F %T')" "$REPO" "$_pt_ff_out" >> "$LOG"
+            fi
+            if [ "$_pt_ff_rc" = "0" ]; then
+              # fail-fast 成立 → category / target を stdout から再抽出して
+              # pt_mark_fail_fast_failed に渡し claude-failed 化
+              local _pt_ff_cat _pt_ff_tgt
+              _pt_ff_cat="$(printf '%s' "$_pt_ff_out" | sed -n 's/.*category=\([^ ]*\).*/\1/p')"
+              _pt_ff_tgt="$(printf '%s' "$_pt_ff_out" | sed -n 's/.*target=\([^ ]*\).*/\1/p')"
+              echo "❌ #$NUMBER: per-task fail-fast 検出 (task=$task_id, category=${_pt_ff_cat:-unknown}, target=${_pt_ff_tgt:-unknown}) → claude-failed (per-task-implementer-fail-fast-loop)" | tee -a "$LOG"
+              pt_mark_fail_fast_failed "$task_id" "${_pt_ff_cat:-unknown}" "${_pt_ff_tgt:-unknown}"
+              return 1
+            fi
+            # fail-fast 不成立 → 既存 Debugger Gate 経路にそのまま進む（Req 3.4）
+
             # 再 reject → Phase 3 (#22) Debugger Gate に分岐 (Req 6.1, 6.3)、
             # 未対応なら claude-failed + Issue コメント
             if [ "${DEBUGGER_ENABLED:-false}" = "true" ] && ! detect_debugger_already_invoked "$task_id"; then
