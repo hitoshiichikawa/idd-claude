@@ -97,7 +97,7 @@
     （Req 3.3）を追記
   - _Requirements: 1.1, 1.2, 1.3, 3.2, 3.3_
 
-- [ ] 8. developer.md / reviewer.md の repo-template ミラー反映（byte 一致）
+- [x] 8. developer.md / reviewer.md の repo-template ミラー反映（byte 一致）
   - タスク 7 で root 系統に加えた変更を、`repo-template/.claude/agents/developer.md` /
     `repo-template/.claude/agents/reviewer.md` に **byte 一致** で適用する
   - 反映後に `diff -r .claude/agents repo-template/.claude/agents` が空であることを確認
