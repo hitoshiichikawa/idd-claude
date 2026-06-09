@@ -1,0 +1,7 @@
+{
+  "tool_name": "Write",
+  "tool_input": {
+    "file_path": "/tmp/scratch.md"
+  },
+  "permission_mode": "bypassPermissions"
+}

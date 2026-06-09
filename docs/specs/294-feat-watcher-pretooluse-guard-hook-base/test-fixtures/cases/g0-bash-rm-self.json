@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rm ~/.idd-claude/hooks/idd-guard.sh"
+  },
+  "permission_mode": "bypassPermissions"
+}

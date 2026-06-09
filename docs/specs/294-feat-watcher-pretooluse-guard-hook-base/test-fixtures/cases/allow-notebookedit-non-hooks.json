@@ -1,0 +1,7 @@
+{
+  "tool_name": "NotebookEdit",
+  "tool_input": {
+    "notebook_path": "/tmp/analysis.ipynb"
+  },
+  "permission_mode": "bypassPermissions"
+}

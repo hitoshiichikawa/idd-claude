@@ -1,0 +1,7 @@
+{
+  "tool_name": "NotebookEdit",
+  "tool_input": {
+    "notebook_path": "~/.idd-claude/hooks/notes.ipynb"
+  },
+  "permission_mode": "bypassPermissions"
+}

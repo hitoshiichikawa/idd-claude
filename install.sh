@@ -245,6 +245,121 @@ copy_template_file() {
   esac
 }
 
+# copy_hook_settings_with_substitution <src> <dest> <hook_path>
+#   `idd-guard-settings.json` 用の placeholder 置換配置（#294 Task 5）。
+#   - `__IDD_HOOK_PATH__` を絶対パス <hook_path> に置換した内容を dest に書き込む
+#   - 冪等性: 既配置 dest は既に置換済み（`__IDD_HOOK_PATH__` を持たない）のため、
+#     src と単純 cmp すると常に差分扱いになる。これを避けるため、
+#     **置換後の期待内容を tmp file に書き出して dest と cmp** する判定にする
+#   - dry-run 時は実置換せず、NEW/SKIP/OVERWRITE のいずれかを predict してログのみ出す
+copy_hook_settings_with_substitution() {
+  local src="$1"
+  local dest="$2"
+  local hook_path="$3"
+
+  if [ ! -f "$src" ]; then
+    echo "Error: source file not found: $src" >&2
+    return 1
+  fi
+
+  # 置換後の期待内容を tmp file に書き出す
+  local tmp_expected
+  tmp_expected="$(mktemp)"
+  # `sed` で `__IDD_HOOK_PATH__` を置換する。`#` を区切りにしてパス内の `/` をエスケープ不要にする
+  sed "s#__IDD_HOOK_PATH__#${hook_path}#g" "$src" >"$tmp_expected"
+
+  local action
+  if [ ! -e "$dest" ]; then
+    action="NEW"
+  elif cmp -s "$tmp_expected" "$dest"; then
+    action="SKIP"
+  else
+    action="OVERWRITE"
+  fi
+
+  local note="(substitute __IDD_HOOK_PATH__ → $hook_path)"
+
+  case "$action" in
+    NEW)
+      log_action "NEW" "$dest" "$note"
+      if [ "$DRY_RUN" = "false" ]; then
+        ensure_dir "$(dirname "$dest")"
+        cp "$tmp_expected" "$dest"
+      fi
+      ;;
+    SKIP)
+      log_action "SKIP" "$dest" "(identical to substituted template)"
+      ;;
+    OVERWRITE)
+      log_action "OVERWRITE" "$dest" "$note"
+      if [ "$DRY_RUN" = "false" ]; then
+        cp "$tmp_expected" "$dest"
+      fi
+      ;;
+  esac
+
+  rm -f "$tmp_expected"
+}
+
+# resolve_hooks_install_dir
+#   guard hook install dir を解決する（#294 Task 5）。
+#   - 既定 `$HOME/.idd-claude/hooks`
+#   - `IDD_CLAUDE_HOOKS_DIR` env var で override 可能
+#   - 末尾スラッシュは除去（`$HOME/.idd-claude/hooks/` → `$HOME/.idd-claude/hooks`）
+resolve_hooks_install_dir() {
+  local dir="${IDD_CLAUDE_HOOKS_DIR:-$HOME/.idd-claude/hooks}"
+  while [ "${dir: -1}" = "/" ] && [ ${#dir} -gt 1 ]; do
+    dir="${dir%/}"
+  done
+  printf '%s' "$dir"
+}
+
+# install_guard_hooks
+#   `local-watcher/hooks/` 配下の guard hook 一式を user-scope に配置する（#294 Task 5）。
+#   配置先は `$IDD_CLAUDE_HOOKS_DIR`（既定 `$HOME/.idd-claude/hooks`）。
+#   - `idd-guard.sh` は実行ビット付与（`copy_template_file --executable` 再利用）
+#   - `idd-guard-settings.json` は `__IDD_HOOK_PATH__` を絶対パスに置換して配置
+#   - `README.md` はそのままコピー
+#   `repo-template/` には何も追加しない（Req 6.2, 6.3 / NFR 4.1）。sudo は不要。
+install_guard_hooks() {
+  local hooks_src="$LOCAL_WATCHER_DIR/hooks"
+  local hooks_dest
+  hooks_dest="$(resolve_hooks_install_dir)"
+
+  # source 不在は noop（後方互換のための保険。通常は存在する前提）
+  if [ ! -d "$hooks_src" ]; then
+    return 0
+  fi
+
+  echo ""
+  echo "🛡  Guard hook (PreToolUse) 一式を配置: $hooks_dest"
+
+  ensure_dir "$hooks_dest"
+
+  # idd-guard.sh: 実行ビット付与
+  if [ -f "$hooks_src/idd-guard.sh" ]; then
+    copy_template_file \
+      "$hooks_src/idd-guard.sh" \
+      "$hooks_dest/idd-guard.sh" \
+      --executable
+  fi
+
+  # idd-guard-settings.json: __IDD_HOOK_PATH__ を絶対パスに置換
+  if [ -f "$hooks_src/idd-guard-settings.json" ]; then
+    copy_hook_settings_with_substitution \
+      "$hooks_src/idd-guard-settings.json" \
+      "$hooks_dest/idd-guard-settings.json" \
+      "$hooks_dest/idd-guard.sh"
+  fi
+
+  # README.md: そのまま配置
+  if [ -f "$hooks_src/README.md" ]; then
+    copy_template_file \
+      "$hooks_src/README.md" \
+      "$hooks_dest/README.md"
+  fi
+}
+
 # copy_glob_to_homebin <src_dir> <pattern> <dest_dir> [--executable]
 #   `<src_dir>/<pattern>` にマッチする全ファイルを <dest_dir> に配置する。
 #   nullglob を一時的に有効化し、マッチ 0 件は SKIP ログを出して exit 0 で継続する。
@@ -1250,6 +1365,13 @@ if $INSTALL_LOCAL; then
     copy_glob_to_homebin "$LOCAL_WATCHER_DIR/bin/modules" "*.sh" "$HOME/bin/modules" --executable
   fi
 
+  # Guard hook (PreToolUse) 一式を user-scope に配置（#294 Task 5）。
+  # 既定配置先は $HOME/.idd-claude/hooks（IDD_CLAUDE_HOOKS_DIR で override 可能）。
+  # sudo 不要 / repo-template/ には配布しない（Req 6.2, 6.3 / NFR 4.1）。
+  # 配置するだけでは guard は有効化されない。watcher 側で
+  # IDD_CLAUDE_HOOKS_ENABLED=true を指定したときのみ fail-closed preflight 経由で有効化される。
+  install_guard_hooks
+
   # macOS: launchd
   if [ "$(uname)" = "Darwin" ]; then
     ensure_dir "$HOME/Library/LaunchAgents"
@@ -1307,6 +1429,40 @@ LAUNCHD_HINT
      root になり、通常ユーザーで更新・削除できなくなります。
 CRON_HINT
   fi
+
+  # Guard hook opt-in 手順（#294 Task 5）。
+  # cron / launchd ヒント直後に共通の案内 1 ブロックを出す。
+  # opt-in は env var で制御される（既定 OFF / opt-in 制）。
+  hooks_dest_for_hint="$(resolve_hooks_install_dir)"
+  cat <<HOOKS_HINT
+
+  🛡  (任意) Guard Hook (PreToolUse) opt-in:
+
+     guard hook を有効化すると、watcher 配下のエージェントによる以下の操作を
+     実行前に機械的に deny します（fail-closed、Reviewer 事後検出を待たない）:
+       - base ブランチ宛 push（bare / HEAD:base / :base / +base / -C path / 暗黙 remote）
+       - 無条件 force push（-f / --force / refspec 先頭 '+'。--force-with-lease は許容）
+       - guard install dir ($hooks_dest_for_hint) 配下の自己改変
+
+     opt-in 手順（cron 例）:
+       */2 * * * * REPO=owner/your-repo REPO_DIR=\$HOME/work/your-repo IDD_CLAUDE_HOOKS_ENABLED=true \$HOME/bin/issue-watcher.sh >> \$HOME/.issue-watcher/cron.log 2>&1
+
+     launchd の場合は plist の EnvironmentVariables に IDD_CLAUDE_HOOKS_ENABLED=true を追記。
+
+     fail-closed 挙動（IDD_CLAUDE_HOOKS_ENABLED=true 時のみ）:
+       - claude version が IDD_CLAUDE_HOOKS_MIN_VERSION 未満 → exit 11
+       - hook install dir が不完全 → exit 12
+       - smoke test 失敗 → exit 13
+       いずれも黙って fallback せず、stderr に理由を出して watcher を停止します。
+       env var を外せば即 opt-out（hook ファイル削除は不要）。
+
+     既知の限界 / consumer repo への配布について:
+       - 本初版は user-scope 専用配置です。consumer repo (.claude/) への配布は
+         別 Issue として後続で承認・起票されます（Req 6.4）。
+       - top-level Bash 文字列のみ解析するため、sh -c "..." / \$(...) / wrapper script
+         内部の push は捕捉できません（NFR 3.1）。
+       - 詳細は README.md の「Guard Hook (PreToolUse) opt-in」節を参照してください。
+HOOKS_HINT
 
   # 前提ツールチェック
   echo ""

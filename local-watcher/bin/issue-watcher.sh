@@ -536,6 +536,32 @@ DEBUGGER_ENABLED="${DEBUGGER_ENABLED:-false}"
 DEBUGGER_MODEL="${DEBUGGER_MODEL:-claude-opus-4-7}"
 DEBUGGER_MAX_TURNS="${DEBUGGER_MAX_TURNS:-40}"
 
+# ─── PreToolUse Guard Hook 設定 (#294 / base 初版) ───
+# Claude Code の PreToolUse フック機構を利用し、watcher が起動する全 claude CLI 実行に
+# 対して `--settings <絶対パス>` を opt-in で注入する。hook 本体（idd-guard.sh）と
+# settings テンプレ（idd-guard-settings.json）は install.sh が user-scope
+# `$IDD_CLAUDE_HOOKS_DIR`（既定 `$HOME/.idd-claude/hooks`）に配置する前提。
+#
+# 既定 OFF（opt-in 専用）であり、`IDD_CLAUDE_HOOKS_ENABLED=true` の **厳密一致**時にのみ
+# 有効化される（typo は安全側で opt-out 扱い / Req 1.1）。未設定 / 空 / `false` /
+# `True` / `1` 等はすべて opt-out として扱い、本機能導入前と完全に同一の引数列・環境変数
+# 集合で claude を起動する（NFR 1.1 / Req 1.1, 1.2）。値正規化（`true`/`false` への
+# 2 値強制）はしない — 上記「デフォルト有効化フラグの値正規化」ループは既定 true の
+# フラグ向けであり、本機能は既定 false の opt-in 制のため対象外。
+#
+# - IDD_CLAUDE_HOOKS_ENABLED:     本機能の opt-in gate（既定空＝opt-out / Req 1.1）
+# - IDD_CLAUDE_HOOKS_DIR:         hook 本体の install dir 絶対パス（既定
+#                                 `$HOME/.idd-claude/hooks` / NFR 1.3）
+# - IDD_CLAUDE_HOOKS_MIN_VERSION: preflight の claude version 最小要求（既定 `2.1.167`
+#                                 / PoC 検証バージョン / NFR 1.3）
+# - IDD_HOOK_LOG:                 hook 本体が optional に append する 1 行ログのパス
+#                                 （未設定で no-op / 運用者が任意に有効化）
+# 詳細は docs/specs/294-feat-watcher-pretooluse-guard-hook-base/design.md を参照。
+IDD_CLAUDE_HOOKS_ENABLED="${IDD_CLAUDE_HOOKS_ENABLED:-}"
+IDD_CLAUDE_HOOKS_DIR="${IDD_CLAUDE_HOOKS_DIR:-$HOME/.idd-claude/hooks}"
+IDD_CLAUDE_HOOKS_MIN_VERSION="${IDD_CLAUDE_HOOKS_MIN_VERSION:-2.1.167}"
+IDD_HOOK_LOG="${IDD_HOOK_LOG:-}"
+
 # ─── Quota-Aware Watcher 設定 (#66) ───
 # Claude Max の 5 時間ローリング quota を claude CLI の `rate_limit_event` JSON で
 # 検知し、quota 起因の停止と他失敗を `needs-quota-wait` ラベルで分離する。
@@ -656,7 +682,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（quota-aware / merge-queue / auto-rebase）、#181 Part 3 で切り出した
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "security-review.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "security-review.sh" "guard-hook.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -668,6 +694,30 @@ for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   . "$_idd_mod_path"
 done
 unset _idd_mod _idd_mod_path
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PreToolUse Guard Hook 配線 (#294 / base 初版)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# guard-hook.sh モジュールの関数（gh_is_enabled / gh_preflight / gh_build_args）を呼び、
+# opt-in 時のみ claude CLI 起動時に注入する `CLAUDE_HOOK_ARGS` グローバル配列を構築する。
+# opt-out 時は空配列 `()` → 既存の各 claude 起動箇所で `"${CLAUDE_HOOK_ARGS[@]}"` を展開しても
+# 引数が一切追加されず、本機能導入前と完全に同一の引数列で claude が起動される（NFR 1.1 /
+# Req 1.1, 1.2）。
+#
+# opt-in 時は以下を順に行う（fail-closed / Req 5.1〜5.5）:
+#   1. gh_preflight: claude version 確認 → install dir 完全性 → smoke test を fail-closed で
+#      連鎖判定する。失敗 (rc=11/12/13) → 非ゼロ exit して watcher 全体を停止する
+#      （黙って guard を無効化する fallback は持たない / Req 5.5）
+#   2. IDD_HOOK_BASE_BRANCH を export: hook プロセスは claude プロセスから env 継承するため、
+#      watcher が `BASE_BRANCH` を hook 側の判定基準として渡す唯一の経路（design.md Env Var
+#      Contract）。
+#   3. gh_build_args: `CLAUDE_HOOK_ARGS=(--settings <絶対パス>)` を構築。以降の `claude --print
+#      ... "${CLAUDE_HOOK_ARGS[@]}"` 展開で settings.json を Claude Code に渡す。
+if gh_is_enabled; then
+  gh_preflight || exit $?
+  export IDD_HOOK_BASE_BRANCH="$BASE_BRANCH"
+fi
+gh_build_args
 
 [ -f "$TRIAGE_TEMPLATE" ] || {
   echo "Error: Triage テンプレートが見つかりません: $TRIAGE_TEMPLATE" >&2
@@ -3122,6 +3172,7 @@ run_per_task_implementer() {
       --max-turns "$DEV_MAX_TURNS" \
       --output-format stream-json \
       --verbose \
+      "${CLAUDE_HOOK_ARGS[@]}" \
       >> "$LOG" 2>&1 || _qa_rc=$?
 
   case "$_qa_rc" in
@@ -3230,6 +3281,7 @@ run_per_task_reviewer() {
         --max-turns "$REVIEWER_MAX_TURNS" \
         --output-format stream-json \
         --verbose \
+        "${CLAUDE_HOOK_ARGS[@]}" \
         >> "$LOG" 2>&1 || _qa_rc=$?
 
     case "$_qa_rc" in
@@ -4287,6 +4339,7 @@ run_debugger_stage() {
       --max-turns "$DEBUGGER_MAX_TURNS" \
       --output-format stream-json \
       --verbose \
+      "${CLAUDE_HOOK_ARGS[@]}" \
       >> "$LOG" 2>&1 || _qa_rc=$?
 
   case "$_qa_rc" in
@@ -4931,6 +4984,7 @@ run_reviewer_stage() {
         --max-turns "$REVIEWER_MAX_TURNS" \
         --output-format stream-json \
         --verbose \
+        "${CLAUDE_HOOK_ARGS[@]}" \
         >> "$LOG" 2>&1 || _qa_rc_rv=$?
     case "$_qa_rc_rv" in
       0)
@@ -5723,6 +5777,7 @@ run_impl_pipeline() {
             --max-turns "$DEV_MAX_TURNS" \
             --output-format stream-json \
             --verbose \
+            "${CLAUDE_HOOK_ARGS[@]}" \
             >> "$LOG" 2>&1 || _qa_rc_a=$?
         # run サマリ: Stage A（通常 Developer 経路）実行を記録し degraded 兆候を反映
         # （quota 99 / 失敗 * でも claude 起動は試みられたため stage は走った / Req 2.1, 6.x）。
@@ -5842,6 +5897,7 @@ run_impl_pipeline() {
           --max-turns "$DEV_MAX_TURNS" \
           --output-format stream-json \
           --verbose \
+          "${CLAUDE_HOOK_ARGS[@]}" \
           >> "$LOG" 2>&1 || _qa_rc_bl=$?
       # run サマリ: Stage A'（BLOCKED 経路 Developer 再起動）実行を記録（Req 2.1, 6.x）。
       rs_record_stage "A'"
@@ -5985,6 +6041,7 @@ run_impl_pipeline() {
               --max-turns "$DEV_MAX_TURNS" \
               --output-format stream-json \
               --verbose \
+              "${CLAUDE_HOOK_ARGS[@]}" \
               >> "$LOG" 2>&1 || _qa_rc_aredo=$?
           # run サマリ: Stage A'（Reviewer reject 差し戻し Developer 再実行）実行を記録
           # （Req 2.1, 6.x）。
@@ -6101,6 +6158,7 @@ run_impl_pipeline() {
                     --max-turns "$DEV_MAX_TURNS" \
                     --output-format stream-json \
                     --verbose \
+                    "${CLAUDE_HOOK_ARGS[@]}" \
                     >> "$LOG" 2>&1 || _qa_rc_app=$?
                 case "$_qa_rc_app" in
                   0)
@@ -6306,6 +6364,7 @@ run_impl_pipeline() {
       --max-turns "$DEV_MAX_TURNS" \
       --output-format stream-json \
       --verbose \
+      "${CLAUDE_HOOK_ARGS[@]}" \
       >> "$LOG" 2>&1 || _qa_rc_c=$?
   # run サマリ: Stage C（PjM / PR 作成）実行を記録し degraded 兆候を反映（Req 2.1, 6.x）。
   # 既存 PR ガード（stage_c_existing_pr_guard）で PjM 起動前に early return したケースでは
@@ -7911,6 +7970,7 @@ _slot_run_issue() {
         --model "$TRIAGE_MODEL" \
         --permission-mode bypassPermissions \
         --max-turns "$TRIAGE_MAX_TURNS" \
+        "${CLAUDE_HOOK_ARGS[@]}" \
         >> "$LOG" 2>&1 || _qa_rc_triage=$?
     case "$_qa_rc_triage" in
       0)
@@ -8163,6 +8223,7 @@ EOF
         --max-turns "$DEV_MAX_TURNS" \
         --output-format stream-json \
         --verbose \
+        "${CLAUDE_HOOK_ARGS[@]}" \
         >> "$LOG" 2>&1 || _qa_rc_design=$?
     case "$_qa_rc_design" in
       0)

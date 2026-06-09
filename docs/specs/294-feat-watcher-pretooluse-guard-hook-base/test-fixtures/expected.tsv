@@ -1,0 +1,30 @@
+case_file	verdict	reason_substring
+g0-edit-self.json	deny	guard install dir self-mutation denied
+g0-write-self.json	deny	guard install dir self-mutation denied
+g0-notebookedit-self.json	deny	guard install dir self-mutation denied
+g0-bash-rm-self.json	deny	guard install dir self-mutation denied
+g0-bash-sed-i-self.json	deny	guard install dir self-mutation denied
+g1-base-push-bare.json	deny	base branch push denied
+g1-base-push-srcdst.json	deny	base branch push denied
+g1-base-push-delete-colon.json	deny	base branch push denied
+g1-base-push-plus-refspec.json	deny	base branch push denied
+g1-base-push-with-C.json	deny	base branch push denied
+g1-base-push-implicit-remote.json	deny	base branch push denied
+g2-force-short.json	deny	unconditional force push denied
+g2-force-long.json	deny	unconditional force push denied
+g2-force-refspec-plus.json	deny	unconditional force push denied
+g2-allow-lease.json	allow
+g2-allow-lease-value.json	allow
+allow-normal-push.json	allow
+allow-push-u.json	allow
+allow-push-srcdst-feature.json	allow
+allow-push-noargs.json	allow
+allow-status.json	allow
+allow-commit-with-push-msg.json	allow
+allow-push-then-checkout.json	allow
+allow-non-git-bash.json	allow
+allow-edit-non-hooks.json	allow
+allow-write-non-hooks.json	allow
+allow-notebookedit-non-hooks.json	allow
+allow-bash-no-hooks-dir.json	allow
+allow-push-different-base.json	allow

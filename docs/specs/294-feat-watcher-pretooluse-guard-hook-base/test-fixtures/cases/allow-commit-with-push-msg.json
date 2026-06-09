@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "git commit -m 'fix: avoid git push origin main misuse'"
+  },
+  "permission_mode": "bypassPermissions"
+}

@@ -4,7 +4,7 @@
 **user-scope のみ**（人間 Decision 2: Option A）。`repo-template/` への追加は本 Issue では
 **禁止**（Req 6.2 / 6.3 / NFR 4.1）。
 
-- [ ] 1. guard hook script (`idd-guard.sh`) と settings テンプレを新規作成
+- [x] 1. guard hook script (`idd-guard.sh`) と settings テンプレを新規作成
   - `local-watcher/hooks/idd-guard.sh` を新規作成。`set -euo pipefail` 宣言。stdin から
     PreToolUse JSON を `jq` で読み、`tool_name` で分岐
   - G1 push 解析: `git` global options (`-C` / `--git-dir=` / `--work-tree=` / `-c k=v`) を
@@ -25,7 +25,7 @@
   - shellcheck 警告ゼロ
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 3.1, 3.2, 3.3, 3.4, 3.5, 4.1, 4.2, 4.3, 4.4, NFR 2.1_
 
-- [ ] 2. test fixtures（29 件マトリクス）と driver スクリプトを作成
+- [x] 2. test fixtures（29 件マトリクス）と driver スクリプトを作成
   - `docs/specs/294-feat-watcher-pretooluse-guard-hook-base/test-fixtures/cases/*.json` を
     29 件作成（G0:5 / G1:6 / G2:5 / Allow:13）。Issue #294 本文の PoC 29 件マトリクスに準拠
   - `expected.tsv` で各ケースの期待 verdict（deny|allow）と reason 部分一致文字列を宣言
@@ -37,7 +37,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 3.1, 3.2, 3.3, 3.4, 4.1, 4.2, 4.3_
   - _Depends: 1_
 
-- [ ] 3. watcher module (`guard-hook.sh`) を新規作成
+- [x] 3. watcher module (`guard-hook.sh`) を新規作成
   - `local-watcher/bin/modules/guard-hook.sh` を新規作成（既存 module 分割パターン踏襲）
   - `gh_log` / `gh_warn` / `gh_error` ロガー（`guard-hook:` prefix、`[$REPO]` 3 段書式）
   - `gh_is_enabled`: `IDD_CLAUDE_HOOKS_ENABLED` の **厳密 `true` 一致**判定（typo 安全側）
@@ -49,7 +49,7 @@
   - shellcheck 警告ゼロ
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 5.1, 5.2, 5.3, 5.4, 5.5, NFR 1.1, NFR 1.3, NFR 2.1_
 
-- [ ] 4. `issue-watcher.sh` を guard hook 対応に編集
+- [x] 4. `issue-watcher.sh` を guard hook 対応に編集
   - Config ブロックに env var の default 宣言を追加（`IDD_CLAUDE_HOOKS_ENABLED` /
     `IDD_CLAUDE_HOOKS_DIR` / `IDD_CLAUDE_HOOKS_MIN_VERSION=2.1.167` / `IDD_HOOK_LOG`）。
     **既存 env var 名・既定値は一切変更しない**
@@ -66,7 +66,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 5.1, 5.2, 5.3, 5.4, 5.5, NFR 1.1, NFR 2.1_
   - _Depends: 3_
 
-- [ ] 5. `install.sh` に hook 一式の user-scope 配置を追加
+- [x] 5. `install.sh` に hook 一式の user-scope 配置を追加
   - `INSTALL_LOCAL` ブロックに `local-watcher/hooks/*` を `$IDD_CLAUDE_HOOKS_DIR`（既定
     `$HOME/.idd-claude/hooks`）に配置する処理を追加（既存 `copy_template_file` 再利用）
   - `idd-guard.sh` は `--executable` 付与
@@ -81,7 +81,7 @@
   - _Requirements: 1.4, 6.1, 6.2, 6.3, NFR 1.2, NFR 2.1, NFR 4.1, NFR 4.2_
   - _Depends: 1_
 
-- [ ] 6. `README.md` に「Guard Hook (PreToolUse) opt-in」節を追加
+- [x] 6. `README.md` に「Guard Hook (PreToolUse) opt-in」節を追加
   - opt-in 手順（`install.sh --local` 再実行 → `claude --version` 確認 → cron に
     `IDD_CLAUDE_HOOKS_ENABLED=true` を追加）
   - env var 一覧（`IDD_CLAUDE_HOOKS_ENABLED` / `IDD_CLAUDE_HOOKS_DIR` /
@@ -98,7 +98,7 @@
   - ロールバック（env を外せば即 opt-out）
   - _Requirements: 6.4, NFR 1.3, NFR 3.1, NFR 3.2, NFR 3.3, NFR 3.4_
 
-- [ ] 7. 統合スモークテスト・手動検証
+- [x] 7. 統合スモークテスト・手動検証
   - `install.sh --dry-run --local` で hook 配置が NEW/SKIP/OVERWRITE 行に現れる
   - 使い捨て `$HOME` で `install.sh --local` 実行 → 配置済みファイル存在 + settings.json の
     placeholder 置換確認
