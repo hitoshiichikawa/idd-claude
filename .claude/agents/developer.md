@@ -390,6 +390,70 @@ fresh な Claude session** で本 Developer サブエージェントが起動さ
   ため、`diff-range-resolve-failed` を引き起こすリスクがある（watcher 側で fallback 解決は
   試行するが、canonical は単記分割のみ）。
 
+## Marker contract（marker は task の終端 commit）（Issue #304 / idd-codex #14 同型再発防止）
+
+per-task ループにおいて、`docs(tasks): mark <id> as done` marker commit は当該 task の
+**終端 commit**（task 完了時点で `${BASE_BRANCH}..HEAD` の最後尾に位置する commit）として
+扱う契約があります。本契約は watcher の `pt_resolve_diff_range` が当該 task の per-task
+Reviewer review range の **終端 SHA** を当該 marker commit に固定する前提に依拠しており、
+契約違反は **silent range truncation**（修正 commit が Reviewer の判定対象から漏れる事故）の
+原因になります。
+
+### marker 作成タイミングの契約（Req 1.1）
+
+- marker commit は、当該 task の **実装 commit・テスト commit・`impl-notes.md` への
+  learning 追記 commit** をすべて積み終えた **最後** に作成すること
+- 「実装途中で先に marker を打って後から修正を追加する」「learning 追記より先に marker を
+  打つ」等のフローは禁止。**「task の全成果物が積み終わった」状態でのみ marker を作る**
+- 本 attempt（Reviewer reject 後の retry も含む）の task-scope 作業がすべて完了した時点で
+  marker commit を作成する
+
+### retry 時の marker refresh 契約（Req 1.2）
+
+Reviewer reject や Debugger guidance による Implementer 再実行（round 2 / round 3）で
+修正 commit を追加する場合、**修正 commit を旧 marker より後ろに残してはならない**。
+旧 marker をそのままに修正 commit を marker 後ろに積むと、watcher の review range が
+旧 marker で固定されたまま修正 commit が漏れ、再 reject の根拠が実態と乖離します
+（idd-codex #14 で実際に発生した failure mode）。
+
+### 推奨 refresh 手順（順序付き）
+
+retry 時に marker を refresh する canonical 手順は以下です:
+
+1. **旧 marker commit の特定**: `git log --oneline ${BASE_BRANCH}..HEAD | grep "docs(tasks): mark <id> as done"` で
+   旧 marker の SHA を特定する
+2. **修正 commit を積む**: 実装 / テスト / learning 追記の修正 commit を通常通り積む（この
+   時点では旧 marker が中間位置に残っている状態）
+3. **旧 marker を剥がして新 marker を末尾に作り直す**: 以下のいずれかの方法で marker を
+   task 終端に移動する:
+   - **方法 A（推奨 / 単純）**: `git reset --soft <旧 marker の SHA>^` で旧 marker を含む
+     最近の commit を index に戻し、修正 commit を再 commit したうえで新 marker を末尾に
+     作成する
+   - **方法 B**: `git rebase -i ${BASE_BRANCH}` で旧 marker を tip に移動（reorder）し、
+     必要なら drop + 末尾で新 marker を作り直す
+4. **push して watcher の次サイクルへ**: refresh 後の HEAD（新 marker が終端）を push する。
+   watcher は次サイクルで新 marker を range_end として解決する
+
+### 禁止例
+
+以下のパターンは silent range truncation を引き起こすため **禁止**:
+
+- 旧 marker をそのままに修正 commit を marker **後ろに** 積む（marker が中間位置に残る）
+- 修正 commit と marker を別 attempt に分割し、marker のみを先行 attempt で push したまま
+  後続 attempt で修正 commit を push する
+- 旧 marker を残したまま「marker を打ち直す」つもりで `docs(tasks): mark <id> as done` を
+  もう 1 件追加する（同一 task ID の marker が複数存在する状態は watcher 側でも `1 commit
+  = 1 task ID` 規約に抵触する）
+
+### watcher 側 safety net との関係
+
+watcher は本契約違反を検出する safety net（`pt_detect_post_marker_commits` /
+`pt_handle_post_marker_commits` / `per-task-post-marker-commits-detected` カテゴリの
+claude-failed、env `POST_MARKER_RECOVERY_MODE`）を持ちますが、これは **Implementer 契約の
+代替ではなく defense-in-depth** です。default の `fail-with-diagnostic` モードでは
+silent truncation を顕在化させて claude-failed で停止するため、Implementer は本契約を
+遵守して safety net 発火を回避することが望まれます。
+
 ## learning 追記の責務（per-task ループの中核 / Req 4.1, 4.2, 4.4）
 
 - 完了時に `impl-notes.md` の `## Implementation Notes` セクション配下へ
