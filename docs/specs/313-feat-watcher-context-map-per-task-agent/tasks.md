@@ -30,7 +30,7 @@ dedicated regression test task として位置付けます。
   - _Requirements_partial: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.9, 2.10, NFR 2.1, NFR 2.3_
   - _Boundary: context-map.sh_
 
-- [ ] 2. `local-watcher/bin/issue-watcher.sh` 本体に Config / `REQUIRED_MODULES` / call site の
+- [x] 2. `local-watcher/bin/issue-watcher.sh` 本体に Config / `REQUIRED_MODULES` / call site の
        追記を行う
   - Config ブロック（行 460 付近、`PER_TASK_LOOP_ENABLED` 宣言の近傍）に
     `CONTEXT_MAP_ENABLED="${CONTEXT_MAP_ENABLED:-false}"` を追加し、コメントで「`=true`
