@@ -2835,9 +2835,13 @@ pt_handle_post_marker_commits() {
     return 0
   fi
 
-  # fail-with-diagnostic: task 4 で `pt_mark_post_marker_commits_detected` 追加後に
-  # `run_per_task_reviewer` 経路（task 5）または本関数の改修でここから mark を呼ぶ。
-  # 本 task 3 時点では rc=5 を返すのみで終わる（fixture 参照実装も同様）。
+  # fail-with-diagnostic: task 3 時点では rc=5 を返すのみで終わる設計とし、
+  # `pt_mark_post_marker_commits_detected`（task 4 で追加）を呼ぶ責務は
+  # `run_per_task_reviewer`（task 5）側に倒した。本関数は fixture 参照実装
+  # （`test-post-marker-detect.sh` line 139〜172）と algorithm body を byte 同期させる
+  # 責務を保持しているため、ここで mark 呼び出しを追加すると fixture との同期が崩れる。
+  # `run_per_task_reviewer` 側は rc=5 を受領した際に必要な marker_sha / post_marker_list を
+  # 自前で保持しているため、そちらから mark を呼べる（Issue #304 task 5 で接続）。
   return 5
 }
 
@@ -3333,9 +3337,11 @@ run_per_task_implementer() {
 #   2  = 異常終了（claude crash / parse 失敗 = 装飾起因 parse 失敗）
 #   3  = diff range 解決失敗（marker commit が単記でも連記でも見つからない / Issue #164）
 #   4  = ファイル不在で 1 回限定リトライ後も生成されず（Issue #296 Req 2 / Req 4.2 で導入）
+#   5  = post-marker commit を marker 後に検出 + POST_MARKER_RECOVERY_MODE=fail-with-diagnostic
+#        （default）で停止（idd-codex #14 同型 commit shape / Issue #304 Req 2.1, 2.2, 2.3）
 #   99 = quota 超過
 #
-# 戻り値 2 / 3 / 4 の使い分け:
+# 戻り値 2 / 3 / 4 / 5 の使い分け:
 #   - rc=2: claude プロセスが起動した後の異常終了（claude crash / RESULT 行欠落 = 装飾起因 parse 失敗）。
 #     呼び出し側は既存の `per-task-reviewer-error` カテゴリで `claude-failed` 付与。
 #   - rc=3: claude プロセス起動前に diff range が解決できなかった（marker 不在 / Issue #164 Req 4）。
@@ -3345,8 +3351,15 @@ run_per_task_implementer() {
 #   - rc=4: review-notes.md がファイル不在で 1 回限定リトライ後も生成されず（Issue #296 Req 2.3 /
 #     Req 4.2）。呼び出し側は `per-task-reviewer-missing-file` カテゴリで `claude-failed` 付与し、
 #     NFR 2.2 に従い装飾起因 parse 失敗（rc=2）と grep で区別可能な reason を出力する。
+#   - rc=5: claude プロセス起動前に marker 後の未レビュー commit を検出した（Issue #304）。
+#     `pt_mark_post_marker_commits_detected` で `per-task-post-marker-commits-detected` カテゴリの
+#     `claude-failed` を本関数内で付与済みのため、呼び出し側は Issue コメント投稿を重ねずに
+#     即停止（既存 rc=3 のように `pt_mark_diff_range_resolve_failed` を loop 側で呼ぶ pattern
+#     と異なり、本経路は marker_sha / post_marker_list を本関数内で保持済みなため loop 側に
+#     データを引き上げず本関数で完結させる）。
 #
-# Requirements: 3.1, 3.2, 3.3, NFR 2.1, NFR 2.2, NFR 2.3, Issue #164 Req 4.1, 4.2, 4.3, NFR 2.2
+# Requirements: 3.1, 3.2, 3.3, NFR 2.1, NFR 2.2, NFR 2.3, Issue #164 Req 4.1, 4.2, 4.3, NFR 2.2,
+#               Issue #304 Req 2.1, 2.2, 2.3, NFR 1.1, NFR 1.3
 run_per_task_reviewer() {
   local task_id="$1"
   local round="$2"
@@ -3365,6 +3378,71 @@ run_per_task_reviewer() {
     return 3
   fi
 
+  # ─── Issue #304: post-marker commit の safety net ──────────────────────────
+  # `pt_resolve_diff_range` で得た range_end（= 当該 task の marker commit）より後ろに
+  # 未レビュー commit が積まれていないかを `pt_detect_post_marker_commits` で確認する。
+  # idd-codex #14 同型の Implementer 契約違反（Reviewer reject 後の再実行で修正 commit を
+  # 旧 marker 後ろに残置）を検出して silent range truncation を防ぐ。
+  #
+  # 後方互換性（NFR 1.1, 1.3）:
+  #   - 検出 0 件（rc=1）: post-marker commit が無い典型シナリオ → 既存ルートで Reviewer 起動
+  #   - git エラー（rc=2）: fail-safe で既存ルート fall-through（NFR 1.3 と同方針）
+  #   - 検出 1 件以上（rc=0）: `pt_handle_post_marker_commits` で recovery dispatch
+  #     - extend-range（rc=0）: 新 range で Reviewer を起動（range_end を HEAD まで拡張）
+  #     - fail-with-diagnostic（rc=5）: `pt_mark_post_marker_commits_detected` を呼んで
+  #       claude-failed を付与した上で rc=5 を呼び出し側に返す
+  local post_marker_list pt_detect_rc=0 extended="false"
+  post_marker_list=$(pt_detect_post_marker_commits "$range_end") || pt_detect_rc=$?
+  case "$pt_detect_rc" in
+    0)
+      # 1 件以上検出 → recovery dispatcher を起動
+      local pt_handle_out pt_handle_rc=0
+      pt_handle_out=$(pt_handle_post_marker_commits "$task_id" "$round" "$range_start" "$range_end" "$post_marker_list") || pt_handle_rc=$?
+      case "$pt_handle_rc" in
+        0)
+          # extend-range: 新 range を採用して Reviewer を起動
+          local new_range_start new_range_end
+          new_range_start=$(printf '%s' "$pt_handle_out" | cut -f1)
+          new_range_end=$(printf '%s' "$pt_handle_out" | cut -f2)
+          if [ -z "$new_range_start" ] || [ -z "$new_range_end" ]; then
+            pt_log "task=$task_id reviewer start round=$round result=error reason=post-marker-extend-range-empty detail=handle-returned-empty-pair" >> "$LOG"
+            # fail-safe: extend-range 結果が空なら fail-with-diagnostic と同等扱いで停止
+            pt_mark_post_marker_commits_detected "$task_id" "$round" "$range_end" "$post_marker_list" || true
+            return 5
+          fi
+          pt_log "task=$task_id reviewer start round=$round post-marker-commits-detected recovery=extend-range old_range_end=${range_end:0:7} new_range_end=${new_range_end:0:7}" >> "$LOG"
+          range_start="$new_range_start"
+          range_end="$new_range_end"
+          extended="true"
+          ;;
+        5)
+          # fail-with-diagnostic: claude-failed を付与して rc=5 を返す
+          pt_log "task=$task_id reviewer start round=$round result=error reason=per-task-post-marker-commits-detected marker=${range_end:0:7}" >> "$LOG"
+          pt_mark_post_marker_commits_detected "$task_id" "$round" "$range_end" "$post_marker_list" || true
+          return 5
+          ;;
+        *)
+          # 想定外の rc: 安全側に倒して fail-with-diagnostic 相当の停止
+          pt_log "task=$task_id reviewer start round=$round result=error reason=post-marker-handle-unexpected-rc rc=$pt_handle_rc marker=${range_end:0:7}" >> "$LOG"
+          pt_mark_post_marker_commits_detected "$task_id" "$round" "$range_end" "$post_marker_list" || true
+          return 5
+          ;;
+      esac
+      ;;
+    1)
+      # 0 件 → 既存ルート（NFR 1.3 既存挙動温存）
+      :
+      ;;
+    2)
+      # git エラー → fail-safe で既存ルート fall-through（NFR 1.3 同方針）
+      pt_log "task=$task_id reviewer start round=$round post-marker-commits-detect-git-error marker=${range_end:0:7} (fall-through to existing route)" >> "$LOG"
+      ;;
+    *)
+      # 想定外の rc → fail-safe で既存ルート fall-through
+      pt_log "task=$task_id reviewer start round=$round post-marker-commits-detect-unexpected-rc rc=$pt_detect_rc marker=${range_end:0:7} (fall-through to existing route)" >> "$LOG"
+      ;;
+  esac
+
   # prev_result（round=2 のみ意味あり）
   local prev_result="(none)"
   local notes_path="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
@@ -3375,7 +3453,7 @@ run_per_task_reviewer() {
     fi
   fi
 
-  pt_log "task=$task_id reviewer start round=$round model=$REVIEWER_MODEL max-turns=$REVIEWER_MAX_TURNS range=${range_start:0:7}..${range_end:0:7}" >> "$LOG"
+  pt_log "task=$task_id reviewer start round=$round model=$REVIEWER_MODEL max-turns=$REVIEWER_MAX_TURNS range=${range_start:0:7}..${range_end:0:7} extended=${extended}" >> "$LOG"
 
   local prompt
   prompt=$(build_per_task_reviewer_prompt "$task_id" "$range_start" "$range_end" "$round" "$prev_result")
@@ -4133,6 +4211,14 @@ run_per_task_loop() {
                   publish_terminal_failure_artifacts "per-task-reviewer-missing-file" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
                   return 1
                   ;;
+                5)
+                  # per-task-post-marker-commits-detected (Issue #304) → marker 後の未レビュー
+                  # commit を検出し fail-with-diagnostic で停止（Debugger 経由 round=3）。
+                  # `run_per_task_reviewer` 内で `pt_mark_post_marker_commits_detected` 済み。
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=per-task-post-marker-commits-detected" >> "$LOG"
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) marker 後の未レビュー commit を検出 → claude-failed (per-task-post-marker-commits-detected)" | tee -a "$LOG"
+                  return 1
+                  ;;
                 *)
                   dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=error" >> "$LOG"
                   echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) 異常終了 → claude-failed" | tee -a "$LOG"
@@ -4177,6 +4263,13 @@ run_per_task_loop() {
             publish_terminal_failure_artifacts "per-task-reviewer-missing-file" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
             return 1
             ;;
+          5)
+            # per-task-post-marker-commits-detected (Issue #304) → marker 後の未レビュー commit
+            # を検出し fail-with-diagnostic で停止。`run_per_task_reviewer` 内で
+            # `pt_mark_post_marker_commits_detected` 済みのため追加の Issue コメントは行わない。
+            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) marker 後の未レビュー commit を検出 → claude-failed (per-task-post-marker-commits-detected)" | tee -a "$LOG"
+            return 1
+            ;;
           *)
             echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) 異常終了 → claude-failed" | tee -a "$LOG"
             publish_terminal_failure_artifacts "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
@@ -4195,6 +4288,14 @@ run_per_task_loop() {
         # → `per-task-reviewer-missing-file` カテゴリで `claude-failed`（round=1）。
         echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) ファイル不在（リトライ後も未生成）→ claude-failed (per-task-reviewer-missing-file)" | tee -a "$LOG"
         publish_terminal_failure_artifacts "per-task-reviewer-missing-file" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+        return 1
+        ;;
+      5)
+        # per-task-post-marker-commits-detected (Issue #304) → marker 後の未レビュー commit
+        # を検出し、`POST_MARKER_RECOVERY_MODE=fail-with-diagnostic`（default）で停止。
+        # `run_per_task_reviewer` 内で `pt_mark_post_marker_commits_detected` 済みのため、
+        # ここでは追加の Issue コメント投稿は行わず、stdout / log 出力のみで停止する。
+        echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) marker 後の未レビュー commit を検出 → claude-failed (per-task-post-marker-commits-detected)" | tee -a "$LOG"
         return 1
         ;;
       *)
