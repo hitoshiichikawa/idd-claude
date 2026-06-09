@@ -82,6 +82,25 @@
 - **残存課題**: なし。本 task は agent 仕様の散文追記のみで完結。AC 3.3 / 4.1 / 4.3 は本 task で
   実装側の責務を完了し、4.3 の機械検証は Task 5 の verify block で行われる。
 
+### Task 4
+
+- **採用方針**: design.md「Agent 仕様改訂」節の追記ブロックを、root の `.claude/agents/reviewer.md`
+  と `repo-template/.claude/agents/reviewer.md` の「必ず先に読むルール」節 必読ファイル一覧の
+  末尾（`docs/specs/<番号>-<slug>/design.md（存在する場合）` の直下）に byte 一致で挿入。
+  Req 3.4 / 4.2 / 4.3 と CLAUDE.md「root/repo-template 二重管理」規約に整合。
+- **重要な判断**:
+  - 挿入位置は既存必読リスト末尾とした。「必ず先に読むルール」節は Reviewer が起動時に
+    最初に Read する一次情報源を列挙する節であり、context-map.md は同節の他必読ファイル
+    （requirements.md / tasks.md / impl-notes.md / design.md）と並列して扱うのが意図に最も近い。
+  - 散文は design.md ブロックを逐語採用し、Task 3 で developer.md に挿入した全角括弧 `（）` /
+    `Req X.Y` 形式の表記スタイルとも整合する形に揃えた。両系統で `diff -r .claude/agents
+    repo-template/.claude/agents` が空であることを確認。
+  - 追記内容は静的な散文のみで実行コードを含まないため、本 task 内に追加すべき regression
+    test は **存在しない**（Req 4.3 の `diff -r` 機械検証は Task 5 の stage-a-verify ブロックで
+    行われる）。
+- **残存課題**: なし。本 task は agent 仕様の散文追記のみで完結。AC 3.4 / 4.2 / 4.3 は本 task で
+  実装側の責務を完了し、4.3 の機械検証は Task 5 の verify block で行われる。
+
 ## 確認事項
 
 特になし（design.md と requirements.md の整合性は確認済み。tasks.md の本 task 仕様も
