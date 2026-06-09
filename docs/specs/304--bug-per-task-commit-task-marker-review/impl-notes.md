@@ -106,3 +106,56 @@ per-task ループの 1 タスクごとの learning を記録する。
 - **残存課題**: なし（task 5 で `run_per_task_reviewer` から本関数または
   `pt_handle_post_marker_commits` 経由で本関数を呼ぶ経路を接続する責務が残る。本関数の
   signature / 副作用は task 4 時点で確定）。
+
+### Task 5
+
+- **採用方針**: `run_per_task_reviewer`（3350 行〜）の `pt_resolve_diff_range` 成功直後に
+  post-marker safety net を挿入し、`pt_detect_post_marker_commits "$range_end"` の rc に
+  応じて 3 分岐（rc=0 / rc=1 / rc=2）。検出時は `pt_handle_post_marker_commits` を呼び、
+  さらに rc=0 (extend-range) / rc=5 (fail-with-diagnostic) で分岐する 2 段 dispatcher
+  構造とした。fail-with-diagnostic と extend-range の失敗 fallback（HEAD 解決失敗 / 想定外
+  rc）の両方で `pt_mark_post_marker_commits_detected` を呼んで claude-failed を付与し、
+  `run_per_task_reviewer` 自身も rc=5 を返す。`run_per_task_loop` の round=1 / round=2
+  / round=3 (Debugger 経由) 各経路に `5)` ケースを既存 `diff-range-resolve-failed` (rc=3)
+  分岐と同じ位置に挿入。
+- **重要な判断**:
+  - **`pt_mark_post_marker_commits_detected` を呼ぶ場所の選択**: design.md は両方の選択肢
+    （`pt_handle_post_marker_commits` 内 / `run_per_task_reviewer` 内）を許容している
+    が、`run_per_task_reviewer` 側で呼ぶ方針を採用した。理由: (a) `pt_handle_post_marker_commits`
+    は fixture 参照実装と algorithm body の byte 同期責務を保持しており、ここに mark
+    呼び出しを追加すると fixture との差分が出る (task 3 impl-notes の precedent と整合)、
+    (b) `run_per_task_reviewer` は marker_sha (= range_end) / post_marker_list を自前で
+    保持しているため情報のプランビング上自然、(c) rc=3（`diff-range-resolve-failed`）の
+    既存 pattern と異なり、本経路は marker / post_marker SHA を含めた詳細復旧手順を要する
+    ため loop 側にデータを引き上げず本関数で完結させる方が plumbing が簡潔。
+  - **loop 側の `5)` ケースは追加投稿しない**: `run_per_task_reviewer` 内で
+    `pt_mark_post_marker_commits_detected` 済みのため、loop 側は stdout / log のみで停止
+    （`return 1`）。`publish_terminal_failure_artifacts` を重ねて呼ばない設計で、Issue
+    コメントの重複を防ぐ。rc=3 の `pt_mark_diff_range_resolve_failed` も loop 側で呼ぶ
+    pattern だが、こちらは `run_per_task_reviewer` 内で mark 済みなので分岐構造が違う。
+    loop 側のコメント欄で「`run_per_task_reviewer` 内で `pt_mark_post_marker_commits_detected`
+    済み」を明示して将来の読者が pattern 差を把握できるようにした。
+  - **fail-safe（NFR 1.3）の徹底**: rc=2（git エラー）/ rc=* (想定外 rc) は既存ルートで
+    fall-through する（既存挙動温存）。rc=0 経路内で `pt_handle_post_marker_commits` が
+    想定外 rc を返した場合（rc=0/5 以外）も `pt_mark_post_marker_commits_detected` を
+    呼んで rc=5 に倒す（安全側）。extend-range で stdout が空（HEAD 解決失敗等）の場合も
+    同様に fail-with-diagnostic 相当の停止に倒す。
+  - **`extended` ローカル変数の扱い**: task 6 で `build_per_task_reviewer_prompt` に
+    `extended` 引数を追加する責務のため、task 5 では `extended` を log 行に出すに留め、
+    prompt builder には渡さない。task 6 完了時に `build_per_task_reviewer_prompt` 呼び出し
+    位置で `"$extended"` を 6 番目の引数として渡すよう改修される予定。
+  - **rc=5 ドキュメント**: `run_per_task_reviewer` の戻り値コメント節を更新し、rc=5 の
+    意味（`post-marker commit を検出 + fail-with-diagnostic で停止`）と rc=3 との
+    使い分け（rc=3 は marker 不在 / rc=5 は marker は見つかったが後続に未レビュー commit）
+    を明示した。
+- **残存課題**:
+  - task 6（`build_per_task_reviewer_prompt` への `extended` 引数追加）で、`run_per_task_reviewer`
+    内 `prompt=$(build_per_task_reviewer_prompt ...)` 呼び出しに 6 番目の引数として
+    `"$extended"` を渡すよう改修する責務が残る。本 task 時点では `extended="false"`（normal
+    経路）/ `extended="true"`（extend-range 経路）の値が正しく分岐済みだが、prompt builder
+    側で消費する subsection 追加は task 6 の責務。
+  - task 7 / 8（agent prompt docs 更新と repo-template ミラー反映）も別 task として残る。
+  - rc=5 経路の E2E 観測は idd-claude self-hosting 上で marker contract 違反の test issue を
+    立てて挙動確認することが推奨だが、本 task では smoke test の case-3 / case-4 で
+    `pt_handle_post_marker_commits` 単体の rc / stdout を検証している。`run_per_task_reviewer`
+    の rc=5 全経路を smoke で検証するには `gh` mock が必要で本 fixture のスコープ外。
