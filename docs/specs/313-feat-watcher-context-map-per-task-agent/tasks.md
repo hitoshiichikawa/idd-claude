@@ -6,7 +6,7 @@ test task（Task 5）に集約しており、先行 task は `_Requirements_part
 追加を Task 5 に deferred している旨を明示しています。Task 5 はこの partial 解消を担う
 dedicated regression test task として位置付けます。
 
-- [ ] 1. `modules/context-map.sh` を新規追加し、`cm_enabled` / 内部 resolver / `cm_compose` /
+- [x] 1. `modules/context-map.sh` を新規追加し、`cm_enabled` / 内部 resolver / `cm_compose` /
        `cm_generate` / `cm_render_prompt_section` の関数定義を実装する
   - `local-watcher/bin/modules/context-map.sh` を新規作成し、冒頭コメントで用途 / 配置先 /
     依存 / セットアップ参照先を明示する（既存 `modules/stage-a-verify.sh` 等と同形式）
@@ -30,7 +30,7 @@ dedicated regression test task として位置付けます。
   - _Requirements_partial: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.9, 2.10, NFR 2.1, NFR 2.3_
   - _Boundary: context-map.sh_
 
-- [ ] 2. `local-watcher/bin/issue-watcher.sh` 本体に Config / `REQUIRED_MODULES` / call site の
+- [x] 2. `local-watcher/bin/issue-watcher.sh` 本体に Config / `REQUIRED_MODULES` / call site の
        追記を行う
   - Config ブロック（行 460 付近、`PER_TASK_LOOP_ENABLED` 宣言の近傍）に
     `CONTEXT_MAP_ENABLED="${CONTEXT_MAP_ENABLED:-false}"` を追加し、コメントで「`=true`
@@ -54,7 +54,7 @@ dedicated regression test task として位置付けます。
   - _Boundary: issue-watcher.sh_
   - _Depends: 1_
 
-- [ ] 3. `.claude/agents/developer.md` と `repo-template/.claude/agents/developer.md` の両系統に
+- [x] 3. `.claude/agents/developer.md` と `repo-template/.claude/agents/developer.md` の両系統に
        context map 参照ルールを byte 一致で追記する
   - root の `.claude/agents/developer.md` の「実装ルール」節
     `変更前に grep / glob で既存実装・影響範囲を必ず把握する` の直後に、design.md
@@ -65,7 +65,7 @@ dedicated regression test task として位置付けます。
   - _Requirements: 3.3, 4.1, 4.3_
   - _Boundary: developer.md_
 
-- [ ] 4. `.claude/agents/reviewer.md` と `repo-template/.claude/agents/reviewer.md` の両系統に
+- [x] 4. `.claude/agents/reviewer.md` と `repo-template/.claude/agents/reviewer.md` の両系統に
        context map 参照ルールを byte 一致で追記する
   - root の `.claude/agents/reviewer.md` の「必ず先に読むルール」節の必読ファイル一覧の末尾に、
     design.md「Agent 仕様改訂」節で示した追記項目（`docs/specs/<番号>-<slug>/context-map.md` を
@@ -76,7 +76,7 @@ dedicated regression test task として位置付けます。
   - _Requirements: 3.4, 4.2, 4.3_
   - _Boundary: reviewer.md_
 
-- [ ] 5. `docs/specs/313-feat-watcher-context-map-per-task-agent/test-fixtures/` 配下に
+- [x] 5. `docs/specs/313-feat-watcher-context-map-per-task-agent/test-fixtures/` 配下に
        fixture とスモークスクリプトを追加する（Task 1 / Task 2 で deferred された behavioral
        regression test を集約する dedicated regression test task）
   - 本 task は Task 1 の `_Requirements_partial: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 2.7, 2.9, 2.10,
@@ -109,7 +109,7 @@ dedicated regression test task として位置付けます。
   - _Boundary: test-fixtures/_
   - _Depends: 1, 2_
 
-- [ ] 6. `README.md` の「オプション機能一覧」節（または同等の節）に `CONTEXT_MAP_ENABLED` の
+- [x] 6. `README.md` の「オプション機能一覧」節（または同等の節）に `CONTEXT_MAP_ENABLED` の
        説明を追記する
   - `CONTEXT_MAP_ENABLED` env var の意味と既定値（未設定＝無効）を記載する
   - 動作前提として `PER_TASK_LOOP_ENABLED=true` 環境のみで動作する旨を明記する

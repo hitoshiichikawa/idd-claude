@@ -494,6 +494,16 @@ PATH_OVERLAP_BUSY_WAIT_THRESHOLD="${PATH_OVERLAP_BUSY_WAIT_THRESHOLD:-5}"
 PER_TASK_LOOP_ENABLED="${PER_TASK_LOOP_ENABLED:-false}"
 PER_TASK_MAX_TASKS="${PER_TASK_MAX_TASKS:-0}"
 
+# ─── #313: Context Map for per-task agents（新規 opt-in 機能） ───
+# `=true` 厳密一致のときだけ per-task Implementer / Reviewer 起動直前に
+# `docs/specs/<番号>-<slug>/context-map.md` を決定論的に生成し、prompt 末尾に
+# inline embed する（広域 grep / glob を抑止して turn 効率を改善する補助情報）。
+# `PER_TASK_LOOP_ENABLED=true` 同時必須。`=true` 以外（未設定 / 空 / `false` /
+# `True` / `1` / `yes` / 任意値）はすべて off として扱い、本機能導入前と差分等価の
+# 挙動を保つ（Req 1.1〜1.4 / NFR 1.1）。詳細は
+# docs/specs/313-feat-watcher-context-map-per-task-agent/design.md を参照。
+CONTEXT_MAP_ENABLED="${CONTEXT_MAP_ENABLED:-false}"
+
 # ─── #304: per-task post-marker commit recovery mode ───
 # per-task Reviewer 起動前の `pt_detect_post_marker_commits` で marker 後の未レビュー commit
 # が検出されたときの復旧モードを切り替える env（Req 2.2, 2.3）。idd-codex #14 と同型の
@@ -693,7 +703,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（quota-aware / merge-queue / auto-rebase）、#181 Part 3 で切り出した
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "security-review.sh" "guard-hook.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -3463,6 +3473,14 @@ EOF
   local findings_block_section=""
   local debugger_block_section=""
   local closure_matrix_section=""
+  # ─── #313: Context Map 注入ブロック（Req 3.1 / 3.5） ───
+  # `cm_enabled` 通過時のみ context-map.md の内容を inline embed する markdown ブロックを
+  # 生成。未設定 / off のときは空文字列のまま heredoc に展開され、prompt は本機能導入前と
+  # byte 一致を保つ（NFR 1.1）。
+  local context_map_block_section=""
+  if cm_enabled; then
+    context_map_block_section=$(cm_render_prompt_section "$task_id")
+  fi
   if [ "$redo_mode" != "initial" ]; then
     local _inject_files=""
     # ── Reviewer Findings 注入（after-round1 / after-debugger 共通） ──
@@ -3669,7 +3687,7 @@ ${learnings_block}
 - \`git reset\` / \`git rebase\` / branch の切り替えは **禁止**
 - 既存 commit と矛盾する変更が必要な場合は、既存 commit を打ち消す追加 commit を積むか、
   impl-notes.md の「確認事項」に矛盾内容を記載して人間判断を仰ぐ
-${findings_block_section}${debugger_block_section}${closure_matrix_section}
+${findings_block_section}${debugger_block_section}${closure_matrix_section}${context_map_block_section}
 EOF
 }
 
@@ -3703,6 +3721,15 @@ build_per_task_reviewer_prompt() {
   # 変数の中身は外側の `cat <<EOF` で変数展開された後の最終 prompt にそのまま埋め込まれる。
   # quoted heredoc（'EXTENDED_EOF'）を使うことで $ / ` / \ が一切解釈されず、markdown の
   # バッククォートも literal で保持される（外側 heredoc の二重 escape 不要）。
+  # ─── #313: Context Map 注入ブロック（Req 3.2 / 3.5） ───
+  # `cm_enabled` 通過時のみ context-map.md の内容を inline embed する markdown ブロックを
+  # 生成。未設定 / off のときは空文字列のまま heredoc に展開され、prompt は本機能導入前と
+  # byte 一致を保つ（NFR 1.1）。
+  local context_map_block_section=""
+  if cm_enabled; then
+    context_map_block_section=$(cm_render_prompt_section "$task_id")
+  fi
+
   local extended_explanation=""
   if [ "$extended" = "true" ]; then
     extended_explanation=$(cat <<'EXTENDED_EOF'
@@ -3816,6 +3843,7 @@ reviewer サブエージェントを起動し、以下を判定して \`${SPEC_D
 - requirements.md / design.md / tasks.md / 既存実装コード / テストコードを書き換えないこと
 - \`git add\` / \`git commit\` / \`git push\` / \`gh\` を実行しないこと
 - スタイル / 命名 / lint / フォーマット観点での reject はしないこと
+${context_map_block_section}
 EOF
 }
 
@@ -4576,6 +4604,15 @@ run_per_task_loop() {
   local task_id
   while IFS= read -r task_id; do
     [ -n "$task_id" ] || continue
+
+    # ─── #313: Context Map 生成（opt-in / Req 2.1, 1.4） ───
+    # `CONTEXT_MAP_ENABLED=true` かつ `PER_TASK_LOOP_ENABLED=true` のときのみ
+    # `cm_enabled` が rc=0 を返す。失敗は `cm_warn` で吸収し per-task ループは継続
+    # させる（NFR 2.3「per-task ループを止めない」）。call site をループ冒頭に置く
+    # ことで Implementer / Reviewer の双方が同じ context-map.md を参照できる。
+    if cm_enabled; then
+      cm_generate "$task_id" || cm_warn "task=$task_id context-map.md 生成で警告（per-task ループは継続）"
+    fi
 
     # Issue #305 task 6: 当該 task の前 cycle 残骸 snapshot を防御的に削除
     # （/tmp の OS cleanup を待たず冒頭で除去。新規 snapshot 取得時は ts で
