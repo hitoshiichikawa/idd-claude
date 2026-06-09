@@ -125,7 +125,7 @@
   - _Boundary: issue-watcher.sh (run_per_task_loop)_
   - _Depends: 5_
 
-- [ ] 7. `developer.md` に「Finding Closure Matrix の記録義務」節を追加 + repo-template に byte 一致同期
+- [x] 7. `developer.md` に「Finding Closure Matrix の記録義務」節を追加 + repo-template に byte 一致同期
   - `.claude/agents/developer.md` の既存「per-task ループ下での Implementer の責務」節 → 「learning
     追記の責務」節の **直後**に新規 h2 節「per-task retry 時の Finding Closure Matrix 記録義務」を追加
   - 節本文には以下を含める（design.md「Developer 規約ドメイン」節と整合）:
