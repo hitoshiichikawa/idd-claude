@@ -3596,6 +3596,166 @@ EOF
   gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
 }
 
+# ─── pt_mark_post_marker_commits_detected <task_id> <round> <marker_sha> <post_marker_list> ───
+#
+# `per-task-post-marker-commits-detected` カテゴリで `claude-failed` を付与し、復旧手順付き
+# Issue コメントを投稿する専用ヘルパー（Issue #304 Req 2.3, NFR 2.1）。
+#
+# 通常の `per-task-reviewer-error` 経路（claude crash / parse 失敗等）および
+# `diff-range-resolve-failed`（marker 不在）との違い:
+#   - marker commit は見つかったが、その後ろに未レビュー commit が積まれた状態を検出した
+#     ケース（idd-codex #14 同型 / Implementer 契約違反: marker を task の終端 commit として
+#     refresh せずに修正 commit を旧 marker 後ろに残置）
+#   - silent range truncation（marker で range_end を止めて post-marker commit を見逃す）を
+#     防ぐため、`POST_MARKER_RECOVERY_MODE=fail-with-diagnostic`（default）経路で
+#     `run_per_task_reviewer` 起動を中止し、本ヘルパーで運用者向けの復旧手順を提示する
+#
+# 重複コメント抑制:
+#   - HTML コメント marker `<!-- idd-claude:per-task-post-marker-commits-detected:#<issue>:<task> -->`
+#     を本文末尾に埋め込み、当該 Issue に同一 marker のコメントが既存なら新規投稿を skip
+#     して既存コメントに「追記」する形式の単発コメントのみ追加する
+#     （`pt_mark_diff_range_resolve_failed` と同パターン）
+#
+# Args:
+#   $1 = task_id (例: `1.2`)
+#   $2 = round (1 / 2 / 3 のいずれか / どの round で検出したかを Issue に明示するため)
+#   $3 = marker_sha (検出時の対象 marker commit SHA)
+#   $4 = post_marker_list (改行区切りの post-marker SHA 列。`git log --format=%H` 由来 /
+#        新しい順 / 0 件の状態では本関数は呼ばれない想定だが空文字を許容する)
+#
+# 副作用:
+#   1. claude-claimed / claude-picked-up を除去し claude-failed を付与
+#   2. 復旧手順付き Issue コメントを 1 件投稿（既存があれば追記コメント）
+#
+# Requirements: Issue #304 Req 2.3, NFR 2.1
+pt_mark_post_marker_commits_detected() {
+  local task_id="$1"
+  local round="$2"
+  local marker_sha="$3"
+  local post_marker_list="$4"
+  local hostname_val
+  hostname_val=$(hostname)
+  local marker="<!-- idd-claude:per-task-post-marker-commits-detected:#${NUMBER}:${task_id} -->"
+
+  # post-marker SHA を CSV / bullet 表記に整形（NFR 2.1: 観測可能性）
+  local post_csv post_bullets
+  post_csv=$(printf '%s' "$post_marker_list" | tr '\n' ',' | sed 's/,$//')
+  post_bullets=$(printf '%s\n' "$post_marker_list" | sed '/^$/d' | sed 's/^/  - `/' | sed 's/$/`/')
+
+  # 重複コメント抑制のため既存 marker を gh API で検索
+  local comments_json existing_count=0
+  if comments_json=$(gh issue view "$NUMBER" --repo "$REPO" --json comments 2>/dev/null); then
+    existing_count=$(echo "$comments_json" | jq -r --arg marker "$marker" '
+      (.comments // []) | map(select(.body | contains($marker))) | length
+    ' 2>/dev/null || echo "0")
+    [ -n "$existing_count" ] || existing_count=0
+  fi
+
+  # ラベル付け替え（既存 mark_issue_failed / pt_mark_diff_range_resolve_failed と同方針 /
+  # 1 コマンド原子的に発行）
+  gh issue edit "$NUMBER" --repo "$REPO" \
+    --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
+
+  local body_header
+  if [ "$existing_count" -gt 0 ]; then
+    body_header="⚠️ 自動開発が失敗しました（${hostname_val} / モード: $MODE / 失敗 stage: per-task-post-marker-commits-detected / round=${round}）— **追記コメント**
+
+本 Issue には同一カテゴリ (\`per-task-post-marker-commits-detected\` / task=\`${task_id}\`) の失敗コメントが既に存在します。
+本コメントは状況が再発生したことを示す追記です。詳細な復旧手順は既存コメントを参照してください。"
+  else
+    body_header="⚠️ 自動開発が失敗しました（${hostname_val} / モード: $MODE / 失敗 stage: per-task-post-marker-commits-detected / round=${round}）"
+  fi
+
+  local body
+  body=$(cat <<EOF
+${body_header}
+
+## 失敗カテゴリ
+- カテゴリ: \`per-task-post-marker-commits-detected\`
+- 対象 task ID: \`${task_id}\`
+- 失敗 round: ${round}
+- 対象 marker SHA: \`${marker_sha}\`
+- post-marker SHA リスト（新しい順 / CSV）: \`${post_csv}\`
+- post-marker SHA リスト（詳細）:
+${post_bullets}
+- ログ: \`$LOG\`
+
+## 原因
+per-task Reviewer 起動前の safety net (\`pt_detect_post_marker_commits\`) が、当該 task の
+\`docs(tasks): mark ${task_id} as done\` marker commit (\`${marker_sha}\`) より後ろに、未レビューの
+commit が積まれている状態を検出しました。このまま Reviewer を起動すると range_end が marker
+で止まり、post-marker commit が判定対象から漏れる **silent range truncation** を引き起こすため、
+\`POST_MARKER_RECOVERY_MODE=fail-with-diagnostic\`（default）に従って Reviewer 起動前に停止しました
+（idd-codex #14 同型の failure mode 予防 / Issue #304）。
+
+Implementer 側で以下のいずれかに該当した可能性があります:
+
+- Reviewer reject / Debugger guidance 後の再実行で、修正 commit を旧 marker 後ろに積んだまま
+  marker を refresh しなかった
+- marker contract（marker は task の終端 commit / retry 時に refresh）に違反した順序で
+  marker commit を作成した
+
+## 復旧手順（重要 / データ損失リスク回避）
+
+**【重要】次サイクルで本ブランチの worktree が reset される可能性があります。**
+push 前の Developer commit が残っていれば、次サイクル前に必ず以下を実施してください:
+
+1. **push 前 commit の有無と現状の commit 列を確認**:
+   \`\`\`bash
+   cd <worktree-or-repo-dir>
+   git reflog --date=iso | head -50
+   git log --oneline ${BASE_BRANCH}..HEAD
+   git status
+   \`\`\`
+2. **push 前 commit がある場合は手動で push して保護**:
+   \`\`\`bash
+   git push origin <current-branch>
+   \`\`\`
+   または、reflog から拾い直して別ブランチに退避:
+   \`\`\`bash
+   git branch <rescue-branch-name> <reflog-sha>
+   git push origin <rescue-branch-name>
+   \`\`\`
+3. **marker commit を refresh**（marker を task の終端 commit に戻す）:
+   - 推奨 (a): 旧 marker を \`git reset --soft <marker^>\` で剥がし、修正 commit を含めた状態で
+     新 marker を末尾に作り直す
+   - 推奨 (b): \`git rebase -i ${BASE_BRANCH}\` で marker commit を tip に移動し、続けて
+     marker SHA を更新する
+   - いずれの場合も「\`docs(tasks): mark ${task_id} as done\` commit が \`${BASE_BRANCH}..HEAD\` の
+     最終 commit」になっていることを \`git log --oneline ${BASE_BRANCH}..HEAD\` で確認すること
+4. **修正完了後**: 修正 push を実施し、\`claude-failed\` ラベルを外すと watcher が次サイクルで
+   再 pickup する
+
+## Marker contract（再周知）
+
+per-task Implementer は以下の contract を厳守してください（詳細は
+\`repo-template/.claude/agents/developer.md\` の「per-task ループ下での Implementer の責務」節
+「Marker contract」subsection を参照）:
+
+- \`docs(tasks): mark <id> as done\` marker commit は、当該 task の **終端 commit**。
+  実装・テスト・learning 追記が完了した時点でのみ作成する
+- Reviewer reject / Debugger guidance 後の再実行では、修正 commit を旧 marker 後ろに残してはならない。
+  必要なら旧 marker を剥がして新 marker を末尾に積み直す（marker refresh）
+- 1 commit = 1 task ID（連記 \`mark 1 / 1.1 as done\` を作らない / 親 task 完了昇格は別 commit）
+
+## 切替 env（運用者向け / 通常は変更不要）
+
+- \`POST_MARKER_RECOVERY_MODE=fail-with-diagnostic\`（**default**）: 本コメントのような失敗扱いで停止
+- \`POST_MARKER_RECOVERY_MODE=extend-range\`: marker を捨てて HEAD まで range を拡張して
+  Reviewer を起動（marker contract 違反を黙って吸収するため、Implementer 側の修正契約が
+  弱くなる点に注意）
+
+${marker}
+EOF
+)
+
+  body="${body}
+
+問題を解決してから \`claude-failed\` ラベルを外してください。"
+
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
+}
+
 # ─── run_per_task_loop ───
 #
 # Stage A の代替実体。未完了 task を numeric ID 順に 1 件ずつ Implementer + Reviewer で
