@@ -2605,6 +2605,351 @@ pt_extract_learnings() {
   return 0
 }
 
+# ─── pt_extract_findings_block <review_notes_path> ───
+#
+# review-notes.md の `## Findings` セクション（次の `## ` 見出し直前まで）を
+# stdout に出力する。per-task retry 経路で Developer prompt に直前 round の
+# Reviewer Findings を inline 注入するために使用する（Issue #305 Req 1.1, 1.3,
+# 1.5, NFR 4.1）。
+#
+# - 抽出成功時: 0 を返し、stdout に `## Findings` 見出しを含む本文を出力
+# - ファイル不在 or `## Findings` 見出し不在: 1 を返し、stdout は空
+# - 末尾の RESULT 行や他セクション（`## Summary` 等）には触れない（次の `## `
+#   見出し直前で停止する）
+#
+# `pt_extract_learnings` の awk pattern を踏襲しているため、テスト容易性と
+# 実装方針を揃えている。
+#
+# Requirements: 1.1, 1.3, 1.5, 5.1, 5.5, NFR 4.1
+pt_extract_findings_block() {
+  local review_notes="$1"
+  if [ ! -f "$review_notes" ]; then
+    return 1
+  fi
+  # `## Findings` 見出しが存在するかを先に確認（不在なら return 1）。
+  if ! grep -qE '^## Findings[[:space:]]*$' "$review_notes"; then
+    return 1
+  fi
+  # awk で `## Findings` セクションを抽出。
+  # - `## Findings` 行を見つけたら print 開始
+  # - print 開始後に別の `## ` 見出しが来たら print 停止
+  # - 末尾まで他の `## ` が来なければファイル末尾まで print
+  awk '
+    /^## Findings[[:space:]]*$/ { in_section = 1; print; next }
+    in_section && /^## / { exit }
+    in_section { print }
+  ' "$review_notes"
+  return 0
+}
+
+# ─── pt_extract_debugger_section <debugger_notes_path> <task_id> ───
+#
+# debugger-notes.md の `## Task <task_id>` セクション（次の `## ` 見出し直前まで）を
+# stdout に出力する。per-task retry の Debugger Gate 経由 round=3 経路で
+# Developer prompt に当該 task の Fix Plan を inline 注入するために使用する
+# （Issue #305 Req 1.2, 1.5, NFR 4.2）。
+#
+# - 抽出成功時: 0 を返し、stdout に `## Task <task_id>` 見出しを含む本文を出力
+# - ファイル不在 or 当該 `## Task <task_id>` 見出し不在: 1 を返し、stdout は空
+# - 他 task の `## Task <other_id>` セクションには触れない（NFR 4.2 を構造保証）
+# - task_id の `.` は awk 正規表現メタを避けるため shell 側で `[.]` にエスケープして
+#   から awk pattern に埋め込む（例: `1.2` → `1[.]2`）
+#
+# 既存 `detect_debugger_already_invoked` の `^## Task <id>$` 行頭マッチ regex と
+# 整合させているため、Debugger が書き出すセクション規約を共有する。
+#
+# Requirements: 1.2, 1.5, 5.2, NFR 4.2
+pt_extract_debugger_section() {
+  local debugger_notes="$1"
+  local task_id="$2"
+  if [ ! -f "$debugger_notes" ]; then
+    return 1
+  fi
+  # task_id 内の `.` を `[.]` にエスケープして awk 正規表現メタを無効化する。
+  # numeric 階層 ID（例: `1`, `1.2`, `2.1.3`）以外の入力は本関数の責務外
+  # （呼び出し側で validated される前提）。
+  local escaped_id="${task_id//./[.]}"
+  local heading_pattern="^## Task ${escaped_id}$"
+  # 該当見出しが存在するかを先に確認（不在なら return 1）。
+  if ! grep -qE "$heading_pattern" "$debugger_notes"; then
+    return 1
+  fi
+  # awk で `## Task <task_id>` セクションを抽出。
+  # - 該当見出し行を見つけたら print 開始
+  # - print 開始後に別の `## ` 見出しが来たら print 停止
+  # - 末尾まで他の `## ` が来なければファイル末尾まで print
+  awk -v pat="$heading_pattern" '
+    $0 ~ pat { in_section = 1; print; next }
+    in_section && /^## / { exit }
+    in_section { print }
+  ' "$debugger_notes"
+  return 0
+}
+
+# ─── pt_snapshot_review_notes <task_id> <round> ───
+#
+# round=2 redo / Debugger 経路 redo 起動の **直前** に現在の review-notes.md を
+# 一時ファイルに退避し、redo 後の Reviewer が同名ファイルを上書きしても
+# fail-fast inspector が「直前 round の Findings」を参照できるようにする
+# （Issue #305 Req 3.1）。
+#
+# - 退避先: `/tmp/idd-claude-${REPO_SLUG}-${NUMBER}-pt-snapshot-${task_id}-round${round}-${ts}.md`
+# - 退避元が存在しない場合は退避せず stdout に空文字 + return 0
+#   （fail-fast 判定側で prev snapshot 不在を非マッチとして扱う / Req 3.4）
+# - REPO_SLUG / NUMBER / task_id / round / ts の 5 要素で隔離して衝突回避
+# - stdout: 退避先 path（空文字なら退避なし）
+#
+# Requirements: 3.1
+pt_snapshot_review_notes() {
+  local task_id="$1"
+  local round="$2"
+  local review_notes="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
+  if [ ! -f "$review_notes" ]; then
+    # 退避元不在 → 空文字を返す（fail-fast 判定側で「snapshot 不在」として扱う）
+    return 0
+  fi
+  local ts
+  ts="$(date +%Y%m%d-%H%M%S)"
+  local snapshot_path="/tmp/idd-claude-${REPO_SLUG}-${NUMBER}-pt-snapshot-${task_id}-round${round}-${ts}.md"
+  if cp "$review_notes" "$snapshot_path" 2>/dev/null; then
+    printf '%s\n' "$snapshot_path"
+  fi
+  return 0
+}
+
+# ─── pt_check_fail_fast <task_id> <prev_snapshot_path> <curr_review_notes_path> <sha_before> <sha_after> ───
+#
+# 連続 2 round（round=1 reject + round=2 reject）の Findings が「同一カテゴリ かつ
+# 同一 target」を 1 件以上共有 かつ 直近 round の Developer 再実行で
+# **テストファイル**に差分が積まれていないことを検出する（Issue #305 Req 3.1, 3.2,
+# 3.4, 3.5）。
+#
+# - 入力:
+#   - $1 task_id              : 対象 task（log 出力用）
+#   - $2 prev_snapshot_path   : round=1 直後に取得した review-notes.md スナップショット
+#                               （空文字 / ファイル不在なら不成立）
+#   - $3 curr_review_notes_path: round=2 reject 直後の review-notes.md
+#                                （空文字 / ファイル不在なら不成立）
+#   - $4 sha_before           : round=2 redo Developer 起動 **直前**の HEAD SHA
+#   - $5 sha_after            : round=2 reject **時点**の HEAD SHA（= 現在の HEAD）
+#
+# - アルゴリズム:
+#   1. 両 review-notes.md から `### Finding <n>` ブロックを抽出し、各 Finding の
+#      `Target` 行 + `Category` 行を `<category>\t<target>` の tuple set として取得
+#   2. 両 set の積集合が空ならば return 1（不成立 / Req 3.4 / stdout に
+#      `task=<id> fail-fast skip reason=no-shared-finding`）
+#   3. `git diff --name-only "$sha_before".."$sha_after"` で変更ファイル一覧を取得
+#   4. 変更ファイル一覧に「テストファイル」が **1 件も含まれない** ならば return 0
+#      （fail-fast 成立 / Req 3.2 / stdout に grep 可能 1 行
+#       `task=<id> fail-fast match category=<cat> target=<tgt> test-diff-empty range=<before>..<after>`）
+#   5. 1 件以上含まれるなら return 1（不成立 / stdout に
+#      `task=<id> fail-fast skip reason=test-diff-present`）
+#
+# - テストファイル判定基準（design.md「テストファイル判定基準」節 / Req 3.5）:
+#   拡張子 OR ディレクトリの 2 軸:
+#   - 拡張子: `_test.sh` / `.test.ts` / `.test.tsx` / `.test.js` / `.test.jsx` /
+#             `.spec.ts` / `.spec.tsx` / `.spec.js` / `.spec.jsx` /
+#             `_test.go` / `_test.py` / `test_*.py`
+#   - ディレクトリ: パスに `/test/` / `/tests/` / `/__tests__/` / `/spec/` のいずれかを含む
+#   - 加えて `local-watcher/test/fixtures/**` も「テスト関連差分」として扱う
+#
+# Requirements: 3.1, 3.2, 3.4, 3.5
+pt_check_fail_fast() {
+  local task_id="$1"
+  local prev_snapshot_path="$2"
+  local curr_review_notes_path="$3"
+  local sha_before="$4"
+  local sha_after="$5"
+
+  # snapshot 不在 / 読取不能なら不成立（Req 3.4 / 安全側）
+  if [ -z "$prev_snapshot_path" ] || [ ! -f "$prev_snapshot_path" ]; then
+    printf 'task=%s fail-fast skip reason=prev-snapshot-missing\n' "$task_id"
+    return 1
+  fi
+  if [ -z "$curr_review_notes_path" ] || [ ! -f "$curr_review_notes_path" ]; then
+    printf 'task=%s fail-fast skip reason=curr-review-notes-missing\n' "$task_id"
+    return 1
+  fi
+
+  # 両 review-notes.md から (category, target) tuple set を抽出する helper
+  # `### Finding <n>` ブロック配下の `**Target**: <val>` + `**Category**: <val>` を
+  # pair でまとめ、`<category>\t<target>` 1 行ずつ stdout に出す。
+  _pt_ff_extract_tuples() {
+    local file="$1"
+    awk '
+      /^### / {
+        # `### ` 見出しに遷移したら、直前の Finding が揃っていれば確定出力
+        if (in_finding && cur_target != "" && cur_category != "") {
+          print cur_category "\t" cur_target
+        }
+        cur_target = ""; cur_category = ""
+        if ($0 ~ /^### Finding[[:space:]]/) { in_finding = 1 } else { in_finding = 0 }
+        next
+      }
+      /^## / {
+        # `## ` 見出しで Finding ブロック群終端
+        if (in_finding && cur_target != "" && cur_category != "") {
+          print cur_category "\t" cur_target
+        }
+        cur_target = ""; cur_category = ""
+        in_finding = 0
+        next
+      }
+      in_finding {
+        # `**Target**: <val>` / `**Category**: <val>` （行頭 `- ` 任意）
+        if (match($0, /\*\*Target\*\*:[[:space:]]*/)) {
+          val = substr($0, RSTART + RLENGTH)
+          sub(/[[:space:]]+$/, "", val)
+          cur_target = val
+        } else if (match($0, /\*\*Category\*\*:[[:space:]]*/)) {
+          val = substr($0, RSTART + RLENGTH)
+          sub(/[[:space:]]+$/, "", val)
+          cur_category = val
+        }
+      }
+      END {
+        if (in_finding && cur_target != "" && cur_category != "") {
+          print cur_category "\t" cur_target
+        }
+      }
+    ' "$file"
+  }
+
+  local prev_tuples curr_tuples shared
+  prev_tuples="$(_pt_ff_extract_tuples "$prev_snapshot_path" | sort -u)"
+  curr_tuples="$(_pt_ff_extract_tuples "$curr_review_notes_path" | sort -u)"
+
+  # 積集合の算出（両方に存在する tuple のみ）
+  if [ -z "$prev_tuples" ] || [ -z "$curr_tuples" ]; then
+    printf 'task=%s fail-fast skip reason=no-shared-finding\n' "$task_id"
+    return 1
+  fi
+  shared="$(comm -12 <(printf '%s\n' "$prev_tuples") <(printf '%s\n' "$curr_tuples"))"
+  if [ -z "$shared" ]; then
+    printf 'task=%s fail-fast skip reason=no-shared-finding\n' "$task_id"
+    return 1
+  fi
+
+  # 最初の共有 tuple を採用（log 用）
+  local first_pair shared_category shared_target
+  first_pair="$(printf '%s\n' "$shared" | head -n 1)"
+  shared_category="$(printf '%s' "$first_pair" | cut -f1)"
+  shared_target="$(printf '%s' "$first_pair" | cut -f2)"
+
+  # テストファイル差分判定
+  local diff_files
+  if ! diff_files="$(git diff --name-only "${sha_before}..${sha_after}" 2>/dev/null)"; then
+    # git diff 失敗時は安全側に倒して不成立扱い（不要 claude-failed を避ける / Req 3.4）
+    printf 'task=%s fail-fast skip reason=git-diff-failed\n' "$task_id"
+    return 1
+  fi
+
+  local has_test_file=0
+  if [ -n "$diff_files" ]; then
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      case "$f" in
+        # 拡張子マッチ
+        *_test.sh|*.test.ts|*.test.tsx|*.test.js|*.test.jsx|\
+        *.spec.ts|*.spec.tsx|*.spec.js|*.spec.jsx|\
+        *_test.go|*_test.py)
+          has_test_file=1; break ;;
+      esac
+      # `test_*.py` パターン（ファイル名先頭 test_ + .py）
+      case "$f" in
+        */test_*.py|test_*.py)
+          has_test_file=1; break ;;
+      esac
+      # ディレクトリマッチ
+      case "$f" in
+        */test/*|*/tests/*|*/__tests__/*|*/spec/*)
+          has_test_file=1; break ;;
+      esac
+      # local-watcher/test/fixtures/** もテスト関連扱い
+      case "$f" in
+        local-watcher/test/fixtures/*)
+          has_test_file=1; break ;;
+      esac
+    done <<< "$diff_files"
+  fi
+
+  if [ "$has_test_file" -eq 0 ]; then
+    printf 'task=%s fail-fast match category=%s target=%s test-diff-empty range=%s..%s\n' \
+      "$task_id" "$shared_category" "$shared_target" "$sha_before" "$sha_after"
+    return 0
+  fi
+
+  printf 'task=%s fail-fast skip reason=test-diff-present\n' "$task_id"
+  return 1
+}
+
+# ─── pt_mark_fail_fast_failed <task_id> <category> <target> ───
+#
+# fail-fast 検出時に `claude-failed` 化 + 運用者向け診断 Issue コメントを投稿する
+# （Issue #305 Req 3.3, NFR 1.3, NFR 3.2）。
+#
+# 既存 `pt_mark_no_progress_failed` / `pt_mark_diff_range_resolve_failed` と
+# 同パターンで `mark_issue_failed` に `per-task-implementer-fail-fast-loop`
+# カテゴリで委譲する。新規カテゴリ追加であり既存カテゴリの意味は変更しない
+# （NFR 1.3）。
+#
+# Args:
+#   $1 = task_id  (例: `1.2`)
+#   $2 = category (連続 reject 対象の Finding カテゴリ / AC 未カバー / missing test
+#                  / boundary 逸脱 等)
+#   $3 = target   (連続 reject 対象の Finding target / numeric requirement ID
+#                  または `boundary:<component>`)
+#
+# 副作用（mark_issue_failed と等価 / NFR 1.3）:
+#   1. claude-claimed / claude-picked-up を除去し claude-failed を付与
+#   2. 復旧手順付き Issue コメントを 1 件投稿
+#
+# Requirements: 3.3, NFR 1.3, NFR 3.2
+pt_mark_fail_fast_failed() {
+  local task_id="$1"
+  local category="$2"
+  local target="$3"
+
+  local extra_body
+  extra_body=$(cat <<EOF
+## 失敗カテゴリ
+- カテゴリ: \`per-task-implementer-fail-fast-loop\`
+- 対象 task ID: \`${task_id}\`
+- 連続 reject 対象 Finding: Category=\`${category}\` / Target=\`${target}\`
+- ログ: \`$LOG\`
+
+## 検出条件
+per-task ループの round=1 と round=2 の **連続 2 round**で Reviewer Findings が
+「同一カテゴリ かつ 同一 target」を 1 件以上共有しており、かつ round=2 redo の
+Developer 再実行（直前の \`run_per_task_implementer_redo\` 起動）で **テスト
+ファイルに差分が積まれていない**ことを検出しました（Issue #305 Req 3.2 / 3.3）。
+
+このまま Debugger Gate 経由 round=3 redo に進んでも、同一指摘が再度 reject される
+構造になっており、turn 予算を無駄に消費するため自動進行を停止しました。
+
+## 参照ファイル
+- \`${SPEC_DIR_REL}/review-notes.md\` — 直近 round の Reviewer Findings
+- \`${SPEC_DIR_REL}/debugger-notes.md\` — Debugger 経路を経た場合のみ存在
+- \`${SPEC_DIR_REL}/impl-notes.md\` — Developer の Finding Closure Matrix と learning
+- \`$LOG\` — watcher ログ全文（fail-fast 検出 1 行 + 直前の Reviewer 判定行）
+
+## 次の手順
+1. \`${SPEC_DIR_REL}/review-notes.md\` と \`${SPEC_DIR_REL}/impl-notes.md\` を読み、
+   連続 reject されている Finding（Category=\`${category}\` / Target=\`${target}\`）の
+   妥当性を確認する
+2. **妥当な指摘**であれば、手動で修正 commit を積み、対応テストを追加した上で
+   \`claude-failed\` ラベルを外す（次サイクルで watcher が当該 Issue を再 pickup）
+3. **妥当でない指摘**（Reviewer の誤判定 / 要件側の曖昧さ）であれば、Architect /
+   PM への差し戻しを判断し、必要なら requirements.md / design.md / tasks.md の
+   再検討を実施する
+EOF
+)
+
+  pt_log "task=${task_id} fail-fast → claude-failed (per-task-implementer-fail-fast-loop) category=${category} target=${target}" >> "$LOG"
+
+  mark_issue_failed "per-task-implementer-fail-fast-loop" "$extra_body"
+}
+
 # ─── pt_resolve_diff_range <task_id> ───
 #
 # per-task Reviewer に渡す diff range の開始 SHA / 終了 SHA を解決して
@@ -2917,7 +3262,7 @@ pt_should_skip_reviewer() {
   return 0
 }
 
-# ─── build_per_task_implementer_prompt <task_id> ───
+# ─── build_per_task_implementer_prompt <task_id> [<redo_mode>] ───
 #
 # per-task Implementer 用の prompt を heredoc で組み立てて stdout に出力。
 # 既存 `build_dev_prompt_a` の形式を踏襲しつつ、以下を明示する:
@@ -2930,9 +3275,27 @@ pt_should_skip_reviewer() {
 #   - 既存 learnings の inline 埋め込み（Req 4.3）
 #   - PR 作成禁止 / spec 書き換え禁止（既存 Stage A 制約と同等）
 #
-# Requirements: 2.2, 2.3, 2.4, 2.5, 4.1, 4.2, 4.3, 4.4
+# redo_mode 引数（Issue #305 で追加 / 既定 "initial"）:
+#   - "initial"        : 初回 Implementer 起動。Findings / Fix Plan 注入ブロックを追加しない
+#                        （既存 1 引数呼び出しと **完全に同一**の prompt を生成 / NFR 1.1）
+#   - "after-round1"   : Reviewer round=1 reject 後の redo。`## 直前 round の Reviewer Findings`
+#                        ブロックと `## Finding Closure Matrix の記録義務` ブロックを注入
+#   - "after-debugger" : Debugger Gate 経由 round=3 の redo。上記 2 ブロックに加えて
+#                        `## Debugger の Fix Plan` ブロックを注入 + Matrix 5 列目指示を追記
+#   - 未知の値は安全側に "initial" へ fallback
+#
+# Requirements: 2.2, 2.3, 2.4, 2.5, 4.1, 4.2, 4.3, 4.4,
+#               1.1, 1.2, 1.3, 1.4, 1.5, 4.3 (Issue #305),
+#               NFR 1.1, NFR 3.1, NFR 4.1, NFR 4.2 (Issue #305)
 build_per_task_implementer_prompt() {
   local task_id="$1"
+  local redo_mode="${2:-initial}"
+  # 安全側 fallback: 未知の値は initial 扱い
+  case "$redo_mode" in
+    initial|after-round1|after-debugger) ;;
+    *) redo_mode=initial ;;
+  esac
+
   local learnings
   learnings=$(pt_extract_learnings "$REPO_DIR/$SPEC_DIR_REL/impl-notes.md")
   local learnings_block
@@ -2956,6 +3319,142 @@ EOF
 （先行 task の learnings はまだ存在しません。本 task が最初の per-task 実装です）
 EOF
 )
+  fi
+
+  # ─── redo_mode != initial 時のみ Findings / Fix Plan / Matrix 規約ブロックを構築 ───
+  #
+  # 注入ブロックは redo 経路（after-round1 / after-debugger）でのみ prompt 本文に追加され、
+  # redo_mode=initial では空文字のまま heredoc に埋まる（= 既存 1 引数呼び出しと完全等価 / NFR 1.1）。
+  #
+  # NFR 3.1: 注入実施事実を grep 可能な 1 行で watcher ログに出力する。round 番号は本関数の引数
+  # に含めず redo_mode に紐付ける形で省略する（after-round1 ≒ round=2 redo /
+  # after-debugger ≒ round=3 redo の対応関係は run_per_task_loop 側で構造的に保証される）。
+  # design.md 行 528 は `redo_mode=<mode> inject=<comma-sep-files> round=<N>` を例示するが、本
+  # build 関数は round を引数で受け取らない設計（呼び出し側の wrapper で stage_label に
+  # redo_mode を埋め込む / 後方互換性の単純化）のため round はログから省略する。
+  local findings_block_section=""
+  local debugger_block_section=""
+  local closure_matrix_section=""
+  if [ "$redo_mode" != "initial" ]; then
+    local _inject_files=""
+    # ── Reviewer Findings 注入（after-round1 / after-debugger 共通） ──
+    local _review_notes_path="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
+    local _findings_block
+    if _findings_block=$(pt_extract_findings_block "$_review_notes_path"); then
+      findings_block_section=$(cat <<EOF
+
+## 直前 round の Reviewer Findings（review-notes.md より）
+
+per-task Reviewer が直前 round で reject 判定を返した際の Findings セクションを以下に
+inline で運びます。各 Finding の **Target / Category / Detail / Required Action** を確認し、
+本起動で **必ず対応**してください（同じ指摘が次 round で再度 reject されないように、
+fix commit + 追加テスト + 検証結果を Finding Closure Matrix に記録します。後述）。
+
+\`\`\`markdown
+${_findings_block}
+\`\`\`
+EOF
+)
+      _inject_files="review-notes"
+    else
+      findings_block_section=$(cat <<'EOF'
+
+## 直前 round の Reviewer Findings（review-notes.md より）
+
+(review-notes.md が見つかりません / 抽出失敗のため Findings の inline 注入を諦めました。
+spec ディレクトリ配下の review-notes.md を直接読み、直前 round の Findings を参照してください)
+EOF
+)
+      pt_log "task=$task_id redo_mode=$redo_mode inject=skipped reason=findings-extract-failed" >> "$LOG"
+    fi
+
+    # ── Debugger Fix Plan 注入（after-debugger のみ） ──
+    if [ "$redo_mode" = "after-debugger" ]; then
+      local _debugger_notes_path="$REPO_DIR/$SPEC_DIR_REL/debugger-notes.md"
+      local _debugger_block
+      if _debugger_block=$(pt_extract_debugger_section "$_debugger_notes_path" "$task_id"); then
+        debugger_block_section=$(cat <<EOF
+
+## Debugger の Fix Plan（debugger-notes.md より）
+
+Debugger サブエージェントが当該 task について生成した Fix Plan を以下に inline で運びます。
+\`### 根本原因\` / \`### 修正手順\` / \`### 検証方法\` / \`### 残存リスク\` を読み、本起動で
+修正手順を順に実施し、検証方法で挙動を確認してください。Debugger は **コード修正権限を
+持たない**ため、Fix Plan の実装は本起動の Developer が担います。
+
+\`\`\`markdown
+${_debugger_block}
+\`\`\`
+EOF
+)
+        if [ -n "$_inject_files" ]; then
+          _inject_files="${_inject_files},debugger-notes"
+        else
+          _inject_files="debugger-notes"
+        fi
+      else
+        debugger_block_section=$(cat <<EOF
+
+## Debugger の Fix Plan（debugger-notes.md より）
+
+(debugger-notes.md または \`## Task ${task_id}\` セクションが見つかりません / 抽出失敗
+のため Fix Plan の inline 注入を諦めました。spec ディレクトリ配下の debugger-notes.md を
+直接読み、当該 task の Fix Plan を参照してください)
+EOF
+)
+        pt_log "task=$task_id redo_mode=$redo_mode inject=skipped reason=debugger-section-not-found" >> "$LOG"
+      fi
+    fi
+
+    # ── 注入実施を 1 行で記録（NFR 3.1） ──
+    if [ -n "$_inject_files" ]; then
+      pt_log "task=$task_id redo_mode=$redo_mode inject=$_inject_files" >> "$LOG"
+    fi
+
+    # ── Finding Closure Matrix の記録義務（redo 経路共通） ──
+    #
+    # 詳細規約は developer.md の「per-task retry 時の Finding Closure Matrix 記録義務」節
+    # （Issue #305 の task 7 で追加予定）を canonical source として参照する。本 prompt では
+    # 規約への参照と最小限の指示を 1〜2 段落で運ぶ。
+    if [ "$redo_mode" = "after-debugger" ]; then
+      closure_matrix_section=$(cat <<EOF
+
+## Finding Closure Matrix の記録義務（per-task retry 経路）
+
+本起動は per-task retry 経路（redo_mode=${redo_mode}）です。直前 round の Reviewer Findings
+（および Debugger Fix Plan）に対する対応状況を、**Finding Closure Matrix** として
+\`${SPEC_DIR_REL}/impl-notes.md\` の \`### Task ${task_id}\` セクション末尾に追記してください。
+規約詳細は \`.claude/agents/developer.md\` の「per-task retry 時の Finding Closure Matrix
+記録義務」節を canonical source として参照すること。
+
+Matrix の各行には直前 round の Reviewer Finding ごとに **Finding / Target / Fix Commit /
+Added/Updated Test / Verification** の 4 項目（5 列）を対応付け、本起動は Debugger Gate
+経由 round=3 のため **5 列目「Fix Plan Step」**（対応する Debugger Fix Plan の修正手順番号）も
+**必ず追記**してください。fix commit が存在しない Finding には「未対応」「対応不可（理由）」
+「次 round へ持ち越し」のいずれかを Fix Commit 列で明示します。先行 task の Matrix および
+先行 round の Matrix 既存行は **改変・削除・並び替え禁止**（新規 round の Matrix は新規
+見出しで追加）。
+EOF
+)
+    else
+      closure_matrix_section=$(cat <<EOF
+
+## Finding Closure Matrix の記録義務（per-task retry 経路）
+
+本起動は per-task retry 経路（redo_mode=${redo_mode}）です。直前 round の Reviewer Findings
+に対する対応状況を、**Finding Closure Matrix** として
+\`${SPEC_DIR_REL}/impl-notes.md\` の \`### Task ${task_id}\` セクション末尾に追記してください。
+規約詳細は \`.claude/agents/developer.md\` の「per-task retry 時の Finding Closure Matrix
+記録義務」節を canonical source として参照すること。
+
+Matrix の各行には直前 round の Reviewer Finding ごとに **Finding / Target / Fix Commit /
+Added/Updated Test / Verification** の 4 項目（4 列）を対応付け、fix commit が存在しない
+Finding には「未対応」「対応不可（理由）」「次 round へ持ち越し」のいずれかを Fix Commit
+列で明示します。先行 task の Matrix および先行 round の Matrix 既存行は **改変・削除・
+並び替え禁止**（新規 round の Matrix は新規見出しで追加）。
+EOF
+)
+    fi
   fi
 
   cat <<EOF
@@ -3042,6 +3541,7 @@ ${learnings_block}
 - \`git reset\` / \`git rebase\` / branch の切り替えは **禁止**
 - 既存 commit と矛盾する変更が必要な場合は、既存 commit を打ち消す追加 commit を積むか、
   impl-notes.md の「確認事項」に矛盾内容を記載して人間判断を仰ぐ
+${findings_block_section}${debugger_block_section}${closure_matrix_section}
 EOF
 }
 
@@ -3192,6 +3692,78 @@ run_per_task_implementer() {
     *)
       rm -f "$_qa_reset_file"
       pt_log "task=$task_id implementer end rc=$_qa_rc result=error" >> "$LOG"
+      return 1
+      ;;
+  esac
+}
+
+# ─── run_per_task_implementer_redo <task_id> <redo_mode> ───
+#
+# Reviewer reject / Debugger 経由 redo 経路専用の Implementer 起動 wrapper。
+# `run_per_task_implementer` をベースに以下 2 点のみ差分:
+#
+#   1. prompt 組み立て時に `build_per_task_implementer_prompt "$task_id" "$redo_mode"` を呼び、
+#      Reviewer Findings / Debugger Fix Plan / Finding Closure Matrix 規約節を inline 注入する
+#      （注入ロジックは build 関数側に実装済み / Issue #305 task 3 で実装）
+#   2. stage_label を `PerTask-Impl-Redo-${task_id}-${redo_mode}` に変更し、quota log /
+#      grep フィルタで初回起動 (`PerTask-Impl-${task_id}`) と区別可能にする
+#
+# `redo_mode` は build 関数側で `initial|after-round1|after-debugger` のみ受け付け、未知の値は
+# 安全側に `initial` へ fallback する。本 wrapper はその値を stage_label 用にもそのまま使うが、
+# stage_label への ASCII 制約は redo_mode の値域が事前定義されているため別途検証しない。
+#
+# 既存 `run_per_task_implementer <task_id>` は **無改変**（NFR 1.1 を構造保証）。
+# BLOCKED 経路 (`run_per_task_loop` の `_pt_blocked_reason` 分岐) は本 wrapper を呼ばず
+# 既存 `run_per_task_implementer` を継続使用する（BLOCKED は Reviewer reject ではないため
+# Findings 注入対象外 / Issue #305 task 4）。
+#
+# 戻り値:
+#   0  = success
+#   1  = claude 非 0 exit / 規約違反（claude-failed は呼び出し側で付与）
+#   99 = quota 超過（既存 #66 規約に従い呼び出し側に伝搬）
+#
+# Requirements: 1.1, 1.2, 4.3 (Issue #305), NFR 1.1, NFR 1.2
+run_per_task_implementer_redo() {
+  local task_id="$1"
+  local redo_mode="$2"
+  local prompt
+  prompt=$(build_per_task_implementer_prompt "$task_id" "$redo_mode")
+
+  pt_log "task=$task_id implementer-redo start (model=$DEV_MODEL, max-turns=$DEV_MAX_TURNS, redo_mode=$redo_mode)" >> "$LOG"
+  echo "--- per-task Implementer Redo 実行 (task=$task_id, redo_mode=$redo_mode) ---" >> "$LOG"
+
+  local _qa_reset_file _qa_rc=0 _qa_ts _qa_stage_label
+  _qa_ts=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-pt-impl-redo-${task_id}-${redo_mode}-${_qa_ts}"
+  _qa_stage_label="PerTask-Impl-Redo-${task_id}-${redo_mode}"
+  qa_run_claude_stage "$_qa_stage_label" "$_qa_reset_file" -- \
+    claude \
+      --print "$prompt" \
+      --model "$DEV_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$DEV_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      "${CLAUDE_HOOK_ARGS[@]}" \
+      >> "$LOG" 2>&1 || _qa_rc=$?
+
+  case "$_qa_rc" in
+    0)
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer-redo end rc=0 redo_mode=$redo_mode" >> "$LOG"
+      return 0
+      ;;
+    99)
+      local _qa_epoch
+      _qa_epoch=$(cat "$_qa_reset_file")
+      qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label" "$_qa_epoch"
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer-redo end rc=99 redo_mode=$redo_mode result=quota-exceeded" >> "$LOG"
+      return 99
+      ;;
+    *)
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer-redo end rc=$_qa_rc redo_mode=$redo_mode result=error" >> "$LOG"
       return 1
       ;;
   esac
@@ -3591,6 +4163,12 @@ run_per_task_loop() {
   while IFS= read -r task_id; do
     [ -n "$task_id" ] || continue
 
+    # Issue #305 task 6: 当該 task の前 cycle 残骸 snapshot を防御的に削除
+    # （/tmp の OS cleanup を待たず冒頭で除去。新規 snapshot 取得時は ts で
+    # 名前衝突を回避するため実害はないが、長期 watcher 稼働で /tmp が肥大化
+    # するのを抑止する）
+    rm -f "/tmp/idd-claude-${REPO_SLUG}-${NUMBER}-pt-snapshot-${task_id}-"* 2>/dev/null || true
+
     # ── round=1: Implementer + Reviewer ──
     local impl_rc=0
     run_per_task_implementer "$task_id" || impl_rc=$?
@@ -3713,8 +4291,18 @@ run_per_task_loop() {
         # reject 1 回目 → Implementer 再起動 + Reviewer round=2
         echo "🔁 #$NUMBER: per-task Reviewer (task=$task_id, round=1) reject → Implementer 再実行" | tee -a "$LOG"
 
+        # Issue #305 task 6: 連続 reject fail-fast 用の prev snapshot 取得 +
+        # round=2 redo Implementer 起動直前の HEAD SHA を記録（Req 3.1）。
+        # snapshot 取得失敗時は空文字が返り、pt_check_fail_fast 側で
+        # prev-snapshot-missing として不成立扱いとなる（Req 3.4 安全側）。
+        # git rev-parse 失敗時も `|| echo ""` で空文字に倒し、pt_check_fail_fast
+        # 側で git-diff-failed 経由 return 1（既存 Debugger Gate 経路に進む）。
+        local _pt_ff_prev_snapshot _pt_ff_sha_before
+        _pt_ff_prev_snapshot="$(pt_snapshot_review_notes "$task_id" 1)"
+        _pt_ff_sha_before="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+
         local impl2_rc=0
-        run_per_task_implementer "$task_id" || impl2_rc=$?
+        run_per_task_implementer_redo "$task_id" "after-round1" || impl2_rc=$?
         case "$impl2_rc" in
           0)
             # Issue #263: Reviewer reject 後の Implementer 再実行も rc=0 で抜けたが進捗ゼロ
@@ -3750,6 +4338,35 @@ run_per_task_loop() {
             return 0
             ;;
           1)
+            # Issue #305 task 6: 連続 reject + テスト差分なしの fail-fast 判定
+            # （Debugger Gate 判定の前 / Req 3.2 / 3.3）。成立時は Debugger Gate
+            # 経由 round=3 redo に進まず即 claude-failed 化して turn 予算消費を
+            # 停止する。不成立時は既存 Debugger Gate / per-task-reviewer-reject2
+            # 経路へ進む（Req 3.4 / 既存挙動温存）。
+            local _pt_ff_sha_after _pt_ff_out _pt_ff_rc=0
+            _pt_ff_sha_after="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+            _pt_ff_out="$(pt_check_fail_fast "$task_id" \
+              "$_pt_ff_prev_snapshot" \
+              "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" \
+              "$_pt_ff_sha_before" \
+              "$_pt_ff_sha_after" 2>&1)" || _pt_ff_rc=$?
+            # pt_check_fail_fast の stdout（grep 可能 1 行）を LOG に転記
+            # （Physical Data Model 行 528-530 / NFR 3.1）
+            if [ -n "$_pt_ff_out" ]; then
+              printf '[%s] [%s] per-task: %s\n' "$(date '+%F %T')" "$REPO" "$_pt_ff_out" >> "$LOG"
+            fi
+            if [ "$_pt_ff_rc" = "0" ]; then
+              # fail-fast 成立 → category / target を stdout から再抽出して
+              # pt_mark_fail_fast_failed に渡し claude-failed 化
+              local _pt_ff_cat _pt_ff_tgt
+              _pt_ff_cat="$(printf '%s' "$_pt_ff_out" | sed -n 's/.*category=\([^ ]*\).*/\1/p')"
+              _pt_ff_tgt="$(printf '%s' "$_pt_ff_out" | sed -n 's/.*target=\([^ ]*\).*/\1/p')"
+              echo "❌ #$NUMBER: per-task fail-fast 検出 (task=$task_id, category=${_pt_ff_cat:-unknown}, target=${_pt_ff_tgt:-unknown}) → claude-failed (per-task-implementer-fail-fast-loop)" | tee -a "$LOG"
+              pt_mark_fail_fast_failed "$task_id" "${_pt_ff_cat:-unknown}" "${_pt_ff_tgt:-unknown}"
+              return 1
+            fi
+            # fail-fast 不成立 → 既存 Debugger Gate 経路にそのまま進む（Req 3.4）
+
             # 再 reject → Phase 3 (#22) Debugger Gate に分岐 (Req 6.1, 6.3)、
             # 未対応なら claude-failed + Issue コメント
             if [ "${DEBUGGER_ENABLED:-false}" = "true" ] && ! detect_debugger_already_invoked "$task_id"; then
@@ -3770,10 +4387,13 @@ run_per_task_loop() {
                   ;;
               esac
 
-              # Implementer 再起動（Fix Plan 注入は per-task Implementer の prompt builder には未対応のため、
-              # debugger-notes.md の存在を Implementer が `### Task <id>` セクションで読むことに依拠する）
+              # Implementer 再起動（Issue #305 task 4 で `run_per_task_implementer_redo` に置換。
+              # `redo_mode=after-debugger` で review-notes.md の Findings と debugger-notes.md
+              # の `## Task <id>` セクションを prompt に inline 注入する。これにより従来
+              # `### Task <id>` の自発参照に依拠していた弱い情報注入を、prompt 内 inline 運搬に
+              # 切り替える）
               local impl3_rc=0
-              run_per_task_implementer "$task_id" || impl3_rc=$?
+              run_per_task_implementer_redo "$task_id" "after-debugger" || impl3_rc=$?
               case "$impl3_rc" in
                 0)
                   # Issue #263: Debugger 経由 Implementer 再実行も rc=0 で抜けたが進捗ゼロ

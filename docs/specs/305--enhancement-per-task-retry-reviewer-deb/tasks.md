@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. `pt_extract_findings_block` ヘルパー実装 + 単体テスト fixture 整備
+- [x] 1. `pt_extract_findings_block` ヘルパー実装 + 単体テスト fixture 整備
   - `local-watcher/bin/issue-watcher.sh` の per-task ブロック末尾（既存 `pt_extract_learnings`
     関数の近傍 / 行 2606 付近）に `pt_extract_findings_block <review_notes_path>` を追加
   - awk で `^## Findings[[:space:]]*$` 〜 次の `^## ` 直前まで抽出。`pt_extract_learnings` の
@@ -17,7 +17,7 @@
   - _Requirements: 1.1, 1.3, 1.5, 5.1, 5.5, NFR 4.1_
   - _Boundary: issue-watcher.sh (pt_* namespace), local-watcher/test/_
 
-- [ ] 2. `pt_extract_debugger_section` ヘルパー実装 + 単体テスト fixture 整備
+- [x] 2. `pt_extract_debugger_section` ヘルパー実装 + 単体テスト fixture 整備
   - 同 namespace に `pt_extract_debugger_section <debugger_notes_path> <task_id>` を追加
   - awk で `^## Task <escaped_task_id>$` 行頭マッチから次の `^## ` 直前まで抽出
   - task_id の `.` は awk の正規表現メタを避けるため shell 側で `[.]` にエスケープしてから awk に渡す
@@ -31,7 +31,7 @@
   - _Boundary: issue-watcher.sh (pt_* namespace), local-watcher/test/_
   - _Depends: 1_
 
-- [ ] 3. `build_per_task_implementer_prompt` の signature 拡張 + 注入ブロック実装
+- [x] 3. `build_per_task_implementer_prompt` の signature 拡張 + 注入ブロック実装
   - 既存関数 `build_per_task_implementer_prompt` の signature を
     `build_per_task_implementer_prompt <task_id> [<redo_mode>]` に拡張（既定 `redo_mode=initial`）
   - 関数冒頭で `redo_mode` を local に取り、`case "$redo_mode" in initial|after-round1|after-debugger) ;;
@@ -55,7 +55,7 @@
   - _Boundary: issue-watcher.sh (build_per_task_implementer_prompt)_
   - _Depends: 1, 2_
 
-- [ ] 4. `run_per_task_implementer_redo` wrapper + `run_per_task_loop` 呼び出し点改修
+- [x] 4. `run_per_task_implementer_redo` wrapper + `run_per_task_loop` 呼び出し点改修
   - 既存 `run_per_task_implementer <task_id>` は **無改変**（NFR 1.1 を構造保証）
   - 新規 wrapper `run_per_task_implementer_redo <task_id> <redo_mode>` を追加。内部処理は
     `run_per_task_implementer` をほぼコピーし、`build_per_task_implementer_prompt "$task_id"
@@ -71,7 +71,7 @@
   - _Boundary: issue-watcher.sh (run_per_task_loop, run_per_task_implementer_redo)_
   - _Depends: 3_
 
-- [ ] 5. `pt_snapshot_review_notes` + `pt_check_fail_fast` + `pt_mark_fail_fast_failed` 実装 + 単体テスト
+- [x] 5. `pt_snapshot_review_notes` + `pt_check_fail_fast` + `pt_mark_fail_fast_failed` 実装 + 単体テスト
   - `pt_snapshot_review_notes <task_id> <round>` を追加:
     - 退避先 path `/tmp/idd-claude-${REPO_SLUG}-${NUMBER}-pt-snapshot-${task_id}-round${round}-${ts}.md`
       を組み立て、`cp` で退避。元ファイル不在なら退避せず stdout に空文字を返す
@@ -101,7 +101,7 @@
   - _Boundary: issue-watcher.sh (pt_* namespace), local-watcher/test/_
   - _Depends: 1_
 
-- [ ] 6. `run_per_task_loop` の round=2 reject 直後に fail-fast 経路を組み込む
+- [x] 6. `run_per_task_loop` の round=2 reject 直後に fail-fast 経路を組み込む
   - `run_per_task_loop` の round=2 redo の **直前** に
     `prev_snapshot=$(pt_snapshot_review_notes "$task_id" 1)` を呼び snapshot 取得
   - round=2 redo Implementer 起動 **直前**の HEAD SHA を `sha_before=$(git -C "$REPO_DIR" rev-parse HEAD)`
@@ -125,7 +125,7 @@
   - _Boundary: issue-watcher.sh (run_per_task_loop)_
   - _Depends: 5_
 
-- [ ] 7. `developer.md` に「Finding Closure Matrix の記録義務」節を追加 + repo-template に byte 一致同期
+- [x] 7. `developer.md` に「Finding Closure Matrix の記録義務」節を追加 + repo-template に byte 一致同期
   - `.claude/agents/developer.md` の既存「per-task ループ下での Implementer の責務」節 → 「learning
     追記の責務」節の **直後**に新規 h2 節「per-task retry 時の Finding Closure Matrix 記録義務」を追加
   - 節本文には以下を含める（design.md「Developer 規約ドメイン」節と整合）:
@@ -141,7 +141,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 4.1, 4.4, NFR 2.1_
   - _Boundary: .claude/agents/developer.md, repo-template/.claude/agents/developer.md_
 
-- [ ] 8. impl-notes.md 整備 + 既存挙動温存の手動スモーク確認
+- [x] 8. impl-notes.md 整備 + 既存挙動温存の手動スモーク確認
   - `docs/specs/305--enhancement-per-task-retry-reviewer-deb/impl-notes.md` に以下を記録:
     - 採用方針（注入ブロック構造 / fail-fast 判定基準）
     - 既存 `build_per_task_implementer_prompt` の 1 引数呼び出し後方互換性の検証結果

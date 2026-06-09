@@ -402,6 +402,85 @@ fresh な Claude session** で本 Developer サブエージェントが起動さ
 - `## Implementation Notes` 見出し自体が無ければ初回 Implementer が追加してよい
   （`impl-notes.md` 自体が存在しなければ作成する）
 
+## per-task retry 時の Finding Closure Matrix 記録義務（Req 2.1〜2.5, 4.1, 4.4 / NFR 2.1）
+
+per-task retry 経路（Reviewer reject 後の Implementer 再起動 / Debugger Gate 経由再起動）では、
+prompt 本文に **「## 直前 round の Reviewer Findings」ブロック**（および `after-debugger` の場合
+は「## Debugger の Fix Plan（debugger-notes.md より）」ブロック）が inline 注入されます。
+Developer は本注入を checklist として扱い、`impl-notes.md` の `### Task <id>` h3 セクション
+末尾に **Finding Closure Matrix** を追記する義務を負います。
+
+### 適用範囲
+
+- **適用**: prompt 本文に「## 直前 round の Reviewer Findings」ブロックが含まれる redo 経路
+  （`redo_mode=after-round1` / `redo_mode=after-debugger`）のみ
+- **非適用**: 初回起動（`redo_mode=initial`）/ `PER_TASK_LOOP_ENABLED=false` 環境 /
+  prompt 本文に Findings 注入ブロックが含まれない場合は **本節を skip** すること
+  （Developer は prompt から本節該当の指示が無いことを観察して skip する。NFR 1.1 / Req 1.4 / 5.5）
+
+### Matrix の構造（規約テンプレ / 4 列）
+
+`impl-notes.md` の当該 task の `### Task <id>` h3 セクション末尾に、以下の見出しで Matrix を追記する:
+
+```markdown
+### Task <id> — Finding Closure Matrix (round=<N>)
+
+| Finding | Target | Fix Commit | Added/Updated Test | Verification |
+|---------|--------|------------|--------------------|--------------|
+| Finding 1 | 1.1 (AC 未カバー) | <短縮 SHA> | `local-watcher/test/foo_test.sh` 追加 | `bash foo_test.sh` 全 pass |
+| Finding 2 | boundary:Watcher | 未対応（理由: 仕様確認待ち、次 round へ持ち越し） | — | — |
+```
+
+- 見出し形式は `### Task <id> — Finding Closure Matrix (round=<N>)` で固定（`<id>` は対象 task ID、
+  `<N>` は当該 redo round 番号。`after-round1` なら `round=2`、`after-debugger` なら `round=3`）
+- 1 行 = 1 Finding（review-notes.md の `### Finding 1` / `### Finding 2` … と 1:1 で対応）
+- `Target` 列は review-notes.md の `**Target**:` 行に対応する numeric requirement ID または
+  `boundary:<component>` をそのまま転記する
+- `Fix Commit` 列は対応 commit の **短縮 SHA**（7 桁以上）を記載する。対応 commit が無い場合は
+  下記 enum 値のいずれかを記載する（Req 2.3）
+
+### `Fix Commit` 列の enum 値（対応不能時）
+
+対応 commit が存在しない Finding は、`Fix Commit` 列に以下のいずれかを記載する:
+
+- `未対応`（次 round で対応予定 / 後続 task の責務 等）
+- `対応不可（理由: <理由>）`（要件側の問題で実装不能、外部依存待ち 等）
+- `次 round へ持ち越し`（本 round では着手したが完了せず、次 round で継続）
+
+これら enum 値を採用した行では `Added/Updated Test` / `Verification` 列に `—` を記入してよい。
+
+### Debugger Gate 経由 round=3 のみ 5 列目「Fix Plan Step」追記（Req 2.5）
+
+`redo_mode=after-debugger` の prompt（= round=3）では、Matrix を 5 列に拡張し、5 列目に
+debugger-notes.md の `### 修正手順` のステップ番号への参照を追記する:
+
+```markdown
+### Task <id> — Finding Closure Matrix (round=3)
+
+| Finding | Target | Fix Commit | Added/Updated Test | Verification | Fix Plan Step |
+|---------|--------|------------|--------------------|--------------|---------------|
+| Finding 1 | 1.1 (missing test) | <SHA> | `foo_test.sh` 追加 | 全 pass | Fix Plan 修正手順 (2) |
+```
+
+- `redo_mode=after-round1`（round=2）では **4 列のまま**にし、5 列目を追加しない
+- 5 列目の値は debugger-notes.md の `### 修正手順` の項目番号（例: `Fix Plan 修正手順 (2)`）を
+  人間レビュワーが追跡できる粒度で記載する
+
+### 先行 task / 先行 round の Matrix 改変禁止（Req 2.4）
+
+- **先行 task の `### Task <id> — Finding Closure Matrix (round=<N>)` 見出しおよび本文は
+  改変・削除・並び替えしない**（前方伝播の規律。`### Task <id>` 既存 learning の改変禁止規約と並列）
+- **同一 task の先行 round の Matrix 行は改変・削除・並び替えしない**。round=3 で追記する場合は
+  既存の `(round=2)` Matrix を温存したまま、**新規見出し `(round=3)` で別の Matrix を追加する**
+- 既存 Matrix の表記揺れ修正・typo 修正等のリファクタも本 task の責務外（後続レビュー / 別 spec で扱う）
+
+### 配置と既存 learning との関係
+
+- Matrix は既存 `### Task <id>` h3 セクション **末尾** に追記する（既存 learning 本文の後ろ）
+- 既存 learning 追記の責務（採用方針 / 重要な判断 / 残存課題）は **本節と並列**に維持する。
+  Matrix 追記は learning の置き換えではなく追加であり、両方を残す
+- `## Implementation Notes` セクション **外** の既存記述には触れない規約は本節でも継承する
+
 ## task-test 境界整合の責務（Issue #303）
 
 per-task Reviewer は当該 task の `_Requirements:_` 列挙 AC について「対応テストが当該 task の

@@ -1,0 +1,2 @@
+local-watcher/bin/issue-watcher.sh
+local-watcher/test/foo_test.sh

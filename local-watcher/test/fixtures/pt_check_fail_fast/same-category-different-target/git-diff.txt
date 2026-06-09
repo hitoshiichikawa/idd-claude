@@ -1,0 +1,1 @@
+local-watcher/bin/issue-watcher.sh
