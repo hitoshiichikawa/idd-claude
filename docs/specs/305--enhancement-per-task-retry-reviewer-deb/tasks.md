@@ -71,7 +71,7 @@
   - _Boundary: issue-watcher.sh (run_per_task_loop, run_per_task_implementer_redo)_
   - _Depends: 3_
 
-- [ ] 5. `pt_snapshot_review_notes` + `pt_check_fail_fast` + `pt_mark_fail_fast_failed` 実装 + 単体テスト
+- [x] 5. `pt_snapshot_review_notes` + `pt_check_fail_fast` + `pt_mark_fail_fast_failed` 実装 + 単体テスト
   - `pt_snapshot_review_notes <task_id> <round>` を追加:
     - 退避先 path `/tmp/idd-claude-${REPO_SLUG}-${NUMBER}-pt-snapshot-${task_id}-round${round}-${ts}.md`
       を組み立て、`cp` で退避。元ファイル不在なら退避せず stdout に空文字を返す
