@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. 回帰テスト fixture の追加（idd-codex #14 同型 commit shape）
+- [x] 1. 回帰テスト fixture の追加（idd-codex #14 同型 commit shape）
   - `docs/specs/304--bug-per-task-commit-task-marker-review/test-fixtures/test-post-marker-detect.sh`
     を新規作成し、以下 5 ケースを assert で検証する
     - case-1: marker 後に commit 無し → 検出 0 件で既存挙動温存
