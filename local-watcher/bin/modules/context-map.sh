@@ -11,8 +11,8 @@
 #
 #   提供関数:
 #     - cm_log / cm_warn / cm_error     : `context-map:` prefix logger
-#     - cm_enabled                       : CONTEXT_MAP_ENABLED + PER_TASK_LOOP_ENABLED の
-#                                          両方が "true" 厳密一致のときのみ rc=0
+#     - cm_enabled                       : PER_TASK_LOOP_ENABLED が "true" 厳密一致のとき
+#                                          のみ rc=0（per-task ループの標準機能）
 #     - cm_resolve_boundary              : tasks.md の `_Boundary:_` 抽出
 #     - cm_resolve_candidate_files       : design.md File Structure Plan の解析
 #     - cm_resolve_candidate_tests       : 候補テストファイル抽出
@@ -36,7 +36,7 @@
 #   - `set -euo pipefail` は本体側で宣言済みのため、本モジュールでは宣言せず関数定義のみを持つ。
 #   - グローバル変数（$REPO / $REPO_DIR / $SPEC_DIR_REL 等）は本体冒頭の Config ブロックで
 #     定義済み。bash の遅延束縛により呼び出し時に解決される。
-#   - 環境変数（読み取り）: CONTEXT_MAP_ENABLED / PER_TASK_LOOP_ENABLED
+#   - 環境変数（読み取り）: PER_TASK_LOOP_ENABLED
 #   - 外部 CLI: grep / awk / sed / wc（POSIX 標準）
 #
 # セットアップ参照先:
@@ -58,12 +58,12 @@ cm_error() {
 
 # ─── cm_enabled ───
 #
-# context map 機能が当該実行で active かを判定する gate（Req 1.1, 1.2, 1.3, 1.4, 3.5, NFR 1.1）。
-# CONTEXT_MAP_ENABLED と PER_TASK_LOOP_ENABLED の **両方** が lowercase の `true` 厳密一致の
-# ときのみ rc=0、それ以外（未設定 / 空 / `True` / `1` / `yes` / 任意の値）は rc=1。
+# context map 機能が当該実行で active かを判定する gate（Req 1.1, 1.4, 3.5, NFR 1.1）。
+# context map は per-task ループの標準機能であり、PER_TASK_LOOP_ENABLED が lowercase の
+# `true` 厳密一致のときのみ rc=0、それ以外（未設定 / 空 / `True` / `1` / `yes` / 任意の値）は
+# rc=1。当初の opt-in gate だった CONTEXT_MAP_ENABLED は削除済み（#313 標準化）。
 # 副作用なし。stdout / stderr へも出力しない（純粋判定関数）。
 cm_enabled() {
-  [ "${CONTEXT_MAP_ENABLED:-}" = "true" ] || return 1
   [ "${PER_TASK_LOOP_ENABLED:-}" = "true" ] || return 1
   return 0
 }
@@ -532,7 +532,7 @@ cm_render_prompt_section() {
   # fenced code block を 4 backtick で囲み、本文中の 3 backtick fence と干渉しないようにする。
   printf '\n'
   # shellcheck disable=SC2016  # backticks are literal markdown decoration, not command substitution
-  printf '## Context Map（auto-generated / `CONTEXT_MAP_ENABLED=true`）\n\n'
+  printf '## Context Map（auto-generated / per-task ループ標準機能）\n\n'
   # shellcheck disable=SC2016
   printf '本起動では watcher が当該 task の `_Boundary:_` と design.md の File Structure Plan を元に\n'
   printf '**広域 grep / glob を行う前にまず参照すべき一次情報**として以下を生成しました\n'

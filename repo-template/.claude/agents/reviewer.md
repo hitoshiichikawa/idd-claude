@@ -20,8 +20,9 @@ model: claude-opus-4-7
 - `docs/specs/<番号>-<slug>/tasks.md`（`_Requirements:_` / `_Boundary:_` アノテーション）
 - `docs/specs/<番号>-<slug>/impl-notes.md`（Developer の補足メモ。テスト実行結果が含まれている前提）
 - `docs/specs/<番号>-<slug>/design.md`（存在する場合）
-- `docs/specs/<番号>-<slug>/context-map.md`（`CONTEXT_MAP_ENABLED=true` 環境下でのみ生成される
-  auto-generated metadata。diff range 評価時の **探索起点**として利用する）
+- `docs/specs/<番号>-<slug>/context-map.md`（per-task ループ配下で自動生成される
+  auto-generated metadata。diff range 評価時の **探索起点**として利用する。当初の opt-in gate
+  `CONTEXT_MAP_ENABLED` は削除済みで per-task ループの標準機能。単一実装パスでは非生成）
 
 ## Feature Flag Protocol 採否確認（Req 4.1, 4.2 / NFR 1.1）
 

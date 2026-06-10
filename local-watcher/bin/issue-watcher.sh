@@ -494,15 +494,14 @@ PATH_OVERLAP_BUSY_WAIT_THRESHOLD="${PATH_OVERLAP_BUSY_WAIT_THRESHOLD:-5}"
 PER_TASK_LOOP_ENABLED="${PER_TASK_LOOP_ENABLED:-false}"
 PER_TASK_MAX_TASKS="${PER_TASK_MAX_TASKS:-0}"
 
-# ─── #313: Context Map for per-task agents（新規 opt-in 機能） ───
-# `=true` 厳密一致のときだけ per-task Implementer / Reviewer 起動直前に
-# `docs/specs/<番号>-<slug>/context-map.md` を決定論的に生成し、prompt 末尾に
-# inline embed する（広域 grep / glob を抑止して turn 効率を改善する補助情報）。
-# `PER_TASK_LOOP_ENABLED=true` 同時必須。`=true` 以外（未設定 / 空 / `false` /
-# `True` / `1` / `yes` / 任意値）はすべて off として扱い、本機能導入前と差分等価の
-# 挙動を保つ（Req 1.1〜1.4 / NFR 1.1）。詳細は
+# ─── #313: Context Map for per-task agents（標準機能 / 常時有効） ───
+# per-task Implementer / Reviewer ループ（`PER_TASK_LOOP_ENABLED=true`）配下では
+# 各 task 起動直前に `docs/specs/<番号>-<slug>/context-map.md` を決定論的に生成し、
+# prompt 末尾に inline embed する（広域 grep / glob を抑止して turn 効率を改善する
+# 補助情報）。当初の opt-in gate だった `CONTEXT_MAP_ENABLED` は削除し、per-task
+# ループの内在機能として常時有効化した（旧 env を cron 等に残しても無害な no-op）。
+# 単一実装パス（`PER_TASK_LOOP_ENABLED` 未設定）では従来どおり未注入。詳細は
 # docs/specs/313-feat-watcher-context-map-per-task-agent/design.md を参照。
-CONTEXT_MAP_ENABLED="${CONTEXT_MAP_ENABLED:-false}"
 
 # ─── #304: per-task post-marker commit recovery mode ───
 # per-task Reviewer 起動前の `pt_detect_post_marker_commits` で marker 後の未レビュー commit
@@ -4605,9 +4604,10 @@ run_per_task_loop() {
   while IFS= read -r task_id; do
     [ -n "$task_id" ] || continue
 
-    # ─── #313: Context Map 生成（opt-in / Req 2.1, 1.4） ───
-    # `CONTEXT_MAP_ENABLED=true` かつ `PER_TASK_LOOP_ENABLED=true` のときのみ
-    # `cm_enabled` が rc=0 を返す。失敗は `cm_warn` で吸収し per-task ループは継続
+    # ─── #313: Context Map 生成（標準機能 / Req 2.1, 1.4） ───
+    # per-task ループ配下（`PER_TASK_LOOP_ENABLED=true`）では `cm_enabled` が常に
+    # rc=0 を返し、各 task で context-map.md を生成する。失敗は `cm_warn` で吸収し
+    # per-task ループは継続
     # させる（NFR 2.3「per-task ループを止めない」）。call site をループ冒頭に置く
     # ことで Implementer / Reviewer の双方が同じ context-map.md を参照できる。
     if cm_enabled; then
