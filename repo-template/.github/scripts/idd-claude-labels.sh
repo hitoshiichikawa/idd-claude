@@ -74,6 +74,7 @@ LABELS=(
   "awaiting-slot|c5def5|【Issue 用】 hot file 競合予防で同サイクル dispatch を見送り中（Phase E Path Overlap Checker が付与・除去）"
   "blocked|b60205|【Issue 用】 依存 Issue 未 merge により auto-dev 進行不能"
   "hotfix|d93f0b|hotfix 優先処理対象（Dispatcher が非 hotfix より先に投入）"
+  "needs-security-fix|d73a4a|【PR 用】 Security Review strict モード（#281）で severity 閾値以上の検出により付与される。手動剥がしで override 可"
 )
 
 echo "📌 idd-claude ラベルを作成します"
