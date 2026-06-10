@@ -62,7 +62,11 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
-  id-token: write   # Bedrock / Vertex OIDC 利用時に必要
+  # id-token: write は Bedrock / Vertex の OIDC 認証を使う場合にのみ必要。
+  # 既定の ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN 認証では不要なため、
+  # 最小権限の原則に従い既定では付与しない（プロンプトインジェクション時の
+  # OIDC トークン窃取の踏み台化を防ぐ）。OIDC を使う場合のみ次行を有効化する:
+  # id-token: write
 
 jobs:
   claude-team-dev:
@@ -150,11 +154,18 @@ jobs:
       # ─────────────────────────────────────────────────────────────
       - name: Create working branch from base
         id: branch
+        # step output / Issue 番号は env 経由で shell へ渡す（`${{ }}` を run: スクリプト
+        # 本体へ直接展開しない GitHub 公式 hardening パターン）。slug の sanitize が将来
+        # 緩んでも shell injection に発展しないようにする防御層。
+        env:
+          DETECT_MODE: ${{ steps.detect.outputs.mode }}
+          DETECT_SLUG: ${{ steps.detect.outputs.slug }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
         run: |
-          if [ "${{ steps.detect.outputs.mode }}" = "impl-resume" ]; then
-            BRANCH="claude/issue-${{ github.event.issue.number }}-impl-${{ steps.detect.outputs.slug }}"
+          if [ "$DETECT_MODE" = "impl-resume" ]; then
+            BRANCH="claude/issue-${ISSUE_NUMBER}-impl-${DETECT_SLUG}"
           else
-            BRANCH="claude/issue-${{ github.event.issue.number }}-${{ steps.detect.outputs.slug }}"
+            BRANCH="claude/issue-${ISSUE_NUMBER}-${DETECT_SLUG}"
           fi
           # Checkout step が ref=$BASE_BRANCH で fetch しているため、HEAD は既に
           # base branch の先端。ここでは作業ブランチを派生させて push するだけ。
