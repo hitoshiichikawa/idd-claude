@@ -577,7 +577,9 @@ pr_detect_iteration_keyword() {
   local pattern="${PR_REVIEWER_ITERATION_PATTERN}"
 
   local count
-  count=$(printf '%s' "$review_text" | grep -E -i -c "$pattern" 2>/dev/null || true)
+  # `--` でパターン以降をオプション解釈から切り離し、`-f...` 等によるフラグ注入を防ぐ
+  # （`PR_REVIEWER_ITERATION_PATTERN` は operator 設定だが安価な hardening）。
+  count=$(printf '%s' "$review_text" | grep -E -i -c -- "$pattern" 2>/dev/null || true)
   count="${count:-0}"
 
   pr_log "PR #${pr_number}: iteration keyword 検出 matches=${count} pattern='${pattern}'" >&2

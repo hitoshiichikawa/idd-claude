@@ -9412,7 +9412,15 @@ _slot_run_issue() {
     local TRIAGE_FILE="/tmp/triage-${REPO_SLUG}-${NUMBER}-${TS}.json"
     rm -f "$TRIAGE_FILE"
 
-    local TITLE_SAFE="${TITLE//|/\\|}"
+    # sed 置換文字列で特別扱いされる文字を網羅エスケープする（未信頼の Issue タイトル由来）。
+    # `\`（エスケープ導入）→ `&`（被マッチ展開）→ 区切り `|` の順で処理する
+    # （`\` を先に処理しないと後続で挿入した `\&` / `\|` が二重エスケープされる）。
+    # 末尾が `\` のタイトルで sed 式が malformed 化する事故、および `&` による
+    # `{{TITLE}}` 逐語混入を防ぐ。
+    local TITLE_SAFE="$TITLE"
+    TITLE_SAFE="${TITLE_SAFE//\\/\\\\}"
+    TITLE_SAFE="${TITLE_SAFE//&/\\&}"
+    TITLE_SAFE="${TITLE_SAFE//|/\\|}"
     local TRIAGE_PROMPT
     TRIAGE_PROMPT=$(sed \
       -e "s|{{NUMBER}}|${NUMBER}|g" \

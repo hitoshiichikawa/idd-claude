@@ -1166,7 +1166,10 @@ pp_resolve_merge_sha() {
     merge_sha=$(timeout "$PROMOTE_GIT_TIMEOUT" \
       gh pr view "$pr_number" --repo "$REPO" \
         --json mergeCommit --jq '.mergeCommit.oid // ""' 2>/dev/null) || continue
-    if [ -n "$merge_sha" ] && [ "$merge_sha" != "null" ]; then
+    # SHA40（git full object name）を厳格検証してから返す。下流の
+    # `git revert "$merge_sha"`（先頭 `-` 引数注入）/ `gh api .../commits/$merge_sha/...`
+    # （`../` path 横断）へ不正値が流れるのを防ぐ。不正値は未解決として次候補へ。
+    if [[ "$merge_sha" =~ ^[0-9a-f]{40}$ ]]; then
       echo "$merge_sha"
       return 0
     fi
