@@ -8878,11 +8878,22 @@ dr_gh_graphql_closed_by() {
   # 返らないため誤判定していた / 本 bug の根因）。
   # `includeClosedPrs: true` で CLOSED/MERGED の PR も含めて返させる。
   # `first: 20` は check_existing_impl_pr と同じく十分なマージン。
+  #
+  # #316: 依存ゲートの base 相対化（staged-for-release 解決判定）のため、同一
+  # クエリで Issue の labels も取得する。`labels(first: 20)` は Issue 1 件に付く
+  # ラベル数として十分なマージン（実運用では 10 件未満が大半）。state + labels を
+  # 1 回の問い合わせで取得することで API 呼び出し回数を本変更前と同数に保つ
+  # （NFR 2.1）。
   # shellcheck disable=SC2016  # `$owner` / `$repo` / `$number` は GraphQL 変数記法であり bash 展開ではない（`-F` で値を渡す）
   local query='query($owner: String!, $repo: String!, $number: Int!) {
     repository(owner: $owner, name: $repo) {
       issue(number: $number) {
         state
+        labels(first: 20) {
+          nodes {
+            name
+          }
+        }
         closedByPullRequestsReferences(first: 20, includeClosedPrs: true) {
           nodes {
             number
@@ -8906,21 +8917,37 @@ dr_gh_graphql_closed_by() {
 # return = 常に 0（判定結果は stdout で返す）。
 # 副作用 = API エラー / jq parse 失敗時のみ dr_warn でログ（Req 6.2）。
 #
-# `dr_gh_graphql_closed_by` で Issue の state と
+# `dr_gh_graphql_closed_by` で Issue の state / labels /
 # `closedByPullRequestsReferences.nodes[].state` を取得し、以下を判定:
-#   - issue.state == "OPEN"  → "open"（unresolved / Req 1.4 / 旧 2.3）
+#   - issue.state == "OPEN" かつ BASE_BRANCH != main かつ labels に
+#     `staged-for-release` を含む → "resolved"（#316 / Req 1.1 / NFR 3.1）
+#   - issue.state == "OPEN"（上記以外）→ "open"（unresolved / Req 1.4 / 旧 2.3 /
+#     #316 Req 1.2, 1.3 で BASE_BRANCH=main の従来挙動を維持）
 #   - issue.state == "CLOSED" かつ PR ノードの state に "MERGED" が 1 件以上
-#     → "resolved"（Req 1.1）
+#     → "resolved"（Req 1.1 / #316 Req 1.4 で従来挙動を維持）
 #   - issue.state == "CLOSED" かつ "MERGED" が 0 件（空配列・全 CLOSED 含む）
-#     → "closed unmerged"（Req 1.2, 1.3）
+#     → "closed unmerged"（Req 1.2, 1.3 / #316 Req 1.5 で従来挙動を維持）
 #   - gh / jq 失敗 / GraphQL errors / 未知の state → "api error"
-#     （Req 2.1, 2.2 / NFR 4.2 安全側）
+#     （Req 2.1, 2.2 / NFR 4.2 安全側 / #316 Req 2.2, 2.3）
 #
 # 旧実装は `gh issue view --json closedByPullRequestsReferences` の PR ノードに
 # 存在しない `.merged` フィールドを参照していたため、merge 済み依存も常に
 # `closed unmerged` と誤判定していた（#204 の根因 / Req 1.5）。
 #
-# timeout は DRR_GH_TIMEOUT に従う（個別の新規 env var は導入しない / Req 3.5）。
+# #316: BASE_BRANCH != main（gitflow 等の multi-branch 運用 / develop dispatch）
+# の場合、依存先が OPEN かつ `staged-for-release` ラベルを持つ状態は「develop
+# には統合済みで main 到達待ち」を意味するため、当該依存を resolved として
+# 扱う（base 相対化）。BASE_BRANCH=main の従来挙動は変更しない。labels 取得・
+# parse に失敗した場合は安全側に倒し `staged-for-release` 付与を仮定しない
+# （`api error` = 未解決 / #316 Req 2.3）。base 相対化の閾値は #221
+# （promote-pipeline.sh `po_resolve_holder_labels`）の dispatch×multi-branch
+# 判定（BASE_BRANCH != PROMOTION_TARGET_BRANCH）と整合させる発想だが、本関数の
+# 文脈は dispatch 確定後の Triage 段階であり依存ゲートに promote コンテキストは
+# 存在しないため、判定基準は単純な `BASE_BRANCH != main` で十分（Issue 本文の
+# 仕様および requirements.md Req 1.1）。
+#
+# timeout は DRR_GH_TIMEOUT に従う（個別の新規 env var は導入しない / Req 3.5 /
+# #316 NFR 1.2）。
 dr_resolve_one() {
   local dep_num="$1"
 
@@ -8967,8 +8994,44 @@ dr_resolve_one() {
 
   case "$state" in
     OPEN)
-      echo "open"
-      return 0
+      # #316: base 相対化（staged-for-release 依存の解決判定）。
+      # BASE_BRANCH=main の場合は従来挙動を維持し、ラベルを参照せず unresolved
+      # （Req 1.2 / NFR 1.1 後方互換）。BASE_BRANCH != main の場合のみ labels を
+      # 読み出し、`staged-for-release` 付与時に resolved として返す（Req 1.1）。
+      if [ "${BASE_BRANCH:-main}" = "main" ]; then
+        echo "open"
+        return 0
+      fi
+      # labels 一覧を取り出して `staged-for-release` の有無を判定。jq parse 失敗時は
+      # 安全側に倒し api error（ラベル付与を仮定して resolved として扱う処理は行わ
+      # ない / Req 2.3）。
+      local has_staged_label
+      if ! has_staged_label=$(printf '%s' "$response" \
+            | jq -r --arg target "${LABEL_STAGED_FOR_RELEASE:-staged-for-release}" \
+                '[.data.repository.issue.labels.nodes[]? | select(.name == $target)] | length > 0' \
+            2>/dev/null); then
+        dr_warn "issue=#${dep_num} jq parse 失敗（labels 取り出し）"
+        echo "api error"
+        return 0
+      fi
+      # 想定外応答（labels ノードが取れない等）で true/false 以外が返った場合も
+      # 安全側で api error（Req 2.2, 2.3）。
+      case "$has_staged_label" in
+        true)
+          dr_log "issue=#${dep_num} verdict=resolved reason=staged-for-release base=${BASE_BRANCH:-main}"
+          echo "resolved"
+          return 0
+          ;;
+        false)
+          echo "open"
+          return 0
+          ;;
+        *)
+          dr_warn "issue=#${dep_num} labels 集計結果が想定外: ${has_staged_label}"
+          echo "api error"
+          return 0
+          ;;
+      esac
       ;;
     CLOSED)
       # closedByPullRequestsReferences.nodes[].state に "MERGED" が 1 件以上あれば
