@@ -48,6 +48,41 @@ po_warn() {
   echo "[$(date '+%F %T')] [$REPO] path-overlap: WARN: $*" >&2
 }
 
+# ─── sticky comment 共通ヘルパー（#320 三重化解消 / 副作用なしの純粋関数） ───
+# po_persist_edit_paths / po_apply_awaiting_slot / po_apply_busy_wait_signal の
+# 3 箇所で同一だった URL/ID パースと marker 検索を共通化する。本ヘルパーは
+# gh / git を呼ばず状態も変更しない（各 call site の取得・PATCH/create・error
+# 分岐の制御フローは不変。差分等価）。
+
+# `gh ... --json comments` の `.url`（末尾 `#issuecomment-<numeric-id>`）から
+# REST API の数値 comment ID を抽出する。`.comments[].id` は GraphQL の base64 id で
+# REST PATCH には使えないため URL 末尾から取り出す。
+#
+# Args: $1 = comment URL（空文字可）
+# Stdout: 数値 comment ID（マッチしない場合は空文字）
+# Return: 0 always
+po_extract_comment_id_from_url() {
+  local url="$1"
+  [ -n "$url" ] || return 0
+  printf '%s' "$url" | sed -nE 's/.*#issuecomment-([0-9]+)$/\1/p'
+}
+
+# `gh issue view --json comments` の JSON から、本文に marker を含む最初のコメントの
+# URL を取り出す。jq 失敗・該当なしはいずれも空文字を返す fail-safe。
+#
+# Args: $1 = comments JSON（`{"comments":[...]}`）, $2 = marker 文字列
+# Stdout: 該当コメントの URL（該当なし / 失敗時は空文字）
+# Return: 0 always
+po_find_sticky_comment_url() {
+  local comments_json="$1"
+  local marker="$2"
+  printf '%s' "$comments_json" | jq -r --arg marker "$marker" '
+    (.comments // [])
+    | map(select(.body | contains($marker)))
+    | .[0].url // ""
+  ' 2>/dev/null || echo ""
+}
+
 # ─── Phase E: Triage Edit-Paths Parser (#18 Req 2.4 / 2.5) ───
 # Triage 結果 JSON から edit_paths 配列を fail-safe に抽出する。
 # - key 不在 / null / 非配列 / 要素に文字列以外混入はすべて空配列にフォールバック
@@ -135,17 +170,9 @@ EOF
   if ! comments_json=$(gh issue view "$issue_number" --repo "$REPO" --json comments 2>/dev/null); then
     return 1
   fi
-  local existing_url
-  existing_url=$(echo "$comments_json" | jq -r '
-    (.comments // [])
-    | map(select(.body | contains("<!-- idd-claude:edit-paths:v1 -->")))
-    | .[0].url // ""
-  ' 2>/dev/null || echo "")
-  local existing_comment_id=""
-  if [ -n "$existing_url" ]; then
-    existing_comment_id=$(printf '%s' "$existing_url" \
-      | sed -nE 's/.*#issuecomment-([0-9]+)$/\1/p')
-  fi
+  local existing_url existing_comment_id
+  existing_url=$(po_find_sticky_comment_url "$comments_json" "<!-- idd-claude:edit-paths:v1 -->")
+  existing_comment_id=$(po_extract_comment_id_from_url "$existing_url")
 
   if [ -n "$existing_comment_id" ]; then
     # 既存 sticky comment を PATCH で上書き（Req 3.3）
@@ -581,17 +608,9 @@ EOF
     gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
     return 0
   fi
-  local existing_url
-  existing_url=$(echo "$comments_json" | jq -r '
-    (.comments // [])
-    | map(select(.body | contains("<!-- idd-claude:awaiting-slot:v1 -->")))
-    | .[0].url // ""
-  ' 2>/dev/null || echo "")
-  local existing_comment_id=""
-  if [ -n "$existing_url" ]; then
-    existing_comment_id=$(printf '%s' "$existing_url" \
-      | sed -nE 's/.*#issuecomment-([0-9]+)$/\1/p')
-  fi
+  local existing_url existing_comment_id
+  existing_url=$(po_find_sticky_comment_url "$comments_json" "<!-- idd-claude:awaiting-slot:v1 -->")
+  existing_comment_id=$(po_extract_comment_id_from_url "$existing_url")
   if [ -n "$existing_comment_id" ]; then
     gh api -X PATCH "/repos/${REPO}/issues/comments/${existing_comment_id}" \
       -f body="$body" >/dev/null 2>&1 || true
@@ -723,17 +742,9 @@ EOF
     gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
     return 0
   fi
-  local existing_url
-  existing_url=$(echo "$comments_json" | jq -r '
-    (.comments // [])
-    | map(select(.body | contains("<!-- idd-claude:busy-wait:v1 -->")))
-    | .[0].url // ""
-  ' 2>/dev/null || echo "")
-  local existing_comment_id=""
-  if [ -n "$existing_url" ]; then
-    existing_comment_id=$(printf '%s' "$existing_url" \
-      | sed -nE 's/.*#issuecomment-([0-9]+)$/\1/p')
-  fi
+  local existing_url existing_comment_id
+  existing_url=$(po_find_sticky_comment_url "$comments_json" "<!-- idd-claude:busy-wait:v1 -->")
+  existing_comment_id=$(po_extract_comment_id_from_url "$existing_url")
   if [ -n "$existing_comment_id" ]; then
     gh api -X PATCH "/repos/${REPO}/issues/comments/${existing_comment_id}" \
       -f body="$body" >/dev/null 2>&1 || true

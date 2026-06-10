@@ -43,10 +43,16 @@ extract_function() {
 }
 
 # 対象関数 + 本文整形ヘルパー（po_format_holders_table_md）を実物で読み込む。
+# #320: po_apply_awaiting_slot が呼ぶ sticky comment 共通ヘルパー 2 つも実物で読み込む
+# （extract_function は単一関数を隔離抽出するため、依存ヘルパーは明示的に読み込む必要がある）。
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PROMOTE_PIPELINE_SH" "po_apply_awaiting_slot")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PROMOTE_PIPELINE_SH" "po_format_holders_table_md")"
+# shellcheck disable=SC1090,SC2086
+eval "$(extract_function "$PROMOTE_PIPELINE_SH" "po_find_sticky_comment_url")"
+# shellcheck disable=SC1090,SC2086
+eval "$(extract_function "$PROMOTE_PIPELINE_SH" "po_extract_comment_id_from_url")"
 
 if ! declare -F po_apply_awaiting_slot >/dev/null; then
   echo "ERROR: po_apply_awaiting_slot not loaded" >&2
@@ -54,6 +60,14 @@ if ! declare -F po_apply_awaiting_slot >/dev/null; then
 fi
 if ! declare -F po_format_holders_table_md >/dev/null; then
   echo "ERROR: po_format_holders_table_md not loaded" >&2
+  exit 2
+fi
+if ! declare -F po_find_sticky_comment_url >/dev/null; then
+  echo "ERROR: po_find_sticky_comment_url not loaded" >&2
+  exit 2
+fi
+if ! declare -F po_extract_comment_id_from_url >/dev/null; then
+  echo "ERROR: po_extract_comment_id_from_url not loaded" >&2
   exit 2
 fi
 
