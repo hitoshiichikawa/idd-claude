@@ -563,8 +563,24 @@ chmod +x ~/bin/issue-watcher.sh
 
 スクリプト自体は編集不要。`REPO` / `REPO_DIR` は **環境変数で上書きできる** ため、
 cron / launchd 側でリポジトリを指定する運用にします（単一 repo でも複数 repo でも同じ手順）。
-必要に応じて `$EDITOR ~/bin/issue-watcher.sh` で `TRIAGE_MODEL` / `DEV_MODEL` / `MAX_TURNS`
-のデフォルトを調整してください。
+必要に応じて `$EDITOR ~/bin/issue-watcher.sh` で `TRIAGE_MODEL` / `DEV_MODEL` / `PJM_MODEL` /
+`MAX_TURNS` のデフォルトを調整してください。
+
+ステージ別モデルの既定値:
+
+| env | 既定 | 適用先 |
+|---|---|---|
+| `TRIAGE_MODEL` | `claude-sonnet-4-6` | Triage（人間判断要否 / Architect 要否の判定） |
+| `DEV_MODEL` | `claude-opus-4-7` | Stage A 系（PM + Developer）/ design モード / Per-Task Impl |
+| `PJM_MODEL` | `claude-sonnet-4-6` | **Stage C（PjM / 実装 PR 作成）**。機械的作業のため軽量既定（#328） |
+| `REVIEWER_MODEL` | `claude-opus-4-7` | Reviewer（独立レビューゲート）/ Per-Task Reviewer |
+
+> **Migration note（#328 / `PJM_MODEL` 導入）**: #328 以前の Stage C は `DEV_MODEL`
+> （既定 Opus）で起動されていました。PR 作成は review-notes の commit / `gh pr create` /
+> ラベル付け替えという機械的作業のみのため、既定を Sonnet に変更しています。従来挙動に
+> 戻す場合は cron / launchd 側で `PJM_MODEL=claude-opus-4-7` を渡してください。
+> design モード（PM → Architect → PjM の単一セッション実行）は本 env の対象外です
+> （PjM サブエージェント自体は #326 の `model: sonnet` 固定で軽量化済み）。
 
 #### macOS: launchd に登録
 
