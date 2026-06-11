@@ -3673,6 +3673,10 @@ Developer に **最大 1 回だけ自動差し戻し** し、再 reject なら `
 - design モード（PM → Architect → PjM）は対象外（Reviewer は実装変更のみを判定する）
 - Reviewer は新しい `claude --print` プロセスとして起動され、Developer の context は引き継がない
 - 判定結果は `docs/specs/<N>-<slug>/review-notes.md` に永続化され、PR にも含まれる
+- #329 以降、Reviewer と Stage C（PjM）は `claude --agent reviewer` / `--agent project-manager`
+  で agent 定義を**トップレベルセッションとして直接実行**します（従来の「オーケストレーター
+  セッション + Task サブエージェント」の 2 層構成を廃止。stage あたり固定 context 1 枚分の
+  トークン削減。独立性はプロセス分離のままで判定契約・ログ・ラベル遷移は不変）
 
 ### 判定カテゴリ（reject の理由は 3 つに限定）
 
