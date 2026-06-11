@@ -189,6 +189,126 @@ Reviewer / PjM）は、以下の方針で **内部思考言語と出力言語を
 
 ---
 
+## 機能追加ガイドライン（コード・概念の散逸防止）
+
+idd-claude は `local-watcher/bin/issue-watcher.sh`（約 1 万行）+ `modules/` + installer +
+GitHub Actions workflow + テンプレート群で構成され、processor / gate / opt-in 機能が継続的に
+追加されてきた。**新機能を追加するとき、コードと概念が散逸しないために以下を守る**。本節は
+「禁止事項」「コード規約」「エージェント連携ルール / idd-claude 特有の設計上の注意」を束ねる
+実務指針であり、矛盾する場合はそれらと本節を併せて読み、独自解釈で確定せず人間にエスカレーション
+すること。
+
+### 1. 配置: 本体 inline ではなく module へ切り出す
+
+- **新しい processor / まとまった機能は `local-watcher/bin/modules/<name>.sh` に新規ファイルとして
+  足す**。`issue-watcher.sh` 本体へ inline で大きな機能を継ぎ足さない（本体は config /
+  module loader / call site / main loop / `--doctor` dispatch に寄せる）。既存の切り出し実績:
+  `quota-aware.sh` / `merge-queue.sh` / `auto-rebase.sh` / `promote-pipeline.sh` /
+  `pr-reviewer.sh` / `pr-iteration.sh` / `security-review.sh` / `stage-a-verify.sh` /
+  `context-map.sh` / `guard-hook.sh` / `scaffolding-health.sh` / `run-summary.sh` /
+  `core_utils.sh`（低レベル共通）。
+- module は**関数定義のみ**を置きトップレベル副作用を持たせない（`extract_function` テスト
+  イディオムと module loader の前提）。本体の `REQUIRED_MODULES` ローダ（同階層 `modules/` を
+  source）に登録し、`install.sh` が `$HOME/bin/modules/` へ配布することを確認する。
+- 「どの module に置くか」が曖昧な小機能は、責務が最も近い既存 module に同居させ、独立性が
+  出てきた段階で切り出す（投機的な新規 module を作らない）。
+
+### 2. 命名: module ごとに関数 prefix namespace を 1 つ持つ
+
+- 各 module は 2〜4 文字の **関数 prefix** を 1 つ持ち、その module の全関数を prefix で
+  namespace する。新 module は**新しい未使用の prefix** を割り当て、ファイル冒頭コメントに明記する。
+
+  | prefix | module / 領域 |
+  |---|---|
+  | `qa_` | quota-aware（ロガー `qa_log` 等は core_utils に同居） |
+  | `mq_` / `mqr_` | merge-queue |
+  | `ar_` | auto-rebase |
+  | `pp_` / `po_` | promote-pipeline（pp=Promote / po=Path Overlap） |
+  | `pr_` | pr-reviewer |
+  | `pi_` | pr-iteration |
+  | `sec_` | security-review |
+  | `cm_` | context-map |
+  | `gh_` | guard-hook |
+  | `sh_` | scaffolding-health |
+  | `stage_a_verify_` / `sav_` | stage-a-verify |
+  | `rs_` | run-summary |
+  | `pt_` / `sc_` / `tc_` / `dr_` | issue-watcher 本体内（per-task / stage checkpoint / tasks-count / dependency-resolver） |
+
+- env var 名・ラベル名・コマンド名・ファイルパスは **英語固定**（言語方針に従う）。
+
+### 3. opt-in gate と後方互換（最重要）
+
+- **外部挙動を変える新機能・新しい外部サービス呼び出しは env gate で opt-in 化し、既定値は
+  導入前と完全に同一の挙動（no-op）に倒す**。実績パターン: `*_ENABLED=true`（既定 false） /
+  `*_MODE=off`（既定 off） / `IDD_CLAUDE_USE_ACTIONS=true`。gate 未設定・不正値・typo は
+  **安全側（無効）** に解決する（起動時に正規化を入れる。例: `AUTO_REBASE_MODE` は `case` で
+  `claude` 以外を `off` に丸める）。
+- 既存の **env var 名 / ラベル名 / exit code 意味 / cron 登録文字列 / ログ出力先** を無告知で
+  壊さない。破壊的変更は README に migration note を書き、必要なら deprecation 期間を設ける
+  （「禁止事項」と整合）。
+- `repo-template/**` の変更は既 installed の consumer にも影響する。破壊的変更は影響評価 +
+  migration note 必須。
+
+### 4. 二重管理・同期の鉄則（ドリフト防止）
+
+- **root `.claude/{agents,rules}/` と `repo-template/.claude/{agents,rules}/` は byte 一致**。
+  片方だけ更新しない。変更後に `diff -r .claude/agents repo-template/.claude/agents` と
+  `diff -r .claude/rules repo-template/.claude/rules` が空であることを確認する。
+- **workflow（`.github/workflows/issue-to-pr.yml` ↔ `repo-template/...`）とラベル script
+  （`idd-claude-labels.sh` ↔ `repo-template/...`）も同期させる**。consumer 配布物（workflow /
+  labels / modules）に機能を足したら repo-template 側にも反映する（過去にラベル
+  `needs-security-fix` 欠落・base-branch 明示プロンプト欠落のドリフトが発生）。`CLAUDE.md` /
+  `README` は consumer 固有内容を持つため byte 一致対象外。
+- **挙動を変えたら同一 PR で README の該当箇所も更新する**（README は主要ドキュメント）。
+- rule が canonical でハーネスが regex を mirror する関係（例: tasks 件数 count regex ↔
+  `tc_count_tasks`、verify block well-formed 判定 ↔ `stage_a_verify_extract_verify_block`）は、
+  **rule 側を正準として先に更新**し、相互参照コメントを残してドリフトを防ぐ。
+
+### 5. 未信頼 GitHub 入力の取り扱い（セキュリティ / #318）
+
+watcher は Issue/PR 本文・コメント・ラベル・ブランチ名・branch 上ファイルという**未信頼入力**を
+`gh` / `git` / `bash -c` / `claude --permission-mode bypassPermissions` に流す。新機能で
+これらを扱うときは:
+
+- 変数展開は常にクォート（`"$var"` / 配列は `"${arr[@]}"`）。`jq` へ渡す未信頼値は **`--arg` /
+  `--argjson`**（フィルタ文字列へ inline 展開しない）。
+- `grep` / `git` / `gh` に未信頼値を渡すときは **`--` でオプション解釈を打ち切る**（`-` 始まりの
+  branch 名・pattern によるフラグ注入を防ぐ）。
+- 数値 ID は `^[0-9]+$`、commit SHA は `^[0-9a-f]{40}$` で**使用直前に検証**してからパス・URL・
+  git revision に使う（path 横断・引数注入の予防）。
+- `sed` の置換文字列に未信頼値を入れる場合は `\` / `&` / 区切り文字を網羅エスケープする。
+- GitHub Actions では未信頼値・step 出力を `${{ }}` で `run:` 本体へ直接展開せず **`env:` 経由**で
+  渡す。`permissions:` は最小権限（既定で不要な `id-token: write` 等を付与しない）。
+- LLM プロンプトインジェクション（Issue 本文が bypassPermissions エージェントへ渡る点）は
+  idd-claude の設計上の前提であり、`auto-dev` 付与をメンテナ権限に限定する**運用ゲート**で
+  受容している。新機能でこの前提（信頼境界）を広げない。
+
+### 6. 状態ファイル・一時ファイルの配置
+
+- 永続的な状態ファイルは予測可能名の `/tmp` ではなく **`$HOME/.issue-watcher/`** 配下を優先する
+  （symlink TOCTOU 予防。`LOG_DIR` / `SLOT_LOCK_DIR` が既にこの方針）。一時ファイルは可能なら
+  `mktemp` を使い、配置先を env で override 可能にする。
+
+### 7. テストの近接配置
+
+- 新 module / 新関数には `local-watcher/test/<name>_test.sh` を追加し、既存の
+  **`extract_function` で単一関数を隔離抽出 → stub → 観測**するイディオムを踏襲する。
+  純粋関数（副作用なし）は入出力 fixture で、副作用を伴う関数は `gh` / `git` を stub して
+  呼び出しトレースで検証する。**ヘルパーを抽出したら、それを呼ぶ既存テストの抽出リストにも
+  追随させる**（隔離抽出の特性上、依存関数を明示 source する必要がある）。
+
+### 8. 機能追加 PR 提出前チェックリスト
+
+- [ ] 大きな機能は本体 inline ではなく `modules/<name>.sh`、prefix namespace を割当
+- [ ] 外部挙動変更は env gate で opt-in、既定は後方互換 no-op、不正値は安全側に正規化
+- [ ] 既存 env var / ラベル / exit code / cron 文字列を壊していない（破壊時は migration note）
+- [ ] `shellcheck` / `actionlint` クリーン、`bash -n` OK、近接テスト追加・通過
+- [ ] root ↔ repo-template（agents / rules / workflow / labels）同期、`diff -r` 空を確認
+- [ ] 挙動変更を README に同一 PR で反映、rule↔harness の canonical 相互参照を更新
+- [ ] 未信頼入力の取り扱い（quote / `--arg` / `--` / ID・SHA 検証 / Actions env 間接化）を確認
+
+---
+
 ## エージェントが参照する共通ルール（`.claude/rules/`）
 
 各エージェントは作業前に以下のルールを `Read` で読み込む:
