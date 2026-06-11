@@ -204,8 +204,9 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
   足す**。`issue-watcher.sh` 本体へ inline で大きな機能を継ぎ足さない（本体は config /
   module loader / call site / main loop / `--doctor` dispatch に寄せる）。既存の切り出し実績:
   `quota-aware.sh` / `merge-queue.sh` / `auto-rebase.sh` / `promote-pipeline.sh` /
-  `pr-reviewer.sh` / `security-review.sh` / `stage-a-verify.sh` / `context-map.sh` /
-  `scaffolding-health.sh` / `run-summary.sh` / `core_utils.sh`（低レベル共通）。
+  `pr-reviewer.sh` / `pr-iteration.sh` / `security-review.sh` / `stage-a-verify.sh` /
+  `context-map.sh` / `guard-hook.sh` / `scaffolding-health.sh` / `run-summary.sh` /
+  `core_utils.sh`（低レベル共通）。
 - module は**関数定義のみ**を置きトップレベル副作用を持たせない（`extract_function` テスト
   イディオムと module loader の前提）。本体の `REQUIRED_MODULES` ローダ（同階層 `modules/` を
   source）に登録し、`install.sh` が `$HOME/bin/modules/` へ配布することを確認する。
@@ -224,9 +225,11 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
   | `ar_` | auto-rebase |
   | `pp_` / `po_` | promote-pipeline（pp=Promote / po=Path Overlap） |
   | `pr_` | pr-reviewer |
+  | `pi_` | pr-iteration |
   | `sec_` | security-review |
   | `cm_` | context-map |
   | `gh_` | guard-hook |
+  | `sh_` | scaffolding-health |
   | `stage_a_verify_` / `sav_` | stage-a-verify |
   | `rs_` | run-summary |
   | `pt_` / `sc_` / `tc_` / `dr_` | issue-watcher 本体内（per-task / stage checkpoint / tasks-count / dependency-resolver） |
