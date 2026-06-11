@@ -155,10 +155,27 @@ qa_run_claude_stage() {
     shift
   fi
 
+  # Issue #325: stage 実行前の $LOG 行数を offset として記録し、実行後に本 stage が
+  # 追記した範囲のみから token usage を抽出する（直前 stage の result 行の誤集計防止）。
+  # token-usage.sh 未ロード環境（extract_function 隔離抽出テスト等）でも従来挙動で
+  # 完走するよう declare -F でガードする（#325 NFR 1.3）。
+  local _tu_offset=0
+  if declare -F tu_mark_log_offset >/dev/null 2>&1; then
+    _tu_offset=$(tu_mark_log_offset)
+  fi
+
   # opt-out: 既存挙動の素通し実行。tee も解析も走らない（Req 1.1, NFR 2.1）。
   if [ "$QUOTA_AWARE_ENABLED" != "true" ]; then
+    local _tu_rc=0
+    set +e
     "$@"
-    return $?
+    _tu_rc=$?
+    set -e
+    # Issue #325: stage 単位の token usage を 1 行追記（fail-open / claude rc は透過）
+    if declare -F tu_report_stage_usage >/dev/null 2>&1; then
+      tu_report_stage_usage "$stage_label" "$_tu_offset" || true
+    fi
+    return "$_tu_rc"
   fi
 
   # opt-in: stream-json を tee で 2 系統に分岐
@@ -180,6 +197,12 @@ qa_run_claude_stage() {
   local _qa_pipestatus=("${PIPESTATUS[@]}")
   set -e
   claude_rc="${_qa_pipestatus[0]:-0}"
+
+  # Issue #325: stage 単位の token usage を $LOG へ 1 行追記（fail-open / 観測のみ）。
+  # quota 検出（exit 99）経路でも実行済み分の usage を記録するため detect 解釈より先に呼ぶ。
+  if declare -F tu_report_stage_usage >/dev/null 2>&1; then
+    tu_report_stage_usage "$stage_label" "$_tu_offset" || true
+  fi
 
   # 検出 TSV を解釈する。
   # 優先順位:
