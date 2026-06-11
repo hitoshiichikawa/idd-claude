@@ -701,8 +701,9 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 可読性のため最も低レベルな core_utils.sh を先頭に置き、以降は #180 Part 2 で切り出した
 # 3 プロセッサ（quota-aware / merge-queue / auto-rebase）、#181 Part 3 で切り出した
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
-# #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" )
+# #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）、
+# #325 の token usage 計測（token-usage.sh）を置く。
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -9241,7 +9242,9 @@ _slot_run_issue() {
   # fail-open（|| true）で emit 失敗がサブシェルの exit code を変えない（NFR 4.1）。
   rs_init
   rs_set_issue "$NUMBER"
-  trap 'rs_emit || true' EXIT
+  # #325: token usage の Issue 単位サマリも同じ EXIT trap に連結する（rs_emit の発火を
+  # 妨げないよう各々 || true で fail-open。出力順は run-summary → token-usage）。
+  trap 'rs_emit || true; tu_emit_issue_summary || true' EXIT
 
   # ── Worktree 初期化（per-slot 永続 worktree）──
   local WT
