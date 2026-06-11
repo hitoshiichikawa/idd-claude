@@ -379,6 +379,16 @@ rm CLAUDE.md.org
 > 指定時のみ従来の上書き挙動（`.bak` once-only 退避＋ template で上書き）に切り替わります。
 > 詳細は本節先頭の「`CLAUDE.md` の `.org` 並置 (#87)」を参照してください。
 
+> **Migration note（#327 / `.claude/rules/` の条件ロード化）**: Claude Code は
+> `.claude/rules/*.md` を全セッション・全サブエージェントの context に自動注入しますが、
+> #327 で各ルールに YAML frontmatter `paths:`（glob）を付与し、**該当パスのファイルに触れる
+> セッションにのみ付与される条件ロード**へ切り替えました（例: `ears-format.md` は
+> `docs/specs/**/requirements.md` を扱うセッションのみ）。ロール特化ルールが Triage / PjM 等の
+> 無関係コンテキストへ毎回載る固定トークン費を削減します。agent 定義内の明示 Read 指示は
+> 従来どおり機能し（新規ファイル作成時の主経路）、`feature-flag.md` / `issue-dependency.md` は
+> 自己参照スコープ（明示 Read 時のみ）です。挙動を従来に戻したい場合は frontmatter の
+> `paths:` ブロックを削除してください（ファイル先頭の注意コメント参照）。
+
 #### `--dry-run` モード
 
 `--dry-run` を付けると、ファイルシステムを変更せずに**予定操作のみを列挙**します。出力例:
