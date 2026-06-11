@@ -536,6 +536,14 @@ DEV_MAX_TURNS="${DEV_MAX_TURNS:-60}"
 # design モード（PM → Architect → PjM の単一セッション）は対象外（DEV_MODEL のまま）。
 PJM_MODEL="${PJM_MODEL:-claude-sonnet-4-6}"
 
+# Triage の --bare 実行 (#332, opt-in)。`true` 厳密一致のみ有効（それ以外はすべて OFF）。
+# --bare は CLAUDE.md / .claude/rules / hooks / skills / MCP の自動ロードをスキップし、
+# Triage の固定 context を排除する（Triage の判定基準は triage-prompt.tmpl 内で自己完結。
+# issue-dependency.md はテンプレートがパス明示しており必要時に Read で到達可能）。
+# guard hook（IDD_CLAUDE_HOOKS_ENABLED）opt-in 時は --settings 経由の hook 注入と衝突
+# しうるため --bare を見送り WARN を出す（call site 参照 / 安全側）。
+TRIAGE_BARE="${TRIAGE_BARE:-false}"
+
 # ─── Reviewer subagent 設定 (#20 Phase 1) ───
 # impl 系モード（impl / impl-resume）の Developer 完了後に独立 context で起動する
 # Reviewer サブエージェント用の env。既存の TRIAGE_* / DEV_* と独立に扱う。
@@ -9447,12 +9455,26 @@ _slot_run_issue() {
       "$TRIAGE_TEMPLATE")
 
     echo "--- Triage 実行 ---" >> "$LOG"
+    # #332: TRIAGE_BARE=true（厳密一致）のとき --bare を付与し、CLAUDE.md / rules 等の
+    # 自動ロードを排除する（Triage の判定基準は template 内で自己完結）。guard hook
+    # （IDD_CLAUDE_HOOKS_ENABLED）opt-in 時は --settings 経由の hook 注入を --bare が
+    # 無効化しうるため、安全側に倒して --bare を見送り WARN を残す（両立不可の明示）。
+    # 空配列展開 "${arr[@]}" は bash 4.4+ で set -u 安全（guard-hook.sh の先例と同様）。
+    local _triage_bare_args=()
+    if [ "${TRIAGE_BARE:-false}" = "true" ]; then
+      if declare -F gh_is_enabled >/dev/null 2>&1 && gh_is_enabled; then
+        echo "[$(date '+%F %T')] [$REPO] triage: WARN: TRIAGE_BARE=true は IDD_CLAUDE_HOOKS_ENABLED（guard hook）と併用できないため --bare を見送ります（guard hook を優先）" >> "$LOG"
+      else
+        _triage_bare_args=(--bare)
+      fi
+    fi
     # Issue #66: Quota-Aware Watcher 経由で claude を起動。opt-out 時は素通し
     # （既存挙動互換）、opt-in 時は rate_limit_event 検知で exit 99 を返す。
     local _qa_reset_file_triage="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-triage-${TS}"
     local _qa_rc_triage=0
     qa_run_claude_stage "Triage" "$_qa_reset_file_triage" -- \
       claude \
+        "${_triage_bare_args[@]}" \
         --print "$TRIAGE_PROMPT" \
         --model "$TRIAGE_MODEL" \
         --permission-mode bypassPermissions \

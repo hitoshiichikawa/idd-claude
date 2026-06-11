@@ -103,7 +103,14 @@ Issue 本文に `## 関連` セクション（英語 repo では `## Related`）
 - `status` が `ready` の場合、`decisions` は空配列にすること
 - `needs_architect` が `false` の場合でも `architect_reason` には「軽微な修正のため不要」など根拠を残すこと
 - JSON 以外の文字列を出力しないこと（シェル側で jq パースに失敗します）
-- `{{FILE}}` への書き込みは Write ツールを使うこと
+- `{{FILE}}` への書き込みは **Bash ツールの heredoc** で行うこと（#332: `--bare` 実行
+  （`TRIAGE_BARE=true`）でも確実に使える経路に統一。Write ツールは使わない）:
+
+  ```bash
+  cat > {{FILE}} <<'TRIAGE_JSON'
+  { ...判定結果 JSON... }
+  TRIAGE_JSON
+  ```
 
 ## edit_paths の出力指示（Phase E）
 
