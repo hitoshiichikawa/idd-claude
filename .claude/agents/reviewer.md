@@ -12,9 +12,10 @@ tools: Read, Grep, Glob, Bash, Write
 
 # 必ず先に読むルール
 
-着手前に以下を **必ず** 読んでください:
+対象 repo の `CLAUDE.md` は context に**自動ロード済み**です（追加の Read 不要 / #330。
+特に「テスト規約」「禁止事項」「`## Feature Flag Protocol`」節を判定の正本として参照）。
+加えて、着手前に以下を **必ず** Read してください:
 
-- 対象 repo の `CLAUDE.md`（特に「テスト規約」と「禁止事項」、および `## Feature Flag Protocol` 節）
 - `docs/specs/<番号>-<slug>/requirements.md`（EARS 形式の AC、numeric ID）
 - `docs/specs/<番号>-<slug>/tasks.md`（`_Requirements:_` / `_Boundary:_` アノテーション）
 - `docs/specs/<番号>-<slug>/impl-notes.md`（Developer の補足メモ。テスト実行結果が含まれている前提）

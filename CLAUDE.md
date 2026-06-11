@@ -1,7 +1,9 @@
 # プロジェクトガイド（Claude Code 全エージェント共通）
 
-このファイルは Claude Code 本体および全サブエージェントが毎回参照するプロジェクト憲章です。
-**すべてのエージェントは、作業開始前にこのファイルを読み直してください。**
+このファイルは Claude Code が本体・全サブエージェントの context に**自動ロード**するプロジェクト
+憲章です。**エージェントが追加で Read し直す必要はありません**（#330。再 Read は同内容の二重注入
+になるだけです）。`.claude/rules/` も自動ロードされます（#327 以降は各ルールの frontmatter
+`paths:` による条件付き）。
 
 ---
 
@@ -184,7 +186,7 @@ Reviewer / PjM）は、以下の方針で **内部思考言語と出力言語を
 - **`idd-claude-labels.sh` のラベルセット**: ラベル追加は OK、既存ラベル削除 / 名前変更は deprecation 期間を経てから
 - **モデル ID デフォルト更新**: 既存ユーザが明示 override している前提で、env default のみ更新
 - **README との二重管理**: 挙動を変えたら必ず README の該当箇所も同じ PR で更新する
-- **root `.claude/{agents,rules}/` と `repo-template/.claude/{agents,rules}/` の二重管理**: 両者は別系統（root = idd-claude self-hosting が使用 / `repo-template/` = `install.sh --repo` で consumer repo に配布）。片方だけ更新すると **consumer に変更が届かない**か **idd-claude 自身が古い規約で動く**ドリフトが発生する（実例: #224 の構造化 verify ブロック規約・architect.md が root のみ更新で consumer 未配布／per-task ループ・BLOCKED 規約が repo-template のみで root の Developer・Reviewer に欠落）。`.claude/agents/*.md` / `.claude/rules/*.md` を変更したら **同一 PR で両系統に byte 一致で反映する**こと（逆方向も同様）。agents の base ブランチ参照は両系統とも `<BASE_BRANCH>` プレースホルダに統一し、root にも具体値 `main` を焼き込まない（orchestrator が解決値を prompt の `Compared to:` ヘッダで渡すため idd-claude でも正しく動く）。反映後に `diff -r .claude/agents repo-template/.claude/agents` と `diff -r .claude/rules repo-template/.claude/rules` が空であることを確認する。**CLAUDE.md / README は consumer 固有内容を持つため本規約の対象外**（それぞれ root 用 / `repo-template/` 用に内容が異なってよい）
+- **root ↔ repo-template の二重管理・同期**: 詳細規約は後述「機能追加ガイドライン」の「4. 二重管理・同期の鉄則（ドリフト防止）」に一本化（#330 で重複記述を解消）。要点: `.claude/{agents,rules}` は同一 PR で byte 一致反映・`diff -r` 空を確認、agents の base 参照は `<BASE_BRANCH>` プレースホルダ統一、CLAUDE.md / README は consumer 固有のため対象外
 - **Phase B Promote Pipeline (#15)**: `PROMOTE_PIPELINE_ENABLED=true` の **明示的 opt-in 制**で、未設定 / `false` の場合は導入前と完全に同一の挙動を保つ。2-branch model（`BASE_BRANCH != PROMOTION_TARGET_BRANCH`）でのみ起動する。`staged-for-release` ラベルは #100 の人間付与運用と同一ラベルを共有し、source 区別はしない。revert / promote はすべて `--force-with-lease` または fast-forward 限定で `--force`（無条件）は使わない
 
 ---
@@ -311,7 +313,9 @@ watcher は Issue/PR 本文・コメント・ラベル・ブランチ名・branc
 
 ## エージェントが参照する共通ルール（`.claude/rules/`）
 
-各エージェントは作業前に以下のルールを `Read` で読み込む:
+各ルールは frontmatter の `paths:` により**該当成果物に触れるセッションへ条件ロード**される
+（#327）。新規ファイル作成時などトリガーが発火しないケースに備え、下表の「参照エージェント」の
+agent 定義には明示 Read 指示があり、到達が二重に保証されている:
 
 | ルールファイル | 参照エージェント | 役割 |
 |---|---|---|
@@ -327,15 +331,11 @@ watcher は Issue/PR 本文・コメント・ラベル・ブランチ名・branc
 
 ---
 
-## PR 品質チェック（PjM が PR 作成時に確認する項目）
+## PR 品質チェック
 
-- [ ] すべての受入基準に対応する実装がある
-- [ ] `shellcheck` / `actionlint` がクリーン（該当ファイルを変更した場合）
-- [ ] 手動スモークテストの結果を PR 本文の「Test plan」に記載
-- [ ] 既存 env var 名 / ラベル / cron 登録文字列の後方互換性を確認
-- [ ] README / CLAUDE.md / 該当 rule ファイルが更新されている（挙動変更時）
-- [ ] 破壊的変更がある場合は README に migration note を追加
-- [ ] PR 本文に「確認事項」セクションがある（レビュワー判断ポイントを明示）
+PjM 専用のチェックリストは [`.claude/agents/project-manager.md`](.claude/agents/project-manager.md)
+の「PR 品質チェック（implementation モード）」節へ移設した（#330。PjM 以外の全コンテキストに
+常時ロードする必要がないため）。
 
 ---
 
