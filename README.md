@@ -3720,6 +3720,7 @@ Stage C exit !=0 → claude-failed
 |---|---|---|---|
 | `REVIEWER_MODEL` | `claude-opus-4-7` | `DEV_MODEL` と揃える運用が無難 | Reviewer サブエージェント用 Claude モデル ID |
 | `REVIEWER_MAX_TURNS` | `30` | turn 不足で parse 失敗が出る場合のみ増やす | Reviewer 1 起動あたりの Claude 実行 turn 数上限（NFR 1.1） |
+| `REVIEWER_SKIP_PATTERN` | （空 = 無効） | アプリ系 repo の docs-only 変更向け（例 `'^docs/'`）。**idd-claude 自身では有効化しない**（markdown が成果物本体のため） | **opt-in（#333）**: 全変更ファイルが本 POSIX ERE に一致する場合のみ Stage B（独立 Reviewer）をスキップし、自動 approve の review-notes.md（hidden marker `idd-claude:reviewer-skip:v1` 付き）を生成。1 件でも不一致 / diff 空 / git 失敗はスキップしない（fail-safe）。スキップ時は run-summary に Stage B を記録しない |
 
 `REVIEWER_MODEL` / `REVIEWER_MAX_TURNS` は **既存環境変数（`TRIAGE_MODEL` / `DEV_MODEL` /
 `TRIAGE_MAX_TURNS` / `DEV_MAX_TURNS` 等）と独立** に扱われ、互いの値が他方の挙動に影響しません。

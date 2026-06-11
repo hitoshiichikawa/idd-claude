@@ -549,6 +549,14 @@ TRIAGE_BARE="${TRIAGE_BARE:-false}"
 # Reviewer サブエージェント用の env。既存の TRIAGE_* / DEV_* と独立に扱う。
 REVIEWER_MODEL="${REVIEWER_MODEL:-claude-opus-4-7}"
 REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-30}"
+# Reviewer ステージの条件スキップ (#333, opt-in)。POSIX ERE。空（既定）で無効。
+# 全変更ファイルが本パターンに一致する場合のみ Stage B（独立 Reviewer）をスキップし、
+# 自動 approve の review-notes.md（hidden marker 付き）を生成する。1 ファイルでも不一致 /
+# diff 空 / git 失敗時はスキップせず通常どおり Reviewer を起動する（fail-safe）。
+# アプリ系 consumer repo の docs-only 変更向け（例: REVIEWER_SKIP_PATTERN='^docs/'）。
+# idd-claude 自身は markdown が成果物本体のため有効化しないこと（README 参照）。
+# 値は operator 設定（cron / launchd）であり未信頼入力ではない。
+REVIEWER_SKIP_PATTERN="${REVIEWER_SKIP_PATTERN:-}"
 
 # ─── Debugger subagent 設定 (#22 Phase 3) ───
 # 新規 opt-in 機能。明示的に `=true` を指定したときだけ Reviewer Round 2 reject 直前 /
@@ -6021,6 +6029,94 @@ parse_review_result() {
   return 0
 }
 
+# ─── reviewer_skip_files_match <pattern> ───
+#
+# stdin の変更ファイル一覧（1 行 1 path）が「1 件以上あり、かつ全行が pattern（POSIX ERE）に
+# 一致する」かを判定する純粋関数（#333）。`--` でパターン以降をオプション解釈から切り離す
+# （`-` 始まりの path / pattern によるフラグ注入防止。#318 hardening と同方針）。
+#
+# 戻り値:
+#   0 = スキップ適用可（非空リスト + 全行一致）
+#   1 = それ以外（pattern 空 / リスト空 / 1 行でも不一致）
+reviewer_skip_files_match() {
+  local pattern="$1"
+  [ -n "$pattern" ] || return 1
+  local line
+  local seen=1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    seen=0
+    if ! printf '%s\n' "$line" | grep -Eq -- "$pattern"; then
+      return 1
+    fi
+  done
+  [ "$seen" -eq 0 ]
+}
+
+# ─── _reviewer_skip_check ───
+#
+# REVIEWER_SKIP_PATTERN（opt-in）の評価本体（#333）。スキップ適用時のみ 0 を返し、副作用として
+# 自動 approve の review-notes.md（hidden marker `idd-claude:reviewer-skip:v1` 付き）生成と
+# rv_log 出力を行う。以下はすべて「スキップしない」（fail-safe / 戻り値 1）:
+#   - REVIEWER_SKIP_PATTERN 未設定・空（既定）
+#   - git diff 失敗 / 変更ファイル 0 件
+#   - 1 ファイルでもパターン不一致
+#
+# 入力 (環境変数経由): REVIEWER_SKIP_PATTERN, BASE_BRANCH, BRANCH, NUMBER, REPO_DIR,
+#                      SPEC_DIR_REL, LOG
+# 副作用: $REPO_DIR/$SPEC_DIR_REL/review-notes.md の生成（commit は Stage C の責務 / 既存契約）
+_reviewer_skip_check() {
+  [ -n "${REVIEWER_SKIP_PATTERN:-}" ] || return 1
+
+  local files
+  if ! files=$(git diff --name-only "origin/${BASE_BRANCH}..HEAD" 2>/dev/null); then
+    rv_log "skip-pattern: git diff 失敗 → 通常 Reviewer 起動（fail-safe）" >> "$LOG"
+    return 1
+  fi
+  if [ -z "$files" ]; then
+    rv_log "skip-pattern: 変更ファイル 0 件 → 通常 Reviewer 起動（fail-safe）" >> "$LOG"
+    return 1
+  fi
+  if ! reviewer_skip_files_match "$REVIEWER_SKIP_PATTERN" <<< "$files"; then
+    return 1
+  fi
+
+  local notes_path="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
+  local head_sha file_count
+  head_sha=$(git rev-parse HEAD 2>/dev/null || echo "(unknown)")
+  file_count=$(printf '%s\n' "$files" | grep -c . || true)
+  mkdir -p "$REPO_DIR/$SPEC_DIR_REL"
+  cat > "$notes_path" <<EOF
+# Review Notes
+
+<!-- idd-claude:reviewer-skip:v1 pattern=${REVIEWER_SKIP_PATTERN} files=${file_count} -->
+
+## Reviewed Scope
+
+- Branch: ${BRANCH}
+- HEAD commit: ${head_sha}
+- Compared to: ${BASE_BRANCH}..HEAD
+
+## Verified Requirements
+
+（独立 Reviewer はスキップされました: 変更ファイル ${file_count} 件すべてが
+REVIEWER_SKIP_PATTERN（\`${REVIEWER_SKIP_PATTERN}\`）に一致 / #333 opt-in）
+
+## Findings
+
+なし（自動 approve。内容レビューは PR 上の人間レビューで実施してください）
+
+## Summary
+
+REVIEWER_SKIP_PATTERN による Stage B スキップ（自動 approve / #333）。
+
+RESULT: approve
+EOF
+  rv_log "round=1 result=approve reason=skip-pattern pattern='${REVIEWER_SKIP_PATTERN}' files=${file_count}" >> "$LOG"
+  echo "⏭️  #$NUMBER: Reviewer スキップ（REVIEWER_SKIP_PATTERN 全一致 → 自動 approve）" | tee -a "$LOG"
+  return 0
+}
+
 # ─── run_reviewer_stage <round> ───
 #
 # Reviewer サブエージェントを 1 回起動し、review-notes.md の最終 RESULT 行を抽出して
@@ -7414,11 +7510,19 @@ run_impl_pipeline() {
   case "$START_STAGE" in
     A|B)
       rev_rc=0
-      run_reviewer_stage 1 || rev_rc=$?
-      # run サマリ: Stage B（Reviewer round=1）実行を記録し degraded 兆候を反映（Req 2.1, 6.x）。
-      # Reviewer verdict / round の記録は task 6 の責務。ここは stage 記録のみ。
-      rs_record_stage B
-      rs_scan_degraded_log "$LOG"
+      # #333: REVIEWER_SKIP_PATTERN（opt-in）— 全変更ファイルがパターンに一致する場合のみ
+      # Stage B をスキップして自動 approve に倒す（_reviewer_skip_check が自動 approve の
+      # review-notes.md 生成とログ出力まで実施済み）。スキップ時は Reviewer が実行されて
+      # いないため rs_record_stage B は記録しない（run-summary の実行実態と一致させる）。
+      if _reviewer_skip_check; then
+        rev_rc=0
+      else
+        run_reviewer_stage 1 || rev_rc=$?
+        # run サマリ: Stage B（Reviewer round=1）実行を記録し degraded 兆候を反映（Req 2.1, 6.x）。
+        # Reviewer verdict / round の記録は task 6 の責務。ここは stage 記録のみ。
+        rs_record_stage B
+        rs_scan_degraded_log "$LOG"
+      fi
       case $rev_rc in
         0)
           # Issue #106 Req 3: Stage B (Reviewer round=1 approve) 完了直後に push 状態 verify。
