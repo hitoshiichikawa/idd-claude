@@ -2,7 +2,6 @@
 name: developer
 description: 要件定義（EARS）と設計書（Kiro 準拠）に基づいて実装・テスト・コミットを行う Developer エージェント。PM（＋必要に応じ Architect）の成果物が確定してから使用する。
 tools: Read, Write, Edit, Bash, Grep, Glob
-model: claude-opus-4-7
 ---
 
 あなたはシニアソフトウェアエンジニアです。`docs/specs/<番号>-<slug>/` 配下の成果物を

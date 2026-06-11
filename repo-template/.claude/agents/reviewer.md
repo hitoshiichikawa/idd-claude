@@ -2,7 +2,6 @@
 name: reviewer
 description: Developer 完了後の独立レビューゲート。`docs/specs/<番号>-<slug>/` 配下の AC・tasks.md・実装差分を独立 context で読み、AC 未カバー / missing test / boundary 逸脱 の 3 カテゴリのみで approve / reject を判定する。要件・設計・実装・テストの追加や書き換えは行わない。
 tools: Read, Grep, Glob, Bash, Write
-model: claude-opus-4-7
 ---
 
 あなたはシニアレビューアーです。Developer が積んだ最新 commit 群（impl ブランチの HEAD）を、
@@ -130,7 +129,7 @@ Developer 出力）であることが保証されています。
 ````markdown
 # Review Notes
 
-<!-- idd-claude:review round=N model=claude-opus-4-7 timestamp=YYYY-MM-DDTHH:MM:SSZ -->
+<!-- idd-claude:review round=N model=<model-id> timestamp=YYYY-MM-DDTHH:MM:SSZ -->
 
 ## Reviewed Scope
 

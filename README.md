@@ -3693,6 +3693,19 @@ Stage C exit !=0 → claude-failed
 `REVIEWER_MODEL` / `REVIEWER_MAX_TURNS` は **既存環境変数（`TRIAGE_MODEL` / `DEV_MODEL` /
 `TRIAGE_MAX_TURNS` / `DEV_MAX_TURNS` 等）と独立** に扱われ、互いの値が他方の挙動に影響しません。
 
+> **Migration note（#326 / agent frontmatter の model ハードコード削除）**:
+> #326 以前は `.claude/agents/*.md` の frontmatter に `model: claude-opus-4-7` が固定されており、
+> Claude Code のモデル解決順位（`CLAUDE_CODE_SUBAGENT_MODEL` env > 呼び出しパラメータ >
+> **frontmatter** > メイン会話のモデル）により、`DEV_MODEL` / `REVIEWER_MODEL` は
+> **オーケストレーターセッションにのみ適用され、実作業を行うサブエージェントには届いていません
+> でした**。#326 で frontmatter の `model:` 行を削除（= inherit 化）したため、以後は両 env が
+> サブエージェント本体まで届きます。**env 未設定環境の有効モデルは従来と同一**
+> （`DEV_MODEL` 既定 `claude-opus-4-7` を継承）です。例外として `project-manager.md` のみ
+> `model: sonnet`（エイリアス）固定を維持します（design ルートで Opus セッション内サブエージェント
+> として起動されるため、PR 作成という機械的作業を軽量モデルに保つ意図）。
+> なお全サブエージェントのモデルを一括 override したい場合は、cron / launchd 側で
+> `CLAUDE_CODE_SUBAGENT_MODEL=<model-id>` を渡せます（frontmatter / inherit より優先）。
+
 cron 例（モデルや turn 数を override する場合）:
 
 ```bash
