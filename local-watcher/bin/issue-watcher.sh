@@ -9582,9 +9582,12 @@ dr_unblock_sweep() {
   fi
 
   # 対象 Issue 列挙: auto-dev AND blocked AND OPEN（Req 2.1）。
-  # claude-failed など終端ラベルは AND クエリでは追加除外しない（auto-dev と claude-failed
-  # は label 上独立だが、claude-failed が付与された Issue は label gating 上一般に
-  # auto-dev も外されるため自然と外れる）。明示除外したい場合は別 search filter を追加。
+  # 終端ラベル（claude-failed / needs-decisions）が付いた Issue は sweep の対象から
+  # 明示除外する（Req 2.2）。`mark_issue_failed` は claude-failed 付与時に auto-dev
+  # ラベルを除去しないため、`auto-dev` + `blocked` + `claude-failed` の 3 ラベル組合せが
+  # 実運用で発生し得る。AND クエリだけでは終端 Issue が pickup されるので、
+  # `_dispatcher_run` のメイン候補クエリ（search_filter）と整合する `-label:"..."`
+  # 除外を `--search` に追加する。
   # FIFO 順（Issue 番号昇順）を取りやすくするため `sort:created-asc` を採用。
   local issues_json
   if ! issues_json=$(gh issue list \
@@ -9592,7 +9595,7 @@ dr_unblock_sweep() {
         --label "$LABEL_TRIGGER" \
         --label "$LABEL_BLOCKED" \
         --state open \
-        --search "sort:created-asc" \
+        --search "-label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_DECISIONS\" sort:created-asc" \
         --json number,body \
         --limit 50 2>/dev/null); then
     dr_warn "dr_unblock_sweep: gh issue list 失敗 / スイープ skip"

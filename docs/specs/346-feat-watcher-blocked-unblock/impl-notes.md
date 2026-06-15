@@ -47,6 +47,7 @@
 | AT-f | 連続 2 回スイープ → 累積なし | end-to-end（同一 fixture を 2 回流す） |
 | AT-g | ラベル除去成功 + コメント投稿失敗 → `dr_warn` 1 行 + 次 Issue へ | `dr_unblock_resolve_one_issue` |
 | AT-h | エスカレーションコメント文面分岐 | `dr_apply_block` を抽出して文面 grep |
+| AT-i | 終端ラベル付き Issue を sweep 対象から除外（Req 2.2） | `gh issue list --search` 引数に `-label:"claude-failed"` / `-label:"needs-decisions"` 含有を assert |
 
 ## トレードオフ
 
@@ -67,7 +68,7 @@
 | Req 1.3 | AT-c（typo: `tRuE` / `1` / `on` を OFF として扱う） |
 | Req 1.4 | 全テスト（既存 env var / ラベル / exit code に触れない） |
 | Req 2.1 | AT-a / `dr_unblock_sweep` の `gh issue list --label auto-dev --label blocked` |
-| Req 2.2 | `gh issue list` の状態指定 `--state open` + 既存除外（`claude-failed` 等は label 自体を `add-label` していないため `auto-dev` AND `blocked` の AND クエリから自然と外れる。明示除外もコード上で実施） |
+| Req 2.2 | `dr_unblock_sweep` の `gh issue list --search` に `-label:"$LABEL_FAILED" -label:"$LABEL_NEEDS_DECISIONS"` 除外を含める（`mark_issue_failed` は `auto-dev` を除去しないため、`auto-dev` + `blocked` + `claude-failed` の 3 ラベル組合せは実運用で発生し得る。AND クエリだけでは終端 Issue が pickup されるため明示除外が必要） + AT-i |
 | Req 2.3 | `dr_unblock_sweep` を `_dispatcher_run` 冒頭で呼ぶ |
 | Req 3.1 | AT-a / `dr_unblock_resolve_one_issue` の全件 resolved 分岐 |
 | Req 3.2 | AT-a / `dr_unblock_post_unblocked_comment` |
@@ -113,6 +114,62 @@
   実運用で「resolved 依存を明示してほしい」と判断された場合は別 Issue で拡張する
 - E2E スモークテスト（実際の cron tick + 実 GitHub Issue）は人間運用者の側で行う想定。
   単体テスト（gh stub）でカバーしたケースは AT-a〜AT-h の 8 ケース + 補助 8 ケース
+
+## Reviewer round=1 reject 是正
+
+Reviewer round=1 の reject 指摘（Finding 1 / Finding 2、いずれも Req 2.2 関連）への是正を実施した。
+
+### Reviewer の指摘要点
+
+- **Finding 1（Req 2.2 AC 未カバー）**: `dr_unblock_sweep` の `gh issue list --search`
+  に `-label:"$LABEL_FAILED"` 等の終端ラベル除外が無く、`mark_issue_failed` が `auto-dev`
+  を除去しないため `auto-dev` + `blocked` + `claude-failed` の 3 ラベル組合せが
+  sweep に pickup されてしまう（Req 2.2 違反）。
+- **Finding 2（Req 2.2 missing test）**: 当該除外フィルタの存在を assert する
+  テストケースが `dr_unblock_sweep_test.sh` に存在しなかった。
+
+### 是正で変更したファイル
+
+- `local-watcher/bin/issue-watcher.sh`（`dr_unblock_sweep` の `gh issue list --search` に
+  `-label:"$LABEL_FAILED" -label:"$LABEL_NEEDS_DECISIONS"` 除外を追加）
+- `local-watcher/test/dr_unblock_sweep_test.sh`（AT-i 追加 + 抽出関数の遅延束縛参照対応で
+  `LABEL_FAILED` / `LABEL_NEEDS_DECISIONS` を test グローバルに定義）
+- `docs/specs/346-feat-watcher-blocked-unblock/impl-notes.md`（Req 2.2 トレース修正 + 本節追記）
+
+### 追加テスト
+
+`dr_unblock_sweep_test.sh` に **AT-i**（5 assertion）を追加:
+
+- `Req 2.2: --search 引数に -label:"claude-failed" 除外が含まれる`
+- `Req 2.2: --search 引数に -label:"needs-decisions" 除外が含まれる（既存メインクエリ整合）`
+- `Req 2.1: --label auto-dev 指定は維持`（regression 防止）
+- `Req 2.1: --label blocked 指定は維持`（regression 防止）
+- `Req 2.1: --state open 指定は維持`（regression 防止）
+
+### 検証コマンド結果
+
+- `bash local-watcher/test/dr_unblock_sweep_test.sh` → **PASS: 56, FAIL: 0**（既存 51 + AT-i 5）
+- `bash -n local-watcher/bin/issue-watcher.sh` → 構文 OK
+- `bash -n local-watcher/test/dr_unblock_sweep_test.sh` → 構文 OK
+- `shellcheck local-watcher/bin/issue-watcher.sh local-watcher/test/dr_unblock_sweep_test.sh`
+  → 警告ゼロ
+- `diff -r .claude/agents repo-template/.claude/agents` → 差分なし
+- `diff -r .claude/rules repo-template/.claude/rules` → 差分なし
+
+### 補足: 既存メインクエリとの整合
+
+`_dispatcher_run` のメイン候補クエリ（line 10340）が使う `search_filter` は
+`-label:"$LABEL_NEEDS_DECISIONS" -label:"$LABEL_AWAITING_DESIGN" -label:"$LABEL_CLAIMED"
+-label:"$LABEL_PICKED" -label:"$LABEL_READY" -label:"$LABEL_FAILED" -label:"$LABEL_NEEDS_ITERATION"
+-label:"$LABEL_NEEDS_QUOTA_WAIT" -label:"$LABEL_STAGED_FOR_RELEASE" -label:"$LABEL_BLOCKED"`
+だが、sweep は `--label "$LABEL_BLOCKED"` を AND 条件で要求している関係で
+`-label:"$LABEL_BLOCKED"` は当然含めず、`needs-iteration` / `claimed` / `picked-up` / `ready`
+/ `needs-quota-wait` / `staged-for-release` / `awaiting-design-review` は sweep の目的
+（blocked + auto-dev の Issue から `blocked` を外すか評価）には直接の関連がない（これらが
+付いた blocked + auto-dev Issue を sweep が誤って unblock しても、後段のメイン候補クエリ側で
+別 label gating により pickup されないため運用上の副作用は出ない）。Req 2.2 が明示的に
+列挙する「`claude-failed` などの終端ラベル」として最小限の `LABEL_FAILED` + `LABEL_NEEDS_DECISIONS`
+を除外することで、AC 充足と最小変更原則の両立を図った。
 
 STATUS: complete
 

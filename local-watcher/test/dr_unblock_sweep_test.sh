@@ -95,6 +95,11 @@ REPO="owner/test-repo"
 LABEL_TRIGGER="auto-dev"
 # shellcheck disable=SC2034
 LABEL_BLOCKED="blocked"
+# 終端ラベル除外（Req 2.2）。dr_unblock_sweep が --search に展開するため必要。
+# shellcheck disable=SC2034
+LABEL_FAILED="claude-failed"
+# shellcheck disable=SC2034
+LABEL_NEEDS_DECISIONS="needs-decisions"
 # 通知マーカー（issue-watcher.sh のグローバル定義と一致させる）
 # 抽出関数 dr_unblock_post_unblocked_comment / dr_unblock_post_orphan_marker_comment が
 # 遅延束縛で参照するため、static 解析からは未使用に見える。
@@ -342,6 +347,40 @@ for bad in "TRUE" "1" "on" "True" "tRuE" "yes"; do
   cleanup_stub_state
 done
 
+unset DEP_AUTO_UNBLOCK_ENABLED
+
+# ============================================================
+# AT-i: 終端ラベル付き Issue を sweep の対象から除外する（Req 2.2）
+#
+#   dr_unblock_sweep の `gh issue list --search` 引数に `-label:"claude-failed"`
+#   および `-label:"needs-decisions"` 除外フィルタが含まれること。`mark_issue_failed`
+#   は `claude-failed` 付与時に `auto-dev` を除去しないため、`auto-dev` + `blocked`
+#   + `claude-failed` の 3 ラベル組合せが実運用で発生し得る。AND クエリだけでは
+#   終端 Issue が pickup されるため、`--search` の `-label:"..."` 除外が必要。
+# ============================================================
+echo ""
+echo "--- AT-i: 終端ラベル付き Issue を sweep 対象から除外（Req 2.2） ---"
+
+DEP_AUTO_UNBLOCK_ENABLED="true"
+reset_stub_state 0 0 "[]" 0 '{"comments": []}' 0
+dr_unblock_sweep
+
+# `gh issue list` 呼び出しの記録を取得
+list_call_line=$(grep -E "^gh issue list" "$GH_CALL_LOG" | head -1)
+
+assert_contains "Req 2.2: --search 引数に -label:\"claude-failed\" 除外が含まれる" \
+  "$list_call_line" '-label:"claude-failed"'
+assert_contains "Req 2.2: --search 引数に -label:\"needs-decisions\" 除外が含まれる（既存メインクエリ整合）" \
+  "$list_call_line" '-label:"needs-decisions"'
+# 既存 AND クエリの label 指定はそのまま維持されていることを確認（regression 防止）
+assert_contains "Req 2.1: --label auto-dev 指定は維持" \
+  "$list_call_line" "--label auto-dev"
+assert_contains "Req 2.1: --label blocked 指定は維持" \
+  "$list_call_line" "--label blocked"
+assert_contains "Req 2.1: --state open 指定は維持" \
+  "$list_call_line" "--state open"
+
+cleanup_stub_state
 unset DEP_AUTO_UNBLOCK_ENABLED
 
 # ============================================================
