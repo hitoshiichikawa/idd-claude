@@ -95,6 +95,15 @@ LABEL_AWAITING_SLOT="awaiting-slot"
 # 既存 `needs-decisions`（汎用人間判断要求）とは意味的に独立した運用シグナル
 # （Req 9.1〜9.4）。
 LABEL_BLOCKED="blocked"
+# Issue #346: 依存全解決時の `blocked` 自動解除スイープ opt-in gate。
+# `=true` 厳密一致のときのみ `dr_unblock_sweep` を `_dispatcher_run` 冒頭で起動し、
+# (1) 全依存 resolved の Issue から `blocked` ラベルを除去 + 自動解除コメント投稿、
+# (2) 依存マーカーが本文から消失した Issue には通知コメントを 1 回だけ投稿（ラベル維持）、
+# (3) 1 件でも依存未解決なら何もしない、を 1 tick で実施する（Req 1.1, 3.1, 5.2, 6.1）。
+# 未設定 / 空 / `false` / `True` / `1` / typo 等は OFF に正規化し、本機能導入前と完全に
+# 等価な挙動を保つ（Req 1.2, 1.3, NFR 1.1）。gate ON 時のみ `dr_apply_block` の新規
+# エスカレーションコメント文面が「依存解消後に自動で外れます」相当に分岐する（Req 8.1, 8.2）。
+DEP_AUTO_UNBLOCK_ENABLED="${DEP_AUTO_UNBLOCK_ENABLED:-false}"
 # Issue #200: hotfix 優先ティアを示すラベル。Dispatcher の候補処理順を
 # FIFO（Issue 番号昇順）にしたうえで、本ラベル付き Issue を非 hotfix Issue より
 # 先に投入する 2 段優先のキー。人間が手動付与する運用前提（自動付与なし）。
@@ -8961,6 +8970,25 @@ dr_format_unresolved_comment() {
   items=$(printf '%s\n' "$unresolved" \
     | awk -F'|' 'NF==2 && $1 != "" {printf "- %s (%s)\n", $1, $2}')
 
+  # #346: gate ON 時は「次回 tick で自動で外れます」相当の文面に分岐する（Req 8.1）。
+  # gate OFF（既定 / 不正値含む）では従来文面（「手動で除去」案内）を維持する（Req 8.2）。
+  local next_steps
+  if dr_unblock_gate_enabled; then
+    next_steps=$(cat <<'EOF_DR_NEXT_AUTO'
+1. 上記依存 Issue の解消（merge / staged-for-release 付与など）を進めてください
+2. すべて解決されると、次回 cron tick で本 Issue の `blocked` ラベルは **自動で外れます**（手動除去は不要 / DEP_AUTO_UNBLOCK_ENABLED=true）
+3. 自動解除と同時に解除コメントが投稿され、通常の Triage / 実装フローに合流します
+EOF_DR_NEXT_AUTO
+)
+  else
+    next_steps=$(cat <<'EOF_DR_NEXT_MANUAL'
+1. 上記依存 Issue の解消（merge）を進めてください
+2. すべて merge 済みになったら、本 Issue から `blocked` ラベルを手動で除去してください
+3. 次回 cron tick (`watcher 起動` 後) で依存チェックが再実行され、解消済みなら通常の Triage / 実装フローに合流します
+EOF_DR_NEXT_MANUAL
+)
+  fi
+
   cat <<EOF_DR_COMMENT
 🛑 依存 Issue 未 merge のため自動処理を中止しました。
 
@@ -8970,9 +8998,7 @@ ${items}
 
 ### 次の手順
 
-1. 上記依存 Issue の解消（merge）を進めてください
-2. すべて merge 済みになったら、本 Issue から \`blocked\` ラベルを手動で除去してください
-3. 次回 cron tick (\`watcher 起動\` 後) で依存チェックが再実行され、解消済みなら通常の Triage / 実装フローに合流します
+${next_steps}
 
 ### \`blocked\` と \`needs-decisions\` の使い分け
 
@@ -9322,6 +9348,280 @@ dr_check_dependencies() {
 
   # 全件 resolved → Triage 続行
   dr_log "issue=#${issue_num} extracted=${extracted_csv} resolved=${resolved_csv} unresolved= api_errors= verdict=all_resolved"
+  return 0
+}
+
+# ─── Dependency Auto-Unblock Sweep (Issue #346) ───
+# 依存全解決時に `blocked` ラベルを自動解除するスイープ関数群。`_dispatcher_run` の
+# 候補クエリより前段で 1 度起動し、auto-dev AND blocked AND OPEN な Issue 集合を列挙して
+# 以下のいずれかに分岐する:
+#   (1) 全依存 resolved → `blocked` 除去 + 自動解除コメント投稿（Req 3.1, 3.2）
+#   (2) 1 件以上 unresolved → 何もしない（Req 4.1, 6.2）
+#   (3) 依存マーカー消失（dr_extract_deps が空）→ 通知コメント 1 回のみ投稿（Req 5.1, 5.2）
+# 起動 gate: `DEP_AUTO_UNBLOCK_ENABLED=true` 厳密一致のみ ON。それ以外は OFF
+# （Req 1.2, 1.3, NFR 1.1）。OFF 時は冒頭 1 行 if で即 return し gh API 呼び出しゼロ。
+#
+# 既存 `dr_*` 関数（`dr_extract_deps` / `dr_resolve_one` / `dr_apply_block` /
+# `dr_check_dependencies`）の signature・戻り値契約は変更しない（NFR 1.2）。
+
+# Issue #346 通知マーカー文字列。
+# - DR_UNBLOCK_MARKER_CLEARED: 自動解除コメントに埋め込む監査識別子（NFR 4.2）
+# - DR_UNBLOCK_MARKER_ORPHAN : 空依存通知コメントの冪等性判定キー（Req 5.4）
+# どちらも HTML コメント形式で GitHub UI 上は不可視。grep / jq から検出可能。
+# shellcheck disable=SC2034  # 抽出した個別関数の遅延束縛 / 既存 dr_* と同パターン
+DR_UNBLOCK_MARKER_CLEARED='<!-- idd-claude:dep-unblock-cleared:v1 -->'
+# shellcheck disable=SC2034  # 同上
+DR_UNBLOCK_MARKER_ORPHAN='<!-- idd-claude:dep-unblock-orphan-marker:v1 -->'
+
+# 引数: なし
+# 戻り値: 0 = gate ON / 1 = gate OFF（既定 / 不正値 / typo）
+# 副作用: なし（純粋関数）
+#
+# `DEP_AUTO_UNBLOCK_ENABLED` を `=true` 厳密一致で判定する（Req 1.2, 1.3）。
+# 値正規化に失敗した状態（未設定 / 空 / `False` / `True` / `1` / `on` / typo）は
+# すべて OFF として扱う（NFR 1.1 安全側）。本関数は `dr_unblock_sweep` の起動 gate
+# 兼、`dr_format_unresolved_comment` の文面分岐スイッチを兼ねる（Req 8.1, 8.2）。
+dr_unblock_gate_enabled() {
+  case "${DEP_AUTO_UNBLOCK_ENABLED:-false}" in
+    true) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# 引数 $1 = 対象 Issue 番号（数字のみ）
+# stdout = なし（戻り値で表現）
+# 戻り値:
+#   0 = 既存コメント中に空依存通知マーカーが見つかった（投稿済 / Req 5.3）
+#   1 = マーカー未投稿 or gh 取得失敗（NFR 3.1 安全側で「未投稿扱い」にすると重複投稿の
+#       恐れがあるため、本実装では gh 取得失敗時は「投稿済 = 1」を返して再投稿を抑止する）
+# 副作用: なし（read-only API のみ）
+#
+# `gh issue view --json comments` で対象 Issue のコメント本文を一括取得し、in-bash で
+# マーカー文字列（`<!-- idd-claude:dep-unblock-orphan-marker:v1 -->`）を grep する。
+# 過去コメントに 1 件でも該当があれば「投稿済」として `dr_unblock_sweep` から再投稿
+# しないようにする（Req 5.3, 6.1, NFR 5.1 冪等性）。
+dr_unblock_has_orphan_marker() {
+  local issue_num="$1"
+  local comments_json
+  if ! comments_json=$(gh issue view "$issue_num" --repo "$REPO" \
+        --json comments 2>/dev/null); then
+    # 取得失敗 → 安全側で「投稿済扱い」にして再投稿しない（NFR 5.1）
+    dr_warn "issue=#${issue_num} gh issue view --json comments 失敗（orphan marker 検出 skip / 投稿済扱い）"
+    return 0
+  fi
+  if printf '%s' "$comments_json" \
+      | jq -r '.comments[]?.body // ""' 2>/dev/null \
+      | grep -qF -- "$DR_UNBLOCK_MARKER_ORPHAN"; then
+    return 0
+  fi
+  return 1
+}
+
+# 引数:
+#   $1 = 対象 Issue 番号
+# 副作用:
+#   - 自動解除コメント 1 件を投稿（マーカー識別子を含む / NFR 4.2）
+# 戻り値:
+#   0 = 投稿成功 / 1 = 投稿失敗（dr_warn は呼び出し元で出す方針）
+#
+# 本コメントは「watcher が依存全解決を検出し `blocked` を外した」旨を GitHub UI
+# 履歴から読み取れる文面とマーカーを含む（Req 3.3, NFR 4.2）。
+dr_unblock_post_unblocked_comment() {
+  local issue_num="$1"
+  local body
+  body=$(cat <<EOF_DR_UNBLOCK_CLEARED
+✅ 依存 Issue がすべて解決したため、\`blocked\` ラベルを自動解除しました。
+
+依存解決時の自動スイープ（\`DEP_AUTO_UNBLOCK_ENABLED=true\`）が、本 Issue 本文の
+依存記法（\`Depends on:\` / \`前提依存:\` / \`Blocked by:\`）から抽出した依存先を
+すべて \`resolved\`（merge 済み / 又は \`staged-for-release\` 付与など base 相対）と
+判定したため、本ラベルを自動で除去しました。次回 cron tick で通常の Triage / 実装
+フローに合流します。
+
+判定経緯は watcher の構造化ログ（\`dr: issue=#${issue_num} verdict=unblock_cleared\`）
+から追跡できます。
+
+${DR_UNBLOCK_MARKER_CLEARED}
+EOF_DR_UNBLOCK_CLEARED
+)
+  gh issue comment "$issue_num" --repo "$REPO" --body "$body" >/dev/null 2>&1
+}
+
+# 引数:
+#   $1 = 対象 Issue 番号
+# 副作用:
+#   - 空依存通知コメント 1 件を投稿（マーカー識別子を含む / Req 5.4）
+# 戻り値:
+#   0 = 投稿成功 / 1 = 投稿失敗
+#
+# 「依存マーカーが本文から消失したため自動解除されない」旨を通知し、人間が依存記法
+# の誤削除に気づけるようにする（Req 5.2）。ラベルは維持され、人間判断で本ラベルを
+# 手動除去するか、依存記法を本文に書き直す運用フローに委ねる。
+dr_unblock_post_orphan_marker_comment() {
+  local issue_num="$1"
+  local body
+  body=$(cat <<EOF_DR_UNBLOCK_ORPHAN
+⚠️ 依存記法が本文から消失していますが、\`blocked\` ラベルは自動解除しませんでした。
+
+本 Issue には \`blocked\` ラベルが付いていますが、現在の Issue 本文から依存記法
+（\`Depends on:\` / \`前提依存:\` / \`Blocked by:\`）が検出できませんでした。
+編集ミス・意図せぬ削除を疑い、安全側で自動解除を見送ります（\`DEP_AUTO_UNBLOCK_ENABLED=true\`）。
+
+### 次の手順
+
+- 依存先がまだ未解決なら、Issue 本文に \`Depends on: #N\` 形式で依存記法を**再記述**してください
+- 既に依存が解決済 / 依存記法を撤回したい場合は、本 Issue から \`blocked\` ラベルを**手動除去**してください
+
+本通知は重複投稿を避けるため 1 度だけ投稿されます（マーカー検出による冪等性）。
+
+${DR_UNBLOCK_MARKER_ORPHAN}
+EOF_DR_UNBLOCK_ORPHAN
+)
+  gh issue comment "$issue_num" --repo "$REPO" --body "$body" >/dev/null 2>&1
+}
+
+# 引数:
+#   $1 = 対象 Issue 番号
+#   $2 = Issue 本文（多行 string）
+# 戻り値:
+#   0 = 処理完了（解除 / 通知 / 維持いずれも 0）
+#   非 0 は呼び出し元では使わない（fail-open）
+# 副作用:
+#   - 全依存 resolved → `gh issue edit --remove-label blocked` + 自動解除コメント投稿
+#   - 空依存マーカー + 未通知 → 通知コメント投稿
+#   - 1 件以上 unresolved → 何もしない
+#   - 各分岐で `dr_log` 構造化ログ 1 行（Req 7.1〜7.3）
+#
+# 既存 `dr_extract_deps` / `dr_resolve_one` を流用するため、依存解析ロジックの
+# 重複実装を避ける（NFR 1.2）。`gh issue edit` 失敗時は解除コメント未投稿で次へ
+# 進み（NFR 3.2 / Req 3.4）、ラベル除去成功 + コメント投稿失敗時は警告ログ 1 行
+# 残して次へ進む（既存 `dr_apply_block` の寛容方針と整合）。
+dr_unblock_resolve_one_issue() {
+  local issue_num="$1"
+  local body="$2"
+
+  # 依存抽出（純粋関数、gh 呼ばず）
+  local extracted
+  extracted=$(dr_extract_deps "$body")
+
+  if [ -z "$extracted" ]; then
+    # 空依存マーカー → 既通知判定 → 未通知ならコメント 1 件投稿（Req 5.1, 5.2, 5.3）
+    if dr_unblock_has_orphan_marker "$issue_num"; then
+      dr_log "issue=#${issue_num} verdict=unblock_orphan_notified (既通知 / 冪等 skip)"
+      return 0
+    fi
+    if ! dr_unblock_post_orphan_marker_comment "$issue_num"; then
+      dr_warn "issue=#${issue_num} 空依存通知コメント投稿に失敗"
+      return 0
+    fi
+    dr_log "issue=#${issue_num} verdict=unblock_orphan_marker"
+    return 0
+  fi
+
+  # 依存解決判定: 1 件でも unresolved があれば維持（Req 4.1, 4.2）
+  local extracted_csv resolved_csv unresolved_csv
+  extracted_csv=""
+  resolved_csv=""
+  unresolved_csv=""
+  local dep verdict_for_dep
+  while IFS= read -r dep; do
+    [ -z "$dep" ] && continue
+    extracted_csv="${extracted_csv:+${extracted_csv},}#${dep}"
+    verdict_for_dep=$(dr_resolve_one "$dep")
+    case "$verdict_for_dep" in
+      resolved)
+        resolved_csv="${resolved_csv:+${resolved_csv},}#${dep}"
+        ;;
+      open|"closed unmerged"|"api error")
+        unresolved_csv="${unresolved_csv:+${unresolved_csv},}#${dep} (${verdict_for_dep})"
+        ;;
+      *)
+        # 想定外 verdict は安全側で unresolved 扱い（Req 4.2）
+        dr_warn "issue=#${issue_num} dep=#${dep} 未知の verdict: ${verdict_for_dep} (unresolved 扱い)"
+        unresolved_csv="${unresolved_csv:+${unresolved_csv},}#${dep} (unknown)"
+        ;;
+    esac
+  done <<< "$extracted"
+
+  if [ -n "$unresolved_csv" ]; then
+    # 1 件以上 unresolved → 維持（Req 4.1, 4.3, 6.2）
+    dr_log "issue=#${issue_num} extracted=${extracted_csv} resolved=${resolved_csv} unresolved=${unresolved_csv} verdict=unblock_keep"
+    return 0
+  fi
+
+  # 全依存 resolved → blocked 除去 + 自動解除コメント投稿（Req 3.1, 3.2）
+  if ! gh issue edit "$issue_num" --repo "$REPO" \
+        --remove-label "$LABEL_BLOCKED" >/dev/null 2>&1; then
+    # ラベル除去失敗 → コメント投稿せず skip（Req 3.4 / NFR 3.2 中途半端な状態を残さない）
+    dr_warn "issue=#${issue_num} gh issue edit --remove-label ${LABEL_BLOCKED} 失敗 / コメント投稿せず skip"
+    return 0
+  fi
+  if ! dr_unblock_post_unblocked_comment "$issue_num"; then
+    # ラベル除去成功 + コメント投稿失敗 → 警告ログ 1 行 + 次 Issue へ
+    # （既存 dr_apply_block と同じ寛容方針 / NFR 3.2）
+    dr_warn "issue=#${issue_num} 自動解除コメント投稿に失敗（ラベルは除去済）"
+  fi
+  dr_log "issue=#${issue_num} extracted=${extracted_csv} resolved=${resolved_csv} unresolved= verdict=unblock_cleared"
+  return 0
+}
+
+# 引数: なし
+# 戻り値: 常に 0（個別 Issue の成否は内部ログで表現 / NFR 3.2 fail-open）
+# 副作用:
+#   - `DEP_AUTO_UNBLOCK_ENABLED=true` 時のみ `gh issue list` で対象 Issue を列挙し
+#     `dr_unblock_resolve_one_issue` を順次適用
+#   - OFF 時は gh API 呼び出しゼロで即 return（NFR 1.1, 2.1）
+#
+# `_dispatcher_run` のメイン候補クエリより前段で 1 度だけ呼ばれる前提（Req 2.3）。
+# 解除された Issue は本 tick の `_dispatcher_run` 候補列挙（`-label:"$LABEL_BLOCKED"`
+# 除外）で通常 pickup に合流できる（同 tick fall-through 動線。Req 2.3 を満たす）。
+dr_unblock_sweep() {
+  # 起動 gate（Req 1.1, 1.2, NFR 1.1, NFR 2.1）。OFF なら gh API ゼロ呼び出しで return。
+  if ! dr_unblock_gate_enabled; then
+    return 0
+  fi
+
+  # 対象 Issue 列挙: auto-dev AND blocked AND OPEN（Req 2.1）。
+  # 終端ラベル（claude-failed / needs-decisions）が付いた Issue は sweep の対象から
+  # 明示除外する（Req 2.2）。`mark_issue_failed` は claude-failed 付与時に auto-dev
+  # ラベルを除去しないため、`auto-dev` + `blocked` + `claude-failed` の 3 ラベル組合せが
+  # 実運用で発生し得る。AND クエリだけでは終端 Issue が pickup されるので、
+  # `_dispatcher_run` のメイン候補クエリ（search_filter）と整合する `-label:"..."`
+  # 除外を `--search` に追加する。
+  # FIFO 順（Issue 番号昇順）を取りやすくするため `sort:created-asc` を採用。
+  local issues_json
+  if ! issues_json=$(gh issue list \
+        --repo "$REPO" \
+        --label "$LABEL_TRIGGER" \
+        --label "$LABEL_BLOCKED" \
+        --state open \
+        --search "-label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_DECISIONS\" sort:created-asc" \
+        --json number,body \
+        --limit 50 2>/dev/null); then
+    dr_warn "dr_unblock_sweep: gh issue list 失敗 / スイープ skip"
+    return 0
+  fi
+
+  local count
+  count=$(printf '%s' "$issues_json" | jq 'length' 2>/dev/null || echo 0)
+  if [ -z "$count" ] || [ "$count" = "0" ]; then
+    # 対象ゼロ → 追加 API 呼び出しゼロで return（NFR 2.1）
+    return 0
+  fi
+
+  dr_log "dr_unblock_sweep 起動 対象=${count} 件 gate=on"
+
+  local i issue_num issue_body
+  for ((i=0; i<count; i++)); do
+    issue_num=$(printf '%s' "$issues_json" | jq -r ".[$i].number" 2>/dev/null)
+    issue_body=$(printf '%s' "$issues_json" | jq -r ".[$i].body // \"\"" 2>/dev/null)
+    if [ -z "$issue_num" ] || ! [[ "$issue_num" =~ ^[0-9]+$ ]]; then
+      dr_warn "dr_unblock_sweep: index=${i} の number 抽出に失敗 / skip"
+      continue
+    fi
+    # 個別 Issue の処理失敗は fail-open（次 Issue に進む / NFR 3.2）
+    dr_unblock_resolve_one_issue "$issue_num" "$issue_body" || true
+  done
   return 0
 }
 
@@ -10007,6 +10307,13 @@ _dispatcher_run() {
   if ! _parallel_validate_slots; then
     return 1
   fi
+
+  # Issue #346: Dependency Auto-Unblock Sweep をメイン候補クエリより前段で 1 回実行
+  # （Req 2.3）。`DEP_AUTO_UNBLOCK_ENABLED=true` のときのみ起動し、OFF / 未設定 /
+  # 不正値では gh API ゼロ呼び出しで即 return する（NFR 1.1, 2.1）。本機能導入前と
+  # 完全に同一の `_dispatcher_run` 挙動を保つため、fail-open（`|| true`）で sweep の
+  # 失敗が dispatcher サイクルを壊さない（NFR 3.2）。
+  dr_unblock_sweep || true
 
   # Req 7.5: 既存の Issue 取得クエリ（フィルタ・limit 5）を据え置き
   # Issue #54 Req 1.1 / 1.3 / 5.2: PR 専用ラベル `needs-iteration` が誤って Issue 側に
