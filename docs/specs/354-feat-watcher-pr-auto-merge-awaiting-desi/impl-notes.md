@@ -41,3 +41,23 @@
   `auto-merge-design.sh` 追加 (task 3) と cycle startup ログへの
   `auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED}` 追加 (task 3) は未着手。
   main loop の `process_auto_merge_design` 呼び出し配線も task 4 で別途実施
+
+### Task 3
+
+- 採用方針: `REQUIRED_MODULES` 配列に `"auto-merge-design.sh"` を `"auto-merge.sh"`
+  の直後に挿入し（#352 との対称配置 / NFR 6.2）、cycle startup ログ行に
+  `auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED}` を `auto-merge=` と `full-auto=`
+  の間に append する 2 箇所の最小編集で task を完結（Req 9.4）
+- 重要な判断:
+  - REQUIRED_MODULES への挿入位置は `auto-merge.sh` 直後とした。loader 自身は遅延束縛で
+    順序非依存だが、可読性 / 対称性 / #352 との grep 整合を優先（design.md の File
+    Structure Plan 内 module 順序記述とも整合）
+  - startup ログ位置は `auto-merge=...` と `full-auto=...` の間に挟む形を採用。impl 用 /
+    design 用 / kill switch という機能順での並びを保ち、運用者の grep 観察を容易にする。
+    既定値（unset 時）でも `auto-merge-design=false` が明示出力されることをスモークで確認
+    （`env -u AUTO_MERGE_DESIGN_ENABLED ...` で `auto-merge-design=false` 出力を観測）
+  - 本体の他 echo 文・他 env 既定値・他 loader entry は一切触らず diff を 4 行追加 / 2 行
+    削除に局所化（NFR 2.1, 2.2, 2.3 / 後方互換）
+- 残存課題: main loop への `process_auto_merge_design` 呼び出し配線が task 4 で未着手。
+  REQUIRED_MODULES で関数定義の前方参照は解決済みのため、task 4 では本体 line 1014
+  付近の `process_auto_merge || am_warn ...` 直後への 1 行追加で配線が完了する見込み
