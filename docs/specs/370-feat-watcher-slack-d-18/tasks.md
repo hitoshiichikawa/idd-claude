@@ -15,7 +15,7 @@
   - _Boundary: slack-notify.sh (新規), issue-watcher.sh (Config ブロック追加のみ), local-watcher/test/sn_is_enabled_test.sh (新規)_
   - _Depends: none_
 
-- [ ] 2. payload 構築（jq --arg sanitize + secret scrub）
+- [x] 2. payload 構築（jq --arg sanitize + secret scrub）
 - [x] 2.1 sn_build_payload 関数の実装
   - `sn_build_payload <event_type> <number> <url> <result> <detail>` を実装
   - jq `--arg` で全フィールドを sanitize（フィルタ文字列に未信頼値を inline 展開しない）
