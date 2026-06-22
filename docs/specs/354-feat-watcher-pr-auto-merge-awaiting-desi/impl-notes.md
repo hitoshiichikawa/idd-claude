@@ -61,3 +61,23 @@
 - 残存課題: main loop への `process_auto_merge_design` 呼び出し配線が task 4 で未着手。
   REQUIRED_MODULES で関数定義の前方参照は解決済みのため、task 4 では本体 line 1014
   付近の `process_auto_merge || am_warn ...` 直後への 1 行追加で配線が完了する見込み
+
+### Task 4
+
+- 採用方針: `process_auto_merge || am_warn ...` (line 1024) の直後に
+  `process_auto_merge_design || amd_warn ...` を 1 行追加し、impl Auto-Merge (#352) と
+  対称配置で main loop に配線。順序は #352 直後 / Promote Pipeline 前を維持（Req 5.4 / 8.4）
+- 重要な判断:
+  - 配線箇所の直上 comment block (8 行) は #352 の comment block と並列構造で記述し、
+    grep / 可読性を担保（AND 二重 opt-in 要件 / head pattern による非干渉 / #40 共存 /
+    配置順序の根拠 を明示）
+  - 既存 `process_auto_merge` 呼び出し行・他 processor 呼び出し順序は一切変更せず、
+    diff を 10 行追加のみに局所化（NFR 2.3 後方互換）
+  - shellcheck / bash -n / 既存 `auto-merge_test.sh` 56 件 PASS / dry-run smoke で
+    `auto-merge-design=false` ログ出力到達 / `cd: /tmp/test-repo-354` で想定通り
+    終了することを確認済み（task 3 で配線済の cycle startup ログが配線後も壊れない
+    ことを兼ねて検証）
+- 残存課題: 本 task で配線完了。task 5 で新規 fixture テスト
+  (`auto-merge-design_test.sh`) を追加する際の参照点として、`process_auto_merge_design`
+  が main loop の `process_auto_merge` 直後で確実に呼ばれることをスモークで確認済み
+  （test fixture 設計上の前提として活用可能）
