@@ -32,7 +32,7 @@
   - _Boundary: slack-notify.sh (sn_build_payload 関数追加), local-watcher/test/sn_build_payload_test.sh (新規)_
   - _Depends: 1_
 
-- [ ] 3. HTTP POST と fail-open 制御（sn_post_webhook + sn_notify entry point）
+- [x] 3. HTTP POST と fail-open 制御（sn_post_webhook + sn_notify entry point）
 - [x] 3.1 sn_post_webhook の実装
   - `curl -X POST -H 'Content-Type: application/json' --max-time "$SLACK_NOTIFY_TIMEOUT" --silent --show-error -d @- -- "$SLACK_WEBHOOK_URL"` 相当を実装
   - payload は stdin (`-d @-`) で渡し、コマンドライン引数化を避ける（process listing からの漏洩防止）
