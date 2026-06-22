@@ -190,6 +190,8 @@ amd_enable_auto_merge_for_pr() {
   if [ "$rc" -eq 0 ]; then
     # Req 9.1: 成功時の log line（PR 番号 / head sha / head branch / 動作）
     amd_log "PR #${pr_number}: auto-merge enabled (squash, delete-branch) head=${head_ref} sha=${head_sha} url=${pr_url}"
+    # Issue #370 task 4: Slack 通知 emitter（fail-open / gate OFF 時は no-op）
+    sn_notify auto-merge-design "$pr_number" "$pr_url" success "head=${head_ref} sha=${head_sha}" || true
     rm -f "$stderr_file" 2>/dev/null || true
     return 0
   fi
