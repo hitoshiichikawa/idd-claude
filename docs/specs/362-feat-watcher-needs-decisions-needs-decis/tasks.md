@@ -52,7 +52,7 @@
   - _Boundary: needs-decisions-auto.sh_
   - _Depends: 2.1_
 
-- [ ] 2.3 auto-continue 実行関数 nda_auto_continue
+- [x] 2.3 auto-continue 実行関数 nda_auto_continue
   - `nda_auto_continue(triage_json_path, first_recommendation_body)` を実装:
     1. `gh issue comment "$NUMBER" --repo "$REPO" --body "$body"` で採用 recommendation +
        mode + classification + 監査用 fingerprint を投稿（best-effort、失敗時は WARN + return 1）
