@@ -35,7 +35,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, NFR 1.3, NFR 5.1, NFR 5.2_
   - _Boundary: modules/failed-recovery.sh:Gate_
 
-- [ ] 3.2 状態永続化レイヤ（fr_state_path / fr_load_state / fr_save_state）を実装
+- [x] 3.2 状態永続化レイヤ（fr_state_path / fr_load_state / fr_save_state）を実装
   - `fr_state_path` / `fr_load_state` / `fr_save_state` を `modules/failed-recovery.sh` に追加
   - 配置: `$FAILED_RECOVERY_STATE_DIR/<issue>.json`、`mkdir -p` 冪等化
   - `fr_save_state` は `mktemp -p` で同一 dir に temp file 作成 → `jq` で組み立て → `mv -f`
