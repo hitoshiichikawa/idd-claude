@@ -145,6 +145,19 @@ sec_error() {
   echo "[$(date '+%F %T')] [$REPO] security-review: ERROR: $*" >&2
 }
 
+# failed-recovery 専用ロガー（識別用 prefix と timestamp 形式を Issue Watcher と揃える）
+# Issue #359: 既存 `pi_log` / `pr_log` と同形式の `[YYYY-MM-DD HH:MM:SS] [$REPO] failed-recovery:`
+# prefix を用いる。`fr_warn` / `fr_error` は `>&2` に出力。
+fr_log() {
+  echo "[$(date '+%F %T')] [$REPO] failed-recovery: $*"
+}
+fr_warn() {
+  echo "[$(date '+%F %T')] [$REPO] failed-recovery: WARN: $*" >&2
+}
+fr_error() {
+  echo "[$(date '+%F %T')] [$REPO] failed-recovery: ERROR: $*" >&2
+}
+
 # ─── Issue #259: Claude API 529 Overloaded detector ───
 #
 # Claude API の一時的な過負荷 (HTTP 529 Overloaded) は claude CLI の stream-json
