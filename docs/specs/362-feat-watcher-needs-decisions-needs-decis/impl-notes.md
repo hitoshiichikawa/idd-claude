@@ -46,3 +46,16 @@
   - `repo-template/local-watcher/bin/triage-prompt.tmpl` は **本 task で触らない**（task 8 の root↔repo-template 同期で別途処理）。
 - 残存課題: なし。task 5（PM agent 定義の classification 出力責務追記）が揃えば PM 段の出力規約も完成する。
 - スモーク検証: 編集後の `triage-prompt.tmpl` を目視確認し、(a) JSON スキーマの `{` / `}` / `[` / `]` の括弧バランスが取れていること、(b) `"classification": "safe" | "human-only"` が `recommendation` の直後に **カンマ区切り**で配置され、`decisions[]` 要素の最末尾 field となっていること、(c) 新規節「## 分類タグ（classification）の判定基準」が既存 status / needs_architect 判定節の **間**に位置し、見出し階層（`##` / `###`）が既存節と整合していること、(d) 補足箇条書きで `status = "needs-decisions"` 時の必須性と `status = "ready"` 時の出現余地なしを明示できていること、を確認した。
+
+### Task 5
+
+- 採用方針: `.claude/agents/product-manager.md` の「# Triage モードで呼ばれた場合」節（行 120-124）末尾に空行 1 行を挟んで 7 行の classification 出力責務段落を追記した（要件レンジ 5-8 行内）。詳細判定基準は重複記載せず `triage-prompt.tmpl` を canonical 参照する形に統一し、本ファイルは summary + canonical 参照に留めた（NFR 2.3）。
+- 重要な判断:
+  - 追記内容の構成は (1) `status = "needs-decisions"` 時の `classification: "safe" | "human-only"` **必須**出力、(2) `human-only` の 4 カテゴリ（機密 / コンプラ / 不可逆 / 外部影響）の概略列挙 + `safe` の条件、(3) 詳細判定基準は `triage-prompt.tmpl` 側 canonical 参照、(4) fail-safe（確信が持てない場合は **必ず** `human-only`）の 4 点で固定。design.md 行 437-450「PM agent 定義の拡張」節と requirements.md NFR 2.3 に 1:1 対応する記述順にした。
+  - `triage-prompt.tmpl` への参照リンクは agent ファイル（`.claude/agents/product-manager.md`）からの相対パス `[triage-prompt.tmpl](../../local-watcher/bin/triage-prompt.tmpl)` を使用。実在パス（`/home/hitoshi/.issue-watcher/worktrees/hitoshiichikawa-idd-claude/slot-1/local-watcher/bin/triage-prompt.tmpl`）を事前確認した上で `[`triage-prompt.tmpl`](../../local-watcher/bin/triage-prompt.tmpl)` の markdown link 形式で配置し、リンク自体は markdown 構文準拠（fence 内バッククォート + 外側 `[]()` リンク）にした。
+  - フィールド名（`classification` / `safe` / `human-only` / `decisions` / `status` / `needs-decisions`）は CLAUDE.md「言語方針」に従って英語固定とし、説明文は日本語ベースで既存「# Triage モードで呼ばれた場合」節の文体（「〜してください」体）に合わせた。
+  - `repo-template/.claude/agents/product-manager.md` は **本 task で触らない**（task 8 の root↔repo-template 同期で別途処理 / CLAUDE.md「機能追加ガイドライン § 4」）。
+- 残存課題: なし。task 6（近接 unit test 集約解消）/ task 7（README 更新）/ task 8（root↔repo-template 同期）の後続で本機能の E2E 経路と配布形態が完成する。
+- スモーク検証: 編集後の `.claude/agents/product-manager.md` を目視確認し、(a) 追記内容が 7 行（126-132 行）で要件レンジ 5-8 行内に収まっていること、(b) 既存節「# Triage モードで呼ばれた場合」の末尾に空行 1 行を挟んで配置され見出し階層（`#`）が崩れていないこと、(c) canonical 参照 `[triage-prompt.tmpl](../../local-watcher/bin/triage-prompt.tmpl)` が明示され実在パスを指していること、(d) fail-safe（確信が持てない場合は **必ず** `human-only`）が明示されていること、(e) 詳細判定基準の重複記載がなく `human-only` 4 カテゴリは概略列挙に留まっていること、を確認した。markdown lint レベル（h1 1 箇所のみ / コードフェンス整合 / リンク構文整合）も保持。
+
+STATUS: complete
