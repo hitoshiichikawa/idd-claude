@@ -44,7 +44,7 @@
   - _Boundary: slack-notify.sh (sn_post_webhook 関数追加)_
   - _Depends: 2.1_
 
-- [ ] 3.2 sn_notify public entry point の実装
+- [x] 3.2 sn_notify public entry point の実装
   - 評価順序を design.md「sn_notify Service Interface」§ の通り実装
     （gate → URL preflight → 引数検証 → build → post → log）
   - 戻り値は **常に rc=0**（fail-open / Req 4.4）
