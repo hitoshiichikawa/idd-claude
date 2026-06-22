@@ -22,7 +22,7 @@
   - _Requirements_partial: 1.5, 4.8_
   - _Boundary: issue-watcher.sh:Config_
 
-- [ ] 3. modules/failed-recovery.sh 新規モジュールを追加（gate + state 永続化レイヤ）
+- [x] 3. modules/failed-recovery.sh 新規モジュールを追加（gate + state 永続化レイヤ）
 - [x] 3.1 module 雛形と gate 関数を実装
   - `local-watcher/bin/modules/failed-recovery.sh` を新規作成。ファイル冒頭コメントで用途・
     配置先・依存・prefix `fr_` を明記し、function 定義のみを置く（トップレベル副作用なし）
