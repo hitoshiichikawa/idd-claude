@@ -34,3 +34,15 @@
   - 配線位置の選択は design.md「Watcher Body Call Site」節に厳密準拠。`PATH_OVERLAP_CHECK` 永続化処理（行 10509-10517）の **後**かつ既存 needs-decisions 分岐の **冒頭**で呼ぶことで、edit_paths sticky comment 永続化（Req 3.4 fail-open）と本機能の auto-continue 判定が独立して動作することを保証。
 - 残存課題: なし。task 4（triage-prompt.tmpl の classification field 追加）と task 5（PM agent 定義）が揃えば本機能の E2E 経路が完成する。task 6 で本配線（rc=0 / rc=1 双方）の AND 二重 opt-in を `extract_function` イディオムで unit test に集約予定（task 3 の `_Requirements_partial:_` 解消）。
 - スモーク検証: `bash -n local-watcher/bin/issue-watcher.sh` / `shellcheck local-watcher/bin/issue-watcher.sh` 双方 pass。`module_loader_missing_test.sh` 7 件全 PASS（needs-decisions-auto.sh を欠落させた場合に loader が同様に検出することを別途確認）。`full_auto_enabled_test.sh` 28 件全 PASS（kill switch との依存に regression なし）。
+
+### Task 4
+
+- 採用方針: `triage-prompt.tmpl` の「## 「致命的に人間の判断が必要」と判定する基準（status 判定）」節（行 23-35）と「## 「Architect を挟むべき」と判定する基準（needs_architect 判定）」節（行 65 以降）の **間**に「## 分類タグ（classification）の判定基準」節を新規追加し、出力 JSON スキーマ（`decisions[]` 要素）に `"classification": "safe" | "human-only"` フィールドを `recommendation` の直後に追記（design.md 行 397-417 の JSON Contract に厳密準拠 / NFR 1.2）。スキーマ直後の補足箇条書きに `status = "needs-decisions"` 時は必須・`status = "ready"` 時は decisions 空配列なので出現余地なしの 1 行を追加した。
+- 重要な判断:
+  - 新規節の構成は (1) 概要 1 段落、(2) `human-only` の定義（4 カテゴリの bullet list）、(3) `safe` の条件（1 段落）、(4) fail-safe（最重要 / 確信が持てない場合は必ず human-only）の 4 サブセクションで固定。design.md「判定基準（triage-prompt.tmpl への追記内容）」節（行 427-435）と requirements.md Req 2.1〜2.5 / NFR 4.1 に 1:1 対応する記述順にした。`human-only` の 4 カテゴリ（機密 / コンプラ / 不可逆 / 外部影響）は design.md と完全に同一文言で列挙し、Architect の判断と Triage agent / PM agent の判断が一致するように字面を揃えた。
+  - JSON スキーマの `classification` 追加位置は `recommendation` の直後（最末尾）。既存 5 fields（`topic` / `question` / `options` / `impact` / `recommendation`）の **位置・型・意味は不変**（NFR 1.2 / Req 5.1）。直前の `recommendation` 行末に `,` を追加して JSON 構文を維持。
+  - 既存「- `status` が `ready` の場合、`decisions` は空配列にすること」箇条書きの **直下**に `classification` 必須性の説明を 1 行追加した。同レベルの箇条書きに並べることで Triage agent / PM agent が `decisions` 空 ↔ 非空の両ケースを並列に認識できる。
+  - prompt template の挙動検証は LLM 側の応答品質に依存するため近接 unit test は不要（tasks.md 行 118 に明示）。本 task では構文整合（JSON 括弧バランス、コメント記法、既存節との位置関係）の目視確認のみで完結させ、E2E スモークは task 7 / 8 完了後の手動検証に委ねる。
+  - `repo-template/local-watcher/bin/triage-prompt.tmpl` は **本 task で触らない**（task 8 の root↔repo-template 同期で別途処理）。
+- 残存課題: なし。task 5（PM agent 定義の classification 出力責務追記）が揃えば PM 段の出力規約も完成する。
+- スモーク検証: 編集後の `triage-prompt.tmpl` を目視確認し、(a) JSON スキーマの `{` / `}` / `[` / `]` の括弧バランスが取れていること、(b) `"classification": "safe" | "human-only"` が `recommendation` の直後に **カンマ区切り**で配置され、`decisions[]` 要素の最末尾 field となっていること、(c) 新規節「## 分類タグ（classification）の判定基準」が既存 status / needs_architect 判定節の **間**に位置し、見出し階層（`##` / `###`）が既存節と整合していること、(d) 補足箇条書きで `status = "needs-decisions"` 時の必須性と `status = "ready"` 時の出現余地なしを明示できていること、を確認した。
