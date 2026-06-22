@@ -50,7 +50,7 @@
   - _Boundary: modules/failed-recovery.sh:State_
   - _Depends: 3.1_
 
-- [ ] 4. 候補選定レイヤ（fr_fetch_failed_issues / fr_fetch_failed_prs）を実装
+- [x] 4. 候補選定レイヤ（fr_fetch_failed_issues / fr_fetch_failed_prs）を実装
   - `fr_fetch_failed_issues` を実装。`gh issue list --search 'label:"claude-failed"
     label:"auto-dev" -label:"needs-decisions" -label:"needs-quota-wait" -label:"blocked"
     -label:"awaiting-slot"' --json number,labels,body,title,url --limit "$FAILED_RECOVERY_MAX_PRS"`
