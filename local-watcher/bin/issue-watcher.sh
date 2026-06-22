@@ -592,6 +592,24 @@ PER_TASK_MAX_TASKS="${PER_TASK_MAX_TASKS:-0}"
 #   （安全側に倒す / Req 2.2 abort 経路の決定論性）。
 POST_MARKER_RECOVERY_MODE="${POST_MARKER_RECOVERY_MODE:-fail-with-diagnostic}"
 
+# ─── #356: per-task post-marker commit の docs-only auto-refresh allowlist ───
+# `pt_classify_post_marker_paths` が「docs-only」と判定するための変更ファイルパスの
+# allowlist（カンマ区切り glob パターン）。post-marker commit 群の全変更ファイルが
+# このいずれかにマッチした場合、`pt_handle_post_marker_commits` は
+# `POST_MARKER_RECOVERY_MODE=fail-with-diagnostic`（default）であっても safety net を
+# 発火せず、marker を HEAD まで auto-refresh して per-task Reviewer を続行する
+# （Req 1.1, 1.5）。
+#
+# - 既定値は `impl-notes.md` / `docs/specs/**/*.md` の 2 パターン。`docs(impl-notes):
+#   learning 追記` のような「Developer agent の Marker contract に従っているが手順順序の
+#   都合で marker 後ろに積まれてしまった文書 commit」のみを救済し、コード / テスト /
+#   設定ファイルが 1 件でも混在すれば safety net 発火に倒す（Req 2.2）。
+# - パターンマッチングは `ar_classify_diff` と同じ POSIX bash `[[ "$path" == $pattern ]]`
+#   イディオムで行うため、glob ワイルドカード `*` / `**` / `?` が利用可能。
+# - `POST_MARKER_RECOVERY_MODE=extend-range` 設定時はこの auto-refresh 判定は
+#   オーバーライドされない（Req 3.3 / 既存 extend-range 挙動を温存）。
+POST_MARKER_DOCS_ALLOWLIST="${POST_MARKER_DOCS_ALLOWLIST:-**/impl-notes.md,docs/specs/**/*.md}"
+
 # LOG_DIR と LOCK_FILE は REPO_SLUG を挟むことで repo ごとに分離。
 # 環境変数で明示上書きもできる。
 LOG_DIR="${LOG_DIR:-$HOME/.issue-watcher/logs/$REPO_SLUG}"
@@ -3234,6 +3252,99 @@ pt_detect_post_marker_commits() {
   return 0
 }
 
+# ─── pt_classify_post_marker_paths <marker_sha> ───
+#
+# Issue #356: marker_sha より後ろ (`<marker_sha>..HEAD`) の累積 diff の変更ファイル集合を
+# `POST_MARKER_DOCS_ALLOWLIST` glob パターンと突合し、`docs-only` / `mixed` を判定する
+# helper（Req 1.1, 2.1, 2.2）。
+#
+# 判定ルール:
+#   - 全変更ファイルが allowlist のいずれかにマッチ → `docs-only`（rc=0）
+#   - 1 件でも allowlist 外（コード / テスト / 設定ファイル等）が含まれる → `mixed`（rc=1）
+#   - 変更ファイル 0 件は想定外（呼び出し側は `pt_detect_post_marker_commits` で先に
+#     0 件を rc=1 で除外している）。本関数では `mixed` に倒す（保守的判定）
+#
+# Contract:
+#   引数: $1 = marker_sha
+#   stdout:
+#     1 行目: `docs-only` または `mixed`
+#     2 行目: `mixed` の場合は最初に検出された allowlist 外パス（取得できれば）
+#   stderr: 警告ログ（git エラー時のみ）
+#   rc=0: docs-only と判定
+#   rc=1: mixed と判定（allowlist 外パスが 1 件以上 / 変更ファイル 0 件 / allowlist 空）
+#   rc=2: git エラー（fail-safe / 呼び出し側は `mixed` 同様に扱える）
+#
+# パターンマッチング:
+#   - `ar_classify_diff` と同じ POSIX bash `[[ "$path" == $pattern ]]` イディオム
+#   - glob ワイルドカード（`*` / `**` / `?`）が使用可能
+#   - 1 件でも unmatched が出た時点で即座に `mixed` 判定（保守的判定 / Req 2.2）
+#
+# 後方互換性（NFR 1.1, 1.3）:
+#   - 本関数は新規追加であり、呼び出し側（`pt_handle_post_marker_commits`）が rc=0
+#     （docs-only）以外の戻り値をすべて従来挙動（safety net 発火）に倒す
+#
+# Requirements: 1.1, 1.5, 2.1, 2.2, NFR 1.3
+pt_classify_post_marker_paths() {
+  local marker_sha="$1"
+
+  # allowlist 未設定 / 空文字 → 保守的に mixed 扱い（Req 2.2 安全側）
+  if [ -z "${POST_MARKER_DOCS_ALLOWLIST:-}" ]; then
+    echo "mixed"
+    return 1
+  fi
+
+  local changed_paths
+  if ! changed_paths=$(git diff --name-only "${marker_sha}..HEAD" 2>/dev/null); then
+    pt_warn "post-marker-paths-classify: git diff error marker=${marker_sha}"
+    echo "mixed"
+    return 2
+  fi
+
+  if [ -z "$changed_paths" ]; then
+    # 変更ファイル 0 件は本来呼ばれない（detect 側で除外済み）。保守的に mixed
+    echo "mixed"
+    return 1
+  fi
+
+  # allowlist をカンマ区切りで配列展開
+  local -a patterns=()
+  local IFS=','
+  read -ra patterns <<< "$POST_MARKER_DOCS_ALLOWLIST"
+  IFS=$' \t\n'
+
+  local path matched pattern first_unmatched=""
+  while IFS= read -r path; do
+    [ -z "$path" ] && continue
+    matched=false
+    for pattern in "${patterns[@]}"; do
+      # 前後空白除去
+      pattern="${pattern# }"
+      pattern="${pattern% }"
+      [ -z "$pattern" ] && continue
+      # POSIX bash の path matching（`==` + glob）。
+      # 右辺の変数 glob 比較は意図的なので SC2053 を局所無効化。
+      # shellcheck disable=SC2053
+      if [[ "$path" == $pattern ]]; then
+        matched=true
+        break
+      fi
+    done
+    if [ "$matched" = "false" ]; then
+      first_unmatched="$path"
+      break
+    fi
+  done <<< "$changed_paths"
+
+  if [ -n "$first_unmatched" ]; then
+    echo "mixed"
+    echo "$first_unmatched"
+    return 1
+  fi
+
+  echo "docs-only"
+  return 0
+}
+
 # ─── pt_handle_post_marker_commits <task_id> <round> <range_start> <marker_sha> <post_marker_list> ───
 #
 # `pt_detect_post_marker_commits` で marker 後の未レビュー commit が検出された場合の
@@ -3290,6 +3401,50 @@ pt_handle_post_marker_commits() {
   local ts post_csv
   ts=$(date '+%F %T')
   post_csv=$(printf '%s' "$post_marker_list" | tr '\n' ',' | sed 's/,$//')
+
+  # ─── Issue #356: docs-only auto-refresh の前段判定 ─────────────────────────
+  # `POST_MARKER_RECOVERY_MODE=extend-range` 設定時は既存挙動を温存する（Req 3.3:
+  # docs-only 判定はこの mode をオーバーライドしない）。それ以外（default
+  # `fail-with-diagnostic` / fallback 経由の `fail-with-diagnostic`）でのみ、
+  # `pt_classify_post_marker_paths` の判定結果が `docs-only` の場合に safety net を
+  # 発火させず marker を HEAD まで auto-refresh する。
+  #
+  # 後方互換性（Req 3.2, NFR 1.1）:
+  #   - `extend-range` mode: 既存どおり docs / code を問わず range 拡張（本ブロックを skip）
+  #   - `fail-with-diagnostic` mode + 全パス allowlist 内: docs-only-auto-refresh で続行
+  #   - `fail-with-diagnostic` mode + allowlist 外 1 件以上 / 混在 / classify 失敗:
+  #     既存どおり fail-with-diagnostic（rc=5）に倒す（Req 2.2, 2.4）
+  if [ "$mode" != "extend-range" ]; then
+    local classify_out classify_rc=0 classify_verdict classify_unmatched=""
+    classify_out=$(pt_classify_post_marker_paths "$marker_sha") || classify_rc=$?
+    classify_verdict=$(printf '%s' "$classify_out" | sed -n '1p')
+    classify_unmatched=$(printf '%s' "$classify_out" | sed -n '2p')
+
+    if [ "$classify_rc" = "0" ] && [ "$classify_verdict" = "docs-only" ]; then
+      local head_sha
+      if ! head_sha=$(git rev-parse HEAD 2>/dev/null); then
+        pt_warn "post-marker-commits-detect: git rev-parse HEAD failed during docs-only auto-refresh (range_start=${range_start})"
+        # auto-refresh 失敗 → fail-with-diagnostic 相当に倒す
+        echo "[${ts}] per-task: post-marker-commits-detected task_id=${task_id} round=${round} marker=${marker_sha} post_marker_shas=${post_csv} recovery=${mode}" >&2
+        return 5
+      fi
+      # Req 1.2 / NFR 2.2: docs-only auto-refresh 発火を 1 行イベントログとして観測可能に
+      echo "[${ts}] per-task: post-marker-commits-detected task_id=${task_id} round=${round} marker=${marker_sha} post_marker_shas=${post_csv} recovery=docs-only-auto-refresh" >&2
+      printf '%s\t%s\n' "$range_start" "$head_sha"
+      return 0
+    fi
+
+    # docs-only 不成立 → mixed / classify 失敗の旨を観測ログ（NFR 1.3）に残し、
+    # 既存の mode dispatch（fail-with-diagnostic）に続行する。
+    local _classify_reason="mixed"
+    if [ "$classify_rc" = "2" ]; then
+      _classify_reason="classify-git-error"
+    elif [ -n "$classify_unmatched" ]; then
+      _classify_reason="mixed(first_unmatched=${classify_unmatched})"
+    fi
+    pt_warn "post-marker-paths-classify: not docs-only task_id=${task_id} marker=${marker_sha} reason=${_classify_reason}"
+  fi
+
   echo "[${ts}] per-task: post-marker-commits-detected task_id=${task_id} round=${round} marker=${marker_sha} post_marker_shas=${post_csv} recovery=${mode}" >&2
 
   if [ "$mode" = "extend-range" ]; then
@@ -4161,17 +4316,32 @@ run_per_task_reviewer() {
       pt_handle_out=$(pt_handle_post_marker_commits "$task_id" "$round" "$range_start" "$range_end" "$post_marker_list") || pt_handle_rc=$?
       case "$pt_handle_rc" in
         0)
-          # extend-range: 新 range を採用して Reviewer を起動
+          # rc=0 経路は以下 2 パターンのいずれか:
+          #   (a) POST_MARKER_RECOVERY_MODE=extend-range で既存どおり range を HEAD まで拡張
+          #   (b) Issue #356: docs-only-auto-refresh で marker を HEAD まで auto-refresh
+          # 両者は stdout フォーマット（<new_range_start>\t<new_range_end>）が同一なため、
+          # 呼び出し側 では `POST_MARKER_RECOVERY_MODE` の正規化値で判別する
+          # （`pt_handle_post_marker_commits` 内と同じ正規化規則）。
           local new_range_start new_range_end
           new_range_start=$(printf '%s' "$pt_handle_out" | cut -f1)
           new_range_end=$(printf '%s' "$pt_handle_out" | cut -f2)
           if [ -z "$new_range_start" ] || [ -z "$new_range_end" ]; then
             pt_log "task=$task_id reviewer start round=$round result=error reason=post-marker-extend-range-empty detail=handle-returned-empty-pair" >> "$LOG"
-            # fail-safe: extend-range 結果が空なら fail-with-diagnostic と同等扱いで停止
+            # fail-safe: 拡張結果が空なら fail-with-diagnostic と同等扱いで停止
             pt_mark_post_marker_commits_detected "$task_id" "$round" "$range_end" "$post_marker_list" || true
             return 5
           fi
-          pt_log "task=$task_id reviewer start round=$round post-marker-commits-detected recovery=extend-range old_range_end=${range_end:0:7} new_range_end=${new_range_end:0:7}" >> "$LOG"
+          local _recovery_kind="extend-range"
+          local _normalized_mode="${POST_MARKER_RECOVERY_MODE:-fail-with-diagnostic}"
+          case "$_normalized_mode" in
+            extend-range) _recovery_kind="extend-range" ;;
+            *)            _recovery_kind="docs-only-auto-refresh" ;;
+          esac
+          pt_log "task=$task_id reviewer start round=$round post-marker-commits-detected recovery=${_recovery_kind} old_range_end=${range_end:0:7} new_range_end=${new_range_end:0:7}" >> "$LOG"
+          if [ "$_recovery_kind" = "docs-only-auto-refresh" ]; then
+            # Req 1.3: 当該 Issue に 1 行の事実記録を残す（auto-refresh が起きた task_id と理由）
+            pt_post_docs_only_auto_refresh_comment "$task_id" "$round" "$range_end" "$new_range_end" "$post_marker_list" || true
+          fi
           range_start="$new_range_start"
           range_end="$new_range_end"
           extended="true"
@@ -4594,6 +4764,79 @@ EOF
   body="${body}
 
 問題を解決してから \`claude-failed\` ラベルを外してください。"
+
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
+}
+
+# ─── pt_post_docs_only_auto_refresh_comment <task_id> <round> <old_marker_sha> <new_range_end_sha> <post_marker_list> ───
+#
+# Issue #356: docs-only auto-refresh が発火したことを当該 Issue に 1 行の事実記録として残す
+# 専用ヘルパー（Req 1.3）。`pt_mark_post_marker_commits_detected` と異なりラベル付け替えは
+# 行わず、`claude-failed` も付与しない（auto-refresh 続行のため）。
+#
+# 重複コメント抑制:
+#   - HTML コメント marker `<!-- idd-claude:per-task-post-marker-docs-only-auto-refresh:#<issue>:<task> -->`
+#     を本文末尾に埋め込み、当該 Issue に同一 marker のコメントが既存なら新規投稿を skip する
+#     （既存コメント末尾への追記もしない / 同一 task で auto-refresh が複数回発火した場合の
+#     コメント増殖を抑制）。
+#
+# Args:
+#   $1 = task_id
+#   $2 = round
+#   $3 = old_marker_sha (auto-refresh 前の marker SHA)
+#   $4 = new_range_end_sha (auto-refresh 後の new range_end = HEAD SHA)
+#   $5 = post_marker_list (改行区切りの post-marker SHA 列)
+#
+# 副作用:
+#   - 既存マーカー無し: 1 件 Issue コメントを投稿
+#   - 既存マーカー有り: 何もしない（rc=0）
+#
+# Requirements: Issue #356 Req 1.3, NFR 1.3, NFR 2.2
+pt_post_docs_only_auto_refresh_comment() {
+  local task_id="$1"
+  local round="$2"
+  local old_marker_sha="$3"
+  local new_range_end_sha="$4"
+  local post_marker_list="$5"
+  local marker="<!-- idd-claude:per-task-post-marker-docs-only-auto-refresh:#${NUMBER}:${task_id} -->"
+
+  local post_csv post_bullets
+  post_csv=$(printf '%s' "$post_marker_list" | tr '\n' ',' | sed 's/,$//')
+  post_bullets=$(printf '%s\n' "$post_marker_list" | sed '/^$/d' | sed 's/^/  - `/' | sed 's/$/`/')
+
+  # 重複コメント抑制
+  local comments_json existing_count=0
+  if comments_json=$(gh issue view "$NUMBER" --repo "$REPO" --json comments 2>/dev/null); then
+    existing_count=$(echo "$comments_json" | jq -r --arg marker "$marker" '
+      (.comments // []) | map(select(.body | contains($marker))) | length
+    ' 2>/dev/null || echo "0")
+    [ -n "$existing_count" ] || existing_count=0
+  fi
+
+  if [ "$existing_count" -gt 0 ]; then
+    return 0
+  fi
+
+  local body
+  body=$(cat <<EOF
+ℹ️ per-task post-marker docs-only auto-refresh が発火しました（task=\`${task_id}\` / round=${round}）。
+
+\`docs(tasks): mark ${task_id} as done\` marker commit (\`${old_marker_sha}\`) より後ろに、
+docs-only allowlist（\`POST_MARKER_DOCS_ALLOWLIST\` 既定: \`**/impl-notes.md,docs/specs/**/*.md\`）
+内のファイルのみで構成される commit が積まれている状態を検出したため、
+marker を HEAD (\`${new_range_end_sha}\`) まで auto-refresh して per-task Reviewer を続行します。
+本コメントは事実記録のみであり、自動開発は停止していません。
+
+- 旧 marker SHA: \`${old_marker_sha}\`
+- 新 range_end SHA: \`${new_range_end_sha}\`
+- post-marker SHA リスト（新しい順 / CSV）: \`${post_csv}\`
+- post-marker SHA リスト（詳細）:
+${post_bullets}
+
+参考: 本判定は Issue #356 の docs-only auto-refresh 機能によるものです。
+${marker}
+EOF
+)
 
   gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
 }
