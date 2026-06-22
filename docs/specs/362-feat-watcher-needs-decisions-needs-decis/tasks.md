@@ -131,7 +131,7 @@
   - _Requirements: NFR 2.3_
   - _Boundary: .claude/agents/product-manager.md_
 
-- [ ] 6. 近接テスト追加（needs_decisions_auto_test.sh）— deferred test の partial 解消
+- [x] 6. 近接テスト追加（needs_decisions_auto_test.sh）— deferred test の partial 解消
   - `local-watcher/test/needs_decisions_auto_test.sh` を新規作成。既存 `full_auto_enabled_test.sh` の
     `extract_function` イディオムを踏襲（awk による単一関数切り出し + eval + stub）
   - 検証ケース（task 1〜2.4 / 3 で deferred した AC のテスト追加を **本 task で集約解消**）:
