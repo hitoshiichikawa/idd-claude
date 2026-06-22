@@ -419,3 +419,108 @@ fr_fetch_failed_prs() {
   printf '%s' "$result"
   return 0
 }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Recovery Decision Layer
+#
+# 失敗ログから正規化 hash（reason key）を生成して、直前試行と同一原因かつ無進捗の
+# 修正反復を検出する。設計参照: design.md の Recovery Decision Layer 節
+# （fr_should_recover / fr_compute_failure_signature / fr_detect_no_progress）。
+#
+# 関連 AC:
+#   - Req 5.1: 修正試行ごとに直前試行との比較を行う
+#   - Req 5.2: 同一失敗理由 + 無進捗で no-progress と判定する
+#   - Req 5.5: 直前試行情報（signature / head_sha）を永続化済み state から参照する
+#   - NFR 5.2: 失敗情報の取得失敗・空 state でも安全側に倒し caller を落とさない
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# fr_compute_failure_signature: 失敗ログから揮発要素を正規化して SHA-1 hex を返す。
+#
+# 入力:
+#   stdin: 正規化対象の失敗ログ本文（複数行可）
+# 出力:
+#   stdout: SHA-1 hex（40 桁）。空入力でも sha1sum が固定の空文字列 hash を返すため
+#           常に 40 桁文字列が出力される
+#
+# 正規化対象（揮発要素を除去して同原因の再発を同一 signature として扱うため）:
+#   - ISO 8601 タイムスタンプ（`2026-06-22T10:34:56Z` 等）
+#   - SHA-1 ライクな 40-hex（commit SHA / object SHA）
+#   - 絶対パス + 行番号（`/foo/bar/baz.sh:123` 等）
+#   - URL（`http://...` / `https://...`）
+#   - GitHub Actions の `Run #N`
+#
+# 設計参照: design.md 行 439-449。本実装は sed -E パターンを忠実に踏襲する。
+fr_compute_failure_signature() {
+  sed -E '
+    s|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]+Z||g
+    s|[0-9a-f]{40}|<sha>|g
+    s|/[A-Za-z0-9._/-]+:[0-9]+||g
+    s|https?://[^[:space:]]+|<url>|g
+    s|Run #[0-9]+||g
+  ' | sha1sum | cut -d' ' -f1
+}
+
+# fr_detect_no_progress: 直前 state と現在 signature / head_sha を比較して
+# no-progress を判定する。
+#
+# Args:
+#   $1 = current_signature (string、空可)
+#   $2 = current_head_sha (string、空文字なら Issue 経路として扱う)
+#   $3 = prev_state_json (string、`{}` または schema 準拠 JSON、空可)
+#
+# Returns:
+#   0 = no-progress（同一 signature + 進捗なし → 終端候補）
+#   1 = progress（prev state なし / signature 異 / head 進捗あり）
+#
+# 判定ロジック（design.md 行 459-466）:
+#   - prev_state_json が `{}` または `last_failure_signature` が空 / null → progress
+#   - 直前 signature と現在 signature が異 → progress
+#   - PR 経路（current_head_sha が非空）:
+#       last_head_sha == current_head_sha かつ signature 一致 → no-progress
+#       last_head_sha != current_head_sha（head 進捗あり） → progress
+#   - Issue 経路（current_head_sha が空文字）:
+#       signature 一致のみで no-progress（branch HEAD を持たないため厳しめ）
+#
+# 副作用なし（純粋関数）。caller の qa_log / fr_log 経由でログ出力する想定。
+fr_detect_no_progress() {
+  local current_signature="$1"
+  local current_head_sha="$2"
+  # 第 3 引数省略時は空 state として扱う。bash の `${var:-default}` 展開は default
+  # 内の `{}` がリテラルとして安全に通らないため、明示的な空チェックで分岐する。
+  local prev_state_json="${3-}"
+  if [ -z "$prev_state_json" ]; then
+    prev_state_json="{}"
+  fi
+
+  # prev_state_json から last_failure_signature / last_head_sha を抽出。
+  # jq parse 失敗 / 不在は空文字に正規化（fail-open）。
+  local prev_signature
+  if ! prev_signature=$(printf '%s' "$prev_state_json" | jq -r '.last_failure_signature // ""' 2>/dev/null); then
+    prev_signature=""
+  fi
+  local prev_head_sha
+  if ! prev_head_sha=$(printf '%s' "$prev_state_json" | jq -r '.last_head_sha // ""' 2>/dev/null); then
+    prev_head_sha=""
+  fi
+
+  # prev state なし / signature 空（初回 / 破損 fallback） → progress
+  if [ -z "$prev_signature" ]; then
+    return 1
+  fi
+
+  # signature 異 → progress
+  if [ "$prev_signature" != "$current_signature" ]; then
+    return 1
+  fi
+
+  # PR 経路: head_sha が非空。head が進んでいたら progress
+  if [ -n "$current_head_sha" ]; then
+    if [ "$prev_head_sha" != "$current_head_sha" ]; then
+      return 1
+    fi
+    return 0
+  fi
+
+  # Issue 経路（current_head_sha 空）: signature 一致のみで no-progress
+  return 0
+}
