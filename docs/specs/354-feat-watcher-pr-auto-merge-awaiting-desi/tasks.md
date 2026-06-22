@@ -10,7 +10,7 @@
 テスト → README 同期）。並列化は同一 `issue-watcher.sh` 本体を編集するタスクが多いため
 基本的に直列で進める。
 
-- [ ] 1. 新規 module `modules/auto-merge-design.sh` を追加
+- [x] 1. 新規 module `modules/auto-merge-design.sh` を追加
   - `local-watcher/bin/modules/auto-merge-design.sh` を新規作成（#352 `auto-merge.sh` を雛形にコピーし `am_` → `amd_` / `AUTO_MERGE_` → `AUTO_MERGE_DESIGN_` で命名置換）
   - 関数 prefix `amd_`（未使用 prefix）で namespace 分離（CLAUDE.md §2）
   - 定義する関数群:
