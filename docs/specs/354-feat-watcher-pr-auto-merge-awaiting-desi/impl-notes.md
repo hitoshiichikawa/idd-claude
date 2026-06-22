@@ -217,3 +217,35 @@
 - 残存課題: なし。本 task で実装系（task 1-4）/ テスト系（task 5-6）/ README 系（task 7）
   が完了し、tasks.md の最後の未完 task は task 8（全体 verify）。task 8 は本 task の verify
   実行をそのまま reproduce + dry-run smoke / install scratch test の追加検証で完了する見込み
+
+### Task 8
+
+- 採用方針: tasks.md line 124-136 の `<!-- stage-a-verify -->` ブロックで宣言された 10
+  コマンドを順次実行し全 PASS を確認、加えて dry-run smoke で cycle 開始ログに
+  `auto-merge-design=false` が含まれることを観測。fail は 1 件もなく impl-notes.md「確認事項」
+  への追加列挙は不要
+- 重要な判断:
+  - shellcheck: `local-watcher/bin/modules/auto-merge-design.sh` / `issue-watcher.sh` /
+    `install.sh` / `setup.sh` / `.github/scripts/*.sh` で警告ゼロ (exit=0)。`.shellcheckrc` の
+    SC2317 / SC2012 accepted baseline を反映済 / NFR 5.1 達成
+  - actionlint: `.github/workflows/*.yml` クリーン (exit=0)。本 spec で workflow は変更
+    しないが回帰確認として要件通り実施
+  - bash -n: `auto-merge-design.sh` / `issue-watcher.sh` 両方とも構文 OK
+  - 新規テスト: `bash local-watcher/test/auto-merge-design_test.sh` PASS=61 FAIL=0
+    （task 5 結果と完全一致）
+  - 既存テスト回帰確認 (NFR 2.3): `auto-merge_test.sh` PASS=56 FAIL=0 / `pr_publish_commit_status_test.sh`
+    PASS=74 FAIL=0 / `full_auto_enabled_test.sh` PASS=28 FAIL=0。task 4-7 で観測した既存挙動
+    と完全一致
+  - diff -r (NFR 4.4): `.claude/agents` / `.claude/rules` ともに root ↔ repo-template 差分
+    ゼロ (exit=0)。本 spec では `.claude/{agents,rules}` を編集しなかったため期待通り
+  - dry-run smoke (Req 9.4 / NFR 2.1): `REPO=owner/test REPO_DIR=/tmp/test-repo-354-task8 bash local-watcher/bin/issue-watcher.sh`
+    で cycle 開始ログ 1 行目に `base-branch=main merge-queue-base=main auto-rebase=claude auto-merge=false auto-merge-design=false full-auto=false`
+    を観測。`auto-merge-design=false` が `auto-merge=` と `full-auto=` の間に正しく出力され
+    （task 3 で配線した位置）、続いて `cd: /tmp/test-repo-354-task8: No such file or directory`
+    で early exit (task 4 learnings 記載通りの想定挙動)
+  - install scratch test (任意): `install.sh` は `IDD_CLAUDE_BIN_DIR` 等の bin dir override
+    env を提供しておらず常に `$HOME/bin` に書き込む実装 (line 1349-1365)。実行すると現在
+    稼働中の watcher の `$HOME/bin/modules/` を実際に書き換える破壊的操作になるため、task 8
+    の指示に従い実施を見送り。本 spec の merge 後は README task 7 で追記済の `cd ~/.idd-claude && git pull && ./install.sh --local`
+    手順で `$HOME/bin/modules/auto-merge-design.sh` が配置される運用フローに従う想定
+- 残存課題: なし。本 spec の全 task (1-8) 完了
