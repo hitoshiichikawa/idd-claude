@@ -66,6 +66,7 @@ if ! declare -F sn_build_payload >/dev/null; then
   exit 2
 fi
 
+# shellcheck disable=SC2034  # sn_build_payload は $REPO を読むため間接的に使用される
 REPO="owner/test-repo"
 PASS_COUNT=0
 FAIL_COUNT=0
