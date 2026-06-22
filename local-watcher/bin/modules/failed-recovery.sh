@@ -931,6 +931,10 @@ fr_finalize_success() {
     rc=1
   fi
 
+  # Issue #370 task 5: Slack 通知 emitter（fail-open / gate OFF 時は no-op / NFR 3.3 で
+  # signature 値は detail に含めない）。
+  sn_notify failed-recovery "$number" "https://github.com/$REPO/${kind}s/$number" recovered "kind=${kind} attempts=${total_attempts}" || true
+
   return "$rc"
 }
 
@@ -1174,6 +1178,9 @@ fr_terminate_max_attempts() {
   # の 3 段 prefix を付与する。
   fr_log "${kind}=#${number} terminated reason=max-attempts total=${total_attempts} max=${FAILED_RECOVERY_MAX_ATTEMPTS}"
 
+  # Issue #370 task 5: Slack 通知 emitter（fail-open / gate OFF 時は no-op）
+  sn_notify failed-recovery "$number" "https://github.com/$REPO/${kind}s/$number" max-attempts "kind=${kind} attempts=${total_attempts} max=${FAILED_RECOVERY_MAX_ATTEMPTS}" || true
+
   return 0
 }
 
@@ -1236,6 +1243,10 @@ fr_terminate_no_progress() {
     sig_prefix=" signature=$(printf '%s' "$signature" | cut -c1-8)"
   fi
   fr_log "${kind}=#${number} terminated reason=no-progress total=${total_attempts}${sig_prefix}"
+
+  # Issue #370 task 5: Slack 通知 emitter（fail-open / gate OFF 時は no-op）。
+  # signature 値は detail に含めない（NFR 3.3 / fr_log 側で先頭 8 桁を維持）。
+  sn_notify failed-recovery "$number" "https://github.com/$REPO/${kind}s/$number" no-progress "kind=${kind} attempts=${total_attempts}" || true
 
   return 0
 }

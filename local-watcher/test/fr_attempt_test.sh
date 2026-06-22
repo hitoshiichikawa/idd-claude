@@ -64,6 +64,21 @@ for fn in fr_should_recover fr_post_attempt_comment fr_finalize_success fr_run_r
   fi
 done
 
+# Issue #370 task 5: fr_finalize_success の return 直前に `sn_notify failed-recovery ...`
+# 呼び出しが挟まる。extract_function は 1 関数しか取らないため `sn_notify` が unbound。
+# ローカル stub で call count と引数を観測する。
+SN_NOTIFY_CALL_COUNT=0
+SN_NOTIFY_LAST_EVENT=""
+SN_NOTIFY_LAST_RESULT=""
+SN_NOTIFY_LAST_NUMBER=""
+sn_notify() {
+  SN_NOTIFY_CALL_COUNT=$((SN_NOTIFY_CALL_COUNT + 1))
+  SN_NOTIFY_LAST_EVENT="${1:-}"
+  SN_NOTIFY_LAST_NUMBER="${2:-}"
+  SN_NOTIFY_LAST_RESULT="${4:-}"
+  return 0
+}
+
 # ── グローバル env（遅延束縛で抽出関数本体から参照される） ──
 # shellcheck disable=SC2034
 REPO="owner/test-repo"
@@ -687,6 +702,10 @@ echo "--- Section 11: fr_finalize_success 単体 ---"
 
 # 11-A: 正常 path → --remove-label + FR_PROCESSED_THIS_CYCLE 追加 + state save
 reset_stub_state
+SN_NOTIFY_CALL_COUNT=0
+SN_NOTIFY_LAST_EVENT=""
+SN_NOTIFY_LAST_RESULT=""
+SN_NOTIFY_LAST_NUMBER=""
 set +e
 fr_finalize_success "issue" "300" "2" "test-sig" ""
 rc=$?
@@ -694,6 +713,11 @@ set -e
 assert_rc "Req 3.4: fr_finalize_success 正常 path → rc=0" "0" "$rc"
 assert_grep "Req 3.4: gh issue edit --remove-label が呼ばれる" "gh issue edit 300 .* --remove-label claude-failed" "$GH_CALL_LOG"
 assert_grep "Req 6.2: state JSON に last_status=succeeded を保存" "^fr_save_state 300 2 succeeded test-sig" "$SAVE_STATE_TRACE"
+# Issue #370 Req 2.2 task 5: success path で sn_notify が failed-recovery + recovered で発火
+assert_eq "#370 Req 2.2 (success): sn_notify が 1 回発火" "1" "$SN_NOTIFY_CALL_COUNT"
+assert_eq "#370 Req 2.2 (success): event_type=failed-recovery" "failed-recovery" "$SN_NOTIFY_LAST_EVENT"
+assert_eq "#370 Req 3.5 (success): result=recovered" "recovered" "$SN_NOTIFY_LAST_RESULT"
+assert_eq "#370 Req 3.3 (success): number=300" "300" "$SN_NOTIFY_LAST_NUMBER"
 case " $FR_PROCESSED_THIS_CYCLE " in
   *" issue:300 "*)
     echo "PASS: Req 6.1: FR_PROCESSED_THIS_CYCLE に issue:300 が追加される"
