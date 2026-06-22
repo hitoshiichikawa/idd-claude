@@ -120,7 +120,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, NFR 2.3, NFR 4.1_
   - _Boundary: triage-prompt.tmpl_
 
-- [ ] 5. PM agent 定義に classification 出力責務を追記
+- [x] 5. PM agent 定義に classification 出力責務を追記
   - `.claude/agents/product-manager.md` の「# Triage モードで呼ばれた場合」節（行 120-124）末尾に
     5-8 行で classification 出力責務を追記:
     - `status = "needs-decisions"` の各 decisions について `classification: "safe" | "human-only"` を
