@@ -33,7 +33,7 @@
   - _Depends: 1_
 
 - [ ] 3. HTTP POST と fail-open 制御（sn_post_webhook + sn_notify entry point）
-- [ ] 3.1 sn_post_webhook の実装
+- [x] 3.1 sn_post_webhook の実装
   - `curl -X POST -H 'Content-Type: application/json' --max-time "$SLACK_NOTIFY_TIMEOUT" --silent --show-error -d @- -- "$SLACK_WEBHOOK_URL"` 相当を実装
   - payload は stdin (`-d @-`) で渡し、コマンドライン引数化を避ける（process listing からの漏洩防止）
   - HTTP status を `-w '%{http_code}'` で取得し、curl exit code と合わせて rc を判定
