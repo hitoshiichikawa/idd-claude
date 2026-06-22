@@ -86,7 +86,7 @@
   - _Boundary: failed-recovery.sh (3 callsite に 1 行ずつ), local-watcher/test/fr_terminate_test.sh, fr_state_test.sh 等_
   - _Depends: 3.2_
 
-- [ ] 6. needs-decisions-auto / promote callsite への hook 追加
+- [x] 6. needs-decisions-auto / promote callsite への hook 追加
   - `local-watcher/bin/modules/needs-decisions-auto.sh` の `nda_auto_continue` 関数末尾
     （既存 `nda_log "issue=#${NUMBER} ... action=auto-continue ..."` 行の直後、`return 0` の直前）に
     `sn_notify needs-decisions-auto-continue "$NUMBER" "https://github.com/$REPO/issues/$NUMBER" auto-continued "mode=$mode classification=$classification" || true` を追加
