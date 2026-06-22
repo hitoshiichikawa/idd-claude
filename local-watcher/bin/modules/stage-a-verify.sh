@@ -409,7 +409,10 @@ _SAV_RESOLVED_SOURCE=""
 # ─── _SAV_LAST_OUTCOME（run サマリ用 outcome 露出 / #239 task 5） ───
 #
 # 直近の `stage_a_verify_run` がどの outcome で抜けたかを記録するモジュールスコープ変数。
-# 値域: success / skip / disabled / round1 / round2 / 空（未実行）。`stage_a_verify_run` は
+# 値域: success / skip / disabled / round1 / round2 / warn-skipped / 空（未実行）。
+# `warn-skipped` は #364 で追加（パス不在 `diff` 失敗を WARN 降格して Stage A 続行した outcome）で、
+# success と区別して run サマリ上で false-fail 救済の発生を観測可能にする（Req 4.4 / NFR 4.2）。
+# `stage_a_verify_run` は
 # call site（run_impl_pipeline）と同一プロセスで呼ばれる（command substitution ではない）
 # ため、ここに代入した値は call site から読める（_SAV_RESOLVED_SOURCE のサブシェル境界問題は
 # resolve が command substitution で呼ばれることに起因するもので、run 自体には当てはまらない）。
@@ -663,6 +666,79 @@ stage_a_verify_reset_round() {
   rm -f "$path" 2>/dev/null || true
 }
 
+# ─── _sav_is_path_missing_diff_failure ───
+#
+# verify コマンドの実行失敗（非 0 exit）が「`diff` のパス不在」に **限定** されるかを判定する
+# 純粋関数（#364 Req 2.1 / NFR 2.1）。WARN 降格と real なコード品質失敗を区別するための
+# defense-in-depth として、`stage_a_verify_run` の Execute 後ブロックから呼ばれる。
+#
+# 判定条件（すべて満たすときに 0 = 「パス不在のみ」）:
+#   - exit code が 2（GNU diff の "trouble" / errors during processing。content 差分は exit=1）
+#   - stderr に `No such file or directory` 文字列を含む（GNU diff のパス不在エラーメッセージ）
+#   - stderr に `diff:` 始まりのエラー行を含む（誤判定回避: 別コマンドが偶然 exit=2 + ENOENT を
+#     吐いたケースを除外し、`diff` 自身のエラーだけを WARN 対象に絞る）
+#
+# Req 2.5（連結コマンド中で real fail と path-missing が混在した場合の優先）に従い、本関数は
+# 上記 3 条件のいずれかを欠く場合に 1 を返し、real fail として既存 round counter 経路を維持する。
+# 具体的には:
+#   - exit=1（diff の content 差分）→ 既存挙動（real fail）として round1/round2 へ進む（Req 3.1）
+#   - exit=124（timeout）→ 既存挙動（real fail）（Req 2.4）
+#   - exit=2 だが `No such file or directory` を含まない（権限エラー等）→ real fail として扱う
+#   - exit=2 + `No such file or directory` だが `diff:` 始まり行がない（別コマンドの ENOENT）→ real fail
+#
+# 入力:
+#   $1 = 整数 rc（実行 exit code）
+#   $2 = stderr 全文（multi-line 可）
+# 戻り値: 0 = 「パス不在のみによる失敗」/ 1 = それ以外（real fail として既存経路を維持）
+# 副作用: なし（純粋関数、Req 3.1 / NFR 2.1）
+_sav_is_path_missing_diff_failure() {
+  local rc="$1"
+  local stderr_text="${2:-}"
+  # 整数 rc を防御的に検証（非整数なら real fail として扱う）
+  case "$rc" in
+    2) ;;
+    *) return 1 ;;
+  esac
+  # `No such file or directory` 文字列の存在確認（GNU diff のパス不在エラーメッセージ）
+  case "$stderr_text" in
+    *"No such file or directory"*) ;;
+    *) return 1 ;;
+  esac
+  # `diff:` で始まる行が含まれることを確認（誤判定回避: diff 自身のエラーに限定）
+  if ! printf '%s' "$stderr_text" | grep -q '^diff:'; then
+    return 1
+  fi
+  return 0
+}
+
+# ─── _sav_extract_missing_path ───
+#
+# stderr から `diff:` のパス不在エラーメッセージに含まれるパスを抽出する純粋関数（#364 Req 4.2）。
+# GNU diff のエラーフォーマットは `diff: <path>: No such file or directory` 形式。stderr に
+# 複数行ある場合は最初に検出した行のパスを返す（NFR 4.2 で 1 行以上の根拠を記録する要件は
+# 「最初の検出 1 件」で十分に満たせる）。
+#
+# パス抽出は sed で `^diff: ` と `: No such file or directory$` を剥がす方式。マッチしない
+# 場合は空文字を返す（呼び出し側は空文字も許容するロギングを行う）。
+#
+# 入力: $1 = stderr 全文
+# stdout: 抽出したパス（1 行）。抽出失敗時は空文字
+# 副作用: なし（純粋関数）
+_sav_extract_missing_path() {
+  local stderr_text="${1:-}"
+  # grep 無マッチ時は exit=1 となり caller の `set -e` を巻き込む可能性があるため `|| true`
+  # で吸収する。pipeline 全体は常に exit=0 で返し、stdout に空文字を出す（仕様: マッチしない
+  # 場合は空文字を返す）。
+  local matched=""
+  matched=$(printf '%s' "$stderr_text" \
+    | grep -m1 '^diff:.*: No such file or directory$' \
+    || true)
+  if [ -z "$matched" ]; then
+    return 0
+  fi
+  printf '%s' "$matched" | sed -e 's|^diff: ||' -e 's|: No such file or directory$||'
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 以下は元 issue-watcher.sh では Region 2（mark_issue_failed 定義後の位置）に
 # 置かれていた失敗ハンドラ / 統合ランナー。#181 Part 3 で Region 1 と 1 モジュールへ
@@ -795,11 +871,37 @@ stage_a_verify_run() {
   # cmd の shell エスケープは printf %q で安全側に倒し、ログ復元性を確保する。
   sav_log "EXEC issue=#${NUMBER:-?} timeout=${_timeout}s cmd=$(printf '%q' "$cmd")"
   local rc=0
-  # subshell `(cd && ...)` で cwd を REPO_DIR に隔離（NFR 5.1）。
-  # `timeout --kill-after=10 "$_timeout"` で暴走を時間でも遮断し、タイムアウト到達時は
-  # 子孫プロセスも SIGKILL する（NFR 5.2）。
-  (cd "$REPO_DIR" && timeout --kill-after=10 "$_timeout" bash -c "$cmd") \
-      >> "$LOG" 2>&1 || rc=$?
+  # #364: stderr を一時ファイルに別捕捉してパス不在 WARN 降格判定（diff の exit=2 +
+  # No such file or directory）に使う。同時に stdout/stderr の両方を $LOG にも append
+  # して、既存の grep 経路（`grep '\[.*\] stage-a-verify:'` / FAILED / TIMEOUT 行の追跡）と
+  # 後続トラブルシュート（実コマンドの実出力閲覧）を温存する（NFR 1.1 / Req 3.x）。
+  # 一時ファイルは $TMPDIR 配下に mktemp で作り、ENV による予測攻撃を防ぐ（CLAUDE.md §5/§6）。
+  local _stderr_path
+  _stderr_path=$(mktemp 2>/dev/null) || _stderr_path=""
+  if [ -z "$_stderr_path" ]; then
+    # mktemp 失敗時は WARN 降格判定を skip して従来挙動に倒す（fail-open）。
+    sav_warn "mktemp に失敗したため stderr 捕捉せずに従来経路で実行"
+    (cd "$REPO_DIR" && timeout --kill-after=10 "$_timeout" bash -c "$cmd") \
+        >> "$LOG" 2>&1 || rc=$?
+  else
+    # stderr を一時ファイルへ振り分けつつ、$LOG にも同じ stderr を append する（tee 相当）。
+    # bash の Process Substitution（`> >(...)`）で stdout/stderr を別系統に流し、それぞれ
+    # tee で $LOG 末尾に append しつつ stderr のみ _stderr_path にも書く。stdout も後続
+    # トラブルシュートの観測情報なので $LOG に保持する。
+    (cd "$REPO_DIR" && timeout --kill-after=10 "$_timeout" bash -c "$cmd") \
+        > >(tee -a "$LOG" >/dev/null) \
+        2> >(tee -a "$LOG" "$_stderr_path" >/dev/null) \
+        || rc=$?
+    # bash の Process Substitution は親より遅延終了することがあり、その後の `cat _stderr_path`
+    # が空を返す事象を起こす。`wait` で子孫の収束を待つ（fail-safe / 既に終了済みなら no-op）。
+    wait 2>/dev/null || true
+  fi
+
+  local _stderr_text=""
+  if [ -n "$_stderr_path" ] && [ -f "$_stderr_path" ]; then
+    _stderr_text=$(cat "$_stderr_path" 2>/dev/null || true)
+    rm -f "$_stderr_path" 2>/dev/null || true
+  fi
 
   # ── 結果分岐 ──
   case "$rc" in
@@ -822,6 +924,25 @@ stage_a_verify_run() {
       return "$_hf_rc"
       ;;
     *)
+      # #364: パス不在に起因する diff 失敗（exit=2 + `No such file or directory`）は
+      # 「コード品質失敗」と区別して WARN 降格する。real なテスト/lint/shellcheck 失敗
+      # （exit=1 等）/ diff content 差分（exit=1）/ timeout（exit=124、上記分岐）は従来どおり
+      # round counter 経路で処理する（Req 2.4 / 3.1 / 3.2 / NFR 1.1）。
+      # 連結コマンド中に real fail と path-missing が混在した場合、bash -c は連結全体の
+      # 最終 exit code を返すため、real fail がいずれかのステップで起きていればここに
+      # 到達する rc は real fail のものになる（Req 2.5）。
+      if _sav_is_path_missing_diff_failure "$rc" "$_stderr_text"; then
+        local _missing_path
+        _missing_path=$(_sav_extract_missing_path "$_stderr_text")
+        # WARN ログには (1) 識別固定 prefix（grep '\[.*\] stage-a-verify: WARN' で抽出可能 /
+        # Req 4.3）、(2) reason=verify-path-missing、(3) 検出パス、(4) 実行 cmd 断片の 4 要素を
+        # 1 行で記録する（Req 4.1 / 4.2 / NFR 4.2）。複数行に分けると grep 抽出時の脱漏や
+        # ペアリングミスを誘発するため 1 行にまとめる。
+        sav_warn "reason=verify-path-missing path=$(printf '%q' "${_missing_path:-(unknown)}") exit=$rc cmd=$(printf '%q' "$cmd")"
+        # round counter は触らない（Req 2.2）。Stage A は続行する（戻り値 0 / 既存契約と整合）。
+        _SAV_LAST_OUTCOME="warn-skipped"
+        return 0
+      fi
       sav_warn "FAILED exit=$rc"
       local _hf_rc=0
       _sav_handle_failure "exit" "$rc" || _hf_rc=$?
