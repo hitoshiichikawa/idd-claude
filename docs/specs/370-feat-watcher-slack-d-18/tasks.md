@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. slack-notify module の骨格 + opt-in gate + ロガー
+- [x] 1. slack-notify module の骨格 + opt-in gate + ロガー
   - 新規ファイル `local-watcher/bin/modules/slack-notify.sh` を追加（ファイル冒頭コメントで用途 / 配置先 / 依存 / セットアップ参照先を明記、関数定義のみでトップレベル副作用なし）
   - `sn_log` / `sn_warn` / `sn_error` を既存 `fr_log` / `am_log` と同形式の 3 段 prefix
     （`[YYYY-MM-DD HH:MM:SS] [$REPO] slack-notify: ...`）で実装
@@ -15,8 +15,8 @@
   - _Boundary: slack-notify.sh (新規), issue-watcher.sh (Config ブロック追加のみ), local-watcher/test/sn_is_enabled_test.sh (新規)_
   - _Depends: none_
 
-- [ ] 2. payload 構築（jq --arg sanitize + secret scrub）
-- [ ] 2.1 sn_build_payload 関数の実装
+- [x] 2. payload 構築（jq --arg sanitize + secret scrub）
+- [x] 2.1 sn_build_payload 関数の実装
   - `sn_build_payload <event_type> <number> <url> <result> <detail>` を実装
   - jq `--arg` で全フィールドを sanitize（フィルタ文字列に未信頼値を inline 展開しない）
   - Slack Block Kit `section` 1 ブロック + フォールバック `text` フィールドの payload schema を採用
@@ -32,8 +32,8 @@
   - _Boundary: slack-notify.sh (sn_build_payload 関数追加), local-watcher/test/sn_build_payload_test.sh (新規)_
   - _Depends: 1_
 
-- [ ] 3. HTTP POST と fail-open 制御（sn_post_webhook + sn_notify entry point）
-- [ ] 3.1 sn_post_webhook の実装
+- [x] 3. HTTP POST と fail-open 制御（sn_post_webhook + sn_notify entry point）
+- [x] 3.1 sn_post_webhook の実装
   - `curl -X POST -H 'Content-Type: application/json' --max-time "$SLACK_NOTIFY_TIMEOUT" --silent --show-error -d @- -- "$SLACK_WEBHOOK_URL"` 相当を実装
   - payload は stdin (`-d @-`) で渡し、コマンドライン引数化を避ける（process listing からの漏洩防止）
   - HTTP status を `-w '%{http_code}'` で取得し、curl exit code と合わせて rc を判定
@@ -44,7 +44,7 @@
   - _Boundary: slack-notify.sh (sn_post_webhook 関数追加)_
   - _Depends: 2.1_
 
-- [ ] 3.2 sn_notify public entry point の実装
+- [x] 3.2 sn_notify public entry point の実装
   - 評価順序を design.md「sn_notify Service Interface」§ の通り実装
     （gate → URL preflight → 引数検証 → build → post → log）
   - 戻り値は **常に rc=0**（fail-open / Req 4.4）
@@ -61,7 +61,7 @@
   - _Boundary: slack-notify.sh (sn_notify 関数追加), local-watcher/test/sn_notify_test.sh (新規)_
   - _Depends: 3.1_
 
-- [ ] 4. auto-merge / auto-merge-design callsite への hook 追加
+- [x] 4. auto-merge / auto-merge-design callsite への hook 追加
   - `local-watcher/bin/modules/auto-merge.sh` の `am_enable_auto_merge_for_pr` rc=0 path
     （既存 `am_log "PR #${pr_number}: auto-merge enabled ..."` 行の直後）に
     `sn_notify auto-merge "$pr_number" "$pr_url" success "head=$head_ref sha=$head_sha" || true` を 1 行追加
@@ -73,7 +73,7 @@
   - _Boundary: auto-merge.sh (rc=0 path に 1 行), auto-merge-design.sh (rc=0 path に 1 行), local-watcher/test/auto-merge_test.sh, auto-merge-design_test.sh_
   - _Depends: 3.2_
 
-- [ ] 5. failed-recovery callsite への hook 追加（3 終端遷移）
+- [x] 5. failed-recovery callsite への hook 追加（3 終端遷移）
   - `local-watcher/bin/modules/failed-recovery.sh` の以下 3 関数末尾（`return` 直前）に
     `sn_notify failed-recovery ...` を 1 行ずつ追加:
     - `fr_finalize_success`: `result=recovered`, detail に `kind=$kind attempts=$total_attempts`
@@ -86,7 +86,7 @@
   - _Boundary: failed-recovery.sh (3 callsite に 1 行ずつ), local-watcher/test/fr_terminate_test.sh, fr_state_test.sh 等_
   - _Depends: 3.2_
 
-- [ ] 6. needs-decisions-auto / promote callsite への hook 追加
+- [x] 6. needs-decisions-auto / promote callsite への hook 追加
   - `local-watcher/bin/modules/needs-decisions-auto.sh` の `nda_auto_continue` 関数末尾
     （既存 `nda_log "issue=#${NUMBER} ... action=auto-continue ..."` 行の直後、`return 0` の直前）に
     `sn_notify needs-decisions-auto-continue "$NUMBER" "https://github.com/$REPO/issues/$NUMBER" auto-continued "mode=$mode classification=$classification" || true` を追加
@@ -99,7 +99,7 @@
   - _Boundary: needs-decisions-auto.sh (1 行), promote-pipeline.sh (1 行), local-watcher/test/needs_decisions_auto_test.sh, local-watcher/test/sn_callsite_promote_test.sh (新規)_
   - _Depends: 3.2_
 
-- [ ] 7. README オプション機能一覧への反映と static-analysis / 同期確認
+- [x] 7. README オプション機能一覧への反映と static-analysis / 同期確認
   - `README.md` の `### opt-in（既定 OFF、明示的に有効化が必要）` 表に Slack 通知行を追加:
     - 機能名: Slack 通知（重要イベント push）
     - 制御変数: `SLACK_NOTIFY_ENABLED`、既定 `false`、正規化: `=true` 厳密一致のみ有効

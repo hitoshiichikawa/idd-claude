@@ -61,6 +61,23 @@ for fn in fr_post_attempt_comment fr_terminate_max_attempts fr_terminate_no_prog
   fi
 done
 
+# Issue #370 task 5: fr_terminate_max_attempts / fr_terminate_no_progress の return 直前に
+# `sn_notify failed-recovery ...` 呼び出しが挟まる。extract_function は 1 関数しか取らない
+# ため `sn_notify` が unbound になる。ローカル stub で call count と引数を観測する。
+SN_NOTIFY_CALL_COUNT=0
+SN_NOTIFY_LAST_EVENT=""
+SN_NOTIFY_LAST_RESULT=""
+SN_NOTIFY_LAST_NUMBER=""
+SN_NOTIFY_LAST_DETAIL=""
+sn_notify() {
+  SN_NOTIFY_CALL_COUNT=$((SN_NOTIFY_CALL_COUNT + 1))
+  SN_NOTIFY_LAST_EVENT="${1:-}"
+  SN_NOTIFY_LAST_NUMBER="${2:-}"
+  SN_NOTIFY_LAST_RESULT="${4:-}"
+  SN_NOTIFY_LAST_DETAIL="${5:-}"
+  return 0
+}
+
 # ── グローバル env（遅延束縛で抽出関数本体から参照される） ──
 # shellcheck disable=SC2034
 REPO="owner/test-repo"
@@ -238,6 +255,11 @@ gh() {
 echo "--- Section 1: fr_terminate_max_attempts (Issue 経路) ---"
 
 reset_stub_state
+SN_NOTIFY_CALL_COUNT=0
+SN_NOTIFY_LAST_EVENT=""
+SN_NOTIFY_LAST_RESULT=""
+SN_NOTIFY_LAST_NUMBER=""
+SN_NOTIFY_LAST_DETAIL=""
 trap 'cleanup_stub_state' EXIT
 
 set +e
@@ -247,6 +269,17 @@ set -e
 
 # 戻り値 0（fail-continue / 正常終端）
 assert_rc "Req 4.6: fr_terminate_max_attempts Issue → rc=0" "0" "$rc"
+
+# Issue #370 Req 2.2 task 5: sn_notify が 1 回 failed-recovery + max-attempts で発火
+assert_eq "#370 Req 2.2: sn_notify が 1 回発火" "1" "$SN_NOTIFY_CALL_COUNT"
+assert_eq "#370 Req 2.2: event_type=failed-recovery" "failed-recovery" "$SN_NOTIFY_LAST_EVENT"
+assert_eq "#370 Req 3.5: result=max-attempts" "max-attempts" "$SN_NOTIFY_LAST_RESULT"
+assert_eq "#370 Req 3.3: number=42" "42" "$SN_NOTIFY_LAST_NUMBER"
+# Req 3.6 / NFR 3.3: detail に signature 値を含めない（max-attempts 経路は signature を受け取らない）
+case "$SN_NOTIFY_LAST_DETAIL" in
+  *signature*) echo "FAIL: #370 NFR 3.3: detail に signature キーが含まれる: $SN_NOTIFY_LAST_DETAIL"; FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+  *) echo "PASS: #370 NFR 3.3: detail に signature を含めない"; PASS_COUNT=$((PASS_COUNT + 1)) ;;
+esac
 
 # 観点 a-1: gh issue comment が 1 件発火（着手 + 結果のような 2 件投稿ではない）
 assert_count "観点 a: gh issue comment 42 が 1 件発火" "gh issue comment 42" "$GH_CALL_LOG" "1"
@@ -278,6 +311,10 @@ echo ""
 echo "--- Section 2: fr_terminate_max_attempts (PR 経路) ---"
 
 reset_stub_state
+SN_NOTIFY_CALL_COUNT=0
+SN_NOTIFY_LAST_EVENT=""
+SN_NOTIFY_LAST_RESULT=""
+SN_NOTIFY_LAST_NUMBER=""
 
 set +e
 fr_terminate_max_attempts "pr" "200" "4"
@@ -285,6 +322,12 @@ rc=$?
 set -e
 
 assert_rc "Req 4.6: fr_terminate_max_attempts PR → rc=0" "0" "$rc"
+
+# Issue #370 Req 2.2 task 5: PR 経路でも sn_notify が同じ event_type + result で発火
+assert_eq "#370 Req 2.2 (PR): sn_notify が 1 回発火" "1" "$SN_NOTIFY_CALL_COUNT"
+assert_eq "#370 Req 2.2 (PR): event_type=failed-recovery" "failed-recovery" "$SN_NOTIFY_LAST_EVENT"
+assert_eq "#370 Req 3.5 (PR): result=max-attempts" "max-attempts" "$SN_NOTIFY_LAST_RESULT"
+assert_eq "#370 Req 3.3 (PR): number=200" "200" "$SN_NOTIFY_LAST_NUMBER"
 
 # 観点 a: gh pr comment が 1 件発火 + --remove-label 呼ばれない
 assert_count "観点 a: gh pr comment 200 が 1 件発火" "gh pr comment 200" "$GH_CALL_LOG" "1"
@@ -305,6 +348,11 @@ echo ""
 echo "--- Section 3: fr_terminate_no_progress (Issue 経路) ---"
 
 reset_stub_state
+SN_NOTIFY_CALL_COUNT=0
+SN_NOTIFY_LAST_EVENT=""
+SN_NOTIFY_LAST_RESULT=""
+SN_NOTIFY_LAST_NUMBER=""
+SN_NOTIFY_LAST_DETAIL=""
 
 set +e
 fr_terminate_no_progress "issue" "100" "2" "aaaaaaaa0000000000000000000000000000bbbb"
@@ -312,6 +360,17 @@ rc=$?
 set -e
 
 assert_rc "Req 5.3: fr_terminate_no_progress Issue → rc=0" "0" "$rc"
+
+# Issue #370 Req 2.2 task 5: sn_notify が 1 回 failed-recovery + no-progress で発火
+assert_eq "#370 Req 2.2 (no-progress): sn_notify が 1 回発火" "1" "$SN_NOTIFY_CALL_COUNT"
+assert_eq "#370 Req 2.2 (no-progress): event_type=failed-recovery" "failed-recovery" "$SN_NOTIFY_LAST_EVENT"
+assert_eq "#370 Req 3.5 (no-progress): result=no-progress" "no-progress" "$SN_NOTIFY_LAST_RESULT"
+assert_eq "#370 Req 3.3 (no-progress): number=100" "100" "$SN_NOTIFY_LAST_NUMBER"
+# Req 3.6 / NFR 3.3: detail に signature の生値（先頭 8 桁含む）を含めない
+case "$SN_NOTIFY_LAST_DETAIL" in
+  *signature*|*aaaaaaaa*) echo "FAIL: #370 NFR 3.3: detail に signature/先頭 8 桁が含まれる: $SN_NOTIFY_LAST_DETAIL"; FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+  *) echo "PASS: #370 NFR 3.3: detail に signature 値を含めない（fr_log は先頭 8 桁を維持）"; PASS_COUNT=$((PASS_COUNT + 1)) ;;
+esac
 
 # 観点 b-1: gh issue comment が 1 件発火
 assert_count "観点 b: gh issue comment 100 が 1 件発火" "gh issue comment 100" "$GH_CALL_LOG" "1"

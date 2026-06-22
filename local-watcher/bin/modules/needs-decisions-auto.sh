@@ -251,6 +251,12 @@ EOF
   local recommendation_head
   recommendation_head=$(printf '%s' "$first_recommendation_body" | head -c 80 | tr '\n' ' ')
   nda_log "issue=#${NUMBER} mode=${mode} classification=${classification} action=auto-continue recommendation=\"${recommendation_head}\""
+
+  # Issue #370 task 6: Slack 通知 emitter（fail-open / gate OFF 時は no-op）。
+  # recommendation 本文は detail に含めない（NFR 3.3: secret 候補値を含む可能性 + 80 文字
+  # 制限でも長すぎるため）。mode と classification の運用メタデータのみを detail に渡す。
+  sn_notify needs-decisions-auto-continue "$NUMBER" "https://github.com/$REPO/issues/$NUMBER" auto-continued "mode=${mode} classification=${classification}" || true
+
   return 0
 }
 

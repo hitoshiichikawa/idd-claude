@@ -90,6 +90,20 @@ for fn in am_resolve_gate_enabled am_should_enable_for_pr am_enable_auto_merge_f
   fi
 done
 
+# Issue #370 task 4: am_enable_auto_merge_for_pr の rc=0 path には `sn_notify` 呼び出しが
+# 挟まる。extract_function は 1 関数しか取らないため `sn_notify` が unbound になる。
+# 既存テストの assertion を壊さないようローカル stub を用意し、call count と引数を
+# 観測可能にする（Issue #370 Req 2.1 / 2.5 の Slack callsite hook 検証も兼ねる）。
+SN_NOTIFY_CALL_COUNT=0
+SN_NOTIFY_LAST_EVENT=""
+SN_NOTIFY_LAST_NUMBER=""
+sn_notify() {
+  SN_NOTIFY_CALL_COUNT=$((SN_NOTIFY_CALL_COUNT + 1))
+  SN_NOTIFY_LAST_EVENT="${1:-}"
+  SN_NOTIFY_LAST_NUMBER="${2:-}"
+  return 0
+}
+
 # グローバル env（遅延束縛で抽出関数本体から参照される）
 REPO="owner/test-repo"
 LABEL_READY="ready-for-review"
@@ -318,10 +332,17 @@ echo "--- Section 3: am_enable_auto_merge_for_pr 呼び出し検証 ---"
 
 # Req 3.1: gh pr merge --auto --squash --delete-branch が呼ばれる
 reset_stub_state
+SN_NOTIFY_CALL_COUNT=0
+SN_NOTIFY_LAST_EVENT=""
+SN_NOTIFY_LAST_NUMBER=""
 GH_PR_MERGE_RC=0
 am_enable_auto_merge_for_pr 100 "claude/issue-352-impl-foo" "abc123def456" "https://github.com/owner/test-repo/pull/100"
 merge_call_count=$(count_calls "^gh pr merge")
 assert_eq "Req 3.1: 全条件満たし → gh pr merge 呼び出しが 1 回発火" "1" "$merge_call_count"
+# Issue #370 Req 2.1 task 4: 成功 path で sn_notify が呼ばれる
+assert_eq "#370 Req 2.1: 成功時 sn_notify が 1 回呼ばれる" "1" "$SN_NOTIFY_CALL_COUNT"
+assert_eq "#370 Req 2.1: sn_notify event_type=auto-merge" "auto-merge" "$SN_NOTIFY_LAST_EVENT"
+assert_eq "#370 Req 2.1: sn_notify number=100" "100" "$SN_NOTIFY_LAST_NUMBER"
 # `--auto --squash --delete-branch` 全フラグが揃っていることを確認
 auto_flag=$(count_calls "gh pr merge.*--auto")
 squash_flag=$(count_calls "gh pr merge.*--squash")
@@ -340,11 +361,14 @@ cleanup_stub_state
 
 # Req 5.1, 5.4: enable 失敗時 WARN ログを残す（silent fail 禁止）
 reset_stub_state
+SN_NOTIFY_CALL_COUNT=0
 GH_PR_MERGE_RC=1
 GH_PR_MERGE_STDERR="HTTP 422: Pull Request is not mergeable"
 am_enable_auto_merge_for_pr 200 "claude/issue-352-impl-bar" "deadbeef" "https://github.com/owner/test-repo/pull/200" || true
 warn_log_count=$(count_logs "$WARN_OUT" "PR #200.*auto-merge enable failed")
 assert_eq "Req 5.1 / 5.4: enable 失敗時 WARN ログを残す" "1" "$warn_log_count"
+# Issue #370 Req 2.5: 失敗 path では sn_notify を発火しない（成功時のみ通知）
+assert_eq "#370 Req 2.5: 失敗 path で sn_notify は呼ばれない" "0" "$SN_NOTIFY_CALL_COUNT"
 cleanup_stub_state
 
 # Req 5.2: transport-error 種別の検出
