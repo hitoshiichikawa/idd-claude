@@ -103,7 +103,7 @@
   - _Boundary: issue-watcher.sh Triage handler, needs-decisions-auto.sh_
   - _Depends: 1, 2.4_
 
-- [ ] 4. Triage prompt 拡張（classification field と判定基準の追加）
+- [x] 4. Triage prompt 拡張（classification field と判定基準の追加）
   - `local-watcher/bin/triage-prompt.tmpl` の「## 「致命的に人間の判断が必要」と判定する基準」節
     （行 23-36）と並列に「## 分類タグ（classification）の判定基準」節を新規追加
     - `human-only` 定義: 機密情報 / API key / OAuth token / 個人情報 / 認証情報 / コンプライアンス /
