@@ -40,7 +40,7 @@
   - _Boundary: issue-watcher.sh:Config_
   - _Depends: 1_
 
-- [ ] 3. `REQUIRED_MODULES` ローダと cycle startup ログ拡張
+- [x] 3. `REQUIRED_MODULES` ローダと cycle startup ログ拡張
   - `local-watcher/bin/issue-watcher.sh` の `REQUIRED_MODULES` 配列に `"auto-merge-design.sh"` を **`"auto-merge.sh"` の直後**に追加（NFR 6.2）
   - cycle startup ログ（line 882 付近の `echo "[$(date '+%F %T')] base-branch=..."` 行）に `auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED}` を `auto-merge=...` と `full-auto=...` の間に追加（Req 9.4）
   - module 配置漏れ時は既存 module loader が起動時 exit 1 する既存挙動を維持（破壊しない）
