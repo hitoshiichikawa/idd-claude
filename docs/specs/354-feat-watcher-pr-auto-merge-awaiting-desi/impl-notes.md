@@ -21,3 +21,23 @@
   配線（task 2 / 3 / 4）が未完。`LABEL_NEEDS_ITERATION` は本体 `issue-watcher.sh` 側で
   既存定義済みであることを確認済み（line 73 で `LABEL_NEEDS_ITERATION="needs-iteration"`
   として定義されており、本 module 内では遅延束縛で参照可能）
+
+### Task 2
+
+- 採用方針: 既存 `─── Auto-Merge Processor 設定 (#352) ───` ブロック（line 232-250）の
+  直後（PR Iteration ブロックの前）に `─── Design Auto-Merge Processor 設定 (#354) ───`
+  ブロックを新規挿入。4 env (`AUTO_MERGE_DESIGN_ENABLED` / `_MAX_PRS` / `_GIT_TIMEOUT` /
+  `_HEAD_PATTERN`) を `:-default` 形式で宣言し既定 OFF を保証
+- 重要な判断:
+  - `_HEAD_PATTERN` の既定値は `^claude/issue-.*-design`（#352 の `^claude/issue-.*-impl`
+    と対称）。両者は env override 可能で互いに独立に倒せる
+  - 既存 `AUTO_MERGE_*`（impl 用、line 232-250）の宣言を一切書き換えず append-only で配置
+    （NFR 2.2 の env 名・既定値温存）
+  - ブロック冒頭コメントに #352 と同形で「AND 二重 opt-in」「既定 OFF」「`=true` 厳密一致
+    以外は OFF」「impl PR との非干渉」「`DESIGN_REVIEW_RELEASE_ENABLED` (#40) との独立共存」
+    を明記。task 3 (cycle log 拡張) と task 4 (main loop 配線) が依存する文脈を Config
+    ブロック側に集約することで grep 起点を一本化
+- 残存課題: 本 task では Config 宣言のみで、`REQUIRED_MODULES` への
+  `auto-merge-design.sh` 追加 (task 3) と cycle startup ログへの
+  `auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED}` 追加 (task 3) は未着手。
+  main loop の `process_auto_merge_design` 呼び出し配線も task 4 で別途実施
