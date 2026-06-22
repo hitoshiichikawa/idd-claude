@@ -10,7 +10,7 @@
 テスト → README 同期）。並列化は同一 `issue-watcher.sh` 本体を編集するタスクが多いため
 基本的に直列で進める。
 
-- [ ] 1. 新規 module `modules/auto-merge-design.sh` を追加
+- [x] 1. 新規 module `modules/auto-merge-design.sh` を追加
   - `local-watcher/bin/modules/auto-merge-design.sh` を新規作成（#352 `auto-merge.sh` を雛形にコピーし `am_` → `amd_` / `AUTO_MERGE_` → `AUTO_MERGE_DESIGN_` で命名置換）
   - 関数 prefix `amd_`（未使用 prefix）で namespace 分離（CLAUDE.md §2）
   - 定義する関数群:
@@ -27,7 +27,7 @@
   - _Requirements: 1.2, 1.3, 1.5, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 3.1, 3.2, 3.3, 3.4, 5.1, 5.2, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 7.1, 7.2, 7.3, 7.4, 7.5, 8.1, 8.2, 8.3, 9.1, 9.2, NFR 1.1, NFR 1.2, NFR 1.3, NFR 1.4_
   - _Boundary: modules/auto-merge-design.sh_
 
-- [ ] 2. `issue-watcher.sh` Config ブロック拡張
+- [x] 2. `issue-watcher.sh` Config ブロック拡張
   - `local-watcher/bin/issue-watcher.sh` の `─── Auto-Merge Processor 設定 (#352) ───` ブロック直後に `─── Design Auto-Merge Processor 設定 (#354) ───` を追加
   - 新規 env 宣言（既定 OFF / unset 時の挙動不変を満たすこと）:
     - `AUTO_MERGE_DESIGN_ENABLED="${AUTO_MERGE_DESIGN_ENABLED:-false}"`
@@ -40,7 +40,7 @@
   - _Boundary: issue-watcher.sh:Config_
   - _Depends: 1_
 
-- [ ] 3. `REQUIRED_MODULES` ローダと cycle startup ログ拡張
+- [x] 3. `REQUIRED_MODULES` ローダと cycle startup ログ拡張
   - `local-watcher/bin/issue-watcher.sh` の `REQUIRED_MODULES` 配列に `"auto-merge-design.sh"` を **`"auto-merge.sh"` の直後**に追加（NFR 6.2）
   - cycle startup ログ（line 882 付近の `echo "[$(date '+%F %T')] base-branch=..."` 行）に `auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED}` を `auto-merge=...` と `full-auto=...` の間に追加（Req 9.4）
   - module 配置漏れ時は既存 module loader が起動時 exit 1 する既存挙動を維持（破壊しない）
@@ -48,7 +48,7 @@
   - _Boundary: issue-watcher.sh:Config, issue-watcher.sh:Loader_
   - _Depends: 1, 2_
 
-- [ ] 4. Main loop に `process_auto_merge_design` 呼び出しを配線
+- [x] 4. Main loop に `process_auto_merge_design` 呼び出しを配線
   - `local-watcher/bin/issue-watcher.sh` の `process_auto_merge || am_warn ...` 行（line 999 付近）の **直後**に `process_auto_merge_design || amd_warn "process_auto_merge_design が想定外のエラーで終了しました（後続 Issue 処理は継続）"` を追加
   - Phase D auto-rebase の後・promote-pipeline の前に配置する順序を維持（既存 design.md「順序根拠」節準拠）
   - `process_auto_merge_design` は戻り値 0 固定（パイプライン継続 / Req 7.3）。失敗時の `amd_warn` は防衛的セーフティ
@@ -58,7 +58,7 @@
   - _Boundary: issue-watcher.sh:MainLoop_
   - _Depends: 1, 3_
 
-- [ ] 5. 新規 fixture テスト `auto-merge-design_test.sh` を追加
+- [x] 5. 新規 fixture テスト `auto-merge-design_test.sh` を追加
   - `local-watcher/test/auto-merge-design_test.sh` を新規作成（既存 `auto-merge_test.sh` を雛形に複製）
   - `extract_function` イディオムで `amd_log` / `amd_warn` / `amd_error` / `amd_resolve_gate_enabled` / `amd_should_enable_for_pr` / `amd_enable_auto_merge_for_pr` / `process_auto_merge_design` を切り出して評価
   - `full_auto_enabled` も `issue-watcher.sh` 本体から切り出して評価（AND gate テスト用）
@@ -78,7 +78,7 @@
   - _Boundary: test/auto-merge-design_test.sh, modules/auto-merge-design.sh_
   - _Depends: 1_
 
-- [ ] 6. 既存 `pr_publish_commit_status_test.sh` に design head fixture を追加
+- [x] 6. 既存 `pr_publish_commit_status_test.sh` に design head fixture を追加
   - `local-watcher/test/pr_publish_commit_status_test.sh` を編集し、既存テストに以下 3 ケースを追加（既存ケースは温存）:
     - (1) head `claude/issue-N-design-foo` + AND gate ON → `pr_publish_codex_status` が `codex-review` context で gh stub を 1 回呼ぶ（state=success または failure を VERDICT で分岐）
     - (2) 同上 + AND gate OFF（`PR_REVIEWER_STATUS_CHECK_ENABLED=false` または `FULL_AUTO_ENABLED=false`）→ gh stub 呼び出し回数 0 + suppression log 1 行
@@ -88,7 +88,7 @@
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, NFR 2.3, NFR 5.3_
   - _Boundary: test/pr_publish_commit_status_test.sh, modules/pr-reviewer.sh_
 
-- [ ] 7. README に Design Auto-Merge Processor 節と一覧表行を追加
+- [x] 7. README に Design Auto-Merge Processor 節と一覧表行を追加
   - `README.md` の「オプション機能一覧（opt-in）」表（line 1346 付近）に `AUTO_MERGE_DESIGN_ENABLED` 行を追加（既定 false / 正規化規則 / 追加 env / 詳細リンク / 関連 #354）
   - 「Auto-Merge Processor (#352)」節（line 2217 付近）の **直後**に「Design Auto-Merge Processor (#354)」節を新設し、以下を記述:
     - 概要（設計 PR head pattern + AND 二重 opt-in + GitHub auto-merge state machine 委譲）
@@ -104,7 +104,7 @@
   - _Requirements: NFR 4.1, NFR 4.2, NFR 4.3_
   - _Boundary: README.md_
 
-- [ ] 8. 全体 verify（shellcheck / actionlint / bash -n / 既存テスト + 新規テスト + diff -r）
+- [x] 8. 全体 verify（shellcheck / actionlint / bash -n / 既存テスト + 新規テスト + diff -r）
   - `shellcheck local-watcher/bin/modules/auto-merge-design.sh local-watcher/bin/issue-watcher.sh install.sh setup.sh .github/scripts/*.sh` で警告ゼロ（`.shellcheckrc` の SC2317 / SC2012 accepted baseline は反映済 / NFR 5.1）
   - `actionlint .github/workflows/*.yml` クリーン（本 spec で workflow は変更しないが回帰確認）
   - `bash -n local-watcher/bin/modules/auto-merge-design.sh local-watcher/bin/issue-watcher.sh` で構文 OK

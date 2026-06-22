@@ -21,6 +21,11 @@
 #         - Req 5.1 / 5.4: publish 失敗時 WARN を残し silent fail にしない
 #         - NFR 1.3 / 1.4: sha / PR 番号の使用前検証
 #
+#       追加で検証する AC（docs/specs/354-feat-watcher-pr-auto-merge-awaiting-desi/requirements.md）:
+#         - Req 4.1 / 4.3 / 4.4: 設計 PR head sha への codex-review publish と state 解決
+#         - Req 4.2 / 4.3 / 4.4: 設計 PR head sha への claude-review publish と state 解決
+#         - Req 4.6: AND gate OFF 時は design PR でも publish なし（既存 #349 経路の流用確認）
+#
 # 配置先: local-watcher/test/pr_publish_commit_status_test.sh
 # 依存:   bash 4+, awk, grep
 # 実行:   bash local-watcher/test/pr_publish_commit_status_test.sh
@@ -424,6 +429,125 @@ GH_NEXT_RC=0
 assert_eq "Req 5.1 (claude): API 失敗は rc=3" "3" "$local_rc"
 warn_count=$(count_warns "commit status publish FAILED")
 assert_eq "Req 5.1 (claude): API 失敗時 WARN 記録" "1" "$warn_count"
+cleanup_stub_state
+
+# ============================================================
+# Section 5: design PR head fixture (Issue #354 Req 4)
+# ============================================================
+#
+# 本セクションは Issue #354（feat(watcher): 設計 PR の auto-merge）の Requirement 4
+# 「設計レビュー結果の必須 status checks 化」を design PR 経路にも拡張することを
+# 確認する Integration Test。
+#
+# 重要な前提（design.md「design レビュー status 化の配置」節と整合）:
+#   - pr_publish_codex_status / pr_publish_claude_status は PR head branch 名を
+#     引数に取らず、PR 番号 + head sha + verdict 本文 (codex 経路) / result 文字列
+#     (claude 経路) + target_url のみで動作する。
+#   - したがって head pattern が `^claude/issue-.*-design` であっても
+#     `^claude/issue-.*-impl` であっても、同じ pr_publish_* 関数の同じ publish 経路が
+#     起動する（head pattern を区別しない既存設計）。
+#   - 本セクションの fixture は「design PR らしい値」(PR 番号 / head sha / target_url)
+#     に差し替えるだけで、関数呼び出しの形は Section 3 / 4 と同一になる。
+#   - これにより Issue #354 Req 4 を満たすために pr-reviewer.sh への
+#     コード変更は不要であり、本 fixture は「既存挙動が design PR 経路でも
+#     同じく成立する」ことの回帰固定として機能する（NFR 5.3）。
+#
+# 検証ケース（6 件）:
+#   - Case 5.A: codex approve  + AND ON  → state=success / context=codex-review (Req 4.1, 4.3)
+#   - Case 5.B: codex iter     + AND ON  → state=failure / context=codex-review (Req 4.1, 4.4)
+#   - Case 5.C: codex          + PR gate OFF → gh 呼び出し 0 + suppression 1 行 (Req 4.6)
+#   - Case 5.D: codex          + FULL_AUTO OFF → gh 呼び出し 0（#348 既存 kill switch に委譲） (Req 4.6)
+#   - Case 5.E: claude approve + AND ON  → state=success / context=claude-review (Req 4.2, 4.3)
+#                                          + target_url に DESIGN_SHA を含む（Req 4.5 latest-wins 補強）
+#   - Case 5.F: claude reject  + AND ON  → state=failure / context=claude-review (Req 4.2, 4.4)
+# ============================================================
+echo ""
+echo "--- Section 5: design PR head fixture (Issue #354 Req 4) ---"
+
+# design PR fixture: PR 番号 / head sha / target_url を design PR らしい値に差し替える。
+# NFR 1.3 (PR 番号 ^[0-9]+$) / NFR 1.4 (40 hex SHA) を満たす。
+# shellcheck disable=SC2034
+DESIGN_PR="200"
+# shellcheck disable=SC2034
+DESIGN_SHA="bcdef0123456789abcdef0123456789abcdef012"
+# shellcheck disable=SC2034
+DESIGN_TARGET_URL="https://github.com/owner/test-repo/pull/200"
+
+# Case 5.A: codex approve + AND gate ON → state=success / context=codex-review
+reset_stub_state
+PR_REVIEWER_STATUS_CHECK_ENABLED="true"; FULL_AUTO_ENABLED="true"
+pr_publish_codex_status "$DESIGN_PR" "$DESIGN_SHA" $'## 概要\n指摘なし\n\nVERDICT: approve' "$DESIGN_TARGET_URL"
+gh_count=$(count_calls "^gh api -X POST repos/owner/test-repo/statuses/$DESIGN_SHA")
+assert_eq "Req 4.1 / 4.3: design PR codex approve → gh api POST 1 回" "1" "$gh_count"
+gh_line=$(cat "$GH_CALL_LOG")
+assert_contains "Req 4.3: design PR codex approve → state=success" "$gh_line" "state=success"
+assert_contains "Req 4.1: design PR codex → context=codex-review (共有 context)" "$gh_line" "context=codex-review"
+assert_contains "Req 4.1: design PR codex → target_url=$DESIGN_TARGET_URL" "$gh_line" "target_url=$DESIGN_TARGET_URL"
+assert_contains "Req 4.1: design PR codex → payload に DESIGN_SHA" "$gh_line" "$DESIGN_SHA"
+cleanup_stub_state
+
+# Case 5.B: codex needs-iteration + AND gate ON → state=failure / context=codex-review
+reset_stub_state
+PR_REVIEWER_STATUS_CHECK_ENABLED="true"; FULL_AUTO_ENABLED="true"
+pr_publish_codex_status "$DESIGN_PR" "$DESIGN_SHA" $'## 概要\n指摘あり\n\nVERDICT: needs-iteration' "$DESIGN_TARGET_URL"
+gh_count=$(count_calls "^gh api -X POST repos/owner/test-repo/statuses/$DESIGN_SHA")
+assert_eq "Req 4.1 / 4.4: design PR codex needs-iteration → gh api POST 1 回" "1" "$gh_count"
+gh_line=$(cat "$GH_CALL_LOG")
+assert_contains "Req 4.4: design PR codex needs-iteration → state=failure" "$gh_line" "state=failure"
+assert_contains "Req 4.1: design PR codex iter → context=codex-review (共有 context)" "$gh_line" "context=codex-review"
+cleanup_stub_state
+
+# Case 5.C: codex + PR_REVIEWER_STATUS_CHECK_ENABLED OFF（FULL_AUTO は ON）
+#   → gh 呼び出しゼロ + pr_publish_commit_status 内の suppression log 1 行
+reset_stub_state
+unset PR_REVIEWER_STATUS_CHECK_ENABLED
+FULL_AUTO_ENABLED="true"
+pr_publish_codex_status "$DESIGN_PR" "$DESIGN_SHA" "VERDICT: approve" "$DESIGN_TARGET_URL" || true
+gh_count=$(count_calls "^gh ")
+assert_eq "Req 4.6: design PR + PR gate OFF で gh 呼び出しゼロ" "0" "$gh_count"
+sup_count=$(count_logs "suppressed by PR_REVIEWER_STATUS_CHECK_ENABLED")
+assert_eq "Req 4.6: design PR + PR gate OFF で suppression ログ 1 行" "1" "$sup_count"
+cleanup_stub_state
+
+# Case 5.D: codex + FULL_AUTO_ENABLED OFF（PR gate は ON）
+#   → gh 呼び出しゼロ（#348 既存 kill switch suppression ログに委譲。
+#   pr_publish_commit_status 内の AUTO_MERGE_DESIGN 専用 suppression は出さない）
+reset_stub_state
+PR_REVIEWER_STATUS_CHECK_ENABLED="true"
+unset FULL_AUTO_ENABLED
+pr_publish_codex_status "$DESIGN_PR" "$DESIGN_SHA" "VERDICT: approve" "$DESIGN_TARGET_URL" || true
+gh_count=$(count_calls "^gh ")
+assert_eq "Req 4.6: design PR + FULL_AUTO OFF で gh 呼び出しゼロ" "0" "$gh_count"
+cleanup_stub_state
+
+# Case 5.E: claude approve + AND gate ON → state=success / context=claude-review
+#   target_url は review-notes.md の blob URL を design PR 用に組み立てる形を想定し、
+#   URL 内に DESIGN_SHA が含まれることを assert（Req 4.5 latest-wins の補強として、
+#   head sha が target_url に正しく伝播することを Case 4.A より厳密に検証）
+reset_stub_state
+PR_REVIEWER_STATUS_CHECK_ENABLED="true"; FULL_AUTO_ENABLED="true"
+design_review_url="https://github.com/owner/test-repo/blob/$DESIGN_SHA/docs/specs/foo/review-notes.md"
+pr_publish_claude_status "$DESIGN_PR" "$DESIGN_SHA" "approve" "$design_review_url"
+gh_count=$(count_calls "^gh api -X POST repos/owner/test-repo/statuses/$DESIGN_SHA")
+assert_eq "Req 4.2 / 4.3: design PR claude approve → gh api POST 1 回" "1" "$gh_count"
+gh_line=$(cat "$GH_CALL_LOG")
+assert_contains "Req 4.3: design PR claude approve → state=success" "$gh_line" "state=success"
+assert_contains "Req 4.2: design PR claude → context=claude-review (共有 context)" "$gh_line" "context=claude-review"
+assert_contains "Req 4.2: design PR claude → description=claude: approve" "$gh_line" "description=claude: approve"
+assert_contains "Req 4.5: design PR claude → target_url 先頭 blob URL" "$gh_line" "target_url=https://github.com/owner/test-repo/blob/"
+assert_contains "Req 4.5: design PR claude → target_url に DESIGN_SHA を含む" "$gh_line" "$DESIGN_SHA"
+cleanup_stub_state
+
+# Case 5.F: claude reject + AND gate ON → state=failure / context=claude-review
+reset_stub_state
+PR_REVIEWER_STATUS_CHECK_ENABLED="true"; FULL_AUTO_ENABLED="true"
+pr_publish_claude_status "$DESIGN_PR" "$DESIGN_SHA" "reject" ""
+gh_count=$(count_calls "^gh api -X POST repos/owner/test-repo/statuses/$DESIGN_SHA")
+assert_eq "Req 4.2 / 4.4: design PR claude reject → gh api POST 1 回" "1" "$gh_count"
+gh_line=$(cat "$GH_CALL_LOG")
+assert_contains "Req 4.4: design PR claude reject → state=failure" "$gh_line" "state=failure"
+assert_contains "Req 4.2: design PR claude reject → context=claude-review" "$gh_line" "context=claude-review"
+assert_contains "Req 4.2: design PR claude reject → description=claude: reject" "$gh_line" "description=claude: reject"
 cleanup_stub_state
 
 # ============================================================
