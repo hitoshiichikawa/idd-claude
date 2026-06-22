@@ -16,7 +16,7 @@
   - _Depends: none_
 
 - [ ] 2. payload 構築（jq --arg sanitize + secret scrub）
-- [ ] 2.1 sn_build_payload 関数の実装
+- [x] 2.1 sn_build_payload 関数の実装
   - `sn_build_payload <event_type> <number> <url> <result> <detail>` を実装
   - jq `--arg` で全フィールドを sanitize（フィルタ文字列に未信頼値を inline 展開しない）
   - Slack Block Kit `section` 1 ブロック + フォールバック `text` フィールドの payload schema を採用
