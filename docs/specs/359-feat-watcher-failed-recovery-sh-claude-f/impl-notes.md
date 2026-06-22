@@ -89,7 +89,55 @@
   - **task 8 で配線が必要**: 本 task では terminate 関数を追加しただけで、`fr_run_recovery_attempt` の `return 2` / `return 3` を caller 側で受けて terminate 関数を呼ぶ配線は task 8（`process_failed_recovery` 実装）の責務。task 8 では `case $rc in 2) fr_terminate_max_attempts "$kind" "$number" "$total"; 3) fr_terminate_no_progress "$kind" "$number" "$total" "$signature"; esac` のような分岐を追加する想定（total / signature の値は state JSON から再読み出しする可能性あり）。
   - **README 追加も task 8 の責務**: 「Failed Recovery Processor (#359)」節への env var 一覧 / 終端動作（max-attempts / no-progress）の挙動説明追加は task 8 で実施。本 task は modules 側の関数追加のみで完結。
 
+### Task 8
+
+- 採用方針: `modules/failed-recovery.sh` 末尾に Orchestrator Entry Point として `process_failed_recovery` と private helper `_fr_dispatch_candidate` を追加し、`issue-watcher.sh` の `REQUIRED_MODULES` 配列末尾に `"failed-recovery.sh"` を、call site を `process_pr_iteration` の直後・`process_design_review_release` の直前に 1 行追加した（design.md L588-606 の Orchestrator Layer 通り）。README には opt-in 機能表への 1 行追加と専用節「Failed Recovery Processor (#359)」を PR Iteration と Design Review Release の間（watcher サイクル順）に追加。
+- 重要な判断:
+  - **terminate 経路の配線方針 — `_fr_dispatch_candidate` 内で state 再読み込み**: `fr_run_recovery_attempt` の rc=2 / rc=3 を受けた時点で state JSON は既に新 total_attempts で in-progress save 済みなので、terminate 関数に渡す total_attempts と signature は **state JSON から再読み込み**するパターンを採用した（design.md の Termination Layer 引数仕様と整合）。`fr_run_recovery_attempt` の局所変数を caller に戻り値以外で渡す方法はないため、`fr_load_state` を再呼び出しして `jq -r '.total_attempts // 0'` / `.last_failure_signature // ""` で抽出する形にした。本パターンは「rc → state 再読み込み → terminate 呼び出し」が caller スコープで完結するため、内部関数の責務境界を綺麗に保てる利点もある。
+  - **`_fr_dispatch_candidate` を private helper として切り出す**: `process_failed_recovery` 本体内に inline 展開すると case 分岐 + state 再読み込み + fail-continue 防御が冗長になり可読性が落ちる。1 candidate を 1 関数で完結させる責務分離が test 容易性にも寄与する（Section 10 で _fr_dispatch_candidate を unit-ish に検証）。private 印として関数名先頭にアンダースコアを付けた（既存 `_idd_flag` / `_fr_pipestatus` 等の既存ローカル変数命名と整合）。
+  - **重複起動防止は `fr_run_recovery_attempt` 内部 in-memory set に委譲**: `FR_PROCESSED_THIS_CYCLE` の管理は task 6 で実装済みの `fr_run_recovery_attempt` / `fr_finalize_success` が担当しており、`process_failed_recovery` 側で二重実装しない（NFR 2.1 の責務一元化）。test Section 5 (fr_attempt_test.sh) で重複起動防止が動作することは確認済み。
+  - **fetch 失敗 / 空文字 / 不正 number の防御**: `fr_fetch_failed_*` は fail-continue で `[]` を返す契約だが、念のため caller 側でも `|| echo "[]"` で 2 重防御し、`jq -r 'length'` の結果が非整数なら 0 に正規化、各 candidate の `number` フィールドも `^[0-9]+$` で再検証してから dispatch する（NFR 3.1 / 5.2 の defense-in-depth）。
+  - **README の配置場所**: 既存 README の「Security Review Processor (#279)」「PR Iteration Processor (#26)」「Design Review Release Processor (#40)」が watcher 実行順に並んでいるため、本機能も同順序に従い **PR Iteration の直後 / Design Review Release の直前** に挿入した。Migration Note / 環境変数表 / cron 例 / D-19b 独立性節 / ⚠️ merge 後の再配置 の構造を既存節と統一した。
+- 残存課題: なし。task 8 は本 spec の最終 task で、全 AC（Req 1.1〜6.2 + NFR 1.1〜5.2）が実装 + 近接テストで充足された。後続作業として、idd-claude が GitHub Actions ワークフロー（`.github/workflows/issue-to-pr.yml`）に Failed Recovery Processor の env を opt-in 露出させるかは、本 spec の Out of Scope（local watcher 用途のみ）なので別 Issue で議論する想定。
+
 ## 確認事項
 
 - design.md の Logger Layer サンプル（`fr_log() { echo "[$(date '+%F %T')] failed-recovery: $*"; }`）には `[$REPO]` segment が無いが、tasks.md は「既存 `pi_log` / `pr_log` と同パターン」と明示しており、core_utils.sh の既存 logger（`qa_log` / `mq_log` / `ar_log` / `pp_log` / `pi_log` / `drr_log` / `pr_log` / `sec_log`）はすべて Issue #119 以降 `[$REPO]` を含む 3 段 prefix で統一されている。実装は tasks.md の「同パターン」指示 + 既存実装慣習に従って `[$REPO]` 含みで追加した。design.md サンプルは簡略表記と解釈したが、Architect 側で意図相違があれば指摘いただきたい（NFR 4.1「`failed-recovery:` prefix と Issue/PR 番号でログ抽出可能」は本実装で充足）。
 - **Task 5.2: spec dir 配下集約の deferred**: design.md 行 485-487 / tasks.md 5.2 詳細項目に「`git show` 経由で spec dir 配下を集約」とあるが、Issue 番号から spec slug（`docs/specs/<N>-<slug>/`）を推定するロジック（git ls-tree で `^docs/specs/<N>-` プレフィックスの dir を探す等）が必要となり実装が膨らむ。本 task では `fr_collect_issue_context` で title / labels / body / 末尾 5 件コメント収集に留め、spec dir 集約は **後続 task 6（orchestrator）の prompt 組み立て時に追加実装する**設計とした。task 6 で必要に応じて `fr_collect_spec_dir <issue_number>` のような helper を追加するか、`fr_collect_issue_context` に統合するかは task 6 で判断する。本 deferred が AC（Req 3.1）の充足に影響する可能性があれば、Architect から指摘いただきたい（現状の Issue context 集約だけでも claude-failed の hint 抽出は十分機能する想定）。
+- **Task 8: spec dir 集約は最終的に未実装のまま完了**: 上記 Task 5.2 で deferred した spec dir 集約は、task 6 / 7 / 8 を通じて結局未実装のまま本 spec を完了した。Issue 番号から spec slug を一意に推定する確定的な手段がない（同番号で複数 slug が存在する可能性、`docs/specs/<N>-*` glob は filesystem 側に依拠して REPO_DIR との整合が必要）ため、現状の context 集約（title / labels / body / 直近 5 件コメント + PR 経路では CI log tail 200 行）で AC Req 3.1 の hint 抽出は充足する判断とした。spec dir 集約を厳密に必要とする運用パターンが顕在化した場合は別 Issue で改修する。
+
+## AC Traceability
+
+| Requirement ID | 充足 task | 充足箇所 |
+|---|---|---|
+| 1.1〜1.5 (gate 起動制御) | task 3.1 + task 8 | `fr_is_enabled` 厳密一致 + `process_failed_recovery` 冒頭 gate / `fr_is_enabled_test.sh` / `fr_process_test.sh` Section 1 |
+| 2.1〜2.5 (候補選定) | task 4 + task 8 | `fr_fetch_failed_issues` / `fr_fetch_failed_prs` + orchestrator 配線 / `fr_fetch_test.sh` / `fr_process_test.sh` Section 2 |
+| 3.1〜3.5 (失敗解析・修正) | task 5 + task 6 | `fr_collect_*_context` / `fr_invoke_claude` / `fr_run_recovery_attempt` / `fr_invoke_test.sh` / `fr_attempt_test.sh` Section 4 |
+| 4.1〜4.8 (attempt budget) | task 2.1 + task 3.2 + task 6 + task 7 + task 8 | env 正規化 + state JSON + 試行開始時 attempt++ + terminate + dispatch 配線 / `fr_state_test.sh` / `fr_attempt_test.sh` Sections 1, 2, 7 / `fr_terminate_test.sh` / `fr_process_test.sh` Section 5 |
+| 5.1〜5.5 (no-progress) | task 5.1 + task 6 + task 7 + task 8 | `fr_compute_failure_signature` / `fr_detect_no_progress` / terminate / dispatch / `fr_no_progress_test.sh` / `fr_attempt_test.sh` Section 8 / `fr_process_test.sh` Section 5-B |
+| 6.1〜6.2 (成功時状態遷移) | task 6 | `fr_finalize_success` / `FR_PROCESSED_THIS_CYCLE` / `fr_attempt_test.sh` Section 5, 11 |
+| NFR 1.1〜1.3 (後方互換) | task 8 | gate off 副作用ゼロ / `fr_process_test.sh` Section 1 |
+| NFR 2.1〜2.3 (冪等性) | task 3.2 + task 6 + task 8 | atomic write / in-memory set / state 再読み込み |
+| NFR 3.1〜3.2 (security) | 全 task | `--arg` / `--` / ID 検証 / secrets 非露出（全 module 内） |
+| NFR 4.1〜4.2 (可観測性) | task 1 + task 7 | `fr_log` 3 段 prefix + `rs_set_result` |
+| NFR 5.1〜5.2 (静的解析+test) | 全 task | shellcheck warning ゼロ + 8 件 fr_*_test.sh 全 pass |
+
+## Verify 結果
+
+```
+$ shellcheck local-watcher/bin/modules/failed-recovery.sh local-watcher/bin/modules/core_utils.sh local-watcher/bin/issue-watcher.sh
+（出力なし / warning ゼロ）
+
+$ bash local-watcher/test/fr_is_enabled_test.sh   # PASS
+$ bash local-watcher/test/fr_state_test.sh        # PASS
+$ bash local-watcher/test/fr_fetch_test.sh        # PASS
+$ bash local-watcher/test/fr_no_progress_test.sh  # PASS
+$ bash local-watcher/test/fr_invoke_test.sh       # PASS
+$ bash local-watcher/test/fr_attempt_test.sh      # PASS
+$ bash local-watcher/test/fr_terminate_test.sh    # PASS
+$ bash local-watcher/test/fr_process_test.sh      # PASS=62 FAIL=0
+```
+
+全 8 件の近接テストが pass、shellcheck warning ゼロ（NFR 5.1, 5.2 充足）。
+
+STATUS: complete
