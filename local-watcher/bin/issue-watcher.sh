@@ -130,6 +130,17 @@ case "$FULL_AUTO_ENABLED" in
   true) : ;;
   *)    FULL_AUTO_ENABLED="false" ;;
 esac
+# Issue #362: needs-decisions 自動続行のモード切替。`safe` 分類かつ `FULL_AUTO_ENABLED=true`
+# のときのみ PM 第一推奨で自動続行する。値は 3 値（`all-human` / `classified` / `all-auto`）
+# のいずれかに正規化し、未設定 / 空 / 不正値・typo はすべて安全側 `all-human` に倒す
+# （Req 1.1〜1.6, NFR 1.1）。正規化は needs-decisions 判定の入口評価より **前** に完了させる
+# （Req 1.6）。kill switch `FULL_AUTO_ENABLED` との AND 二重 opt-in で発火し、既定値
+# `all-human` では本機能導入前と完全に等価な挙動を保つ（Req 5.1, 5.3, NFR 1.1）。
+NEEDS_DECISIONS_MODE="${NEEDS_DECISIONS_MODE:-all-human}"
+case "$NEEDS_DECISIONS_MODE" in
+  all-human|classified|all-auto) : ;;
+  *)                              NEEDS_DECISIONS_MODE="all-human" ;;
+esac
 # Issue #200: hotfix 優先ティアを示すラベル。Dispatcher の候補処理順を
 # FIFO（Issue 番号昇順）にしたうえで、本ラベル付き Issue を非 hotfix Issue より
 # 先に投入する 2 段優先のキー。人間が手動付与する運用前提（自動付与なし）。
@@ -965,7 +976,9 @@ mkdir -p "$LOG_DIR"
 # Issue #352: cycle startup ログに `auto-merge=` の解決値も含める（Req 7.4）。
 # Issue #354: cycle startup ログに `auto-merge-design=` の解決値も含める（Req 9.4）。
 # 運用者は `grep auto-merge-design=` で現在の design auto-merge 有効状態を確認できる。
-echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED}"
+# Issue #362: cycle startup ログに `needs-decisions-mode=` の解決値も含める（Req 6.4）。
+# 運用者は `grep needs-decisions-mode=` で現在の needs-decisions 自動続行モードを確認できる。
+echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED} needs-decisions-mode=${NEEDS_DECISIONS_MODE}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # doctor サブコマンド dispatch (#238 / Decision 2)
