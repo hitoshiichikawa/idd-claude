@@ -62,7 +62,7 @@ ar_fetch_candidates() {
       --repo "$REPO" \
       --state open \
       --search "review:approved label:\"$LABEL_NEEDS_REBASE\" -label:\"$LABEL_FAILED\" -draft:true" \
-      --json number,headRefName,baseRefName,labels,url,isDraft,reviewDecision,headRepositoryOwner,title \
+      --json number,headRefName,baseRefName,labels,url,isDraft,reviewDecision,headRepositoryOwner,title,headRefOid \
       --limit 100 2>/dev/null); then
     ar_warn "対象 PR 一覧の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
     echo "[]"
@@ -442,20 +442,407 @@ ar_dismiss_all_approvals() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ar_apply_semantic: semantic 判定時の副作用を実行。
-#   1. ar_dismiss_all_approvals で approve を全件 dismiss
-#   2. needs-rebase 除去
-#   3. ready-for-review 付与
-#   4. 説明コメント投稿（rebase 実施 / semantic 判定 / dismissal / 再レビュー誘導）
+# ar_semantic_enabled: Issue #366 D-12 Claude semantic 解決の **dual opt-in** 判定。
+#   `AUTO_REBASE_SEMANTIC=claude` AND `FULL_AUTO_ENABLED=true` の双方が「lowercase
+#   厳密一致」の場合のみ 0 を返す純粋関数（副作用なし）。それ以外（未設定 / 空 /
+#   `Claude` / `on` / `true` / typo 等）はすべて 1 を返し OFF として扱う。
+#
+#   Req 1.2, 1.3, 1.4, 2.1, 2.2, 2.3, 2.5 / NFR 1.1（安全側 fallback）
+#
+#   Returns:
+#     0 = 両 gate が ON（Claude semantic 解決経路が起動可能）
+#     1 = いずれかの gate が OFF（旧 semantic 経路にフォールバック）
+# ─────────────────────────────────────────────────────────────────────────────
+ar_semantic_enabled() {
+  [ "${AUTO_REBASE_SEMANTIC:-off}" = "claude" ] || return 1
+  [ "${FULL_AUTO_ENABLED:-false}" = "true" ] || return 1
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_semantic_state_path: PR 番号から状態ファイル絶対パスを返す純粋関数。
+#   $AUTO_REBASE_SEMANTIC_STATE_DIR/pr-<number>.json の形式（NFR 4.1 /
+#   CLAUDE.md「機能追加ガイドライン §6」と整合）。
+#
+#   Args:   $1 = PR number
+#   Stdout: 絶対パス
+#   Return: 0（常に）
+#
+#   Req 6.2
+# ─────────────────────────────────────────────────────────────────────────────
+ar_semantic_state_path() {
+  local pr_number="$1"
+  printf '%s/pr-%s.json' "$AUTO_REBASE_SEMANTIC_STATE_DIR" "$pr_number"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_semantic_load_state: 状態 JSON を stdout に出力する。ファイル不在 / JSON parse
+#   失敗時は安全側 fallback として `{}` を返し、呼出側は既定値（total_attempts=0 等）
+#   で初期化できる（fail-open）。
+#
+#   Args:   $1 = PR number
+#   Stdout: JSON 全体（不在 / 破損時は `{}`）
+#   Return: 0（常に）
+#
+#   Req 6.3（fail-open）/ NFR 4.1
+# ─────────────────────────────────────────────────────────────────────────────
+ar_semantic_load_state() {
+  local pr_number="$1"
+  local state_file
+  state_file=$(ar_semantic_state_path "$pr_number")
+  if [ ! -f "$state_file" ]; then
+    printf '%s' "{}"
+    return 0
+  fi
+  local content
+  if ! content=$(jq -c '.' "$state_file" 2>/dev/null); then
+    printf '%s' "{}"
+    return 0
+  fi
+  printf '%s' "$content"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_semantic_save_state: 状態 JSON を atomic write で永続化する。mkdir -p で
+#   state_dir を冪等確保し、同一 dir 上の `mktemp` で temp file を作成して
+#   `mv -f` で atomic rename することで read-modify-write 中の中断でも破損
+#   ファイルを残さない。すべての値を `jq --arg` / `--argjson` で sanitize する
+#   （NFR 4.1）。
+#
+#   Args:
+#     $1 = PR number (int)
+#     $2 = total_attempts (int)
+#     $3 = last_status (enum: "in-progress" | "succeeded" | "max-attempts" |
+#          "skip-idempotent" | "failed")
+#     $4 = last_head_sha (sha string、空可)
+#
+#   Return: 0 = persisted, 1 = failure (呼出側を落とさない / ar_warn で警告)
+#
+#   Req 6.2, 6.4 / NFR 4.1
+# ─────────────────────────────────────────────────────────────────────────────
+ar_semantic_save_state() {
+  local pr_number="$1"
+  local total_attempts="$2"
+  local last_status="$3"
+  local last_head_sha="$4"
+
+  if ! mkdir -p "$AUTO_REBASE_SEMANTIC_STATE_DIR" 2>/dev/null; then
+    ar_warn "ar_semantic_save_state: mkdir -p \"$AUTO_REBASE_SEMANTIC_STATE_DIR\" 失敗"
+    return 1
+  fi
+
+  local state_file
+  state_file=$(ar_semantic_state_path "$pr_number")
+
+  local now_iso
+  now_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  local new_state
+  if ! new_state=$(jq -n \
+      --argjson pr "$pr_number" \
+      --argjson total_attempts "$total_attempts" \
+      --arg last_status "$last_status" \
+      --arg last_head_sha "$last_head_sha" \
+      --arg last_attempt_at "$now_iso" \
+      '{
+        pr: $pr,
+        total_attempts: $total_attempts,
+        last_status: $last_status,
+        last_head_sha: $last_head_sha,
+        last_attempt_at: $last_attempt_at
+      }' 2>/dev/null); then
+    ar_warn "ar_semantic_save_state: state JSON 構築失敗 pr=$pr_number"
+    return 1
+  fi
+
+  local tmp_file
+  if ! tmp_file=$(mktemp "${state_file}.XXXXXX" 2>/dev/null); then
+    ar_warn "ar_semantic_save_state: mktemp 失敗 pr=$pr_number"
+    return 1
+  fi
+
+  if ! printf '%s\n' "$new_state" > "$tmp_file"; then
+    rm -f "$tmp_file" 2>/dev/null || true
+    ar_warn "ar_semantic_save_state: tmp file 書き込み失敗 pr=$pr_number"
+    return 1
+  fi
+
+  if ! mv -f "$tmp_file" "$state_file" 2>/dev/null; then
+    rm -f "$tmp_file" 2>/dev/null || true
+    ar_warn "ar_semantic_save_state: atomic rename 失敗 pr=$pr_number"
+    return 1
+  fi
+
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_semantic_should_skip_idempotent: 同一 PR head SHA に対する Claude semantic
+#   解決の二重実行を抑止する純粋判定関数。前回試行の last_head_sha が現在の head SHA
+#   と一致すれば 0（= skip）、それ以外（state 不在 / 異なる SHA）は 1（= 試行可）。
+#
+#   Args:   $1 = PR number, $2 = current head SHA
+#   Return: 0 = skip すべき（同一 SHA で attempt 済み）
+#           1 = 試行可（新規 SHA / state 不在）
+#
+#   Req 6.1, 6.4, 6.5
+# ─────────────────────────────────────────────────────────────────────────────
+ar_semantic_should_skip_idempotent() {
+  local pr_number="$1"
+  local current_head_sha="$2"
+
+  if [ -z "$current_head_sha" ]; then
+    # head SHA 不明時は安全側 (試行可) に倒す（次サイクルで state が育つ）
+    return 1
+  fi
+
+  local state last_head_sha
+  state=$(ar_semantic_load_state "$pr_number")
+  last_head_sha=$(printf '%s' "$state" | jq -r '.last_head_sha // ""' 2>/dev/null || echo "")
+
+  if [ -n "$last_head_sha" ] && [ "$last_head_sha" = "$current_head_sha" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_semantic_get_attempts: 現在の通算 attempts 数を stdout に出力する。
+#   state 不在 / parse 失敗時は 0。
+#
+#   Args:   $1 = PR number
+#   Stdout: 整数（通算 attempts）
+#   Return: 0（常に）
+#
+#   Req 7.1, 7.2
+# ─────────────────────────────────────────────────────────────────────────────
+ar_semantic_get_attempts() {
+  local pr_number="$1"
+  local state total
+  state=$(ar_semantic_load_state "$pr_number")
+  total=$(printf '%s' "$state" | jq -r '.total_attempts // 0' 2>/dev/null || echo 0)
+  # 不正値（非数値）は 0 に丸める
+  case "$total" in
+    ''|*[!0-9]*) total=0 ;;
+  esac
+  printf '%s' "$total"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_semantic_budget_exhausted: 通算 attempts が上限 (`$AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS`)
+#   に到達済みか判定する純粋関数。
+#
+#   Args:   $1 = total_attempts (int)
+#   Return: 0 = 上限到達（escalate 要）/ 1 = まだ余裕あり
+#
+#   Req 7.2
+# ─────────────────────────────────────────────────────────────────────────────
+ar_semantic_budget_exhausted() {
+  local total_attempts="$1"
+  local budget="${AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS:-3}"
+  case "$total_attempts" in
+    ''|*[!0-9]*) total_attempts=0 ;;
+  esac
+  case "$budget" in
+    ''|*[!0-9]*) budget=3 ;;
+  esac
+  [ "$total_attempts" -ge "$budget" ]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_semantic_escalate_needs_decisions: 通算 attempts が上限到達した PR を
+#   `needs-decisions` ラベルでエスカレーションする。`claude-failed` ラベルは
+#   付与しない（Req 7.6 / NFR 1.3）。コメント本文には (a) 累積 attempt 数 /
+#   (b) budget 値 / (c) 当該 head SHA / (d) 推奨手動復旧手順 を含める（Req 7.3）。
+#
+#   Args: $1=pr_number, $2=total_attempts, $3=current_head_sha
+#   Return: 0=成功（label + comment）/ 1=label 付与失敗（WARN 出力 / Req 8.4）
+# ─────────────────────────────────────────────────────────────────────────────
+ar_semantic_escalate_needs_decisions() {
+  local pr_number="$1"
+  local total_attempts="$2"
+  local current_head_sha="$3"
+  local budget="${AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS:-3}"
+
+  local label_rc=0
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh pr edit "$pr_number" --repo "$REPO" \
+        --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: needs-decisions ラベル付与に失敗（semantic budget 到達）"
+    label_rc=1
+  fi
+
+  local comment_body
+  comment_body=$(cat <<EOF
+## Phase D-12: Claude semantic 解決の試行上限に到達しました（人間判断が必要）
+
+watcher (Phase D-12 Claude semantic resolution) が本 PR の semantic conflict に対して
+Claude による rebase 解決を **${total_attempts} 回** 試行しましたが、再レビュー
+パイプラインを通過した状態に到達できませんでした。試行上限（\`AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS=${budget}\`）に
+到達したため、**人間判断にエスカレーション**します。
+
+### 状態
+
+- 累積試行回数: \`${total_attempts}\`
+- 試行上限値: \`${budget}\`
+- 当該 PR head SHA: \`${current_head_sha}\`
+
+### 推奨復旧手順
+
+1. 当該 PR の差分を手動で確認し、semantic 解消が妥当か判断してください
+2. 手動 rebase が必要な場合: \`gh pr checkout ${pr_number} && git rebase origin/${BASE_BRANCH}\`
+   で解消した上で \`git push --force-with-lease\` してください
+3. Issue 自体の方針変更が必要な場合は \`MECHANICAL_PATHS\` allowlist の見直しや、
+   親 Issue の分割 / 設計差し戻しを検討してください
+4. 復旧後、\`${LABEL_NEEDS_DECISIONS}\` ラベルを手動で外すと watcher が再試行可能になります
+
+---
+
+_本コメントは Phase D-12 Claude semantic resolution が自動投稿しました。本機能を
+完全に無効化する場合は \`AUTO_REBASE_SEMANTIC\` を \`off\` に切り替えてください。_
+
+<!-- idd-claude:auto-rebase-semantic pr=${pr_number} attempts=${total_attempts} status=max-attempts -->
+EOF
+)
+
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: needs-decisions エスカレーションコメント投稿に失敗"
+  fi
+
+  return "$label_rc"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_apply_semantic_claude: Claude semantic 解決経路の副作用を実行。
+#   旧 `ar_apply_semantic`（人間レビュー誘導）と異なり、再レビュー（codex-review /
+#   claude-review）の再発火に処理を委ねる点が中核。push そのものは既存
+#   `ar_run_claude_rebase` が `--force-with-lease` で完了済みのため、本関数では:
+#     1. ar_dismiss_all_approvals で approve を全件 dismiss（二重ゲートの維持 / Req 5.1）
+#     2. needs-rebase 除去
+#     3. ready-for-review 付与（既存と同じ / Req 5.2）
+#     4. コメント本文を「再レビュー再発火」を明記した文面に置換（Req 4.4 (a)〜(d)）
 #
 #   入力: $1=pr_number, $2=pr_url, $3=before_sha, $4=after_sha,
-#         $5=first_unmatched_path（空可）
+#         $5=first_unmatched_path（空可）, $6=total_attempts（コメントに含める）
 #   戻り値:
 #     0 : 全成功
-#     1 : dismissal 失敗（呼び出し側で escalate `dismissal-failed` 経路）
-#     2 : label / comment 失敗（部分成功、WARN 後 semantic 扱いは継続）
+#     1 : dismissal 失敗（呼出側で escalate `dismissal-failed`）
+#     2 : label / comment 失敗（部分成功）
 #
-#   Req 7.1, 7.2, 7.3, 7.4
+#   Req 4.4, 5.1, 5.2, 5.3, 5.4, 8.3
+# ─────────────────────────────────────────────────────────────────────────────
+ar_apply_semantic_claude() {
+  local pr_number="$1"
+  local pr_url="$2"
+  local before_sha="$3"
+  local after_sha="$4"
+  local first_unmatched="${5:-}"
+  local total_attempts="${6:-1}"
+
+  # 1. approving review をすべて dismiss（Claude 解決後も二重ゲートを維持 / Req 5.1）
+  if ! ar_dismiss_all_approvals "$pr_number"; then
+    return 1
+  fi
+
+  local partial_fail=0
+
+  # 2. needs-rebase 除去（既存挙動と整合 / Req 8.3）
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh pr edit "$pr_number" --repo "$REPO" --remove-label "$LABEL_NEEDS_REBASE" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: needs-rebase ラベル除去に失敗（semantic-claude 経路）"
+    partial_fail=1
+  fi
+
+  # 3. ready-for-review 付与（Req 5.2）
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh pr edit "$pr_number" --repo "$REPO" --add-label "$LABEL_READY" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: ready-for-review ラベル付与に失敗（semantic-claude 経路）"
+    partial_fail=1
+  fi
+
+  # 4. 説明コメント投稿（Req 4.4 (a)〜(d)）
+  local unmatched_line=""
+  if [ -n "$first_unmatched" ]; then
+    unmatched_line="- 最初に検出された allowlist 外パス: \`${first_unmatched}\`"
+  fi
+
+  local comment_body
+  comment_body=$(cat <<EOF
+## Phase D-12: Claude が semantic conflict を解消しました（再レビュー待ち）
+
+watcher (Phase D-12 Claude semantic resolution) が本 PR の \`needs-rebase\` 状態に
+対して Claude による rebase を実行し、semantic な書き換えを含む解決を **PR head
+へ追加 commit として push** しました。本機能は LLM の解決結果を **無検証で merge
+することは絶対に行わず**、既存 approving review を全件取り消した上で、再レビュー
+パイプライン（\`codex-review\` / \`claude-review\` の自動レビュー）の再発火を待ちます。
+
+### 実施内容（試行 ${total_attempts} 回目）
+
+- (a) rebase 前 head SHA: \`${before_sha}\`
+- (a) rebase 後 head SHA: \`${after_sha}\` （= Claude が push した新 head）
+${unmatched_line}
+- (b) 既存 approving review を **review dismissal API** で全件取り消しました
+- \`needs-rebase\` を除去し \`ready-for-review\` を付与しました
+
+### 次のアクション（再レビューパイプラインに委譲）
+
+- (c) **\`codex-review\` / \`claude-review\` が新 head SHA \`${after_sha}\` に対して
+  自動的に再発火します**（pr-reviewer.sh の既存挙動 / #261 / #349）。watcher が
+  数サイクル以内に再レビュー結果を投稿します
+- (d) **auto-merge の発火条件**: 再レビュー結果が \`needs-iteration\` でなく、かつ
+  少なくとも 1 件の approving review が新 head SHA に対して付与された場合のみ
+  auto-merge が許可されます（人間 / 自動 approve の復帰が必須）
+- 再レビューが \`needs-iteration\` を返した場合は pr-iteration.sh の通常 3R ループに
+  委譲されます。本 PR の Claude semantic 解決の通算試行上限は
+  \`AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS\`（既定 3 回）で、上限到達時は
+  \`needs-decisions\` ラベル付与で人間判断にエスカレーションされます
+
+---
+
+_本コメントは Phase D-12 Claude semantic resolution が自動投稿しました。本機能の
+挙動を変更する場合は \`AUTO_REBASE_SEMANTIC\` を \`off\` に切り替えてください
+（旧 semantic 経路 = 人間レビュー待ちにフォールバック）。_
+
+<!-- idd-claude:auto-rebase-semantic pr=${pr_number} attempt=${total_attempts} before=${before_sha} after=${after_sha} -->
+EOF
+)
+
+  if ! timeout "$AUTO_REBASE_GIT_TIMEOUT" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$comment_body" >/dev/null 2>&1; then
+    ar_warn "PR #${pr_number}: semantic-claude 説明コメントの投稿に失敗（${pr_url}）"
+    partial_fail=1
+  fi
+
+  if [ "$partial_fail" -eq 1 ]; then
+    return 2
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ar_apply_semantic: semantic 判定時の副作用を実行。
+#   gate 評価により以下の 2 経路に分岐する（Req 1.4, 2.4, 3.1, NFR 1.1）:
+#
+#   - dual opt-in OFF（既定 / `AUTO_REBASE_SEMANTIC=off` または
+#     `FULL_AUTO_ENABLED!=true`）: 旧経路（人間レビュー待ち）
+#       1. ar_dismiss_all_approvals で approve を全件 dismiss
+#       2. needs-rebase 除去
+#       3. ready-for-review 付与
+#       4. 「人間レビュー必須」コメント投稿
+#
+#   - dual opt-in ON（`AUTO_REBASE_SEMANTIC=claude` AND `FULL_AUTO_ENABLED=true`）:
+#     新経路（再レビュー再発火に委譲）→ ar_apply_semantic_claude へ委譲
+#
+#   入力: $1=pr_number, $2=pr_url, $3=before_sha, $4=after_sha,
+#         $5=first_unmatched_path（空可）, $6=total_attempts（新経路時のみ参照）
+#   戻り値:
+#     0 : 全成功
+#     1 : dismissal 失敗
+#     2 : label / comment 失敗（部分成功）
+#
+#   Req 1.4, 2.4, 3.1, 4.4, 5.1〜5.4, 7.1〜7.4, 8.3, NFR 1.1
 # ─────────────────────────────────────────────────────────────────────────────
 ar_apply_semantic() {
   local pr_number="$1"
@@ -463,7 +850,17 @@ ar_apply_semantic() {
   local before_sha="$3"
   local after_sha="$4"
   local first_unmatched="${5:-}"
+  local total_attempts="${6:-1}"
 
+  # dual opt-in ON → 新経路（Claude 解決 + 再レビュー再発火）へ委譲
+  if ar_semantic_enabled; then
+    ar_apply_semantic_claude \
+      "$pr_number" "$pr_url" "$before_sha" "$after_sha" \
+      "$first_unmatched" "$total_attempts"
+    return $?
+  fi
+
+  # dual opt-in OFF → 旧経路（人間レビュー待ち / NFR 1.1）
   # 1. approving review をすべて dismiss
   if ! ar_dismiss_all_approvals "$pr_number"; then
     return 1
@@ -643,16 +1040,86 @@ EOF
 ar_handle_pr() {
   local pr_json="$1"
 
-  local pr_number head_ref base_ref pr_url pr_title
+  local pr_number head_ref base_ref pr_url pr_title current_head_sha
   pr_number=$(echo "$pr_json" | jq -r '.number')
   head_ref=$(echo "$pr_json"  | jq -r '.headRefName')
   base_ref=$(echo "$pr_json"  | jq -r '.baseRefName')
   pr_url=$(echo "$pr_json"    | jq -r '.url')
   pr_title=$(echo "$pr_json"  | jq -r '.title // ""')
+  # Issue #366: idempotency / budget 判定に使う現在の head SHA（既存 query に headRefOid を追加）
+  current_head_sha=$(echo "$pr_json" | jq -r '.headRefOid // ""')
+
+  # Issue #366 Req 9.3: per-cycle summary 用の bucket 識別子（process_auto_rebase が読む
+  # グローバル）。gate OFF / mechanical 経路では "" のままで semantic subtotal に加算
+  # されない。本変数は ar_handle_pr 1 回呼び出しごとに必ずリセットする。
+  _AR_SEMANTIC_BUCKET=""
+
+  # Issue #366: dual opt-in が ON のときのみ、Claude 起動前に以下を判定する。
+  # gate OFF（既定）では一切実行されず、本機能導入前と完全に等価（NFR 1.1）。
+  if ar_semantic_enabled; then
+    # 1a. needs-decisions ラベル付きの PR は skip（Req 7.4 / 8.1 と同型）
+    local has_needs_decisions
+    has_needs_decisions=$(echo "$pr_json" | jq -r \
+      --arg L "$LABEL_NEEDS_DECISIONS" \
+      '[.labels[]? | select(.name == $L)] | length' 2>/dev/null || echo 0)
+    if [ "${has_needs_decisions:-0}" -gt 0 ]; then
+      # Issue #366 Req 9.1: log に gate 解決値を含める
+      ar_log "PR #${pr_number}: semantic action=skip-needs-decisions semantic=${AUTO_REBASE_SEMANTIC} full-auto=${FULL_AUTO_ENABLED} head=${current_head_sha} url=${pr_url}"
+      _AR_SEMANTIC_BUCKET="skipped"
+      return 10
+    fi
+
+    # 1a'. claude-failed ラベル付きの PR は本来 server-side filter で除外済み（Req 4.7 /
+    # 8.1）。万一通過した場合の防御的 skip。Req 9.1 の skip-claude-failed action ラベル
+    # 出力もここで担う。
+    local has_claude_failed
+    has_claude_failed=$(echo "$pr_json" | jq -r \
+      --arg L "$LABEL_FAILED" \
+      '[.labels[]? | select(.name == $L)] | length' 2>/dev/null || echo 0)
+    if [ "${has_claude_failed:-0}" -gt 0 ]; then
+      ar_log "PR #${pr_number}: semantic action=skip-claude-failed semantic=${AUTO_REBASE_SEMANTIC} full-auto=${FULL_AUTO_ENABLED} head=${current_head_sha} url=${pr_url}"
+      _AR_SEMANTIC_BUCKET="skipped"
+      return 10
+    fi
+
+    # 1b. budget 上限到達済みかチェック（Req 7.2）
+    local prior_attempts
+    prior_attempts=$(ar_semantic_get_attempts "$pr_number")
+    if ar_semantic_budget_exhausted "$prior_attempts"; then
+      ar_log "PR #${pr_number}: semantic action=escalate-needs-decisions semantic=${AUTO_REBASE_SEMANTIC} full-auto=${FULL_AUTO_ENABLED} attempts=${prior_attempts} budget=${AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS} head=${current_head_sha} url=${pr_url}"
+      ar_semantic_escalate_needs_decisions "$pr_number" "$prior_attempts" "$current_head_sha" || true
+      # state を `max-attempts` に更新（次サイクル以降の冪等性 / Req 7.4）
+      ar_semantic_save_state "$pr_number" "$prior_attempts" "max-attempts" "$current_head_sha" || true
+      _AR_SEMANTIC_BUCKET="escalated"
+      return 10
+    fi
+
+    # 1c. 同一 head SHA への二重実行抑止（Req 6.1, 6.4, 6.5）
+    if ar_semantic_should_skip_idempotent "$pr_number" "$current_head_sha"; then
+      ar_log "PR #${pr_number}: semantic action=skip-idempotent semantic=${AUTO_REBASE_SEMANTIC} full-auto=${FULL_AUTO_ENABLED} head=${current_head_sha} attempts=${prior_attempts} url=${pr_url}"
+      _AR_SEMANTIC_BUCKET="skipped"
+      return 10
+    fi
+
+    # 1d. attempt budget を試行開始時に加算（Req 7.5 / failed-recovery と同方針）。
+    # この時点で state を「in-progress / current_head_sha」で保存し、Claude / push 失敗時も
+    # 上限消費が確定するようにする。
+    local new_attempts=$((prior_attempts + 1))
+    ar_semantic_save_state "$pr_number" "$new_attempts" "in-progress" "$current_head_sha" || true
+    ar_log "PR #${pr_number}: semantic action=attempt semantic=${AUTO_REBASE_SEMANTIC} full-auto=${FULL_AUTO_ENABLED} attempts=${new_attempts} budget=${AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS} head=${current_head_sha} url=${pr_url}"
+  fi
 
   # 1. Claude rebase を試行
   local rebase_output rebase_rc=0
   rebase_output=$(ar_run_claude_rebase "$pr_number" "$pr_title" "$pr_url" "$head_ref" "$base_ref") || rebase_rc=$?
+
+  # Issue #366 Req 9.2: 試行完了時の outcome 識別子（`resolved` / `timeout` / `dirty` /
+  # `push-failed`）を ar_log に併記する。gate ON 時は attempts も含める。
+  # gate OFF 時は `_AR_SEMANTIC_BUCKET` を空のまま残し、summary subtotal に加算しない。
+  local _semantic_log_suffix=""
+  if ar_semantic_enabled; then
+    _semantic_log_suffix=" semantic=${AUTO_REBASE_SEMANTIC} full-auto=${FULL_AUTO_ENABLED} attempts=${new_attempts:-1}"
+  fi
 
   case "$rebase_rc" in
     0)
@@ -661,31 +1128,49 @@ ar_handle_pr() {
     5)
       # rebase 不要（既に base が head の祖先）。Re-check が拾うべきケースとして skip
       ar_log "PR #${pr_number}: rebase 不要（already up-to-date with base, skip）action=skip url=${pr_url}"
+      if ar_semantic_enabled; then
+        _AR_SEMANTIC_BUCKET="skipped"
+      fi
       return 10
       ;;
     1)
       ar_escalate_to_failed "$pr_number" "conflict-unresolved" || true
-      ar_log "PR #${pr_number}: classification=failed reason=conflict-unresolved action=escalate url=${pr_url}"
+      ar_log "PR #${pr_number}: classification=failed reason=conflict-unresolved outcome=dirty action=escalate url=${pr_url}${_semantic_log_suffix}"
+      if ar_semantic_enabled; then
+        _AR_SEMANTIC_BUCKET="failed"
+      fi
       return 2
       ;;
     2)
       ar_escalate_to_failed "$pr_number" "timeout" || true
-      ar_log "PR #${pr_number}: classification=failed reason=timeout action=escalate url=${pr_url}"
+      ar_log "PR #${pr_number}: classification=failed reason=timeout outcome=timeout action=escalate url=${pr_url}${_semantic_log_suffix}"
+      if ar_semantic_enabled; then
+        _AR_SEMANTIC_BUCKET="failed"
+      fi
       return 2
       ;;
     3)
       ar_escalate_to_failed "$pr_number" "push-failed" || true
-      ar_log "PR #${pr_number}: classification=failed reason=push-failed action=escalate url=${pr_url}"
+      ar_log "PR #${pr_number}: classification=failed reason=push-failed outcome=push-failed action=escalate url=${pr_url}${_semantic_log_suffix}"
+      if ar_semantic_enabled; then
+        _AR_SEMANTIC_BUCKET="failed"
+      fi
       return 2
       ;;
     4)
       ar_escalate_to_failed "$pr_number" "fetch-failed" || true
-      ar_log "PR #${pr_number}: classification=failed reason=fetch-failed action=escalate url=${pr_url}"
+      ar_log "PR #${pr_number}: classification=failed reason=fetch-failed outcome=fetch-failed action=escalate url=${pr_url}${_semantic_log_suffix}"
+      if ar_semantic_enabled; then
+        _AR_SEMANTIC_BUCKET="failed"
+      fi
       return 2
       ;;
     *)
       ar_escalate_to_failed "$pr_number" "conflict-unresolved" || true
-      ar_log "PR #${pr_number}: classification=failed reason=unknown(rc=${rebase_rc}) action=escalate url=${pr_url}"
+      ar_log "PR #${pr_number}: classification=failed reason=unknown(rc=${rebase_rc}) outcome=dirty action=escalate url=${pr_url}${_semantic_log_suffix}"
+      if ar_semantic_enabled; then
+        _AR_SEMANTIC_BUCKET="failed"
+      fi
       return 2
       ;;
   esac
@@ -725,26 +1210,58 @@ ar_handle_pr() {
 
   # semantic（または `git diff` 失敗時の保守的 semantic）
   local semantic_rc=0
-  ar_apply_semantic "$pr_number" "$pr_url" "$before_sha" "$after_sha" "$first_unmatched" || semantic_rc=$?
+  # Issue #366: 新経路は試行カウンタを comment に含めるため引数として渡す。gate OFF
+  # 時は ar_apply_semantic 内部で旧経路に分岐し、6 番目の引数は使われない（無害）。
+  local _semantic_attempts="${new_attempts:-1}"
+
+  # Issue #366 Req 9.1: gate OFF + classification=semantic で skip-gate-off の log 行を
+  # 1 件出力する。Req 9.2 の outcome 識別子は ar_apply_semantic の rc から後段で
+  # マップするため、ここでは行を出すだけで bucket には加算しない（gate OFF 時 bucket は
+  # ""のまま）。
+  if ! ar_semantic_enabled; then
+    ar_log "PR #${pr_number}: semantic action=skip-gate-off semantic=${AUTO_REBASE_SEMANTIC} full-auto=${FULL_AUTO_ENABLED} before=${before_sha} after=${after_sha} head=${current_head_sha} url=${pr_url}"
+  fi
+
+  ar_apply_semantic "$pr_number" "$pr_url" "$before_sha" "$after_sha" "$first_unmatched" "$_semantic_attempts" || semantic_rc=$?
   case "$semantic_rc" in
     0)
-      ar_log "PR #${pr_number}: classification=semantic before=${before_sha} after=${after_sha} unmatch=${first_unmatched:-(unknown)} action=dismissed+ready url=${pr_url}"
+      # Issue #366: gate ON 時は after_sha を last_head_sha として記録し、
+      # 次サイクル以降の同一 SHA への二重実行を抑止する（Req 6.4）。
+      if ar_semantic_enabled; then
+        ar_semantic_save_state "$pr_number" "$_semantic_attempts" "succeeded" "$after_sha" || true
+        _AR_SEMANTIC_BUCKET="resolved"
+      fi
+      # Req 9.2: outcome=resolved + attempts を併記（既存 action=dismissed+ready は
+      # 後方互換のため温存）
+      ar_log "PR #${pr_number}: classification=semantic before=${before_sha} after=${after_sha} unmatch=${first_unmatched:-(unknown)} action=dismissed+ready outcome=resolved attempts=${_semantic_attempts} url=${pr_url}"
       return 1
       ;;
     1)
       # dismissal 失敗 → escalate
       ar_escalate_to_failed "$pr_number" "dismissal-failed" || true
-      ar_log "PR #${pr_number}: classification=failed reason=dismissal-failed before=${before_sha} after=${after_sha} action=escalate url=${pr_url}"
+      ar_log "PR #${pr_number}: classification=failed reason=dismissal-failed outcome=push-failed before=${before_sha} after=${after_sha} action=escalate attempts=${_semantic_attempts} url=${pr_url}"
+      if ar_semantic_enabled; then
+        _AR_SEMANTIC_BUCKET="failed"
+      fi
       return 2
       ;;
     2)
       # label / comment の部分失敗。dismissal は成功しているので semantic 扱いを維持
-      ar_log "PR #${pr_number}: classification=semantic before=${before_sha} after=${after_sha} action=dismissed+partial-fail url=${pr_url}"
+      if ar_semantic_enabled; then
+        ar_semantic_save_state "$pr_number" "$_semantic_attempts" "succeeded" "$after_sha" || true
+        _AR_SEMANTIC_BUCKET="resolved"
+      fi
+      # Req 9.2: dismissal は成功 = outcome=resolved 扱い（label/comment の部分失敗は
+      # 二重ゲート上の安全性に影響しないため）
+      ar_log "PR #${pr_number}: classification=semantic before=${before_sha} after=${after_sha} action=dismissed+partial-fail outcome=resolved attempts=${_semantic_attempts} url=${pr_url}"
       return 1
       ;;
     *)
       ar_escalate_to_failed "$pr_number" "dismissal-failed" || true
-      ar_log "PR #${pr_number}: classification=failed reason=unknown-semantic(rc=${semantic_rc}) action=escalate url=${pr_url}"
+      ar_log "PR #${pr_number}: classification=failed reason=unknown-semantic(rc=${semantic_rc}) outcome=push-failed action=escalate attempts=${_semantic_attempts} url=${pr_url}"
+      if ar_semantic_enabled; then
+        _AR_SEMANTIC_BUCKET="failed"
+      fi
       return 2
       ;;
   esac
@@ -764,7 +1281,12 @@ process_auto_rebase() {
   fi
 
   # Req 1.4: サイクル開始時に有効値をログ出力
-  ar_log "サイクル開始 (mode=${AUTO_REBASE_MODE}, paths=${MECHANICAL_PATHS:-(empty)}, max_prs=${AUTO_REBASE_MAX_PRS}, model=${AUTO_REBASE_MODEL}, max_turns=${AUTO_REBASE_MAX_TURNS}, timeout=${AUTO_REBASE_MAX_TURNS_SEC}s)"
+  # Issue #366 Req 1.6: dual opt-in 状態（semantic-claude 経路の有効化条件）も併記。
+  local _semantic_resolved_state="off"
+  if ar_semantic_enabled; then
+    _semantic_resolved_state="claude"
+  fi
+  ar_log "サイクル開始 (mode=${AUTO_REBASE_MODE}, paths=${MECHANICAL_PATHS:-(empty)}, max_prs=${AUTO_REBASE_MAX_PRS}, model=${AUTO_REBASE_MODEL}, max_turns=${AUTO_REBASE_MAX_TURNS}, timeout=${AUTO_REBASE_MAX_TURNS_SEC}s, semantic=${AUTO_REBASE_SEMANTIC}, semantic-resolved=${_semantic_resolved_state}, semantic-max-attempts=${AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS})"
 
   # Req 2.1〜2.5 / Req 8.4: 候補 PR 取得（API エラー時は空配列を扱う）
   local prs_json
@@ -786,6 +1308,10 @@ process_auto_rebase() {
   fi
 
   local mechanical=0 semantic=0 failed=0 skipped=0
+  # Issue #366 Req 9.3: semantic-claude 経路の subtotal カウンタ。gate ON 配下で
+  # `ar_handle_pr` が `_AR_SEMANTIC_BUCKET` をセットしたときのみインクリメントする
+  # （gate OFF 時は空のままで加算されない / NFR 1.1 互換）。
+  local semantic_resolved=0 semantic_failed=0 semantic_escalated=0 semantic_skipped=0
 
   if [ "$target_count" -gt 0 ]; then
     local pr_iter
@@ -794,6 +1320,7 @@ process_auto_rebase() {
     if [ -n "$pr_iter" ]; then
       while IFS= read -r pr_json; do
         local rc=0
+        # ar_handle_pr は呼び出し毎に _AR_SEMANTIC_BUCKET をリセットする契約。
         ar_handle_pr "$pr_json" || rc=$?
         case "$rc" in
           0)  mechanical=$((mechanical + 1)) ;;
@@ -802,12 +1329,22 @@ process_auto_rebase() {
           10) skipped=$((skipped + 1)) ;;
           *)  failed=$((failed + 1)) ;;
         esac
+        # Issue #366 Req 9.3: gate ON 配下のみ subtotal を加算
+        case "${_AR_SEMANTIC_BUCKET:-}" in
+          resolved)  semantic_resolved=$((semantic_resolved + 1)) ;;
+          failed)    semantic_failed=$((semantic_failed + 1)) ;;
+          escalated) semantic_escalated=$((semantic_escalated + 1)) ;;
+          skipped)   semantic_skipped=$((semantic_skipped + 1)) ;;
+          *) : ;;
+        esac
       done <<< "$pr_iter"
     fi
   fi
 
   # Req 3.4 / NFR 2.2: サマリ行 1 件
-  ar_log "サマリ: mechanical=${mechanical}, semantic=${semantic}, failed=${failed}, skip=${skipped}, overflow=${skipped_overflow}"
+  # Issue #366 Req 9.3: semantic-resolved / semantic-failed / semantic-escalated /
+  # semantic-skipped の 4 subtotal を追記
+  ar_log "サマリ: mechanical=${mechanical}, semantic=${semantic}, failed=${failed}, skip=${skipped}, overflow=${skipped_overflow}, semantic-resolved=${semantic_resolved}, semantic-failed=${semantic_failed}, semantic-escalated=${semantic_escalated}, semantic-skipped=${semantic_skipped}"
 
   # NFR 5.2 / Phase A pattern: 念のため最終確認で base branch に戻す
   git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true

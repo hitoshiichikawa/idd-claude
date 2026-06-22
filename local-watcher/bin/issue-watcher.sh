@@ -240,6 +240,45 @@ AUTO_REBASE_MAX_PRS="${AUTO_REBASE_MAX_PRS:-3}"
 # Prompt template の配置先（install.sh が `*.tmpl` glob で自動配置）。
 AUTO_REBASE_TEMPLATE="${AUTO_REBASE_TEMPLATE:-$HOME/bin/auto-rebase-prompt.tmpl}"
 
+# ─── Phase D-12: Claude Semantic Resolution 設定 (#366) ───
+# Phase D の semantic 経路（変更ファイルが `MECHANICAL_PATHS` allowlist 外を含む rebase）に
+# 限り、Claude による conflict 解消を opt-in で追加し、Claude が生成した解決 commit を
+# PR head に積んだうえで既存の `codex-review` / `claude-review`（pr-reviewer.sh / #261 /
+# #349）を **再発火** させて二重ゲートを通った場合のみ auto-merge が可能となるよう拡張する。
+# Claude の解決結果は **無検証で merge することは絶対に行わない**：Claude 解決後も approve
+# は dismissal され続け、PR Reviewer の再レビューと人間 / 自動 approve 復帰を経て初めて
+# auto-merge に到達する（Req 4.x / 5.x の二重ゲート）。
+#
+# **AND 二重 opt-in**: `AUTO_REBASE_SEMANTIC=claude` AND `FULL_AUTO_ENABLED=true`
+# （#348 kill switch）が双方 ON のときのみ動作する。いずれかが OFF（既定）なら本機能
+# 導入前と完全に等価で旧 semantic 経路（approve dismiss → 人間レビュー待ち）にフォールバック
+# する（Req 1.4, 2.2, 2.3, 2.4 / NFR 1.1）。`AUTO_REBASE_SEMANTIC` は `claude` / `off` の
+# 2 値厳密一致のみ受理し、それ以外（未設定 / 空 / `Claude` / `on` / `true` / typo）は
+# すべて `off` に正規化（Req 1.3, 1.4）。
+#
+# 本フラグは新規追加 = opt-in 制 + 既定 off が要件のため、上記「デフォルト有効化フラグの
+# 値正規化」ループには **含めない**。
+AUTO_REBASE_SEMANTIC="${AUTO_REBASE_SEMANTIC:-off}"
+case "$AUTO_REBASE_SEMANTIC" in
+  claude) : ;;
+  *)      AUTO_REBASE_SEMANTIC="off" ;;
+esac
+# 同一 PR に対する Claude semantic 解決試行の通算上限（Req 7.1）。
+# failed-recovery の 4 回より厳しめに 3 回。未設定 / 非整数 / 0 以下は既定 3 に正規化。
+AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS="${AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS:-3}"
+case "$AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS" in
+  ''|*[!0-9]*) AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS=3 ;;
+  *)
+    if [ "$AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS" -le 0 ]; then
+      AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS=3
+    fi
+    ;;
+esac
+# 状態ファイル（通算 attempt + 直前試行 head SHA の JSON）の配置先。既定
+# `$HOME/.issue-watcher/auto-rebase-semantic/$REPO_SLUG`（LOG_DIR / FAILED_RECOVERY_STATE_DIR
+# と同じ repo-slug 分離方針 / NFR 4.1 / CLAUDE.md「機能追加ガイドライン §6」）。
+AUTO_REBASE_SEMANTIC_STATE_DIR="${AUTO_REBASE_SEMANTIC_STATE_DIR:-$HOME/.issue-watcher/auto-rebase-semantic/$REPO_SLUG}"
+
 # ─── Auto-Merge Processor 設定 (#352) ───
 # 実装 PR（head が `^claude/issue-.*-impl` パターン、`ready-for-review` ラベル、draft でない、
 # `mergeable=MERGEABLE`）に対して **GitHub ネイティブの auto-merge** を `gh pr merge --auto
@@ -978,7 +1017,9 @@ mkdir -p "$LOG_DIR"
 # 運用者は `grep auto-merge-design=` で現在の design auto-merge 有効状態を確認できる。
 # Issue #362: cycle startup ログに `needs-decisions-mode=` の解決値も含める（Req 6.4）。
 # 運用者は `grep needs-decisions-mode=` で現在の needs-decisions 自動続行モードを確認できる。
-echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED} needs-decisions-mode=${NEEDS_DECISIONS_MODE}"
+# Issue #366: cycle startup ログに `auto-rebase-semantic=` の解決値も含める（Req 1.6）。
+# 運用者は `grep auto-rebase-semantic=` で Claude semantic 解決 gate の有効状態を確認できる。
+echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-rebase-semantic=${AUTO_REBASE_SEMANTIC} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED} needs-decisions-mode=${NEEDS_DECISIONS_MODE}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # doctor サブコマンド dispatch (#238 / Decision 2)
