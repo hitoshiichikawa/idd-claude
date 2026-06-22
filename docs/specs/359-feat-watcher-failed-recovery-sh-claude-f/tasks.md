@@ -7,7 +7,7 @@
   - 近接テストはロガー単独では追加せず、後続 task の `fr_*_test.sh` で間接検証する
   - _Requirements: NFR 4.1, NFR 5.1_
 
-- [ ] 2. issue-watcher.sh Config ブロックに FAILED_RECOVERY_* env を追加
+- [x] 2. issue-watcher.sh Config ブロックに FAILED_RECOVERY_* env を追加
 - [x] 2.1 Config ブロックに env 受け取り + 値正規化を追加
   - `FAILED_RECOVERY_ENABLED` / `FAILED_RECOVERY_MAX_ATTEMPTS` / `FAILED_RECOVERY_MAX_TURNS` /
     `FAILED_RECOVERY_DEV_MODEL` / `FAILED_RECOVERY_GIT_TIMEOUT` / `FAILED_RECOVERY_MAX_PRS` /
