@@ -27,7 +27,7 @@
   - _Requirements: 1.2, 1.3, 1.5, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 3.1, 3.2, 3.3, 3.4, 5.1, 5.2, 6.1, 6.2, 6.3, 6.4, 6.5, 6.6, 6.7, 7.1, 7.2, 7.3, 7.4, 7.5, 8.1, 8.2, 8.3, 9.1, 9.2, NFR 1.1, NFR 1.2, NFR 1.3, NFR 1.4_
   - _Boundary: modules/auto-merge-design.sh_
 
-- [ ] 2. `issue-watcher.sh` Config ブロック拡張
+- [x] 2. `issue-watcher.sh` Config ブロック拡張
   - `local-watcher/bin/issue-watcher.sh` の `─── Auto-Merge Processor 設定 (#352) ───` ブロック直後に `─── Design Auto-Merge Processor 設定 (#354) ───` を追加
   - 新規 env 宣言（既定 OFF / unset 時の挙動不変を満たすこと）:
     - `AUTO_MERGE_DESIGN_ENABLED="${AUTO_MERGE_DESIGN_ENABLED:-false}"`
