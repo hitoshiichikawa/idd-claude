@@ -88,7 +88,7 @@
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, NFR 2.3, NFR 5.3_
   - _Boundary: test/pr_publish_commit_status_test.sh, modules/pr-reviewer.sh_
 
-- [ ] 7. README に Design Auto-Merge Processor 節と一覧表行を追加
+- [x] 7. README に Design Auto-Merge Processor 節と一覧表行を追加
   - `README.md` の「オプション機能一覧（opt-in）」表（line 1346 付近）に `AUTO_MERGE_DESIGN_ENABLED` 行を追加（既定 false / 正規化規則 / 追加 env / 詳細リンク / 関連 #354）
   - 「Auto-Merge Processor (#352)」節（line 2217 付近）の **直後**に「Design Auto-Merge Processor (#354)」節を新設し、以下を記述:
     - 概要（設計 PR head pattern + AND 二重 opt-in + GitHub auto-merge state machine 委譲）
