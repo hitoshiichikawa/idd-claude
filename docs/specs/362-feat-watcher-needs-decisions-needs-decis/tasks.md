@@ -9,7 +9,7 @@
 > `_Requirements_partial:_` で明示している（Reviewer は当該 AC を `missing test` reject 対象から除外し、
 > task 6 で partial 解消を確認する）。
 
-- [ ] 1. env 正規化と cycle startup ログ拡張
+- [x] 1. env 正規化と cycle startup ログ拡張
   - `local-watcher/bin/issue-watcher.sh` の Config block（`FULL_AUTO_ENABLED` 正規化直後、行 ~133 近辺）
     に `NEEDS_DECISIONS_MODE` を追加。既定 `all-human`、`case ... esac` で 3 値（`all-human` /
     `classified` / `all-auto`）以外は `all-human` に正規化（既存 `AUTO_REBASE_MODE` パターン踏襲）
@@ -23,8 +23,8 @@
   - _Requirements_partial: 1.5_
   - _Boundary: issue-watcher.sh Config block_
 
-- [ ] 2. needs-decisions-auto.sh module の新規追加（関数定義のみ）
-- [ ] 2.1 module ファイル雛形 + ロガー（nda_log / nda_warn / nda_error）
+- [x] 2. needs-decisions-auto.sh module の新規追加（関数定義のみ）
+- [x] 2.1 module ファイル雛形 + ロガー（nda_log / nda_warn / nda_error）
   - `local-watcher/bin/modules/needs-decisions-auto.sh` を新規作成。冒頭コメントで「用途 / 配置先 /
     依存 / セットアップ参照先」を明記（既存 `auto-merge.sh` `failed-recovery.sh` 形式に揃える）
   - 関数 prefix `nda_` を明示。`[YYYY-MM-DD HH:MM:SS] [$REPO] needs-decisions-auto:` 3 段 prefix ロガー
@@ -35,7 +35,7 @@
   - _Requirements: 6.1, 6.2, 6.3_
   - _Boundary: needs-decisions-auto.sh_
 
-- [ ] 2.2 mode 解決 + classification 抽出 + recommendation 抽出の純関数
+- [x] 2.2 mode 解決 + classification 抽出 + recommendation 抽出の純関数
   - `nda_resolve_mode_enabled()` を実装: `NEEDS_DECISIONS_MODE` が `classified` / `all-auto` の場合
     rc=0、`all-human` の場合 rc=1（本体 Config で正規化済前提）
   - `nda_extract_classification(triage_json_path)` を実装: jq で `decisions[].classification` を抽出し、
@@ -52,7 +52,7 @@
   - _Boundary: needs-decisions-auto.sh_
   - _Depends: 2.1_
 
-- [ ] 2.3 auto-continue 実行関数 nda_auto_continue
+- [x] 2.3 auto-continue 実行関数 nda_auto_continue
   - `nda_auto_continue(triage_json_path, first_recommendation_body)` を実装:
     1. `gh issue comment "$NUMBER" --repo "$REPO" --body "$body"` で採用 recommendation +
        mode + classification + 監査用 fingerprint を投稿（best-effort、失敗時は WARN + return 1）
@@ -67,7 +67,7 @@
   - _Boundary: needs-decisions-auto.sh_
   - _Depends: 2.1, 2.2_
 
-- [ ] 2.4 判定エントリ nda_evaluate_auto_continue（AND 二重 opt-in / 判定順序）
+- [x] 2.4 判定エントリ nda_evaluate_auto_continue（AND 二重 opt-in / 判定順序）
   - `nda_evaluate_auto_continue(triage_json_path)` を実装。判定順序（design.md「Service Interface」節）:
     1. `full_auto_enabled` が rc=1 → halt（log: `suppressed by FULL_AUTO_ENABLED`、Req 5.2 / 6.2）
     2. `nda_resolve_mode_enabled` が rc=1 → halt（log: `mode=all-human action=halt`、Req 5.3 / 6.1）
@@ -84,7 +84,7 @@
   - _Boundary: needs-decisions-auto.sh_
   - _Depends: 2.1, 2.2, 2.3_
 
-- [ ] 3. 本体への配線（REQUIRED_MODULES 登録 + Triage 結果ハンドラ分岐）
+- [x] 3. 本体への配線（REQUIRED_MODULES 登録 + Triage 結果ハンドラ分岐）
   - `local-watcher/bin/issue-watcher.sh:889` の `REQUIRED_MODULES` 配列に `needs-decisions-auto.sh` を
     追加（順序は機能的に任意、可読性のため末尾近辺）
   - Triage 結果ハンドラ（`local-watcher/bin/issue-watcher.sh:10506-10542`）の `if [ "$STATUS" =
@@ -103,7 +103,7 @@
   - _Boundary: issue-watcher.sh Triage handler, needs-decisions-auto.sh_
   - _Depends: 1, 2.4_
 
-- [ ] 4. Triage prompt 拡張（classification field と判定基準の追加）
+- [x] 4. Triage prompt 拡張（classification field と判定基準の追加）
   - `local-watcher/bin/triage-prompt.tmpl` の「## 「致命的に人間の判断が必要」と判定する基準」節
     （行 23-36）と並列に「## 分類タグ（classification）の判定基準」節を新規追加
     - `human-only` 定義: 機密情報 / API key / OAuth token / 個人情報 / 認証情報 / コンプライアンス /
@@ -120,7 +120,7 @@
   - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, NFR 2.3, NFR 4.1_
   - _Boundary: triage-prompt.tmpl_
 
-- [ ] 5. PM agent 定義に classification 出力責務を追記
+- [x] 5. PM agent 定義に classification 出力責務を追記
   - `.claude/agents/product-manager.md` の「# Triage モードで呼ばれた場合」節（行 120-124）末尾に
     5-8 行で classification 出力責務を追記:
     - `status = "needs-decisions"` の各 decisions について `classification: "safe" | "human-only"` を
@@ -131,7 +131,7 @@
   - _Requirements: NFR 2.3_
   - _Boundary: .claude/agents/product-manager.md_
 
-- [ ] 6. 近接テスト追加（needs_decisions_auto_test.sh）— deferred test の partial 解消
+- [x] 6. 近接テスト追加（needs_decisions_auto_test.sh）— deferred test の partial 解消
   - `local-watcher/test/needs_decisions_auto_test.sh` を新規作成。既存 `full_auto_enabled_test.sh` の
     `extract_function` イディオムを踏襲（awk による単一関数切り出し + eval + stub）
   - 検証ケース（task 1〜2.4 / 3 で deferred した AC のテスト追加を **本 task で集約解消**）:
@@ -162,7 +162,7 @@
   - _Boundary: needs_decisions_auto_test.sh, needs-decisions-auto.sh_
   - _Depends: 1, 2.4, 3_
 
-- [ ] 7. README 更新（オプション機能表 + 詳細節 + kill switch 配線対象更新）
+- [x] 7. README 更新（オプション機能表 + 詳細節 + kill switch 配線対象更新）
   - `README.md` の「### opt-in（既定 OFF、明示的に有効化が必要）」表（行 1349 近辺）に
     `NEEDS_DECISIONS_MODE` を 1 行追加:
     - 機能名 / 制御変数 / 既定 (`all-human`) / 正規化規則（3 値以外は `all-human` 安全側） /
@@ -183,7 +183,7 @@
   - _Boundary: README.md_
   - _Depends: 1, 2, 3, 4_
 
-- [ ] 8. root ↔ repo-template 二重管理同期（byte 一致確認）
+- [x] 8. root ↔ repo-template 二重管理同期（byte 一致確認）
   - `repo-template/local-watcher/bin/issue-watcher.sh` ← `local-watcher/bin/issue-watcher.sh` を同期
   - `repo-template/local-watcher/bin/triage-prompt.tmpl` ← `local-watcher/bin/triage-prompt.tmpl` を同期
   - `repo-template/local-watcher/bin/modules/needs-decisions-auto.sh` を新規配置

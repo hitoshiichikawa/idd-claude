@@ -130,6 +130,17 @@ case "$FULL_AUTO_ENABLED" in
   true) : ;;
   *)    FULL_AUTO_ENABLED="false" ;;
 esac
+# Issue #362: needs-decisions 自動続行のモード切替。`safe` 分類かつ `FULL_AUTO_ENABLED=true`
+# のときのみ PM 第一推奨で自動続行する。値は 3 値（`all-human` / `classified` / `all-auto`）
+# のいずれかに正規化し、未設定 / 空 / 不正値・typo はすべて安全側 `all-human` に倒す
+# （Req 1.1〜1.6, NFR 1.1）。正規化は needs-decisions 判定の入口評価より **前** に完了させる
+# （Req 1.6）。kill switch `FULL_AUTO_ENABLED` との AND 二重 opt-in で発火し、既定値
+# `all-human` では本機能導入前と完全に等価な挙動を保つ（Req 5.1, 5.3, NFR 1.1）。
+NEEDS_DECISIONS_MODE="${NEEDS_DECISIONS_MODE:-all-human}"
+case "$NEEDS_DECISIONS_MODE" in
+  all-human|classified|all-auto) : ;;
+  *)                              NEEDS_DECISIONS_MODE="all-human" ;;
+esac
 # Issue #200: hotfix 優先ティアを示すラベル。Dispatcher の候補処理順を
 # FIFO（Issue 番号昇順）にしたうえで、本ラベル付き Issue を非 hotfix Issue より
 # 先に投入する 2 段優先のキー。人間が手動付与する運用前提（自動付与なし）。
@@ -886,7 +897,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）、
 # #325 の token usage 計測（token-usage.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" "needs-decisions-auto.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -965,7 +976,9 @@ mkdir -p "$LOG_DIR"
 # Issue #352: cycle startup ログに `auto-merge=` の解決値も含める（Req 7.4）。
 # Issue #354: cycle startup ログに `auto-merge-design=` の解決値も含める（Req 9.4）。
 # 運用者は `grep auto-merge-design=` で現在の design auto-merge 有効状態を確認できる。
-echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED}"
+# Issue #362: cycle startup ログに `needs-decisions-mode=` の解決値も含める（Req 6.4）。
+# 運用者は `grep needs-decisions-mode=` で現在の needs-decisions 自動続行モードを確認できる。
+echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED} needs-decisions-mode=${NEEDS_DECISIONS_MODE}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # doctor サブコマンド dispatch (#238 / Decision 2)
@@ -10504,6 +10517,18 @@ _slot_run_issue() {
     fi
 
     if [ "$STATUS" = "needs-decisions" ] && [ "$DECISION_COUNT" -gt 0 ]; then
+      # ── Issue #362: needs-decisions 自動続行（D-08 / D-09） ──
+      # AND 二重 opt-in（FULL_AUTO_ENABLED=true AND NEEDS_DECISIONS_MODE in (classified, all-auto)）
+      # 配下で、Triage が `safe` 分類した decisions について PM 第一推奨で自動続行する。
+      # rc=0 = auto-continue 実行済 → 既存 COMMENT 組み立て + gh issue comment + ラベル付け替え
+      # （needs-decisions 付与）+ return 0 を **すべて skip** して即 return 0（Issue は
+      # `needs-decisions` 不付与 + `claude-claimed` 除去済 → 次サイクルで dispatcher 再 pickup）。
+      # rc=1 = halt → 既存処理（needs-decisions 付与 + コメント投稿）にそのまま流す
+      # （本機能導入前と完全等価 / NFR 1.1, 1.3）。
+      if nda_evaluate_auto_continue "$TRIAGE_FILE"; then
+        slot_log "Triage 結果: needs-decisions → auto-continue（#362, claude-claimed 除去済・次サイクル再 pickup 待機）"
+        return 0
+      fi
       local COMMENT
       COMMENT=$(jq -r '
         "## 🤔 実装着手前に確認が必要な事項\n\n" +
