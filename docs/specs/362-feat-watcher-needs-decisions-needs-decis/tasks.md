@@ -84,7 +84,7 @@
   - _Boundary: needs-decisions-auto.sh_
   - _Depends: 2.1, 2.2, 2.3_
 
-- [ ] 3. 本体への配線（REQUIRED_MODULES 登録 + Triage 結果ハンドラ分岐）
+- [x] 3. 本体への配線（REQUIRED_MODULES 登録 + Triage 結果ハンドラ分岐）
   - `local-watcher/bin/issue-watcher.sh:889` の `REQUIRED_MODULES` 配列に `needs-decisions-auto.sh` を
     追加（順序は機能的に任意、可読性のため末尾近辺）
   - Triage 結果ハンドラ（`local-watcher/bin/issue-watcher.sh:10506-10542`）の `if [ "$STATUS" =
