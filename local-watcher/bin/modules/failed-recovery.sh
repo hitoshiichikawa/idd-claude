@@ -14,12 +14,15 @@
 #   - fr_load_state     : 状態 JSON 読み出し（不在 / parse 失敗で `{}` を返す fail-open）
 #   - fr_save_state     : 状態 JSON の atomic write（mktemp → mv -f）
 #
-#   後続 task で `fr_fetch_failed_issues` / `fr_fetch_failed_prs` /
-#   `fr_compute_failure_signature` / `fr_detect_no_progress` /
-#   `fr_collect_issue_context` / `fr_collect_pr_ci_context` / `fr_invoke_claude` /
-#   `fr_should_recover` / `fr_run_recovery_attempt` / `fr_finalize_success` /
-#   `fr_post_attempt_comment` / `fr_terminate_max_attempts` /
-#   `fr_terminate_no_progress` / `process_failed_recovery` を追加する。
+#   - fr_fetch_failed_issues / fr_fetch_failed_prs : 候補列挙
+#   - fr_compute_failure_signature / fr_detect_no_progress : no-progress 判定
+#   - fr_collect_issue_context / fr_collect_pr_ci_context  : context 収集
+#   - fr_invoke_claude     : fresh Claude session wrapper (quota 検出 sentinel)
+#   - fr_should_recover    : 通算 attempt 上限の純粋判定
+#   - fr_post_attempt_comment / fr_finalize_success / fr_run_recovery_attempt : Orchestrator
+#   - fr_terminate_max_attempts / fr_terminate_no_progress : 終端処理（claude-failed 据え置き）
+#   - process_failed_recovery : watcher 本体からの単一エントリ
+#                               （_fr_dispatch_candidate 経由で候補列挙と terminate 配線を直列実行）
 #
 # 配置先:
 #   $HOME/bin/modules/failed-recovery.sh（install.sh が local-watcher/bin/modules/ から配置する）
@@ -1234,5 +1237,160 @@ fr_terminate_no_progress() {
   fi
   fr_log "${kind}=#${number} terminated reason=no-progress total=${total_attempts}${sig_prefix}"
 
+  return 0
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Orchestrator Entry Point
+#
+# watcher サイクルから呼ばれる単一エントリ。gate → 候補列挙 → 各 candidate に試行 →
+# terminate 経路（max-attempts / no-progress）配線 を直列実行する。本機能は claude-failed
+# 復旧の核なので、API 失敗・claude session 失敗・terminate 関数の例外はすべて fr_warn で
+# 吸収し、watcher 本体の後続 Issue 処理を止めない（fail-continue / NFR 5.2）。
+#
+# 関連 AC:
+#   - Req 1.1: gate=on 時のみ起動
+#   - Req 1.4: gate=off / 不正値 / 未設定で副作用ゼロ（NFR 1.1 / 1.3 と整合）
+#   - Req 2.1: claude-failed Issue を走査対象とする
+#   - Req 2.3: auto-merge 待ち PR の CI error を走査対象とする
+#   - NFR 1.1: gate off では本機能導入前と完全に同一の外部挙動を保つ
+#   - NFR 1.3: gate off / 不正値で副作用ゼロ
+#   - NFR 2.1: 同一サイクル内の重複起動を FR_PROCESSED_THIS_CYCLE で抑止
+#   - NFR 5.2: 取得失敗 / 例外時も fail-continue
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# _fr_dispatch_candidate: 1 candidate（kind + number）に対して fr_run_recovery_attempt を
+# 呼び、return code を terminate 経路に分岐する private helper。
+#
+# Args:
+#   $1 = kind ("issue" | "pr")
+#   $2 = number (^[0-9]+$)
+#
+# Returns: 常に 0（fail-continue）
+#
+# rc 解釈:
+#   0  = success / 通常完了
+#   1  = claude session 失敗。次サイクル再試行（fr_run_recovery_attempt 内で結果コメント済み）
+#   2  = max-attempts 到達 → fr_terminate_max_attempts に委譲（state から total を再読み込み）
+#   3  = no-progress 判定 → fr_terminate_no_progress に委譲（state から signature を再読み込み）
+#   99 = quota 検出 → 次サイクル待ち（fr_run_recovery_attempt 内で結果コメント済み）
+#   その他 = 未知 rc 警告 + 次候補へ
+_fr_dispatch_candidate() {
+  local kind="$1"
+  local number="$2"
+  local rc=0
+  fr_run_recovery_attempt "$kind" "$number" || rc=$?
+  case "$rc" in
+    0|1|99)
+      # 通常完了 / 再試行待ち / quota は本サイクルでは何もしない（必要なコメント・state
+      # 更新は fr_run_recovery_attempt 内で完結している）
+      :
+      ;;
+    2)
+      # max-attempts 到達: terminate 関数を呼ぶ。total_attempts は state JSON から
+      # 再読み込みする（fr_run_recovery_attempt 内で in-progress save 済みのため最新値）
+      local prev_state total
+      prev_state=$(fr_load_state "$number")
+      if ! total=$(printf '%s' "$prev_state" | jq -r '.total_attempts // 0' 2>/dev/null); then
+        total=0
+      fi
+      if ! [[ "$total" =~ ^[0-9]+$ ]]; then
+        total=0
+      fi
+      fr_terminate_max_attempts "$kind" "$number" "$total" || true
+      ;;
+    3)
+      # no-progress 判定: terminate 関数を呼ぶ。signature も state JSON から再読み込み
+      local prev_state total signature
+      prev_state=$(fr_load_state "$number")
+      if ! total=$(printf '%s' "$prev_state" | jq -r '.total_attempts // 0' 2>/dev/null); then
+        total=0
+      fi
+      if ! [[ "$total" =~ ^[0-9]+$ ]]; then
+        total=0
+      fi
+      if ! signature=$(printf '%s' "$prev_state" | jq -r '.last_failure_signature // ""' 2>/dev/null); then
+        signature=""
+      fi
+      fr_terminate_no_progress "$kind" "$number" "$total" "$signature" || true
+      ;;
+    *)
+      fr_warn "_fr_dispatch_candidate: 未知の rc=$rc ${kind}=#${number}（skip）"
+      ;;
+  esac
+  return 0
+}
+
+# process_failed_recovery: watcher サイクルからの単一エントリ。
+#
+# 仕様:
+#   - 冒頭で `fr_is_enabled || return 0` で gate off の場合は副作用ゼロで return（NFR 1.3）
+#   - Issue 候補（fr_fetch_failed_issues）と PR 候補（fr_fetch_failed_prs）を列挙し、各
+#     candidate を直列に `_fr_dispatch_candidate` へ流す
+#   - 重複起動防止は `fr_run_recovery_attempt` 内部の FR_PROCESSED_THIS_CYCLE で実装済み
+#     （本関数は重複ガードを二重実装しない / NFR 2.1）
+#   - 例外（候補列挙失敗・dispatch 失敗）は fr_warn で吸収して次の候補に進む（fail-continue
+#     / NFR 5.2）
+#
+# Returns: 常に 0（caller の `process_failed_recovery || fr_warn ...` 経路が念のための保険）
+process_failed_recovery() {
+  # gate off / 不正値 / 未設定 → no-op（Req 1.1〜1.5 / NFR 1.1 / 1.3）
+  if ! fr_is_enabled; then
+    return 0
+  fi
+
+  fr_log "process_failed_recovery: 起動 (FAILED_RECOVERY_MAX_ATTEMPTS=${FAILED_RECOVERY_MAX_ATTEMPTS} FAILED_RECOVERY_MAX_PRS=${FAILED_RECOVERY_MAX_PRS})"
+
+  # Issue 候補（Req 2.1 / 2.2 / 2.5）
+  local issues_json
+  issues_json=$(fr_fetch_failed_issues 2>/dev/null || echo "[]")
+  if [ -z "$issues_json" ]; then
+    issues_json="[]"
+  fi
+  local issues_count
+  issues_count=$(printf '%s' "$issues_json" | jq -r 'length' 2>/dev/null || echo "0")
+  if ! [[ "$issues_count" =~ ^[0-9]+$ ]]; then
+    issues_count=0
+  fi
+  fr_log "process_failed_recovery: issue 候補 ${issues_count} 件"
+
+  local i=0
+  while [ "$i" -lt "$issues_count" ]; do
+    local number
+    number=$(printf '%s' "$issues_json" | jq -r --argjson i "$i" '.[$i].number' 2>/dev/null || echo "")
+    if [[ "$number" =~ ^[0-9]+$ ]]; then
+      _fr_dispatch_candidate "issue" "$number" || fr_warn "process_failed_recovery: issue=#${number} の dispatch で例外（次候補に進む）"
+    else
+      fr_warn "process_failed_recovery: 不正な issue number index=${i}（skip）"
+    fi
+    i=$((i + 1))
+  done
+
+  # PR 候補（Req 2.3 / 2.4）
+  local prs_json
+  prs_json=$(fr_fetch_failed_prs 2>/dev/null || echo "[]")
+  if [ -z "$prs_json" ]; then
+    prs_json="[]"
+  fi
+  local prs_count
+  prs_count=$(printf '%s' "$prs_json" | jq -r 'length' 2>/dev/null || echo "0")
+  if ! [[ "$prs_count" =~ ^[0-9]+$ ]]; then
+    prs_count=0
+  fi
+  fr_log "process_failed_recovery: pr 候補 ${prs_count} 件"
+
+  local j=0
+  while [ "$j" -lt "$prs_count" ]; do
+    local pr_number
+    pr_number=$(printf '%s' "$prs_json" | jq -r --argjson i "$j" '.[$i].number' 2>/dev/null || echo "")
+    if [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+      _fr_dispatch_candidate "pr" "$pr_number" || fr_warn "process_failed_recovery: pr=#${pr_number} の dispatch で例外（次候補に進む）"
+    else
+      fr_warn "process_failed_recovery: 不正な pr number index=${j}（skip）"
+    fi
+    j=$((j + 1))
+  done
+
+  fr_log "process_failed_recovery: サマリ issues=${issues_count} prs=${prs_count}"
   return 0
 }
