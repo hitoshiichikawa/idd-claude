@@ -73,7 +73,7 @@
   - _Boundary: auto-merge.sh (rc=0 path に 1 行), auto-merge-design.sh (rc=0 path に 1 行), local-watcher/test/auto-merge_test.sh, auto-merge-design_test.sh_
   - _Depends: 3.2_
 
-- [ ] 5. failed-recovery callsite への hook 追加（3 終端遷移）
+- [x] 5. failed-recovery callsite への hook 追加（3 終端遷移）
   - `local-watcher/bin/modules/failed-recovery.sh` の以下 3 関数末尾（`return` 直前）に
     `sn_notify failed-recovery ...` を 1 行ずつ追加:
     - `fr_finalize_success`: `result=recovered`, detail に `kind=$kind attempts=$total_attempts`
