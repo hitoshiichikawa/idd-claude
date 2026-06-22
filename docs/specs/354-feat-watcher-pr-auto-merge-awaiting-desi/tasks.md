@@ -58,7 +58,7 @@
   - _Boundary: issue-watcher.sh:MainLoop_
   - _Depends: 1, 3_
 
-- [ ] 5. 新規 fixture テスト `auto-merge-design_test.sh` を追加
+- [x] 5. 新規 fixture テスト `auto-merge-design_test.sh` を追加
   - `local-watcher/test/auto-merge-design_test.sh` を新規作成（既存 `auto-merge_test.sh` を雛形に複製）
   - `extract_function` イディオムで `amd_log` / `amd_warn` / `amd_error` / `amd_resolve_gate_enabled` / `amd_should_enable_for_pr` / `amd_enable_auto_merge_for_pr` / `process_auto_merge_design` を切り出して評価
   - `full_auto_enabled` も `issue-watcher.sh` 本体から切り出して評価（AND gate テスト用）
