@@ -777,3 +777,326 @@ fr_invoke_claude() {
   fr_log "claude session end label=$stage_label rc=$claude_rc"
   return "$claude_rc"
 }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Orchestrator Layer
+#
+# 1 Issue / PR ごとの 1 試行を駆動する orchestrator 関数群。前段で生成した
+# Gate / Candidate / State / Decision / Context / Execution Layer の各関数を
+# 連結し、attempt budget 加算（試行開始時 / Req 4.2）、no-progress 判定
+# （Req 5.1, 5.2）、結果コメント投稿（Req 3.3）、成功時のラベル除去（Req 3.4,
+# 6.1, 6.2）を行う。
+#
+# 関連 AC:
+#   - Req 3.1〜3.5: 失敗解析 → 修正 → 結果コメント → ラベル除去 → 未信頼入力 sanitize
+#   - Req 4.2: 試行開始時に attempt++（quota 燃焼上界保証）
+#   - Req 4.3: 通算カウンタは Reviewer marker / pr-iteration marker を読まず独立
+#   - Req 4.4: 通算 attempt < FAILED_RECOVERY_MAX_ATTEMPTS なら次の試行を実行可
+#   - Req 6.1: 復旧成功後の同サイクル内追加試行は in-memory set で抑止
+#   - Req 6.2: 成功時 state JSON に last_status="succeeded" を残す
+#   - NFR 2.1: in-memory set FR_PROCESSED_THIS_CYCLE で重複起動防止
+#   - NFR 3.2: secrets を comment 本文に埋め込まない
+#   - NFR 5.2: API 失敗時も fail-continue（fr_warn + caller を落とさない）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# fr_should_recover: 通算 attempt カウンタが上限未満かを判定する純粋関数。
+#
+# Args:
+#   $1 = total_attempts (int)
+#
+# Returns:
+#   0 = まだ試行可能（total < FAILED_RECOVERY_MAX_ATTEMPTS）
+#   1 = 上限到達（total >= FAILED_RECOVERY_MAX_ATTEMPTS）
+#
+# 副作用なし。Config ブロックで MAX_ATTEMPTS は正規化済み（既定 4 / Req 4.8）
+# のため、ここで再度範囲チェックはしない。design.md 行 416-422 参照。
+fr_should_recover() {
+  local total="$1"
+  [ "$total" -lt "$FAILED_RECOVERY_MAX_ATTEMPTS" ] || return 1
+  return 0
+}
+
+# fr_post_attempt_comment: Issue / PR に 1 件コメントを投稿する。
+#
+# Args:
+#   $1 = kind ("issue" | "pr")
+#   $2 = number (^[0-9]+$ で使用前検証)
+#   $3 = body (printf '%s' で値埋め込み済みの本文 / secrets を含めないこと / NFR 3.2)
+#
+# 副作用:
+#   - gh issue comment / gh pr comment を 1 回呼ぶ
+#
+# Returns:
+#   0 = 投稿成功
+#   1 = 投稿失敗（fr_warn で警告 / fail-continue、caller を落とさない）
+fr_post_attempt_comment() {
+  local kind="$1"
+  local number="$2"
+  local body="$3"
+
+  # kind の不正値ガード（issue / pr のみ受理）
+  case "$kind" in
+    issue|pr) : ;;
+    *)
+      fr_warn "fr_post_attempt_comment: 不正な kind=$(printf '%s' "$kind" | tr -cd '[:alnum:]_-' | head -c 16)"
+      return 1
+      ;;
+  esac
+
+  # NFR 3.1: 番号の形式検証（^[0-9]+$）
+  if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+    fr_warn "fr_post_attempt_comment: 不正な ${kind} 番号 number=$(printf '%s' "$number" | tr -cd '[:alnum:]_-' | head -c 32)"
+    return 1
+  fi
+
+  # `gh issue comment` / `gh pr comment` を呼ぶ。本文は --body 引数として渡し、
+  # secrets を含む env を直接 inline 展開しない（NFR 3.2 / 既存 pr-iteration の
+  # コメント投稿パターンと同方針）。
+  if ! timeout "$FAILED_RECOVERY_GIT_TIMEOUT" gh "$kind" comment "$number" \
+      --repo "$REPO" \
+      --body "$body" >/dev/null 2>&1; then
+    fr_warn "fr_post_attempt_comment: gh $kind comment 失敗 ${kind}=#${number}"
+    return 1
+  fi
+  return 0
+}
+
+# fr_finalize_success: 復旧成功時に claude-failed ラベルを除去し、同サイクル内の
+# 重複起動を in-memory set に記録する。
+#
+# Args:
+#   $1 = kind ("issue" | "pr")
+#   $2 = number (^[0-9]+$)
+#   $3 = total_attempts (int / state JSON 上書き用)
+#   $4 = signature (string)
+#   $5 = head_sha (string、Issue 経路は空文字を渡す)
+#
+# 副作用:
+#   - gh issue edit / gh pr edit --remove-label でラベル除去
+#   - FR_PROCESSED_THIS_CYCLE に "<kind>:<number>" を idempotent に append
+#   - fr_save_state で last_status="succeeded" を永続化（Req 6.2）
+#
+# Returns:
+#   0 = 成功（ラベル除去 + state 保存 + in-memory set 反映が全完了）
+#   1 = 部分失敗（fr_warn で警告 / caller は判断する）
+fr_finalize_success() {
+  local kind="$1"
+  local number="$2"
+  local total_attempts="$3"
+  local signature="$4"
+  local head_sha="$5"
+
+  # kind の不正値ガード
+  case "$kind" in
+    issue|pr) : ;;
+    *)
+      fr_warn "fr_finalize_success: 不正な kind=$(printf '%s' "$kind" | tr -cd '[:alnum:]_-' | head -c 16)"
+      return 1
+      ;;
+  esac
+
+  # NFR 3.1: 番号の形式検証（^[0-9]+$）
+  if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+    fr_warn "fr_finalize_success: 不正な ${kind} 番号 number=$(printf '%s' "$number" | tr -cd '[:alnum:]_-' | head -c 32)"
+    return 1
+  fi
+
+  # claude-failed ラベルを除去（Req 3.4）。失敗は fr_warn + return 1 で caller に通知。
+  local rc=0
+  if ! timeout "$FAILED_RECOVERY_GIT_TIMEOUT" gh "$kind" edit "$number" \
+      --repo "$REPO" \
+      --remove-label "$LABEL_FAILED" >/dev/null 2>&1; then
+    fr_warn "fr_finalize_success: gh $kind edit --remove-label 失敗 ${kind}=#${number}"
+    rc=1
+  fi
+
+  # in-memory set に "<kind>:<number>" を idempotent に追加（Req 6.1 / NFR 2.1）。
+  local key="${kind}:${number}"
+  FR_PROCESSED_THIS_CYCLE="${FR_PROCESSED_THIS_CYCLE:-}"
+  case " $FR_PROCESSED_THIS_CYCLE " in
+    *" $key "*) : ;;
+    *) FR_PROCESSED_THIS_CYCLE="${FR_PROCESSED_THIS_CYCLE} ${key}" ;;
+  esac
+  # 先頭空白の正規化（読みやすさのため）
+  FR_PROCESSED_THIS_CYCLE="${FR_PROCESSED_THIS_CYCLE# }"
+  export FR_PROCESSED_THIS_CYCLE
+
+  # state JSON に last_status="succeeded" を残す（Req 6.2）。Issue 経路でも PR
+  # 経路でも同一 state ファイル（<number>.json）に書き込む（state は番号単位）。
+  if ! fr_save_state "$number" "$total_attempts" "succeeded" "$signature" "$head_sha"; then
+    fr_warn "fr_finalize_success: fr_save_state 失敗 ${kind}=#${number}"
+    rc=1
+  fi
+
+  return "$rc"
+}
+
+# fr_run_recovery_attempt: 1 Issue / PR に対する 1 試行を駆動する orchestrator。
+#
+# Args:
+#   $1 = kind ("issue" | "pr")
+#   $2 = number (^[0-9]+$)
+#
+# Returns:
+#   0  = success path（claude が修正を完了し fr_finalize_success まで実行）
+#   1  = claude session 失敗（attempt 加算済み、次サイクルで resume）
+#   2  = max-attempts 到達（fr_terminate_max_attempts は task 7 で追加 / 本 task は return 2 stub）
+#   3  = no-progress 判定（fr_terminate_no_progress は task 7 で追加 / 本 task は return 3 stub）
+#   99 = quota 検出（fr_invoke_claude からの sentinel 伝播。caller は次サイクル待ち）
+#
+# 副作用:
+#   - gh comment（着手 1 件 + 結果 1 件 = 2 件 / Req 3.3）
+#   - claude session 起動（fr_invoke_claude 経由）
+#   - state JSON 上書き（試行終了時に 1 回 / Req 4.2）
+#   - 成功時のみ claude-failed ラベル除去 + FR_PROCESSED_THIS_CYCLE 反映
+#
+# 重要な不変条件:
+#   - 重複起動防止: FR_PROCESSED_THIS_CYCLE に "<kind>:<number>" が既存なら即 0 return
+#   - 試行開始時 attempt++ （Req 4.2 / quota 燃焼上界保証）。途中失敗でも加算は確定
+#   - Reviewer marker / pr-iteration marker（`idd-claude:pr-iteration round=N`）を
+#     **読まない**（Req 4.3 / D-19b の独立カウンタ規約）
+fr_run_recovery_attempt() {
+  local kind="$1"
+  local number="$2"
+
+  # kind の不正値ガード
+  case "$kind" in
+    issue|pr) : ;;
+    *)
+      fr_warn "fr_run_recovery_attempt: 不正な kind=$(printf '%s' "$kind" | tr -cd '[:alnum:]_-' | head -c 16)"
+      return 1
+      ;;
+  esac
+
+  # NFR 3.1: 番号の形式検証（^[0-9]+$）
+  if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+    fr_warn "fr_run_recovery_attempt: 不正な ${kind} 番号 number=$(printf '%s' "$number" | tr -cd '[:alnum:]_-' | head -c 32)"
+    return 1
+  fi
+
+  # 重複起動防止（Req 6.1 / NFR 2.1）。同一サイクル内で既に成功 finalize 済みなら no-op
+  local key="${kind}:${number}"
+  FR_PROCESSED_THIS_CYCLE="${FR_PROCESSED_THIS_CYCLE:-}"
+  case " $FR_PROCESSED_THIS_CYCLE " in
+    *" $key "*)
+      fr_log "fr_run_recovery_attempt: ${kind}=#${number} は本サイクル処理済み（skip）"
+      return 0
+      ;;
+  esac
+
+  # 直前 state を読み出す（Req 4.3: Reviewer marker / pr-iteration marker は読まない）。
+  # state JSON は本 module が独自管理する <number>.json 1 ファイルだけを参照する。
+  local prev_state
+  prev_state=$(fr_load_state "$number")
+  local prev_total
+  if ! prev_total=$(printf '%s' "$prev_state" | jq -r '.total_attempts // 0' 2>/dev/null); then
+    prev_total=0
+  fi
+  # jq が空文字 / null を返したケースを 0 に正規化
+  if ! [[ "$prev_total" =~ ^[0-9]+$ ]]; then
+    prev_total=0
+  fi
+
+  # 上限判定（Req 4.4 / 4.5）。上限到達時は terminate 関数（task 7）に委譲する
+  # ため return 2 で caller に通知（本 task では terminate 未実装のため stub）。
+  if ! fr_should_recover "$prev_total"; then
+    fr_log "fr_run_recovery_attempt: ${kind}=#${number} 通算 attempt 上限到達 total=$prev_total"
+    return 2
+  fi
+
+  # context 収集（Req 3.1 / 3.2）。kind に応じて Issue / PR 別の収集関数を呼ぶ。
+  local context=""
+  if [ "$kind" = "issue" ]; then
+    context=$(fr_collect_issue_context "$number" || printf '%s' "")
+  else
+    context=$(fr_collect_pr_ci_context "$number" || printf '%s' "")
+  fi
+
+  # failure signature 計算（Req 5.1 / 5.5）。collect が空文字を返したケースでも
+  # sha1sum は固定の hash を返すため signature 自体は常に得られる。
+  local signature
+  signature=$(printf '%s' "$context" | fr_compute_failure_signature)
+
+  # head_sha 取得（PR 経路のみ。Issue 経路は空文字）。
+  # 失敗時は空文字に正規化し、no-progress 判定は signature 一致のみで動く。
+  local head_sha=""
+  if [ "$kind" = "pr" ]; then
+    if ! head_sha=$(timeout "$FAILED_RECOVERY_GIT_TIMEOUT" gh pr view "$number" \
+        --repo "$REPO" \
+        --json headRefOid \
+        --jq '.headRefOid' 2>/dev/null); then
+      fr_warn "fr_run_recovery_attempt: gh pr view --json headRefOid 失敗 pr=#${number}"
+      head_sha=""
+    fi
+    # 末尾改行を trim（jq -r が改行を付ける）
+    head_sha="${head_sha%$'\n'}"
+    # 取得値が空 / 不正 SHA なら空文字に正規化
+    if ! [[ "$head_sha" =~ ^[0-9a-f]{40}$ ]]; then
+      head_sha=""
+    fi
+  fi
+
+  # no-progress 判定（Req 5.1 / 5.2）。判定 0=no-progress なら terminate 関数
+  # （task 7）に委譲するため return 3 で caller に通知（stub）。
+  if fr_detect_no_progress "$signature" "$head_sha" "$prev_state"; then
+    fr_log "fr_run_recovery_attempt: ${kind}=#${number} no-progress 判定 signature=$signature"
+    return 3
+  fi
+
+  # 着手コメント投稿（Req 3.3 の 1 件目 / 着手表明）。新 total_attempts = prev + 1
+  # を本文に含めて運用者が試行回数を追跡できるようにする。
+  local new_total=$((prev_total + 1))
+  local start_body
+  start_body=$(printf 'Failed Recovery Processor (#359): 修正試行を開始します（通算 %s 回目 / 上限 %s）。\n\nclaude-failed 復旧フローで自動的に分析・修正を試みます。' \
+      "$new_total" "$FAILED_RECOVERY_MAX_ATTEMPTS")
+  fr_post_attempt_comment "$kind" "$number" "$start_body" || true
+
+  # 試行開始時の attempt++ 確定（Req 4.2 / quota 燃焼上界保証）。
+  # ここで一度 in-progress を永続化することで、claude が exit する前に
+  # cron が中断しても次サイクルで total_attempts=new_total から resume できる。
+  if ! fr_save_state "$number" "$new_total" "in-progress" "$signature" "$head_sha"; then
+    fr_warn "fr_run_recovery_attempt: 開始時 fr_save_state 失敗 ${kind}=#${number}"
+  fi
+
+  # claude session を起動（Req 3.1 / 3.2）。prompt は context + 修正指示 +
+  # attempt 回数を平文で組み立てる。secrets を含めない（NFR 3.2 / fr_invoke_claude
+  # は値を引数として claude に渡す）。
+  local prompt
+  prompt=$(printf 'Failed Recovery Processor: claude-failed %s #%s の修正試行 (通算 %s 回目 / 上限 %s)\n\n以下の context から失敗原因を分析し、修正コミットを push してください。\n修正完了したら通常の Reviewer / pr-iteration フローに復帰させるため、本コメントへの追記応答は不要です。\n\n=== Context ===\n%s\n=== End of Context ===\n' \
+      "$kind" "$number" "$new_total" "$FAILED_RECOVERY_MAX_ATTEMPTS" "$context")
+
+  local stage_label="failed-recovery-${kind}-${number}"
+  local claude_rc=0
+  # fr_invoke_claude は内部で set +e/-e を toggle するため subshell で隔離
+  ( fr_invoke_claude "$prompt" "$stage_label" ) || claude_rc=$?
+
+  if [ "$claude_rc" = "99" ]; then
+    # quota 検出: 結果コメント投稿 + state in-progress 維持 + caller は次サイクル待ち
+    local quota_body
+    quota_body=$(printf 'Failed Recovery Processor (#359): quota 検出により本試行を中断しました（通算 %s 回目）。\n\nquota reset 後の次サイクルで再試行されます。attempt カウンタは加算済みです。' \
+        "$new_total")
+    fr_post_attempt_comment "$kind" "$number" "$quota_body" || true
+    # quota 起因の燃焼回避: attempt は加算済みなので state は in-progress を維持
+    return 99
+  fi
+
+  if [ "$claude_rc" = "0" ]; then
+    # success path: 結果コメント投稿 → fr_finalize_success（ラベル除去 + state succeeded）
+    local success_body
+    success_body=$(printf 'Failed Recovery Processor (#359): 修正試行が完了しました（通算 %s 回目）。\n\nclaude-failed ラベルを除去し、通常の処理フローに復帰させます。\n適用した修正の概要は本 %s の最新コミット / PR 差分を参照してください。' \
+        "$new_total" "$kind")
+    fr_post_attempt_comment "$kind" "$number" "$success_body" || true
+    if ! fr_finalize_success "$kind" "$number" "$new_total" "$signature" "$head_sha"; then
+      fr_warn "fr_run_recovery_attempt: fr_finalize_success が部分失敗 ${kind}=#${number}"
+      return 1
+    fi
+    return 0
+  fi
+
+  # その他の失敗 (rc != 0, 99): 結果コメント投稿 + state in-progress 維持
+  local failure_body
+  failure_body=$(printf 'Failed Recovery Processor (#359): 修正試行が失敗しました（通算 %s 回目 / 上限 %s / claude rc=%s）。\n\nclaude-failed ラベルは据え置きます。次サイクルで再試行されます（上限到達時は手動レビューへエスカレーション）。' \
+      "$new_total" "$FAILED_RECOVERY_MAX_ATTEMPTS" "$claude_rc")
+  fr_post_attempt_comment "$kind" "$number" "$failure_body" || true
+  return 1
+}
