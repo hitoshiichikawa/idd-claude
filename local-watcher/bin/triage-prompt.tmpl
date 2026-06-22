@@ -34,6 +34,34 @@ Issue の取得は次の順で行ってください。
 変数名・テストライブラリ・命名規約など、Claude が自律判断できる技術的詳細は含めない。
 迷ったら包括的に並べず、**重要度で最大 3 件**まで。
 
+## 分類タグ（classification）の判定基準
+
+`status = "needs-decisions"` で抽出した各 `decisions[]` 要素には、`classification` フィールドで
+`safe` / `human-only` のいずれか **1 つ** を必ず付与してください。後段の watcher が機械可読な
+根拠で自動続行可否を判定するためのタグです（`status = "ready"` の場合は `decisions` が空配列
+なので出現余地はありません）。
+
+### `human-only` の定義
+
+以下のいずれかに該当する論点は **必ず** `human-only` とすること:
+
+- 機密情報 / API key / OAuth token / 個人情報 / 認証情報
+- コンプライアンス / 法務 / 契約 / ライセンス
+- 不可逆な変更（schema migration / data delete / branch protection 緩和 / 公開済み API の
+  互換性破壊）
+- 外部影響（本番環境 / 課金 / 外部サービスへの新規依存）
+
+### `safe` の条件
+
+`safe` と判定できるのは、**上記すべてに該当せず**、かつ PM が `recommendation` で明確な
+第一推奨を提示できる論点に限ります。
+
+### fail-safe（最重要）
+
+判定に確信が持てない場合は **必ず** `human-only` を選択してください。`safe` と `human-only` の
+どちらか迷う段階で `safe` を選ぶことは禁止です（安全側に倒す / 機密・コンプラ・不可逆・外部影響
+の漏れリスクをゼロにするため）。
+
 ## 「Architect を挟むべき」と判定する基準（needs_architect 判定）
 
 `needs_architect: true` と判定された Issue は **設計 PR ゲート**（cc-sdd 風の 2 PR フロー）を
@@ -90,7 +118,8 @@ Issue 本文に `## 関連` セクション（英語 repo では `## Related`）
         "Option B: 選択肢 B の説明"
       ],
       "impact": "この決定が実装・運用に与える影響",
-      "recommendation": "Claude の推奨とその理由"
+      "recommendation": "Claude の推奨とその理由",
+      "classification": "safe" | "human-only"
     }
   ],
   "edit_paths": [
@@ -101,6 +130,7 @@ Issue 本文に `## 関連` セクション（英語 repo では `## Related`）
 ```
 
 - `status` が `ready` の場合、`decisions` は空配列にすること
+- `status` が `needs-decisions` の場合、各 `decisions[]` 要素に `classification`（`safe` または `human-only`）を **必須**で含めること。`status = "ready"` の場合は `decisions` 空配列なので `classification` 出現の余地はない
 - `needs_architect` が `false` の場合でも `architect_reason` には「軽微な修正のため不要」など根拠を残すこと
 - JSON 以外の文字列を出力しないこと（シェル側で jq パースに失敗します）
 - `{{FILE}}` への書き込みは **Bash ツールの heredoc** で行うこと（#332: `--bare` 実行
