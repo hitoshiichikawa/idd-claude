@@ -9,7 +9,7 @@
 > `_Requirements_partial:_` で明示している（Reviewer は当該 AC を `missing test` reject 対象から除外し、
 > task 6 で partial 解消を確認する）。
 
-- [ ] 1. env 正規化と cycle startup ログ拡張
+- [x] 1. env 正規化と cycle startup ログ拡張
   - `local-watcher/bin/issue-watcher.sh` の Config block（`FULL_AUTO_ENABLED` 正規化直後、行 ~133 近辺）
     に `NEEDS_DECISIONS_MODE` を追加。既定 `all-human`、`case ... esac` で 3 値（`all-human` /
     `classified` / `all-auto`）以外は `all-human` に正規化（既存 `AUTO_REBASE_MODE` パターン踏襲）
