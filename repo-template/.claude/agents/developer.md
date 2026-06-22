@@ -422,6 +422,26 @@ Reviewer review range の **終端 SHA** を当該 marker commit に固定する
 - 本 attempt（Reviewer reject 後の retry も含む）の task-scope 作業がすべて完了した時点で
   marker commit を作成する
 
+### 順序条項（Issue #356 / 必読）
+
+watcher 側で docs-only post-marker commit を auto-refresh する safety net
+（`pt_classify_post_marker_paths` / `POST_MARKER_DOCS_ALLOWLIST`）は **defense-in-depth**
+であり、Developer 側でも以下の順序を **厳守** すること。これは silent range truncation
+（修正 commit が Reviewer の判定対象から漏れる事故）と、本来不要な auto-refresh の
+発火・Issue コメント増殖を防ぐためである:
+
+1. **impl-notes / learning 追記は marker commit より「前に」完了させる**
+   - 当該 task の `### Task <id>` 見出し追加 / Finding Closure Matrix 追記 /
+     残存課題の記録など `impl-notes.md` への書き込みは、すべて `docs(tasks): mark
+     <id> as done` marker commit より「前」の commit として積むこと
+   - 「marker を打った後に impl-notes だけ追記する」フローは禁止
+2. **marker commit は当該 task の「最終 commit」として作成する**
+   - marker commit を打った後に、当該 task scope の追加 commit を一切積まない
+     こと。`docs(impl-notes): learning 追記` のような docs-only commit も含めて
+     **後続 commit を作らない**
+   - 後続作業が必要になった場合は、後述「retry 時の marker refresh 契約」に従って
+     旧 marker を剥がし、追加 commit を積んだ上で marker を作り直す
+
 ### retry 時の marker refresh 契約（Req 1.2）
 
 Reviewer reject や Debugger guidance による Implementer 再実行（round 2 / round 3）で
@@ -467,6 +487,15 @@ claude-failed、env `POST_MARKER_RECOVERY_MODE`）を持ちますが、これは
 代替ではなく defense-in-depth** です。default の `fail-with-diagnostic` モードでは
 silent truncation を顕在化させて claude-failed で停止するため、Implementer は本契約を
 遵守して safety net 発火を回避することが望まれます。
+
+Issue #356 で追加された **docs-only auto-refresh**（`pt_classify_post_marker_paths` /
+env `POST_MARKER_DOCS_ALLOWLIST` 既定: `**/impl-notes.md` / `docs/specs/**/*.md`）は、
+post-marker commit が docs-only allowlist 内のみで構成される場合に marker を HEAD
+まで自動拡張して `claude-failed` を踏まずに済ませる **追加の安全網** ですが、これも
+Developer 契約の代替ではなく defense-in-depth です。allowlist 外（コード / テスト /
+設定ファイル）が 1 件でも含まれれば従来どおり `fail-with-diagnostic` 経路で停止します。
+本順序条項を遵守すれば auto-refresh も発火しないため、Issue コメントでの事実記録を
+増殖させずに済みます。
 
 ## learning 追記の責務（per-task ループの中核 / Req 4.1, 4.2, 4.4）
 
