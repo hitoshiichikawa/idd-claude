@@ -77,16 +77,26 @@ eval "$(extract_function "$WATCHER_SH" "dr_unblock_sweep")"
 eval "$(extract_function "$WATCHER_SH" "dr_extract_deps")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$WATCHER_SH" "dr_format_unresolved_comment")"
+# Issue #348: dr_unblock_sweep 内で full_auto_enabled を呼ぶため、ヘルパー抽出規約
+# （CLAUDE.md 機能追加ガイドライン §7）に従って当該抽出リストへ追随させる。
+# shellcheck disable=SC1090,SC2086
+eval "$(extract_function "$WATCHER_SH" "full_auto_enabled")"
 
 for fn in dr_unblock_gate_enabled dr_unblock_has_orphan_marker \
           dr_unblock_post_unblocked_comment dr_unblock_post_orphan_marker_comment \
           dr_unblock_resolve_one_issue dr_unblock_sweep dr_extract_deps \
-          dr_format_unresolved_comment; do
+          dr_format_unresolved_comment full_auto_enabled; do
   if ! declare -F "$fn" >/dev/null; then
     echo "ERROR: $fn not loaded" >&2
     exit 2
   fi
 done
+
+# Issue #348: 既存テストは個別 gate `DEP_AUTO_UNBLOCK_ENABLED` のセマンティクスを検証する
+# ことが目的のため、新規導入された上位 kill switch `FULL_AUTO_ENABLED` を ON に固定して
+# 既存テストの観測点（gh 呼び出し回数 / コメント文面 / 構造化ログ）を変えない。
+# kill switch OFF 時の AND ゲート挙動は別ファイル `full_auto_enabled_test.sh` で検証する。
+FULL_AUTO_ENABLED="true"
 
 # グローバル env（遅延束縛で抽出関数本体から参照される）
 # shellcheck disable=SC2034

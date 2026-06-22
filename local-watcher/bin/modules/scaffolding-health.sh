@@ -19,6 +19,7 @@
 #   - sh_doctor_check_clis                     : doctor 点検: gh/jq/flock/git/claude 存否（Req 4.3）
 #   - sh_doctor_check_labels                   : doctor 点検: 必須ラベル存否（Req 4.4 / read-only）
 #   - sh_doctor_check_base_branch              : doctor 点検: base ブランチ解決可否（Req 4.5 / read-only）
+#   - sh_doctor_check_full_auto                : doctor 点検: FULL_AUTO_ENABLED kill switch 解決値（#348 / read-only / 常に ok）
 #   - sh_doctor_run                            : doctor 統合: 全項目集約 + full/degraded 一覧レポート
 #
 # 配置先:
@@ -337,6 +338,30 @@ sh_doctor_check_base_branch() {
   return 1
 }
 
+# ─── sh_doctor_check_full_auto ───
+# Issue #348: full-auto 系 processor の単一 kill switch `FULL_AUTO_ENABLED` の解決値を
+# read-only で表示する。`FULL_AUTO_ENABLED=true` 厳密一致のみ enabled、それ以外は
+# すべて disabled として正規化済みの前提（本体 Config ブロックで正規化済み）。
+# 本点検は **常に ok 戻り** で repo 全体 degraded への昇格に算入しない（kill switch の
+# 状態 enabled / disabled は運用判断に基づく設定であり、degraded ではない）。
+# Req 3.2「`issue-watcher.sh --doctor` subcommand shall remain functional」を満たし、
+# 運用者が doctor 1 コマンドで kill switch の現在値を確認できる（Req 4.2 補強）。
+#
+# 入力: env FULL_AUTO_ENABLED
+# 戻り値: 常に 0（ok 表示。degraded には昇格しない）
+sh_doctor_check_full_auto() {
+  # 本体 Config ブロックが既に "true" / "false" に正規化済みのため、表示値はそのまま
+  # 採用する。本体起源以外（直接 sh_doctor_check_full_auto を呼ぶ単体テスト等）で
+  # 未設定の状態に遭遇した場合は安全側の "false" を表示する。
+  local v="${FULL_AUTO_ENABLED:-false}"
+  if [ "$v" = "true" ]; then
+    printf '  %-42s: %s (%s)\n' "full-auto kill switch (FULL_AUTO_ENABLED)" "ok" "enabled"
+  else
+    printf '  %-42s: %s (%s)\n' "full-auto kill switch (FULL_AUTO_ENABLED)" "ok" "disabled"
+  fi
+  return 0
+}
+
 # ─── sh_doctor_run ───
 # doctor の統合ランナー。現行 env で解決された REPO / REPO_DIR / BASE_BRANCH の 1 組を点検し、
 # 全 `sh_doctor_check_*` を集約して full / degraded を識別できる一覧レポートを出力する（Req 4.1,
@@ -361,6 +386,8 @@ sh_doctor_run() {
   sh_doctor_check_clis        || overall="degraded"
   sh_doctor_check_labels      || overall="degraded"
   sh_doctor_check_base_branch || overall="degraded"
+  # #348: kill switch 状態は常に ok 表示（degraded には算入しない）
+  sh_doctor_check_full_auto   || true
 
   echo "  ----------------------------------------------------------------"
   echo "  RESULT: ${overall}"

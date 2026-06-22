@@ -104,6 +104,32 @@ LABEL_BLOCKED="blocked"
 # 等価な挙動を保つ（Req 1.2, 1.3, NFR 1.1）。gate ON 時のみ `dr_apply_block` の新規
 # エスカレーションコメント文面が「依存解消後に自動で外れます」相当に分岐する（Req 8.1, 8.2）。
 DEP_AUTO_UNBLOCK_ENABLED="${DEP_AUTO_UNBLOCK_ENABLED:-false}"
+# Issue #348: full-auto 系 processor の単一 kill switch。
+# `=true` 厳密一致のときのみ ON。それ以外（未設定 / 空 / `false` / `0` / `True` /
+# `TRUE` / `1` / typo 等）はすべて OFF に正規化し、本機能導入前と完全に等価な挙動を
+# 保つ（Req 1.1〜1.3, NFR 1.1）。本フラグは個別 gate と **AND** 関係で動作し、
+# `FULL_AUTO_ENABLED=true` かつ個別 gate=true の場合のみ full-auto 系 processor が
+# 発火する（二重 opt-in / Req 2.1〜2.7）。
+#
+# 本フラグの配下に置く processor は「実装済みの full-auto 系」のみとする。本 Issue 時点で
+# 実装済みのものは Dependency Auto-Unblock Sweep (`dr_unblock_sweep`, #346) の 1 件のみ。
+# 要件で言及された auto-merge / failed-recovery / needs-decisions auto / semantic conflict
+# は本 Issue 時点では未実装のため配線対象外（将来追加時に同じ kill switch を参照する設計）。
+#
+# 本フラグは Out of Scope に明記された既存 opt-in 機能（merge-queue / auto-rebase /
+# promote-pipeline / pr-iteration / pr-reviewer / security-review / design-review-release /
+# stage-checkpoint / stage-a-verify / quota-aware / debugger / hooks / dep-auto-unblock の
+# 個別 gate 自体）の解釈は変更しない（Req 3.3 / 3.4）。
+FULL_AUTO_ENABLED="${FULL_AUTO_ENABLED:-false}"
+# 値正規化: `true` 厳密一致のみ通し、それ以外（未設定 / 空 / `false` / `0` / `True` /
+# `TRUE` / `1` / typo 等）はすべて `false` に固定する（Req 1.2, 1.3）。
+# 正規化は full-auto 系 processor の入口評価より **前** に完了させる（Req 1.4）。
+# 既存「デフォルト有効化フラグの値正規化」ループには加えない（既定 OFF の opt-in 制のため、
+# `=true` 厳密一致で有効化する仕様。`=false` 既定の opt-out 系 8 種とは別扱い）。
+case "$FULL_AUTO_ENABLED" in
+  true) : ;;
+  *)    FULL_AUTO_ENABLED="false" ;;
+esac
 # Issue #200: hotfix 優先ティアを示すラベル。Dispatcher の候補処理順を
 # FIFO（Issue 番号昇順）にしたうえで、本ラベル付き Issue を非 hotfix Issue より
 # 先に投入する 2 段優先のキー。人間が手動付与する運用前提（自動付与なし）。
@@ -807,7 +833,9 @@ mkdir -p "$LOG_DIR"
 # 解決済み base branch を起動時 log に出力（Req 1.7 / NFR 4.1）。
 # 運用者が cron mailer / log で `base-branch=...` を grep できるよう、
 # 既定値（main）でも明示的に出力する。
-echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE}"
+# Issue #348: cycle startup ログに `full-auto=` の解決値も含める（Req 4.2）。
+# 運用者は `grep full-auto=` で現在の kill switch 状態を確認できる。
+echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} full-auto=${FULL_AUTO_ENABLED}"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # doctor サブコマンド dispatch (#238 / Decision 2)
@@ -9388,6 +9416,27 @@ dr_unblock_gate_enabled() {
   esac
 }
 
+# Issue #348: full-auto 系 processor の単一 kill switch 判定関数。
+# 引数: なし
+# 戻り値: 0 = kill switch ON（= full-auto を許可） / 1 = OFF（= 全 full-auto 抑止）
+# 副作用: なし（純粋関数）
+#
+# `FULL_AUTO_ENABLED` env を `=true` 厳密一致で判定する（Req 1.2, 1.3）。
+# 値正規化に失敗した状態（未設定 / 空 / `False` / `True` / `1` / `on` / typo）は
+# すべて OFF として扱う（NFR 1.1 安全側）。本関数は **すべての** full-auto 系
+# processor の入口で AND 条件として参照される（Req 2.1〜2.5）。`full_auto_enabled`
+# が 1 を返した場合、当該 processor は外部副作用なしで早期 return する（Req 2.1〜2.5）。
+#
+# Config ブロックで値正規化が完了している前提だが、外部から `FULL_AUTO_ENABLED` を
+# unset した状態で本関数だけが evaluation される万が一の経路でも安全側に倒すため、
+# `${FULL_AUTO_ENABLED:-false}` で fallback する。
+full_auto_enabled() {
+  case "${FULL_AUTO_ENABLED:-false}" in
+    true) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # 引数 $1 = 対象 Issue 番号（数字のみ）
 # stdout = なし（戻り値で表現）
 # 戻り値:
@@ -9576,6 +9625,15 @@ dr_unblock_resolve_one_issue() {
 # 解除された Issue は本 tick の `_dispatcher_run` 候補列挙（`-label:"$LABEL_BLOCKED"`
 # 除外）で通常 pickup に合流できる（同 tick fall-through 動線。Req 2.3 を満たす）。
 dr_unblock_sweep() {
+  # Issue #348: full-auto kill switch（AND 二重 opt-in / Req 2.5）。
+  # 個別 gate `DEP_AUTO_UNBLOCK_ENABLED` より先に kill switch を評価し、
+  # OFF なら外部副作用ゼロで早期 return + 抑止原因を 1 行ログ出力する（Req 4.1）。
+  # 既存個別 gate の挙動と独立に評価することで、運用者は kill switch 1 つで
+  # 全 full-auto 系 processor を即時 no-op に倒せる（Req 2.5 / NFR 1.1）。
+  if ! full_auto_enabled; then
+    dr_log "dr_unblock_sweep: suppressed by FULL_AUTO_ENABLED kill switch (no-op)"
+    return 0
+  fi
   # 起動 gate（Req 1.1, 1.2, NFR 1.1, NFR 2.1）。OFF なら gh API ゼロ呼び出しで return。
   if ! dr_unblock_gate_enabled; then
     return 0
