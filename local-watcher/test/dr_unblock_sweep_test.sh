@@ -82,6 +82,18 @@ eval "$(extract_function "$WATCHER_SH" "dr_format_unresolved_comment")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$WATCHER_SH" "full_auto_enabled")"
 
+# Issue #368 / D-16: dr_unblock_sweep が dc_cycle_sweep を呼ぶようになったため、
+# 同じく抽出リストに追随させる。本テストは cycle 検出を行わない fixture を扱うため、
+# `dc_cycle_sweep` は no-op stub で十分（_DC_CYCLE_MEMBERS を空に設定するだけ）。
+# 同 stub により stderr へ "command not found" を漏らさず、既存テストの観測点
+# （gh 呼び出し回数 / コメント文面 / 構造化ログ）を一切変えない（NFR 1.1 後方互換）。
+# shellcheck disable=SC2317
+dc_cycle_sweep() {
+  _DC_CYCLE_MEMBERS=""
+  export _DC_CYCLE_MEMBERS
+  return 0
+}
+
 for fn in dr_unblock_gate_enabled dr_unblock_has_orphan_marker \
           dr_unblock_post_unblocked_comment dr_unblock_post_orphan_marker_comment \
           dr_unblock_resolve_one_issue dr_unblock_sweep dr_extract_deps \

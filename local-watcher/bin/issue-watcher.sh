@@ -936,7 +936,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）、
 # #325 の token usage 計測（token-usage.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" "needs-decisions-auto.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" "needs-decisions-auto.sh" "dep-cycle-detect.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -10230,12 +10230,32 @@ dr_unblock_sweep() {
 
   dr_log "dr_unblock_sweep 起動 対象=${count} 件 gate=on"
 
+  # Issue #368 / D-16: Dependency Cycle Detection をスイープ本処理の前段で 1 回実行。
+  # auto-unblock と同じ取得済み $issues_json をそのまま渡すことで本文取得 API を
+  # 二重呼び出ししない（NFR 2.2）。閉路メンバー集合は `_DC_CYCLE_MEMBERS`（空白区切り）
+  # に export され、本ループ内で auto-unblock の対象から除外する（Req 4.4 / AT-j）。
+  # fail-open（`|| true`）で cycle 検出の失敗が auto-unblock を壊さない（NFR 3.2）。
+  dc_cycle_sweep "$issues_json" || true
+
+  # 閉路メンバー判定用の grep -F 入力（改行区切り）に変換
+  local cycle_members_lines=""
+  if [ -n "${_DC_CYCLE_MEMBERS:-}" ]; then
+    cycle_members_lines=$(printf '%s\n' "$_DC_CYCLE_MEMBERS" | tr ' ' '\n' | grep -E '^[0-9]+$' || true)
+  fi
+
   local i issue_num issue_body
   for ((i=0; i<count; i++)); do
     issue_num=$(printf '%s' "$issues_json" | jq -r ".[$i].number" 2>/dev/null)
     issue_body=$(printf '%s' "$issues_json" | jq -r ".[$i].body // \"\"" 2>/dev/null)
     if [ -z "$issue_num" ] || ! [[ "$issue_num" =~ ^[0-9]+$ ]]; then
       dr_warn "dr_unblock_sweep: index=${i} の number 抽出に失敗 / skip"
+      continue
+    fi
+    # Issue #368 / D-16: 閉路メンバーは auto-unblock の対象から除外（Req 4.4 / AT-j）。
+    # cycle 検出側で needs-decisions 付与済みのため、ここで blocked を外すと矛盾する。
+    if [ -n "$cycle_members_lines" ] \
+        && printf '%s\n' "$cycle_members_lines" | grep -qxF -- "$issue_num"; then
+      dr_log "issue=#${issue_num} verdict=unblock_skip_cycle_member"
       continue
     fi
     # 個別 Issue の処理失敗は fail-open（次 Issue に進む / NFR 3.2）
