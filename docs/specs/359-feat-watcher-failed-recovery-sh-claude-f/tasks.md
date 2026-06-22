@@ -133,7 +133,7 @@
   - _Boundary: modules/failed-recovery.sh:Termination_
   - _Depends: 3.2, 6_
 
-- [ ] 8. process_failed_recovery エントリ + watcher 本体配線 + README 追記
+- [x] 8. process_failed_recovery エントリ + watcher 本体配線 + README 追記
   - `process_failed_recovery` を `modules/failed-recovery.sh` に実装。冒頭で
     `fr_is_enabled || return 0`、Issue 候補と PR 候補を列挙 → 各 candidate を直列実行 →
     重複起動防止 in-memory set、例外は `fr_warn` 吸収（fail-continue）
