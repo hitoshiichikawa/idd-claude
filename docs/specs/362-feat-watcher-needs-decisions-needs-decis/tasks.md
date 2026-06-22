@@ -35,7 +35,7 @@
   - _Requirements: 6.1, 6.2, 6.3_
   - _Boundary: needs-decisions-auto.sh_
 
-- [ ] 2.2 mode 解決 + classification 抽出 + recommendation 抽出の純関数
+- [x] 2.2 mode 解決 + classification 抽出 + recommendation 抽出の純関数
   - `nda_resolve_mode_enabled()` を実装: `NEEDS_DECISIONS_MODE` が `classified` / `all-auto` の場合
     rc=0、`all-human` の場合 rc=1（本体 Config で正規化済前提）
   - `nda_extract_classification(triage_json_path)` を実装: jq で `decisions[].classification` を抽出し、
