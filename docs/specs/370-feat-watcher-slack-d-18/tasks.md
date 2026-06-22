@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. slack-notify module の骨格 + opt-in gate + ロガー
+- [x] 1. slack-notify module の骨格 + opt-in gate + ロガー
   - 新規ファイル `local-watcher/bin/modules/slack-notify.sh` を追加（ファイル冒頭コメントで用途 / 配置先 / 依存 / セットアップ参照先を明記、関数定義のみでトップレベル副作用なし）
   - `sn_log` / `sn_warn` / `sn_error` を既存 `fr_log` / `am_log` と同形式の 3 段 prefix
     （`[YYYY-MM-DD HH:MM:SS] [$REPO] slack-notify: ...`）で実装
