@@ -80,7 +80,7 @@
   - _Boundary: modules/failed-recovery.sh:Decision_
   - _Depends: 3.2_
 
-- [ ] 5.2 Context 収集と Claude 起動 wrapper を実装
+- [x] 5.2 Context 収集と Claude 起動 wrapper を実装
   - `fr_collect_issue_context` を実装。`gh issue view --json comments,body,title,labels`
     で直近 5 件のコメント + `git show` 経由で spec dir 配下を集約
   - `fr_collect_pr_ci_context` を実装。`gh pr checks --json` で failing check 特定 → `gh run
