@@ -99,7 +99,7 @@
   - _Boundary: modules/failed-recovery.sh:Execution_
   - _Depends: 3.1_
 
-- [ ] 6. attempt orchestrator + finalize_success を実装
+- [x] 6. attempt orchestrator + finalize_success を実装
   - `fr_should_recover` を実装（`total_attempts < FAILED_RECOVERY_MAX_ATTEMPTS` の純粋判定）
   - `fr_run_recovery_attempt` を実装。pre-attempt の `fr_should_recover` → no-progress 判定
     → 着手コメント投稿 → **試行開始時に attempt++**（Req 4.2、quota 燃焼上界保証）→
