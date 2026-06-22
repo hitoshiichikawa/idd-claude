@@ -78,7 +78,7 @@
   - _Boundary: test/auto-merge-design_test.sh, modules/auto-merge-design.sh_
   - _Depends: 1_
 
-- [ ] 6. 既存 `pr_publish_commit_status_test.sh` に design head fixture を追加
+- [x] 6. 既存 `pr_publish_commit_status_test.sh` に design head fixture を追加
   - `local-watcher/test/pr_publish_commit_status_test.sh` を編集し、既存テストに以下 3 ケースを追加（既存ケースは温存）:
     - (1) head `claude/issue-N-design-foo` + AND gate ON → `pr_publish_codex_status` が `codex-review` context で gh stub を 1 回呼ぶ（state=success または failure を VERDICT で分岐）
     - (2) 同上 + AND gate OFF（`PR_REVIEWER_STATUS_CHECK_ENABLED=false` または `FULL_AUTO_ENABLED=false`）→ gh stub 呼び出し回数 0 + suppression log 1 行
