@@ -149,4 +149,74 @@
 | NFR 4.1〜4.4 (セキュリティ) | jq --arg / `--` でオプション解釈打ち切り / fork 除外既存ガード再利用 |
 | NFR 5.1〜5.3 (性能 / 運用) | AUTO_REBASE_MAX_PRS / AUTO_REBASE_MAX_TURNS_SEC を流用 |
 
+## 7. Reviewer round=1 reject 是正（Findings 1〜4）
+
+### Finding 1 (Req 9.1): log line に gate 値 + skip-gate-off action 追加
+
+- 対象: `local-watcher/bin/modules/auto-rebase.sh` の `ar_handle_pr`
+- semantic 関連の `ar_log` 行（`action=skip-needs-decisions` / `action=escalate-needs-decisions`
+  / `action=skip-idempotent` / `action=attempt`）に
+  `semantic=${AUTO_REBASE_SEMANTIC} full-auto=${FULL_AUTO_ENABLED}` フィールドを追記
+- 新規 `action=skip-claude-failed` の防御的 log 行を 1a' に追加（claude-failed は
+  server-side filter で通常除外されるが念のため）
+- 新規 `action=skip-gate-off` の log 行を、`ar_apply_semantic` 呼出直前（gate OFF 時のみ）に
+  1 行出力（`semantic` 候補が gate OFF で旧経路に流れた事実を観測可能化）
+
+### Finding 2 (Req 9.2): semantic 完了 log に attempts + outcome 追加
+
+- 対象: 同 `ar_handle_pr` 内の rebase 完了側 `case "$rebase_rc"` ブロック + semantic
+  完了側 `case "$semantic_rc"` ブロック
+- 既存 `action=dismissed+ready` / `action=dismissed+partial-fail` / `reason=...` 行に
+  `outcome=resolved` / `outcome=dirty` / `outcome=timeout` / `outcome=push-failed` /
+  `outcome=fetch-failed` を併記（Req 9.2 の enum 識別子）
+- `attempts=${_semantic_attempts}` を末尾に追記（gate ON 配下のみ意味がある値 / gate OFF
+  では既存 fall-through により無影響）
+- 既存の `action=*` ラベルは後方互換のため温存し、`outcome=*` を **併記** する形式を採用
+
+### Finding 3 (Req 9.3): per-cycle summary に semantic subtotal 4 種を追加
+
+- 対象: 同モジュールの `process_auto_rebase` のループと末尾 summary 行
+- 新グローバル `_AR_SEMANTIC_BUCKET`（"resolved" / "failed" / "escalated" / "skipped" / ""）を
+  `ar_handle_pr` 内で gate ON 時のみセット。呼出毎に最初にリセット
+- `process_auto_rebase` ループで bucket 値に応じて 4 個のローカルカウンタ
+  `semantic_resolved` / `semantic_failed` / `semantic_escalated` / `semantic_skipped` を
+  インクリメント
+- 末尾 summary 行 (`ar_log "サマリ: ..."`) に
+  `semantic-resolved=N, semantic-failed=N, semantic-escalated=N, semantic-skipped=N` を追記
+- gate OFF 時は bucket が "" のままで 4 種すべて 0 → 旧サマリ形式と数値的に等価
+  （NFR 1.1 互換）
+
+### Finding 4 (NFR 3.2): 近接テスト 2 ケース追加
+
+- 対象: `local-watcher/test/ar_semantic_test.sh`
+- Section 7: `ar_apply_semantic_claude` の抽出 + `gh` / `ar_dismiss_all_approvals` stub
+  - (a) dismissal が PR 番号付きで呼ばれる
+  - (b) `needs-rebase --remove-label` / `ready-for-review --add-label` が呼ばれる
+  - (c) コメント本文に before/after SHA + `<!-- idd-claude:auto-rebase-semantic` マーカー
+  - 追加で `claude-failed` ラベルが付与されないことも検証（Req 7.6 / 8.2 安全性核心）
+  - dismissal 失敗時に rc=1 で早期 return + 後段 label 変更が呼ばれない
+- Section 8: `ar_semantic_escalate_needs_decisions` の抽出 + `gh` stub
+  - `gh pr edit --add-label needs-decisions` が呼ばれる
+  - `gh pr comment` が呼ばれる
+  - **`claude-failed` ラベルは絶対に付与されない**（Req 7.6 / 8.2 の安全性核心）
+  - コメント本文に累積 attempts(4) / budget env 名 / head SHA が含まれる
+  - needs-decisions 付与失敗時に rc=1（次サイクル再試行可能 / Req 8.4）
+- ヘルパ `grep_count()` を追加（`grep -c` の rc=1 (0 マッチ) 問題を回避）
+
+### 検証
+
+- `bash -n local-watcher/bin/modules/auto-rebase.sh local-watcher/bin/issue-watcher.sh
+   local-watcher/test/ar_semantic_test.sh`: 構文 OK
+- `shellcheck local-watcher/bin/*.sh local-watcher/bin/modules/*.sh install.sh setup.sh
+   .github/scripts/*.sh`: 警告ゼロ
+- `bash local-watcher/test/ar_semantic_test.sh`: PASS=84 FAIL=0（既存 66 + 新規 18）
+- 関連 regression（auto-merge_test.sh / auto-merge-design_test.sh /
+  full_auto_enabled_test.sh / fr_state_test.sh / needs_decisions_auto_test.sh）: 全 PASS
+
+### 確認事項
+
+- なし。Findings 1〜4 はすべて auto-rebase.sh + ar_semantic_test.sh の 2 ファイルで
+  機械的に修正完了。Req 9.1 enum の `skip-claude-failed` は server-side filter で通常
+  除外されるが、防御的 1a' branch を追加して log 出力経路を確保した。
+
 STATUS: complete

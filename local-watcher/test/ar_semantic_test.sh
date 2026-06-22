@@ -55,7 +55,7 @@ extract_function() {
   ' "$script"
 }
 
-# 抽出: 6 関数を同一 module から取り出す
+# 抽出: 8 関数を同一 module から取り出す
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$MODULE_SH" "ar_semantic_enabled")"
 # shellcheck disable=SC1090,SC2086
@@ -70,10 +70,15 @@ eval "$(extract_function "$MODULE_SH" "ar_semantic_should_skip_idempotent")"
 eval "$(extract_function "$MODULE_SH" "ar_semantic_get_attempts")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$MODULE_SH" "ar_semantic_budget_exhausted")"
+# shellcheck disable=SC1090,SC2086
+eval "$(extract_function "$MODULE_SH" "ar_apply_semantic_claude")"
+# shellcheck disable=SC1090,SC2086
+eval "$(extract_function "$MODULE_SH" "ar_semantic_escalate_needs_decisions")"
 
 for fn in ar_semantic_enabled ar_semantic_state_path ar_semantic_load_state \
           ar_semantic_save_state ar_semantic_should_skip_idempotent \
-          ar_semantic_get_attempts ar_semantic_budget_exhausted; do
+          ar_semantic_get_attempts ar_semantic_budget_exhausted \
+          ar_apply_semantic_claude ar_semantic_escalate_needs_decisions; do
   if ! declare -F "$fn" >/dev/null; then
     echo "ERROR: $fn not loaded" >&2
     exit 2
@@ -369,6 +374,186 @@ AUTO_REBASE_SEMANTIC="claude"
 unset FULL_AUTO_ENABLED
 assert_rc "NFR 1.1: gate ON + kill 未設定でも disabled（旧経路 fall-through）" 1 \
   ar_semantic_enabled
+
+# ============================================================
+# Section 7: ar_apply_semantic_claude — dismissal + ラベル遷移 + コメント本文（NFR 3.2）
+#   stub: gh / ar_dismiss_all_approvals / timeout / ar_warn
+# ============================================================
+echo ""
+echo "--- Section 7: ar_apply_semantic_claude の副作用検証（NFR 3.2） ---"
+
+# stub 用のグローバル
+# shellcheck disable=SC2034  # 抽出関数が遅延束縛で参照
+REPO="owner/test-repo"
+# shellcheck disable=SC2034
+AUTO_REBASE_GIT_TIMEOUT=60
+# shellcheck disable=SC2034
+LABEL_NEEDS_REBASE="needs-rebase"
+# shellcheck disable=SC2034
+LABEL_READY="ready-for-review"
+# shellcheck disable=SC2034
+LABEL_FAILED="claude-failed"
+# shellcheck disable=SC2034
+LABEL_NEEDS_DECISIONS="needs-decisions"
+# shellcheck disable=SC2034
+AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS=3
+# shellcheck disable=SC2034
+BASE_BRANCH="main"
+
+GH_CALL_LOG=$(mktemp)
+GH_COMMENT_BODY=$(mktemp)
+# shellcheck disable=SC2317
+timeout() { shift; "$@"; }
+
+# 観測用 stub: dismissal 呼び出しを記録
+DISMISS_CALL_LOG=$(mktemp)
+DISMISS_RC=0
+# shellcheck disable=SC2317
+ar_dismiss_all_approvals() {
+  echo "ar_dismiss_all_approvals pr=$1" >> "$DISMISS_CALL_LOG"
+  return "$DISMISS_RC"
+}
+
+# gh stub: pr edit / pr comment を観測。引数を改行区切りで GH_CALL_LOG に。
+# `--body` の値は GH_COMMENT_BODY に分離保存して長文比較を安全にする。
+# shellcheck disable=SC2317
+gh() {
+  # body 値を抜く（pr comment --body "..." の形式）
+  if [ "${1:-}" = "pr" ] && [ "${2:-}" = "comment" ]; then
+    local prev=""
+    local arg
+    for arg in "$@"; do
+      if [ "$prev" = "--body" ]; then
+        printf '%s' "$arg" >> "$GH_COMMENT_BODY"
+        echo "gh pr comment --body <BODY>" >> "$GH_CALL_LOG"
+      fi
+      prev="$arg"
+    done
+    return 0
+  fi
+  echo "gh $*" >> "$GH_CALL_LOG"
+  return 0
+}
+
+cleanup_gh_stub() {
+  : > "$GH_CALL_LOG"
+  : > "$GH_COMMENT_BODY"
+  : > "$DISMISS_CALL_LOG"
+  DISMISS_RC=0
+}
+
+# 7.1: 正常系（dismissal 成功）— dismissal / ラベル遷移 / コメント本文を一括検証
+cleanup_gh_stub
+rc=0
+ar_apply_semantic_claude 366 "https://github.com/owner/test-repo/pull/366" \
+  "deadbeef" "cafef00d" "src/foo.rs" 1 >/dev/null 2>&1 || rc=$?
+
+assert_eq "Req 5.1 (NFR 3.2): ar_apply_semantic_claude 正常終了 (rc=0)" "0" "$rc"
+
+# grep_count: grep -c の rc=1 (0 マッチ) を safely 0 に正規化するヘルパ。
+# 単純な `grep -c ... || echo 0` だと「0\n0」を返してしまうため、`{ ... ; true; }`
+# でラップして stdout だけを採用する。
+# shellcheck disable=SC2317
+grep_count() {
+  local n
+  n=$({ grep -cE "$@" 2>/dev/null; true; } | head -n1)
+  echo "${n:-0}"
+}
+
+# (a) dismissal が呼ばれる
+dismiss_count=$(grep_count "ar_dismiss_all_approvals pr=366" "$DISMISS_CALL_LOG")
+assert_eq "NFR 3.2 (a): ar_dismiss_all_approvals が PR #366 で 1 回呼ばれる" "1" "$dismiss_count"
+
+# (b) needs-rebase remove + ready-for-review add が呼ばれる
+remove_needs_rebase=$(grep_count "gh pr edit 366.*--remove-label needs-rebase" "$GH_CALL_LOG")
+add_ready=$(grep_count "gh pr edit 366.*--add-label ready-for-review" "$GH_CALL_LOG")
+assert_eq "NFR 3.2 (b): needs-rebase --remove-label が 1 回" "1" "$remove_needs_rebase"
+assert_eq "NFR 3.2 (b): ready-for-review --add-label が 1 回" "1" "$add_ready"
+
+# (c) コメント本文に before/after SHA とマーカーが含まれる
+body_content=$(cat "$GH_COMMENT_BODY")
+before_hit=0
+case "$body_content" in *"deadbeef"*) before_hit=1 ;; esac
+assert_eq "NFR 3.2 (c): コメント本文に before SHA(deadbeef) を含む" "1" "$before_hit"
+after_hit=0
+case "$body_content" in *"cafef00d"*) after_hit=1 ;; esac
+assert_eq "NFR 3.2 (c): コメント本文に after SHA(cafef00d) を含む" "1" "$after_hit"
+marker_hit=0
+case "$body_content" in *"<!-- idd-claude:auto-rebase-semantic"*) marker_hit=1 ;; esac
+assert_eq "NFR 3.2 (c): コメント本文に idd-claude:auto-rebase-semantic マーカーを含む" "1" "$marker_hit"
+
+# 念のため `claude-failed` ラベルは絶対に付与されない（Req 7.6 / 8.2 安全性確認）
+add_failed=$(grep_count "gh pr edit.*--add-label claude-failed" "$GH_CALL_LOG")
+assert_eq "Req 7.6 / 8.2: ar_apply_semantic_claude では claude-failed ラベルを付与しない" "0" "$add_failed"
+
+# 7.2: dismissal 失敗時は rc=1 で早期 return（後段の label/comment は呼ばれない）
+cleanup_gh_stub
+DISMISS_RC=1
+rc=0
+ar_apply_semantic_claude 367 "https://github.com/owner/test-repo/pull/367" \
+  "aaa" "bbb" "" 1 >/dev/null 2>&1 || rc=$?
+assert_eq "Req 5.1: dismissal 失敗で rc=1（escalate に流れる契約）" "1" "$rc"
+post_dismiss_label_calls=$(grep_count "gh pr edit 367" "$GH_CALL_LOG")
+assert_eq "Req 5.1: dismissal 失敗時は後段ラベル変更を呼ばない" "0" "$post_dismiss_label_calls"
+
+# ============================================================
+# Section 8: ar_semantic_escalate_needs_decisions — needs-decisions 付与 + コメント投稿
+#   かつ claude-failed 付与なし（Req 7.6 / 8.2 / NFR 3.2）
+# ============================================================
+echo ""
+echo "--- Section 8: ar_semantic_escalate_needs_decisions の副作用検証（NFR 3.2） ---"
+
+cleanup_gh_stub
+DISMISS_RC=0
+rc=0
+ar_semantic_escalate_needs_decisions 999 4 "feedfacefeedface" >/dev/null 2>&1 || rc=$?
+assert_eq "Req 7.2: escalation 関数が正常終了 (rc=0)" "0" "$rc"
+
+# (a) needs-decisions ラベル付与
+add_needs_decisions=$(grep_count "gh pr edit 999.*--add-label needs-decisions" "$GH_CALL_LOG")
+assert_eq "NFR 3.2: needs-decisions --add-label が PR #999 で 1 回呼ばれる" "1" "$add_needs_decisions"
+
+# (b) gh pr comment が呼ばれる
+comment_calls=$(grep_count "gh pr comment --body <BODY>" "$GH_CALL_LOG")
+assert_eq "NFR 3.2: gh pr comment が 1 回呼ばれる" "1" "$comment_calls"
+
+# (c) claude-failed は絶対に付与されない（Req 7.6 / 8.2 の安全性核心）
+add_claude_failed=$(grep_count "gh pr edit.*--add-label claude-failed" "$GH_CALL_LOG")
+assert_eq "Req 7.6 / 8.2: escalation では claude-failed ラベルを絶対に付与しない" "0" "$add_claude_failed"
+
+# (d) コメント本文に累積 attempts / budget / head SHA が含まれる（Req 7.3）
+body_content=$(cat "$GH_COMMENT_BODY")
+attempt_hit=0
+case "$body_content" in *"4"*) attempt_hit=1 ;; esac
+assert_eq "Req 7.3 (a): コメント本文に累積 attempts(4) を含む" "1" "$attempt_hit"
+budget_hit=0
+case "$body_content" in *"AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS"*) budget_hit=1 ;; esac
+assert_eq "Req 7.3 (b): コメント本文に budget 値の env 名を含む" "1" "$budget_hit"
+head_hit=0
+case "$body_content" in *"feedfacefeedface"*) head_hit=1 ;; esac
+assert_eq "Req 7.3 (c): コメント本文に head SHA を含む" "1" "$head_hit"
+
+# 8.1: needs-decisions ラベル付与失敗時は rc=1（次サイクルで再試行可能 / Req 8.4）
+cleanup_gh_stub
+# gh stub を一時的に fail させる
+# shellcheck disable=SC2317
+gh() {
+  if [ "${1:-}" = "pr" ] && [ "${2:-}" = "edit" ]; then
+    return 1
+  fi
+  if [ "${1:-}" = "pr" ] && [ "${2:-}" = "comment" ]; then
+    echo "gh pr comment --body <BODY>" >> "$GH_CALL_LOG"
+    return 0
+  fi
+  echo "gh $*" >> "$GH_CALL_LOG"
+  return 0
+}
+rc=0
+ar_semantic_escalate_needs_decisions 1000 5 "abc" >/dev/null 2>&1 || rc=$?
+assert_eq "Req 8.4: needs-decisions 付与失敗で rc=1 (次サイクル再試行可能)" "1" "$rc"
+
+# tmp ファイル後片付け
+rm -f "$GH_CALL_LOG" "$GH_COMMENT_BODY" "$DISMISS_CALL_LOG" 2>/dev/null || true
 
 # ============================================================
 # Summary
