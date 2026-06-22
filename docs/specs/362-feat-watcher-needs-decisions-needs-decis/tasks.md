@@ -24,7 +24,7 @@
   - _Boundary: issue-watcher.sh Config block_
 
 - [ ] 2. needs-decisions-auto.sh module の新規追加（関数定義のみ）
-- [ ] 2.1 module ファイル雛形 + ロガー（nda_log / nda_warn / nda_error）
+- [x] 2.1 module ファイル雛形 + ロガー（nda_log / nda_warn / nda_error）
   - `local-watcher/bin/modules/needs-decisions-auto.sh` を新規作成。冒頭コメントで「用途 / 配置先 /
     依存 / セットアップ参照先」を明記（既存 `auto-merge.sh` `failed-recovery.sh` 形式に揃える）
   - 関数 prefix `nda_` を明示。`[YYYY-MM-DD HH:MM:SS] [$REPO] needs-decisions-auto:` 3 段 prefix ロガー
