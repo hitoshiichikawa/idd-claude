@@ -897,7 +897,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）、
 # #325 の token usage 計測（token-usage.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" "needs-decisions-auto.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -10517,6 +10517,18 @@ _slot_run_issue() {
     fi
 
     if [ "$STATUS" = "needs-decisions" ] && [ "$DECISION_COUNT" -gt 0 ]; then
+      # ── Issue #362: needs-decisions 自動続行（D-08 / D-09） ──
+      # AND 二重 opt-in（FULL_AUTO_ENABLED=true AND NEEDS_DECISIONS_MODE in (classified, all-auto)）
+      # 配下で、Triage が `safe` 分類した decisions について PM 第一推奨で自動続行する。
+      # rc=0 = auto-continue 実行済 → 既存 COMMENT 組み立て + gh issue comment + ラベル付け替え
+      # （needs-decisions 付与）+ return 0 を **すべて skip** して即 return 0（Issue は
+      # `needs-decisions` 不付与 + `claude-claimed` 除去済 → 次サイクルで dispatcher 再 pickup）。
+      # rc=1 = halt → 既存処理（needs-decisions 付与 + コメント投稿）にそのまま流す
+      # （本機能導入前と完全等価 / NFR 1.1, 1.3）。
+      if nda_evaluate_auto_continue "$TRIAGE_FILE"; then
+        slot_log "Triage 結果: needs-decisions → auto-continue（#362, claude-claimed 除去済・次サイクル再 pickup 待機）"
+        return 0
+      fi
       local COMMENT
       COMMENT=$(jq -r '
         "## 🤔 実装着手前に確認が必要な事項\n\n" +
