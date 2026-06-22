@@ -61,7 +61,7 @@
   - _Boundary: slack-notify.sh (sn_notify 関数追加), local-watcher/test/sn_notify_test.sh (新規)_
   - _Depends: 3.1_
 
-- [ ] 4. auto-merge / auto-merge-design callsite への hook 追加
+- [x] 4. auto-merge / auto-merge-design callsite への hook 追加
   - `local-watcher/bin/modules/auto-merge.sh` の `am_enable_auto_merge_for_pr` rc=0 path
     （既存 `am_log "PR #${pr_number}: auto-merge enabled ..."` 行の直後）に
     `sn_notify auto-merge "$pr_number" "$pr_url" success "head=$head_ref sha=$head_sha" || true` を 1 行追加
