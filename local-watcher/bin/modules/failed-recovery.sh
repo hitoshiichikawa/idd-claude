@@ -524,3 +524,256 @@ fr_detect_no_progress() {
   # Issue 経路（current_head_sha 空）: signature 一致のみで no-progress
   return 0
 }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Context Collection Layer
+#
+# claude session に渡す context 文字列を `gh issue view` / `gh pr checks` /
+# `gh run view` で組み立てる。すべて fail-continue（API エラー時は警告 + 部分結果
+# を返し caller を落とさない / NFR 5.2）。未信頼入力（Issue 本文・PR 本文・branch
+# 名・コメント）は jq --arg / --argjson 経由で sanitize（NFR 3.1）。
+#
+# 関連 AC:
+#   - Req 3.1: Issue コメントおよび関連ログから失敗原因 hint を抽出
+#   - Req 3.2: auto-merge 待ち PR の CI ログを解析
+#   - Req 3.5: 未信頼入力の quote / sanitize / ID 検証
+#   - NFR 3.1: jq --arg / --argjson、gh -- / git --、ID `^[0-9]+$` / SHA `^[0-9a-f]{40}$`
+#   - NFR 5.2: 取得失敗時も非破壊（fr_warn + 部分結果 / fail-continue）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# fr_collect_issue_context: claude-failed Issue の context（title + labels + body +
+# 直近 5 件コメント本文）を 1 つの平文に集約する。
+#
+# Args:
+#   $1 = issue_number（^[0-9]+$ で使用前検証）
+#
+# Stdout: 集約済みの context 文字列（取得失敗時は警告 + 空文字）
+# Returns:
+#   0 = 成功（部分結果含む。API 失敗時も fail-continue で 0 を返し warn のみ）
+#   1 = issue_number の形式不正（NFR 3.1 ガード）
+fr_collect_issue_context() {
+  local issue_number="$1"
+
+  # NFR 3.1: Issue 番号の形式検証（^[0-9]+$）
+  if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+    fr_warn "fr_collect_issue_context: 不正な Issue 番号 issue=$(printf '%s' "$issue_number" | tr -cd '[:alnum:]_-' | head -c 32) を skip"
+    return 1
+  fi
+
+  # gh issue view を呼び出す。失敗時は warn + 空 JSON で続行（fail-continue）
+  local view_json
+  if ! view_json=$(timeout "$FAILED_RECOVERY_GIT_TIMEOUT" gh issue view "$issue_number" \
+      --repo "$REPO" \
+      --json comments,body,title,labels 2>/dev/null); then
+    fr_warn "fr_collect_issue_context: gh issue view 失敗 issue=#${issue_number}"
+    view_json="{}"
+  fi
+  if [ -z "$view_json" ]; then
+    view_json="{}"
+  fi
+
+  # 直近 5 件のコメントを抽出する。jq parse 失敗時は空配列に正規化（fail-open）。
+  # すべて jq filter 内で完結（未信頼値の inline 展開は無し / NFR 3.1）。
+  local context
+  if ! context=$(printf '%s' "$view_json" | jq -r '
+    "## Title\n" + ((.title // "") | tostring) + "\n\n" +
+    "## Labels\n" + (((.labels // []) | map(.name) | join(", "))) + "\n\n" +
+    "## Body\n" + ((.body // "") | tostring) + "\n\n" +
+    "## Recent Comments (last 5)\n" +
+    (((.comments // [])[-5:]) | map("--- comment by " + ((.author.login // "unknown") | tostring) + " ---\n" + ((.body // "") | tostring)) | join("\n\n"))
+  ' 2>/dev/null); then
+    fr_warn "fr_collect_issue_context: jq による context 組み立て失敗 issue=#${issue_number}"
+    printf '%s' ""
+    return 0
+  fi
+
+  printf '%s' "$context"
+  return 0
+}
+
+# fr_collect_pr_ci_context: auto-merge 待ち PR の failing checks ログ tail を集約する。
+#
+# Args:
+#   $1 = pr_number（^[0-9]+$ で使用前検証）
+#
+# Stdout: 集約済みの context（failing check 一覧 + 各 check の log tail 200 行）
+# Returns:
+#   0 = 成功（部分結果含む。API 失敗時も fail-continue で 0 を返し warn のみ）
+#   1 = pr_number の形式不正（NFR 3.1 ガード）
+#
+# 仕様:
+#   - `gh pr checks <pr_number> --json name,state,conclusion,detailsUrl` で
+#     failing check 列を取得（state=FAILURE または conclusion=FAILURE/TIMED_OUT）
+#   - 各 failing check の detailsUrl から regex `actions/runs/([0-9]+)` で run id を
+#     抽出。`^[0-9]+$` で再検証してから `gh run view <run_id> --log-failed` を呼ぶ
+#   - 出力ログは tail で 200 行に cap（context 長制御）
+#   - すべての API 失敗を fr_warn で吸収し残り check の処理を継続（fail-continue）
+fr_collect_pr_ci_context() {
+  local pr_number="$1"
+
+  # NFR 3.1: PR 番号の形式検証（^[0-9]+$）
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    fr_warn "fr_collect_pr_ci_context: 不正な PR 番号 pr=$(printf '%s' "$pr_number" | tr -cd '[:alnum:]_-' | head -c 32) を skip"
+    return 1
+  fi
+
+  # failing checks を取得（gh pr checks --json）
+  local checks_json
+  if ! checks_json=$(timeout "$FAILED_RECOVERY_GIT_TIMEOUT" gh pr checks "$pr_number" \
+      --repo "$REPO" \
+      --json name,state,conclusion,detailsUrl 2>/dev/null); then
+    fr_warn "fr_collect_pr_ci_context: gh pr checks 失敗 pr=#${pr_number}"
+    printf '%s' ""
+    return 0
+  fi
+  if [ -z "$checks_json" ]; then
+    printf '%s' ""
+    return 0
+  fi
+
+  # failing check のみ filter（state=FAILURE または conclusion=FAILURE/TIMED_OUT）
+  local failing_checks
+  if ! failing_checks=$(printf '%s' "$checks_json" | jq -c '
+    [.[] | select(
+      ((.state // "") == "FAILURE")
+      or ((.conclusion // "") == "FAILURE")
+      or ((.conclusion // "") == "TIMED_OUT")
+    )]
+  ' 2>/dev/null); then
+    fr_warn "fr_collect_pr_ci_context: failing checks の jq filter 失敗 pr=#${pr_number}"
+    printf '%s' ""
+    return 0
+  fi
+
+  # failing check の概要 header を組み立てる
+  local header
+  header=$(printf '%s' "$failing_checks" | jq -r '
+    "## Failing Checks (count: " + ((. | length) | tostring) + ")\n" +
+    (map("- " + ((.name // "unknown") | tostring) + " [state=" + ((.state // "") | tostring) + " conclusion=" + ((.conclusion // "") | tostring) + "]") | join("\n"))
+  ' 2>/dev/null || echo "## Failing Checks")
+
+  # 各 failing check の log tail を取得して append する
+  local count
+  count=$(printf '%s' "$failing_checks" | jq -r 'length' 2>/dev/null || echo "0")
+  if [ -z "$count" ]; then
+    count="0"
+  fi
+
+  local logs_section=""
+  local idx=0
+  while [ "$idx" -lt "$count" ]; do
+    local check_meta details_url check_name run_id
+    check_meta=$(printf '%s' "$failing_checks" | jq -c --argjson i "$idx" '.[$i]')
+    details_url=$(printf '%s' "$check_meta" | jq -r '.detailsUrl // ""')
+    check_name=$(printf '%s' "$check_meta" | jq -r '.name // "unknown"')
+
+    # detailsUrl から run id を抽出（actions/runs/<id> の形式）
+    run_id=""
+    if [[ "$details_url" =~ actions/runs/([0-9]+) ]]; then
+      run_id="${BASH_REMATCH[1]}"
+    fi
+
+    # NFR 3.1: run id の再検証（^[0-9]+$）
+    if [ -n "$run_id" ] && [[ "$run_id" =~ ^[0-9]+$ ]]; then
+      local log_tail
+      if log_tail=$(timeout "$FAILED_RECOVERY_GIT_TIMEOUT" gh run view "$run_id" \
+          --repo "$REPO" \
+          --log-failed 2>/dev/null | tail -n 200); then
+        logs_section="${logs_section}"$'\n\n'"### Log for check: ${check_name} (run #${run_id})"$'\n'"${log_tail}"
+      else
+        fr_warn "fr_collect_pr_ci_context: gh run view 失敗 pr=#${pr_number} run=${run_id}（skip）"
+      fi
+    else
+      fr_warn "fr_collect_pr_ci_context: detailsUrl から run id を抽出できず check=${check_name}（skip）"
+    fi
+    idx=$((idx + 1))
+  done
+
+  printf '%s\n%s' "$header" "$logs_section"
+  return 0
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Recovery Execution Layer
+#
+# fresh Claude session を起動して context を解析・修正させる wrapper。quota-aware
+# モジュールの qa_detect_rate_limit を再利用し、quota 検出時は exit 99 sentinel を
+# caller に伝播する（呼出側で qa_handle_quota_exceeded 経路へ流す）。
+#
+# 関連 AC:
+#   - Req 3.1: 修正試行を伴う再開を実行する
+#   - Req 3.2: PR の CI 修正コミット投入
+#   - Req 3.5: 未信頼入力の sanitize
+#   - NFR 3.1: prompt は printf '%s' で値埋め込み、claude には引数として個別に渡す
+#   - NFR 3.2: secrets を prompt 本文に埋め込まない（GH_TOKEN 等を直接展開しない）
+#   - NFR 5.2: claude 実行失敗を fail-continue で扱う（quota 検出は別経路 exit 99）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# fr_invoke_claude: fresh claude session を起動し stream-json を qa_detect_rate_limit
+# で fold する。
+#
+# Args:
+#   $1 = prompt（claude へ -p で渡す本文。secrets を含めないこと / NFR 3.2）
+#   $2 = stage_label（ログ識別用ラベル。例: "failed-recovery-issue-42"）
+#
+# Returns:
+#   0     = claude 正常終了 + quota 検出なし
+#   99    = quota 検出（caller は qa_handle_quota_exceeded 経路に流す / Req 3.x）
+#   N≠0,99 = claude 自体の非ゼロ exit（quota 以外の失敗、fail-continue で caller に透過）
+#
+# 副作用:
+#   - $LOG（caller 側で設定済みの実行ログ）に stream-json を tee で append
+#   - prompt 本文を bash 引数として claude に渡す（環境変数経由ではなく引数）
+#
+# 実装メモ:
+#   quota-aware.sh の qa_run_claude_stage と同じ tee + qa_detect_rate_limit 構成を
+#   採用するが、本機能は QUOTA_AWARE_ENABLED gate を**経由しない**（Failed Recovery
+#   は claude-failed 復旧の核となる処理なので、quota 検出のみは常時必要）。
+#   そのため qa_run_claude_stage を呼ばず独自 wrapper として実装する。
+fr_invoke_claude() {
+  local prompt="$1"
+  local stage_label="$2"
+
+  # quota 検出用の中間 TSV ファイル（同一 cycle 内の他 stage と衝突しないよう mktemp）
+  local detect_file
+  if ! detect_file=$(mktemp 2>/dev/null); then
+    fr_warn "fr_invoke_claude: mktemp 失敗 stage=$stage_label"
+    return 1
+  fi
+  : > "$detect_file"
+
+  fr_log "claude session start label=$stage_label model=${FAILED_RECOVERY_DEV_MODEL} max_turns=${FAILED_RECOVERY_MAX_TURNS}"
+
+  # tee で 2 系統に分岐:
+  #   系統 1: $LOG への append（観測ログ。caller 側で LOG を設定済みの前提）
+  #   系統 2: qa_detect_rate_limit → detect_file へ TSV
+  # set +e/-e で囲って pipefail 起因の即時 exit を一時抑止し、PIPESTATUS[0] で
+  # claude 本体の exit code を取り出す（quota-aware の同型ロジックを踏襲）。
+  local claude_rc=0
+  set +e
+  claude -p "$prompt" \
+    --model "$FAILED_RECOVERY_DEV_MODEL" \
+    --max-turns "$FAILED_RECOVERY_MAX_TURNS" \
+    --permission-mode bypassPermissions \
+    --output-format stream-json 2>&1 | tee -a "${LOG:-/dev/null}" | qa_detect_rate_limit > "$detect_file"
+  local _fr_pipestatus=("${PIPESTATUS[@]}")
+  set -e
+  claude_rc="${_fr_pipestatus[0]:-0}"
+
+  # quota 検出（epoch 付き行が 1 行でもあれば exit 99 sentinel）
+  if [ -s "$detect_file" ]; then
+    local epoch_line
+    epoch_line=$(awk -F '\t' 'NF >= 2 && $2 ~ /^[0-9]+$/ { last = $0 } END { print last }' "$detect_file")
+    if [ -n "$epoch_line" ]; then
+      local path_field
+      path_field="${epoch_line%%$'\t'*}"
+      fr_log "claude session quota detected label=$stage_label path=$path_field"
+      rm -f "$detect_file"
+      return 99
+    fi
+  fi
+  rm -f "$detect_file"
+
+  fr_log "claude session end label=$stage_label rc=$claude_rc"
+  return "$claude_rc"
+}
