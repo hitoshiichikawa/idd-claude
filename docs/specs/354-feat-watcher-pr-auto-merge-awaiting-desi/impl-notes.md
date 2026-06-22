@@ -168,3 +168,52 @@
     ブロック (tasks.md line 124–136) は `bash local-watcher/test/
     pr_publish_commit_status_test.sh` を含んでおり、PASS=74 / FAIL=0 が task 8 で
     そのまま reproduce される見込み
+
+### Task 7
+
+- 採用方針: 既存 `## Auto-Merge Processor (#352)` 節（line 2218 開始 / 約 100 行）を
+  雛形に、命名置換（`auto-merge:` → `auto-merge-design:` / `AUTO_MERGE_` →
+  `AUTO_MERGE_DESIGN_` / 「実装 PR」→「設計 PR」 / `^claude/issue-.*-impl` →
+  `^claude/issue-.*-design`）と design 用差分（`ready-for-review` 必須削除 /
+  `needs-iteration` 除外追加 / merge 後の `awaiting-design-review` 除去は #40 が担当
+  と明示）を反映した新規節 `## Design Auto-Merge Processor (#354)` を、既存 #352 節の
+  終端 `---` 区切り直後（line 2320 の `## PR Reviewer Processor (#261)` 直前）に append。
+  オプション機能一覧表 (line 1346 付近) には #352 行 (line 1364) の直後に
+  `AUTO_MERGE_DESIGN_ENABLED` 行を 7 カラム揃えで挿入
+- 重要な判断:
+  - **小節構造の完全対称化**: #352 節と同じ 9 小節（概要 / 対象 PR の条件 / 前提となる
+    repo 設定 / 有効化方法 / 異常系 / 観測ログ / `DESIGN_REVIEW_RELEASE_ENABLED` 共存 /
+    後方互換 / merge 後の再配置）で構成。Reviewer / 将来の保守者が #352 ↔ #354 を 1:1 で
+    grep 比較できる形を最優先（NFR 4.1 / 4.2）。「対象 PR の条件」直下に `> 実装 PR との
+    差分` 注記を **blockquote** で追加し、`ready-for-review` 必須削除 + `needs-iteration`
+    除外追加の差分理由を明示
+  - **#40 との共存節を独立小節として配置**: 当初 `### `[`DESIGN_REVIEW_RELEASE_ENABLED`](...)`
+    のような複合 anchor を試みたが、GitHub の markdown anchor 生成規則で予期せぬ衝突を
+    招くため、シンプルな日本語見出し `### DESIGN_REVIEW_RELEASE_ENABLED (#40) との共存`
+    として両 processor の責務分担（本 #354 = PR 単位 auto-merge / #40 = Issue 単位ラベル
+    除去）を表で読み下せる形に整理。NFR 4.3「`awaiting-design-review` は触らない」が
+    本文と表の両方で明示される
+  - **既存節への相互リンク 4 種**: `[#352](#auto-merge-processor-352)` /
+    `[#349](#pr-reviewer-commit-status-publishing-349)` /
+    `[#40](#design-review-release-processor-40)` /
+    `[#348 kill switch](#full-auto-kill-switch)` を概要・運用設定・後方互換・観測ログの
+    各小節に散りばめ、片方向リンクではなく双方向に辿れる文脈を整備。anchor は既存 README で
+    実例のある形式（`grep -n` で既存箇所を確認）のみを使用
+  - **`merge 後の再配置`注記**: 既存 #261 (line 2483) / #279 (line 2900) と同形の
+    `cd ~/.idd-claude && git pull && ./install.sh --local` 文面を採用。本機能は新規 module
+    `modules/auto-merge-design.sh` を追加するため、`REQUIRED_MODULES` ローダの起動時 fail
+    を避けるための再配置が必須である旨を明示
+  - **オプション機能一覧表**: 7 カラム形式（機能 / 制御変数 / 既定 / 正規化規則 / 追加 env /
+    詳細 / 関連）を #352 行と同じ密度で記述。差分は (1) head pattern を `-design` に置換、
+    (2) `ready-for-review` ラベル必須記述を削除、(3) `needs-iteration` 除外を追加、(4) impl
+    PR を head pattern により排他する旨を明記、(5) `DESIGN_REVIEW_RELEASE_ENABLED` (#40)
+    との分担を併記、の 5 箇所
+  - **検証**: stage-a-verify gate の verify ブロック（tasks.md line 124-136）で宣言された
+    全コマンド (shellcheck / actionlint / bash -n / auto-merge-design_test.sh /
+    auto-merge_test.sh / pr_publish_commit_status_test.sh / full_auto_enabled_test.sh /
+    diff -r) を本 task 完了時点でローカル再実行し、shellcheck OK / actionlint OK /
+    bash -n OK / PASS=61 (auto-merge-design) / PASS=56 (auto-merge) / PASS=74
+    (pr_publish_commit_status) / PASS=28 (full_auto_enabled) / diff -r empty を確認
+- 残存課題: なし。本 task で実装系（task 1-4）/ テスト系（task 5-6）/ README 系（task 7）
+  が完了し、tasks.md の最後の未完 task は task 8（全体 verify）。task 8 は本 task の verify
+  実行をそのまま reproduce + dry-run smoke / install scratch test の追加検証で完了する見込み
