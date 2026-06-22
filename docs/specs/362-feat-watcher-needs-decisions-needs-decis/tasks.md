@@ -67,7 +67,7 @@
   - _Boundary: needs-decisions-auto.sh_
   - _Depends: 2.1, 2.2_
 
-- [ ] 2.4 判定エントリ nda_evaluate_auto_continue（AND 二重 opt-in / 判定順序）
+- [x] 2.4 判定エントリ nda_evaluate_auto_continue（AND 二重 opt-in / 判定順序）
   - `nda_evaluate_auto_continue(triage_json_path)` を実装。判定順序（design.md「Service Interface」節）:
     1. `full_auto_enabled` が rc=1 → halt（log: `suppressed by FULL_AUTO_ENABLED`、Req 5.2 / 6.2）
     2. `nda_resolve_mode_enabled` が rc=1 → halt（log: `mode=all-human action=halt`、Req 5.3 / 6.1）
