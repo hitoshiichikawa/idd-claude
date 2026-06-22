@@ -118,7 +118,7 @@
   - _Boundary: modules/failed-recovery.sh:Orchestrator_
   - _Depends: 3.2, 4, 5.1, 5.2_
 
-- [ ] 7. 終端処理（max-attempts / no-progress）と run-summary 連携を実装
+- [x] 7. 終端処理（max-attempts / no-progress）と run-summary 連携を実装
   - `fr_terminate_max_attempts` を実装。`claude-failed` 据え置き（Req 4.5）、終端理由コメント
     1 件投稿（通算試行回数 + 上限値含む / Req 4.6）、`rs_set_result claude-failed` 呼び出し
     （NFR 4.2）、`fr_log` でログ記録（NFR 4.1）
