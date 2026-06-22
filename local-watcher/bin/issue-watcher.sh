@@ -249,6 +249,29 @@ AUTO_MERGE_GIT_TIMEOUT="${AUTO_MERGE_GIT_TIMEOUT:-60}"
 # Req 2.1, 6.3）。idd-claude の実装 PR は `claude/issue-<N>-impl-<slug>` 形式。
 AUTO_MERGE_HEAD_PATTERN="${AUTO_MERGE_HEAD_PATTERN:-^claude/issue-.*-impl}"
 
+# ─── Design Auto-Merge Processor 設定 (#354) ───
+# 設計 PR（head が `^claude/issue-.*-design` パターン、`ready-for-review` ラベル、draft でない、
+# `mergeable=MERGEABLE`）に対して **GitHub ネイティブの auto-merge** を `gh pr merge --auto
+# --squash --delete-branch` で有効化する opt-in 機能。必須 status checks（CI +
+# `codex-review` + `claude-review`）が全 green に到達したら GitHub 側が squash merge + branch
+# 削除を実行する。watcher 自体は直接 branch を merge しない。実装 PR は #352
+# (Auto-Merge Processor) が担当し、本機能とは head pattern で分離（Req 2.6, 6.7）。
+#
+# AND 二重 opt-in: `AUTO_MERGE_DESIGN_ENABLED=true` AND `FULL_AUTO_ENABLED=true`（#348 kill
+# switch）が双方 ON のときのみ動作する。いずれかが OFF（既定）なら gh API 呼び出しゼロで
+# 本機能導入前と完全に等価（NFR 1.1）。`=true` 厳密一致以外（未設定 / 空 / `false` / `0` /
+# `True` / `TRUE` / `1` / `on` / `yes` / typo 等）はすべて OFF に正規化（Req 1.3）。
+# auto-merge 完了後の `awaiting-design-review` ラベル除去は Design Review Release Processor
+# (#40, `DESIGN_REVIEW_RELEASE_ENABLED`) が引き続き担当し、本機能とは独立共存する（NFR 4.3）。
+AUTO_MERGE_DESIGN_ENABLED="${AUTO_MERGE_DESIGN_ENABLED:-false}"
+# 1 サイクルで処理する PR 数の上限（残りは次回サイクルに持ち越し）。
+AUTO_MERGE_DESIGN_MAX_PRS="${AUTO_MERGE_DESIGN_MAX_PRS:-10}"
+# gh / git 操作の個別タイムアウト（秒）。既存 AUTO_MERGE_GIT_TIMEOUT と同既定。
+AUTO_MERGE_DESIGN_GIT_TIMEOUT="${AUTO_MERGE_DESIGN_GIT_TIMEOUT:-60}"
+# head branch pattern: 設計 PR のみを対象にする（実装 PR / 手書き PR を除外 / Req 2.6, 6.7）。
+# idd-claude の設計 PR は `claude/issue-<N>-design-<slug>` 形式。
+AUTO_MERGE_DESIGN_HEAD_PATTERN="${AUTO_MERGE_DESIGN_HEAD_PATTERN:-^claude/issue-.*-design}"
+
 # ─── PR Iteration Processor 設定 (#26) ───
 # `needs-iteration` ラベル付き PR をレビューコメントに基づいて自動で iterate する。
 # 標準機能としてデフォルト有効化（#112）。無効化したい場合は cron / launchd 側で
