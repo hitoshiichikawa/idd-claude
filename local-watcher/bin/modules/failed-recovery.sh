@@ -223,3 +223,199 @@ fr_save_state() {
   fi
   return 0
 }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Candidate Selection Layer
+#
+# `claude-failed` Issue 群と auto-merge 待ち PR 群を server-side / client-side
+# 二段フィルタで列挙し、Failed Recovery Processor の入力となる候補集合を返す。
+# 取得失敗時は空 JSON 配列 `[]` を返し `fr_warn` で警告（fail-continue / 既存
+# pr-iteration.sh `pi_fetch_candidate_prs` と同パターン）。
+#
+# 関連 AC:
+#   - Req 2.1: claude-failed ラベル付き Issue を走査対象とする
+#   - Req 2.2: reviewer-reject 由来も label 付与経緯非依存で含める（auto-dev かつ
+#              claude-failed が立っていれば対象。`mark_issue_failed` /
+#              `pi_escalate_to_failed` / `_slot_mark_failed` 何れの経路で付与
+#              されたかは問わない）
+#   - Req 2.3: auto-merge 待ち PR の CI error を走査対象とする
+#   - Req 2.4: needs-decisions / needs-quota-wait / blocked / awaiting-slot などの
+#              人間判断待ちラベルを持つ候補は server-side filter で除外
+#   - Req 2.5: auto-dev ラベル未付与の Issue は除外（手動運用 Issue 保護）
+#   - NFR 3.1: jq へ渡す未信頼入力（branch 名等）は `--arg` 経由で sanitize
+#   - NFR 5.2: 取得失敗時も非破壊（fr_warn + `[]` 返却 / fail-continue）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# fr_fetch_failed_issues: claude-failed Issue 群を列挙する。
+#
+# 仕様:
+#   - `gh issue list` の `--search` に `label:"claude-failed" label:"auto-dev"` で
+#     AND 必須条件を、`-label:"needs-decisions" -label:"needs-quota-wait"
+#     -label:"blocked" -label:"awaiting-slot"` で除外条件を組み立てる。
+#   - --limit は `$FAILED_RECOVERY_MAX_PRS`（既定 3）で truncate。
+#   - `timeout "$FAILED_RECOVERY_GIT_TIMEOUT"` で外部呼び出しを保護。
+#   - 取得失敗（timeout / gh エラー）時は `fr_warn` を 1 件記録し `[]` を返す。
+#
+#   ラベル変数は issue-watcher.sh Config ブロックで定義済みの既存定数
+#   （`LABEL_FAILED="claude-failed"` / `LABEL_TRIGGER="auto-dev"` /
+#   `LABEL_NEEDS_DECISIONS` / `LABEL_NEEDS_QUOTA_WAIT` / `LABEL_BLOCKED` /
+#   `LABEL_AWAITING_SLOT`）を参照する。既存 `pi_fetch_candidate_prs` と同方針で
+#   server-side filter の保険のため除外条件を二重展開している。
+#
+# Stdout: JSON 配列文字列（候補なし / 取得失敗時は `[]`）
+# Returns: 0（常に。fail-continue）
+fr_fetch_failed_issues() {
+  local issues_json
+  if ! issues_json=$(timeout "$FAILED_RECOVERY_GIT_TIMEOUT" gh issue list \
+      --repo "$REPO" \
+      --state open \
+      --search "label:\"$LABEL_FAILED\" label:\"$LABEL_TRIGGER\" -label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_BLOCKED\" -label:\"$LABEL_AWAITING_SLOT\"" \
+      --json number,labels,body,title,url \
+      --limit "$FAILED_RECOVERY_MAX_PRS" 2>/dev/null); then
+    fr_warn "fr_fetch_failed_issues: gh issue list 失敗（timeout または API エラー）"
+    echo "[]"
+    return 0
+  fi
+
+  # 取得成功でも非 JSON / 空文字なら安全側で `[]` に正規化
+  if [ -z "$issues_json" ]; then
+    echo "[]"
+    return 0
+  fi
+  if ! printf '%s' "$issues_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    fr_warn "fr_fetch_failed_issues: gh issue list が JSON 配列を返さなかった"
+    echo "[]"
+    return 0
+  fi
+  printf '%s' "$issues_json"
+  return 0
+}
+
+# fr_fetch_failed_prs: auto-merge 待ちかつ CI error の PR 群を列挙する。
+#
+# 仕様:
+#   - 1 次絞り: `gh pr list --search 'label:"claude-failed"
+#     -label:"needs-decisions" -label:"needs-quota-wait" -label:"blocked"
+#     -label:"awaiting-slot" -draft:true'` で `claude-failed` ラベル + 人間判断
+#     待ち除外 + 非 draft の PR を取得。`--json number,headRefName,
+#     headRepositoryOwner,url,labels` で 1 次データを得る。
+#   - 2 次絞り: 1 次結果の各 PR に対し `gh pr view --json mergeStateStatus,
+#     autoMergeRequest,statusCheckRollup` を呼び、以下を client-side filter:
+#       (a) `.autoMergeRequest` が null でない（auto-merge 有効化済み）
+#       (b) `.statusCheckRollup[]` に state=FAILURE または conclusion=
+#           FAILURE/TIMED_OUT が 1 件以上含まれる（CI error）
+#   - head pattern `^claude/` で fork PR を除外（idd-claude 管理下 PR のみ）
+#     + headRepositoryOwner.login == repo_owner で fork 強制除外
+#   - `FAILED_RECOVERY_MAX_PRS` で件数 truncate（jq で `.[0:N]`）
+#   - 取得失敗時は `fr_warn` を記録し `[]` を返す（fail-continue）
+#
+#   全ての未信頼入力（branch 名等）は jq `--arg` 経由で展開し inline 展開しない
+#   （NFR 3.1）。
+#
+# Stdout: JSON 配列文字列（候補なし / 取得失敗時は `[]`）
+# Returns: 0（常に。fail-continue）
+fr_fetch_failed_prs() {
+  local repo_owner="${REPO%%/*}"
+  local prs_json
+  if ! prs_json=$(timeout "$FAILED_RECOVERY_GIT_TIMEOUT" gh pr list \
+      --repo "$REPO" \
+      --state open \
+      --search "label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_BLOCKED\" -label:\"$LABEL_AWAITING_SLOT\" -draft:true" \
+      --json number,headRefName,headRepositoryOwner,url,labels \
+      --limit "$FAILED_RECOVERY_MAX_PRS" 2>/dev/null); then
+    fr_warn "fr_fetch_failed_prs: gh pr list 失敗（timeout または API エラー）"
+    echo "[]"
+    return 0
+  fi
+  if [ -z "$prs_json" ]; then
+    echo "[]"
+    return 0
+  fi
+  if ! printf '%s' "$prs_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    fr_warn "fr_fetch_failed_prs: gh pr list が JSON 配列を返さなかった"
+    echo "[]"
+    return 0
+  fi
+
+  # head pattern `^claude/` と headRepositoryOwner で fork PR を server-side
+  # filter の保険として除外（NFR 3.1: branch 名は --arg で展開）。
+  local filtered_first
+  if ! filtered_first=$(printf '%s' "$prs_json" | jq -c \
+      --arg owner "$repo_owner" \
+      '[.[]
+        | select((.headRepositoryOwner.login // "") == $owner)
+        | select((.headRefName // "") | test("^claude/"))
+      ]' 2>/dev/null); then
+    fr_warn "fr_fetch_failed_prs: 1 次結果の jq filter 失敗"
+    echo "[]"
+    return 0
+  fi
+
+  # 各 PR について `gh pr view` で auto-merge 状況 + CI rollup を取得し、
+  # client-side で auto-merge 有効 AND CI error を残す。
+  local result="[]"
+  local count
+  count=$(printf '%s' "$filtered_first" | jq -r 'length' 2>/dev/null || echo "0")
+  if [ "$count" = "0" ] || [ -z "$count" ]; then
+    echo "[]"
+    return 0
+  fi
+
+  local idx=0
+  while [ "$idx" -lt "$count" ]; do
+    local pr_meta pr_number
+    pr_meta=$(printf '%s' "$filtered_first" | jq -c --argjson i "$idx" '.[$i]')
+    pr_number=$(printf '%s' "$pr_meta" | jq -r '.number')
+    # 数値検証（^[0-9]+$ / NFR 3.1）
+    if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+      fr_warn "fr_fetch_failed_prs: 不正な PR number=$pr_number を skip"
+      idx=$((idx + 1))
+      continue
+    fi
+    local view_json
+    if ! view_json=$(timeout "$FAILED_RECOVERY_GIT_TIMEOUT" gh pr view "$pr_number" \
+        --repo "$REPO" \
+        --json mergeStateStatus,autoMergeRequest,statusCheckRollup 2>/dev/null); then
+      fr_warn "fr_fetch_failed_prs: gh pr view 失敗 pr=#${pr_number}（skip）"
+      idx=$((idx + 1))
+      continue
+    fi
+    if [ -z "$view_json" ]; then
+      idx=$((idx + 1))
+      continue
+    fi
+
+    # auto-merge 有効化 (.autoMergeRequest != null) かつ CI error が 1 件以上ある
+    # PR のみを残す。CI error は state=FAILURE または conclusion=FAILURE/TIMED_OUT。
+    local keep
+    keep=$(printf '%s' "$view_json" | jq -r '
+      (.autoMergeRequest != null) as $auto
+      | ((.statusCheckRollup // []) | map(
+          select(
+            (.state // "") == "FAILURE"
+            or (.conclusion // "") == "FAILURE"
+            or (.conclusion // "") == "TIMED_OUT"
+          )
+        ) | length > 0) as $err
+      | if ($auto and $err) then "yes" else "no" end
+    ' 2>/dev/null || echo "no")
+
+    if [ "$keep" = "yes" ]; then
+      # 1 次 PR メタに view の auto-merge / rollup 概要をマージして結果配列に append。
+      local merged
+      merged=$(jq -n \
+        --argjson meta "$pr_meta" \
+        --argjson view "$view_json" \
+        '$meta + {
+          mergeStateStatus: $view.mergeStateStatus,
+          autoMergeRequest: $view.autoMergeRequest,
+          statusCheckRollup: $view.statusCheckRollup
+        }')
+      result=$(printf '%s' "$result" | jq -c --argjson item "$merged" '. + [$item]')
+    fi
+    idx=$((idx + 1))
+  done
+
+  printf '%s' "$result"
+  return 0
+}
