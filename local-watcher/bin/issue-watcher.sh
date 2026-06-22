@@ -333,6 +333,29 @@ PR_REVIEWER_GIT_TIMEOUT="${PR_REVIEWER_GIT_TIMEOUT:-120}"
 # レビュー実行コマンドの最大経過秒数。
 PR_REVIEWER_EXEC_TIMEOUT="${PR_REVIEWER_EXEC_TIMEOUT:-600}"
 
+# ─── PR Reviewer Commit Status Publishing 設定 (#349) ───
+# codex / antigravity Reviewer の VERDICT および Claude Reviewer の RESULT を、
+# GitHub Commit Status API (`POST /repos/{owner}/{repo}/statuses/{sha}`) 経由で
+# 安定 context 名（`codex-review` / `claude-review`）の commit status として publish し、
+# branch protection の required status checks による auto-merge ゲートを成立させるための
+# opt-in 機能（Issue #349 / NFR 1.1）。
+#
+# **AND 二重 opt-in**: 本 gate は `FULL_AUTO_ENABLED=true`（#348 kill switch）と AND
+# で評価される。`PR_REVIEWER_STATUS_CHECK_ENABLED=true` かつ `FULL_AUTO_ENABLED=true`
+# の双方が成立した場合のみ commit status を publish する（Req 1.2, 1.4）。
+#
+# 既定 `false`。`=true` 厳密一致以外（未設定 / 空 / `True` / `TRUE` / `1` / typo 等）は
+# すべて `false` に正規化し、本機能導入前と完全に等価な挙動を保つ（Req 1.1, 1.3 / NFR 1.1）。
+# gate OFF 時はコメント投稿等の既存 PR Reviewer / Claude Reviewer 挙動には影響を与えない
+# （Req 6.1, 6.2, 6.3）。
+PR_REVIEWER_STATUS_CHECK_ENABLED="${PR_REVIEWER_STATUS_CHECK_ENABLED:-false}"
+# 値正規化: `true` 厳密一致のみ通し、それ以外はすべて `false` に固定する（Req 1.3）。
+# 既定 OFF の opt-in 制のため、上記「デフォルト有効化フラグの値正規化」ループには加えない。
+case "$PR_REVIEWER_STATUS_CHECK_ENABLED" in
+  true) : ;;
+  *)    PR_REVIEWER_STATUS_CHECK_ENABLED="false" ;;
+esac
+
 # ─── Security Review Processor 設定 (#279) ───
 # Claude Code 公式 `/security-review` skill を `claude` CLI headless 起動経由で呼び出し、
 # open PR の diff に対するセキュリティレビューを PR コメントとして投稿する。本 spec では
@@ -4792,6 +4815,8 @@ run_per_task_loop() {
     case "$rev_rc" in
       0)
         # approve → 次 task へ
+        # Issue #349 Req 3.1: per-task Reviewer round=1 approve → claude-review=success を publish
+        publish_claude_review_status 1 || true
         ;;
       99)
         echo "⏸️ #$NUMBER: per-task Reviewer (task=$task_id, round=1) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
@@ -4799,6 +4824,8 @@ run_per_task_loop() {
         ;;
       1)
         # reject 1 回目 → Implementer 再起動 + Reviewer round=2
+        # Issue #349 Req 3.2: per-task Reviewer round=1 reject → claude-review=failure を publish
+        publish_claude_review_status 1 || true
         echo "🔁 #$NUMBER: per-task Reviewer (task=$task_id, round=1) reject → Implementer 再実行" | tee -a "$LOG"
 
         # Issue #305 task 6: 連続 reject fail-fast 用の prev snapshot 取得 +
@@ -4842,6 +4869,8 @@ run_per_task_loop() {
         case "$rev2_rc" in
           0)
             # round=2 approve → 次 task へ
+            # Issue #349 Req 3.1: per-task Reviewer round=2 approve → claude-review=success
+            publish_claude_review_status 2 || true
             ;;
           99)
             echo "⏸️ #$NUMBER: per-task Reviewer (task=$task_id, round=2) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
@@ -4876,6 +4905,9 @@ run_per_task_loop() {
               return 1
             fi
             # fail-fast 不成立 → 既存 Debugger Gate 経路にそのまま進む（Req 3.4）
+            # Issue #349 Req 3.2: per-task Reviewer round=2 reject → claude-review=failure
+            # （fail-fast 成立時は既に return 1 済 / 不成立時のみここに到達）
+            publish_claude_review_status 2 || true
 
             # 再 reject → Phase 3 (#22) Debugger Gate に分岐 (Req 6.1, 6.3)、
             # 未対応なら claude-failed + Issue コメント
@@ -4937,6 +4969,8 @@ run_per_task_loop() {
                 0)
                   dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=approve" >> "$LOG"
                   # approve → 次 task へ
+                  # Issue #349 Req 3.1: per-task Reviewer round=3 approve → claude-review=success
+                  publish_claude_review_status 3 || true
                   ;;
                 99)
                   dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=quota-exceeded" >> "$LOG"
@@ -4945,6 +4979,8 @@ run_per_task_loop() {
                   ;;
                 1)
                   dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=reject" >> "$LOG"
+                  # Issue #349 Req 3.2: per-task Reviewer round=3 reject → claude-review=failure
+                  publish_claude_review_status 3 || true
                   echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) reject → claude-failed (Req 3.5)" | tee -a "$LOG"
                   local parsed3pt cat3pt tgt3pt
                   parsed3pt=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
@@ -7569,6 +7605,9 @@ run_impl_pipeline() {
             return 1
           fi
           echo "✅ #$NUMBER: Reviewer round=1 approve" | tee -a "$LOG"
+          # Issue #349 Req 3.1: review-notes.md 確定 + push 済の状態で claude-review status を publish。
+          # AND 二重 opt-in (PR_REVIEWER_STATUS_CHECK_ENABLED && FULL_AUTO_ENABLED) が成立した場合のみ動く。
+          publish_claude_review_status 1 || true
           ;;
         99)
           # Issue #66: Reviewer round=1 で quota 超過検出。run_reviewer_stage 内で
@@ -7583,6 +7622,9 @@ run_impl_pipeline() {
           if ! verify_pushed_or_retry "stageB-push-missing" "$BRANCH" "Stage B (round=1 reject)"; then
             return 1
           fi
+          # Issue #349 Req 3.2: round=1 reject 段階の review-notes.md からも claude-review=failure
+          # を publish しておく（後続 round=2 で再 publish して上書き / Req 4.3 latest-wins）。
+          publish_claude_review_status 1 || true
           echo "🔁 #$NUMBER: Reviewer round=1 reject → Developer 再実行" | tee -a "$LOG"
           rv_dev_log "redo by reviewer reject (round=1)" >> "$LOG"
 
@@ -7658,6 +7700,8 @@ run_impl_pipeline() {
                 return 1
               fi
               echo "✅ #$NUMBER: Reviewer round=2 approve" | tee -a "$LOG"
+              # Issue #349 Req 3.1: round=2 approve → claude-review=success を publish
+              publish_claude_review_status 2 || true
               ;;
             99)
               # Issue #66: Reviewer round=2 で quota 超過検出。run_reviewer_stage 内で
@@ -7673,6 +7717,9 @@ run_impl_pipeline() {
               # WARN ログ / 自動 push 復旧コメントは verify_pushed_or_retry 内で出力済
               # （観測可能性は維持）。
               verify_pushed_or_retry "stageB-push-missing" "$BRANCH" "Stage B (round=2 reject)" || true
+              # Issue #349 Req 3.2: round=2 reject → claude-review=failure を publish（Debugger
+              # 経路 / reject2 経路いずれに進む場合でも、現時点の RESULT を反映する）。
+              publish_claude_review_status 2 || true
 
               # Phase 3 (#22): DEBUGGER_ENABLED=true 時のみ Debugger Gate に分岐。
               # Debugger 未起動（sentinel 不在）なら Stage D (Round 2 reject) → Stage A''
@@ -7766,6 +7813,8 @@ run_impl_pipeline() {
                       return 1
                     fi
                     echo "✅ #$NUMBER: Reviewer round=3 approve（Debugger 経由）" | tee -a "$LOG"
+                    # Issue #349 Req 3.1: round=3 approve → claude-review=success
+                    publish_claude_review_status 3 || true
                     # 既存 approve 後経路（Stage C）に合流するため case を抜ける
                     ;;
                   99)
@@ -7776,6 +7825,8 @@ run_impl_pipeline() {
                   1)
                     dbg_log "trigger=round2-reject issue=#${NUMBER} task=none round3 result=reject" >> "$LOG"
                     verify_pushed_or_retry "stageB-pp-push-missing" "$BRANCH" "Stage B'' (round=3 reject)" || true
+                    # Issue #349 Req 3.2: round=3 reject → claude-review=failure
+                    publish_claude_review_status 3 || true
                     echo "❌ #$NUMBER: Reviewer round=3 reject → claude-failed（Debugger 再起動なし / Req 3.5）" | tee -a "$LOG"
                     local parsed3 cat3 tgt3
                     parsed3=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
@@ -9435,6 +9486,103 @@ full_auto_enabled() {
     true) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# ─── publish_claude_review_status <round> ─────────────────────────────────────
+#
+# Claude Reviewer ステージ完了直後（review-notes.md commit / push 済み）に呼ばれ、
+# 当該 PR の head sha に対して `claude-review` 安定 context 名で commit status を
+# publish する。Issue #349 Req 3.x / Req 4.x / Req 7.x / NFR 1.x。
+#
+# 入力: $1 = round（観測ログ用。1 / 2 / 3 のいずれか）
+# 戻り値: 0 = 成功 or gate OFF（no-op）/ 1 = best-effort 失敗（呼び出し側はパイプライン
+#         継続 / Req 5.3）
+# 副作用: gh api -X POST /repos/.../statuses/<sha>（gate ON 時のみ）。 + LOG
+#
+# 入口で `pr_status_check_enabled` を呼んで AND 二重 opt-in を確認するため、gate OFF
+# 状態（既定）では外部副作用ゼロで return する（NFR 1.1）。
+#
+# 設計判断:
+#   - PR 番号と head sha は `gh pr list --head "$BRANCH" --state all` で 1 回引く
+#     （review-notes.md commit / push 後の最新 head が返る）。`gh pr view` の `--head`
+#     非対応事情は既存 `pp_resolve_pr_head_sha` 等と同方針（既存コメント参照）。
+#   - `parse_review_result` で result を抽出。rc=0（approve / reject）以外（rc=2 装飾起因
+#     parse 失敗 / rc=3 ファイル不在）は **publish しない**（AC 3.5 / Req 5.x）。
+#   - target_url は review-notes.md の GitHub blob URL（HEAD sha 指定）に倒す。
+#     blob URL が組み立てられない場合は PR の HTML URL に fallback（AC 3.4）。
+#   - gate OFF / parse 失敗 / publish 失敗いずれもパイプラインを止めない（Req 5.3）。
+publish_claude_review_status() {
+  local round="${1:-?}"
+  # AND 二重 opt-in 早期判定（gh / git 呼び出しを skip するため）
+  if ! pr_status_check_enabled; then
+    # pr_publish_commit_status と整合する suppression ログを cycle あたり 1 行に制限。
+    # FULL_AUTO_ENABLED OFF 起因は #348 既存ログに委ね、本関数では本 gate OFF のみ記録。
+    if [ "${PR_REVIEWER_STATUS_CHECK_ENABLED:-false}" != "true" ] \
+        && [ "${PR_STATUS_GATE_SUPPRESS_LOGGED:-0}" != "1" ]; then
+      pr_log "claude-review status publish suppressed by PR_REVIEWER_STATUS_CHECK_ENABLED gate (round=${round} no-op)"
+      PR_STATUS_GATE_SUPPRESS_LOGGED=1
+    fi
+    return 0
+  fi
+
+  local notes_path="${REPO_DIR}/${SPEC_DIR_REL}/review-notes.md"
+  if [ ! -f "$notes_path" ]; then
+    pr_warn "claude-review status publish: review-notes.md not found at '${notes_path}' (round=${round} issue=#${NUMBER:-?})"
+    return 1
+  fi
+
+  # AC 3.5: parse 失敗時は publish せず WARN
+  local parsed parse_rc=0
+  parsed=$(parse_review_result "$notes_path") || parse_rc=$?
+  if [ "$parse_rc" -ne 0 ] || [ -z "$parsed" ]; then
+    pr_warn "claude-review status publish: parse_review_result 失敗 rc=${parse_rc} (round=${round} issue=#${NUMBER:-?})"
+    return 1
+  fi
+  local result
+  result=$(echo "$parsed" | cut -f1)
+  case "$result" in
+    approve|reject) ;;
+    *)
+      pr_warn "claude-review status publish: 不正な RESULT '${result}' (round=${round} issue=#${NUMBER:-?})"
+      return 1
+      ;;
+  esac
+
+  # PR 番号 / head sha を取得（BRANCH 経由）
+  local pr_json pr_number sha pr_url
+  if ! pr_json=$(timeout "${PR_REVIEWER_GIT_TIMEOUT:-120}" \
+      gh pr list --repo "$REPO" --head "$BRANCH" --state all \
+        --json number,headRefOid,url --limit 1 2>/dev/null); then
+    pr_warn "claude-review status publish: gh pr list 失敗 (branch=${BRANCH} issue=#${NUMBER:-?})"
+    return 1
+  fi
+  pr_number=$(echo "$pr_json" | jq -r '.[0].number // empty' 2>/dev/null || echo "")
+  sha=$(echo "$pr_json" | jq -r '.[0].headRefOid // empty' 2>/dev/null || echo "")
+  pr_url=$(echo "$pr_json" | jq -r '.[0].url // empty' 2>/dev/null || echo "")
+
+  if [ -z "$pr_number" ] || [ -z "$sha" ]; then
+    pr_warn "claude-review status publish: PR not found for branch=${BRANCH} (issue=#${NUMBER:-?})"
+    return 1
+  fi
+
+  # AC 3.4: target_url は review-notes.md の blob URL（HEAD sha 指定）に倒す。
+  # blob URL は `https://github.com/<owner>/<repo>/blob/<sha>/<path>` 形式。
+  local target_url=""
+  if [ -n "$sha" ] && [ -n "$SPEC_DIR_REL" ]; then
+    target_url="https://github.com/${REPO}/blob/${sha}/${SPEC_DIR_REL}/review-notes.md"
+  elif [ -n "$pr_url" ]; then
+    target_url="$pr_url"
+  fi
+
+  # publish
+  local pub_rc=0
+  pr_publish_claude_status "$pr_number" "$sha" "$result" "$target_url" || pub_rc=$?
+  if [ "$pub_rc" -ne 0 ] && [ "$pub_rc" -ne 1 ]; then
+    # rc=1 は gate OFF（既に上で弾いているはずだが念のため）。それ以外は WARN を残す。
+    pr_warn "claude-review status publish: pr_publish_claude_status rc=${pub_rc} (round=${round} pr=#${pr_number} sha=${sha} issue=#${NUMBER:-?})"
+    return 1
+  fi
+  return 0
 }
 
 # 引数 $1 = 対象 Issue 番号（数字のみ）

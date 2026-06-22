@@ -608,6 +608,258 @@ pr_add_iteration_label() {
   return 0
 }
 
+# ─── Issue #349: Commit Status Publishing ─────────────────────────────────────
+#
+# codex / antigravity の VERDICT と Claude Reviewer の RESULT を GitHub Commit Status
+# API (`POST /repos/{owner}/{repo}/statuses/{sha}`) 経由で `codex-review` /
+# `claude-review` context 名の commit status として publish するためのヘルパー群。
+# auto-merge ゲートを required status checks で成立させるための前提整備（D-03 / D-04）。
+#
+# AND 二重 opt-in:
+#   - `PR_REVIEWER_STATUS_CHECK_ENABLED=true` 厳密一致（issue-watcher.sh 本体で正規化済）
+#   - `FULL_AUTO_ENABLED=true` 厳密一致（#348 kill switch / 同様に正規化済）
+#   どちらか一方でも `=true` 以外なら publish を行わず即 return（Req 1.2, 1.4 / 6.1）。
+#
+# gate OFF 時の suppression ログは「サイクルあたり最大 1 行」に制限する（Req 7.2）。
+# 単一サイクル内で複数の publish 試行（codex 用 + claude 用、複数 PR）が同一 gate OFF
+# 状態で suppress される場合でも、`PR_STATUS_GATE_SUPPRESS_LOGGED` フラグで重複出力を抑止
+# する。`FULL_AUTO_ENABLED` 側の suppression は #348 既存ログに委ね（重複させない / Req 7.3）。
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_status_check_enabled: AND 二重 opt-in gate の評価（Req 1.2, 1.4）
+#   入力: 環境変数のみ
+#   出力: なし
+#   戻り値: 0 = 両 gate 有効（publish 許可）/ 1 = いずれかの gate が OFF（publish 抑止）
+#
+#   - `PR_REVIEWER_STATUS_CHECK_ENABLED` と `FULL_AUTO_ENABLED` を独立に評価し、
+#     **双方** が `=true` 厳密一致の場合のみ rc=0 を返す。
+#   - 値正規化（unset / 空 / `True` / `TRUE` / `1` / typo の安全側 OFF 化）は
+#     issue-watcher.sh 本体の Config ブロックで完了している前提だが、本関数は遅延
+#     束縛のため `${VAR:-false}` で fallback して NFR 1.1 安全側に倒す。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_status_check_enabled() {
+  if [ "${PR_REVIEWER_STATUS_CHECK_ENABLED:-false}" != "true" ]; then
+    return 1
+  fi
+  if [ "${FULL_AUTO_ENABLED:-false}" != "true" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_publish_commit_status: GitHub Commit Status API 呼び出しの低レベルヘルパー
+#   入力: $1 = pr_number, $2 = sha, $3 = context, $4 = state,
+#         $5 = description, $6 = target_url
+#   出力: なし（observe 用 log は pr_log / pr_warn）
+#   戻り値: 0 = publish 成功 / 1 = gate OFF（no-op）/ 2 = 入力検証失敗 /
+#           3 = API 呼び出し失敗
+#   AC: 1.2, 1.4, 2.1, 2.2, 3.1, 3.2, 4.1, 5.1, 5.2, 5.3, 5.4, 7.1
+#   NFR: 1.1, 1.2, 1.3, 1.4, 2.1
+#
+#   - AND 二重 opt-in の gate を先頭で評価し、OFF なら外部副作用ゼロで 1 を返す
+#     （Req 6.1 / 1.4）。suppression 観測は cycle あたり 1 行に制限（Req 7.2）。
+#   - 未信頼入力（sha / PR 番号）の使用前検証を厳格に行い、不正値時は publish せず
+#     2 を返す（NFR 1.3, 1.4）。
+#   - description は GitHub 仕様の 140 文字制限内かつ運用要件の 72 文字以内に短縮。
+#   - state は GitHub Commit Status API の許容値 `success` / `failure` / `pending` /
+#     `error` のいずれかに正規化（本仕様では `success` / `failure` のみ使用 / AC 2.1, 2.2）。
+#   - 失敗時は HTTP status / stderr を含めて pr_warn し、silent fail にしない（AC 5.1, 5.4）。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_publish_commit_status() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local context="${3:-}"
+  local state="${4:-}"
+  local description="${5:-}"
+  local target_url="${6:-}"
+
+  # AND 二重 opt-in gate（Req 1.2, 1.4, 6.1）
+  if ! pr_status_check_enabled; then
+    # cycle あたり 1 行に制限（Req 7.2）。`FULL_AUTO_ENABLED` OFF 起因は #348 既存ログに
+    # 委ね、本関数では `PR_REVIEWER_STATUS_CHECK_ENABLED` OFF 起因のみログする（Req 7.3）。
+    if [ "${PR_REVIEWER_STATUS_CHECK_ENABLED:-false}" != "true" ] \
+        && [ "${PR_STATUS_GATE_SUPPRESS_LOGGED:-0}" != "1" ]; then
+      pr_log "commit status publish suppressed by PR_REVIEWER_STATUS_CHECK_ENABLED gate (cycle no-op)"
+      PR_STATUS_GATE_SUPPRESS_LOGGED=1
+    fi
+    return 1
+  fi
+
+  # ── 未信頼入力の検証（NFR 1.3, 1.4）─────────────────────────────────────────
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    pr_warn "commit status publish: 無効な PR 番号 '${pr_number}' を検出（context=${context} state=${state}）"
+    return 2
+  fi
+  if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+    pr_warn "commit status publish: 無効な sha '${sha}' を検出（pr=#${pr_number} context=${context} state=${state}）"
+    return 2
+  fi
+  case "$state" in
+    success|failure|pending|error) ;;
+    *)
+      pr_warn "commit status publish: 無効な state '${state}'（pr=#${pr_number} sha=${sha} context=${context}）"
+      return 2
+      ;;
+  esac
+  case "$context" in
+    "")
+      pr_warn "commit status publish: context が空（pr=#${pr_number} sha=${sha} state=${state}）"
+      return 2
+      ;;
+  esac
+
+  # description は 72 文字以内に短縮（AC 2.3, 3.3）。空入力時は context+state から既定値を生成。
+  if [ -z "$description" ]; then
+    description="${context}: ${state}"
+  fi
+  if [ "${#description}" -gt 72 ]; then
+    description="${description:0:72}"
+  fi
+
+  # target_url は空でも GitHub API は受け付けるが、空文字は `-f target_url=` で渡すと
+  # 不正な空 URL とみなされる可能性があるため、空時は引数自体を渡さない分岐を取る。
+  # ── API call: gh api -X POST ────────────────────────────────────────────────
+  # gh は `-f key=value` で POST body を application/json として構築するため、
+  # 未信頼値の inline 展開リスクは低い。URL path 部の sha / repo owner は事前検証済。
+  local api_path="repos/${REPO}/statuses/${sha}"
+  local api_stderr_tmp
+  api_stderr_tmp=$(mktemp -t idd-claude-pr-status.XXXXXX 2>/dev/null || echo "")
+
+  local api_rc=0
+  if [ -n "$target_url" ]; then
+    if [ -n "$api_stderr_tmp" ]; then
+      timeout "$PR_REVIEWER_GIT_TIMEOUT" \
+        gh api -X POST "$api_path" \
+          -f state="$state" \
+          -f context="$context" \
+          -f description="$description" \
+          -f target_url="$target_url" \
+          >/dev/null 2>"$api_stderr_tmp" || api_rc=$?
+    else
+      timeout "$PR_REVIEWER_GIT_TIMEOUT" \
+        gh api -X POST "$api_path" \
+          -f state="$state" \
+          -f context="$context" \
+          -f description="$description" \
+          -f target_url="$target_url" \
+          >/dev/null 2>&1 || api_rc=$?
+    fi
+  else
+    if [ -n "$api_stderr_tmp" ]; then
+      timeout "$PR_REVIEWER_GIT_TIMEOUT" \
+        gh api -X POST "$api_path" \
+          -f state="$state" \
+          -f context="$context" \
+          -f description="$description" \
+          >/dev/null 2>"$api_stderr_tmp" || api_rc=$?
+    else
+      timeout "$PR_REVIEWER_GIT_TIMEOUT" \
+        gh api -X POST "$api_path" \
+          -f state="$state" \
+          -f context="$context" \
+          -f description="$description" \
+          >/dev/null 2>&1 || api_rc=$?
+    fi
+  fi
+
+  if [ "$api_rc" -ne 0 ]; then
+    # AC 5.1, 5.2, 5.4: 失敗時は WARN ログに PR / sha / context / state / 終了コード /
+    # stderr 抜粋を残す。silent fail にしない。パイプライン継続は呼び出し側の責務。
+    local err_tail=""
+    if [ -n "$api_stderr_tmp" ] && [ -f "$api_stderr_tmp" ]; then
+      err_tail=$(tail -c 512 "$api_stderr_tmp" 2>/dev/null || true)
+      rm -f "$api_stderr_tmp" 2>/dev/null || true
+    fi
+    pr_warn "commit status publish FAILED: pr=#${pr_number} sha=${sha} context=${context} state=${state} rc=${api_rc} stderr='${err_tail//$'\n'/ }'"
+    return 3
+  fi
+
+  if [ -n "$api_stderr_tmp" ]; then
+    rm -f "$api_stderr_tmp" 2>/dev/null || true
+  fi
+  # AC 7.1: 成功時 1 行 log（PR / sha / context / state）
+  pr_log "commit status published: pr=#${pr_number} sha=${sha} context=${context} state=${state}"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_publish_codex_status: codex / antigravity の VERDICT から commit status を publish
+#   入力: $1 = pr_number, $2 = sha, $3 = review_text, $4 = pr_url
+#   出力: なし（log のみ）
+#   戻り値: pr_publish_commit_status の戻り値をそのまま返す（0/1/2/3）
+#   AC: 2.1, 2.2, 2.3, 2.4, 2.5
+#
+#   - review_text の最終行 `VERDICT: approve` / `VERDICT: needs-iteration` から
+#     state を解決する（approve → success、needs-iteration → failure）。
+#   - antigravity 利用時も同じ `codex-review` context を共有する（AC 2.5）。
+#   - target_url はコメント permalink を取得できないため PR URL に倒す（AC 2.4 fallback）。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_publish_codex_status() {
+  local pr_number="$1"
+  local sha="$2"
+  local review_text="$3"
+  local pr_url="$4"
+
+  # VERDICT 検出: pr_detect_iteration_keyword が >0 を返せば needs-iteration（=failure）。
+  # pr_detect_iteration_keyword は PR_REVIEWER_ITERATION_PATTERN を用いるため挙動が一貫する。
+  local match_count
+  match_count=$(pr_detect_iteration_keyword "$pr_number" "$review_text")
+  match_count="${match_count:-0}"
+
+  local state description
+  if [ "$match_count" -gt 0 ] 2>/dev/null; then
+    state="failure"
+    description="codex: needs-iteration"
+  else
+    state="success"
+    description="codex: approve"
+  fi
+
+  pr_publish_commit_status "$pr_number" "$sha" "codex-review" "$state" "$description" "$pr_url"
+  return $?
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_publish_claude_status: Claude Reviewer の RESULT から commit status を publish
+#   入力: $1 = pr_number, $2 = sha, $3 = result (approve|reject), $4 = target_url
+#   出力: なし（log のみ）
+#   戻り値: pr_publish_commit_status の戻り値（0/1/2/3）/ 4 = 不正な result
+#   AC: 3.1, 3.2, 3.3, 3.4, 3.5
+#
+#   - 呼び出し元（issue-watcher.sh 本体 / run_reviewer_stage 直後）が
+#     `parse_review_result` で result を抽出してから本関数を呼ぶ前提。
+#   - approve → success / reject → failure。`parse_review_result` の戻り値 0 を伴う
+#     場合のみ呼ばれる前提のため、本関数では result の値検証のみ行う。
+#   - target_url は review-notes.md の blob URL（呼び出し側で組み立て）を期待するが、
+#     空文字なら pr_publish_commit_status 側で省略される。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_publish_claude_status() {
+  local pr_number="$1"
+  local sha="$2"
+  local result="$3"
+  local target_url="${4:-}"
+
+  local state description
+  case "$result" in
+    approve)
+      state="success"
+      description="claude: approve"
+      ;;
+    reject)
+      state="failure"
+      description="claude: reject"
+      ;;
+    *)
+      pr_warn "claude-review status publish: 不正な result '${result}'（pr=#${pr_number} sha=${sha}）"
+      return 4
+      ;;
+  esac
+
+  pr_publish_commit_status "$pr_number" "$sha" "claude-review" "$state" "$description" "$target_url"
+  return $?
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # pr_run_review_for_pr: 1 PR 分のレビューを統括する（task 4〜6 の orchestration）
 #   入力: $1 = pr_json（pr_fetch_candidate_prs の単一要素）, $2 = tool
@@ -746,6 +998,11 @@ pr_run_review_for_pr() {
   if [ "$match_count" -gt 0 ] 2>/dev/null; then
     pr_add_iteration_label "$pr_number"
   fi
+
+  # Issue #349 / Req 2.1〜2.5: codex / antigravity の VERDICT を commit status に publish。
+  # AND 二重 opt-in（PR_REVIEWER_STATUS_CHECK_ENABLED && FULL_AUTO_ENABLED）が成立した
+  # 場合のみ実行。gate OFF / publish 失敗いずれもパイプラインを止めない（Req 5.3, 5.5）。
+  pr_publish_codex_status "$pr_number" "$sha" "$review_text" "$pr_url" || true
 
   return 0
 }
