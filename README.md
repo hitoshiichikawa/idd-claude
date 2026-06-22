@@ -5237,6 +5237,38 @@ reject 時のログには `categories=` / `targets=` が含まれ、対応 requi
 [YYYY-MM-DD HH:MM:SS] per-task: task=1.2 reviewer end round=1 result=reject categories=AC未カバー targets=1.2
 ```
 
+### Post-marker commit safety net（#304 / #356）
+
+per-task Reviewer 起動前に `pt_detect_post_marker_commits` が `docs(tasks): mark <id> as done`
+marker commit より後ろに **未レビュー commit** が積まれていないかをチェックし、idd-codex #14
+同型の **silent range truncation**（修正 commit が Reviewer の判定対象から漏れる事故）を
+防ぎます（#304）。`POST_MARKER_RECOVERY_MODE` で挙動を切り替えられます:
+
+| 値 | 挙動 |
+|---|---|
+| `fail-with-diagnostic` (既定) | post-marker commit を検出したら `claude-failed` を付与して停止し、復旧手順付き Issue コメントを投稿 |
+| `extend-range` | post-marker commit の内容に関わらず range を HEAD まで拡張して Reviewer を続行（既存 escape hatch） |
+
+#### docs-only auto-refresh（#356）
+
+post-marker commit が **docs-only**（`docs(impl-notes): learning 追記` のような無害な
+文書追記のみ）のときは、`fail-with-diagnostic` であっても `claude-failed` を踏まずに marker を
+HEAD まで auto-refresh して Reviewer を続行します。発火条件は env `POST_MARKER_DOCS_ALLOWLIST`
+の glob パターン（既定: `**/impl-notes.md,docs/specs/**/*.md`）に **全ての** post-marker 変更
+ファイルが閉じていることです。コード / テスト / 設定ファイルが 1 件でも混在すれば、従来どおり
+`fail-with-diagnostic` 経路で停止します。
+
+- 発火時のログ行（grep 抽出可能 / NFR 2.2）:
+  ```
+  [YYYY-MM-DD HH:MM:SS] per-task: post-marker-commits-detected task_id=1.2 round=1 marker=<sha> post_marker_shas=<csv> recovery=docs-only-auto-refresh
+  ```
+- 発火時、当該 Issue に 1 件のみ事実記録コメントが投稿されます（同一 task の再発火は
+  重複抑制マーカーで抑止）
+- `POST_MARKER_RECOVERY_MODE=extend-range` を明示している repo では、本判定はオーバーライド
+  されず既存 extend-range 挙動が温存されます（#356 Req 3.3）
+- Developer 契約として `impl-notes` 追記を marker より「前」に積む順序を遵守すれば、本
+  auto-refresh は発火せず Issue コメントも増えません（[`developer.md` の Marker contract 順序条項](repo-template/.claude/agents/developer.md) 参照）
+
 ### 累積コスト警告（重要）
 
 ⚠️ **per-task ループ有効化により Claude CLI 起動回数は task 件数に比例して増加します。**
