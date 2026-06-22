@@ -1100,3 +1100,139 @@ fr_run_recovery_attempt() {
   fr_post_attempt_comment "$kind" "$number" "$failure_body" || true
   return 1
 }
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Termination Layer
+#
+# `fr_run_recovery_attempt` が return 2 / return 3 で caller に通知する終端経路
+# （max-attempts / no-progress）を受け取り、`claude-failed` ラベルを据え置いた
+# まま、運用者向けの終端理由コメントと run-summary 連携を行う。
+#
+# 共通契約:
+#   - `claude-failed` ラベルは **据え置く**（Req 4.5 / 5.3。手動介入待ち）
+#   - 終端理由コメントを **1 件のみ**投稿（着手 + 結果のような 2 件投稿はしない）
+#   - `rs_set_result claude-failed` を **1 度だけ**呼ぶ（多重発火しない / NFR 4.2）
+#   - `fr_log` で `failed-recovery:` prefix + Issue/PR 番号でログ抽出可能（NFR 4.1）
+#   - fail-continue: gh comment 失敗は `fr_post_attempt_comment` 内で fr_warn 済み
+#     のため、Returns は常に 0
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# fr_terminate_max_attempts: 通算 attempt 上限到達時の終端処理。
+#
+# Args:
+#   $1 = kind ("issue" | "pr")
+#   $2 = number (^[0-9]+$ で使用前検証)
+#   $3 = total_attempts (int / state の total_attempts をそのまま渡す)
+#
+# 副作用:
+#   - 終端理由コメント 1 件を投稿（Req 4.6。本文に通算回数 + 上限値を含む）
+#   - rs_set_result "claude-failed" を呼ぶ（NFR 4.2 / run-summary 連携）
+#   - fr_log で終端理由をログ出力（NFR 4.1）
+#   - claude-failed ラベルは **除去しない**（Req 4.5 / 手動介入待ち）
+#
+# Returns:
+#   0 = fail-continue（コメント / rs_set_result 投稿失敗時も 0 を返す）
+#   1 = 不正な引数（kind が issue/pr 以外 or number が非数値）
+fr_terminate_max_attempts() {
+  local kind="$1"
+  local number="$2"
+  local total_attempts="$3"
+
+  # kind の不正値ガード（issue / pr のみ受理）
+  case "$kind" in
+    issue|pr) : ;;
+    *)
+      fr_warn "fr_terminate_max_attempts: 不正な kind=$(printf '%s' "$kind" | tr -cd '[:alnum:]_-' | head -c 16)"
+      return 1
+      ;;
+  esac
+
+  # NFR 3.1: 番号の形式検証（^[0-9]+$）
+  if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+    fr_warn "fr_terminate_max_attempts: 不正な ${kind} 番号 number=$(printf '%s' "$number" | tr -cd '[:alnum:]_-' | head -c 32)"
+    return 1
+  fi
+
+  # 終端理由コメント 1 件を投稿（Req 4.6）。本文に通算回数 + 上限値を含めて
+  # 運用者が手動レビュー時に試行履歴を把握できるようにする。secrets は含めない
+  # （NFR 3.2 / printf '%s' で値埋め込み）。
+  local body
+  # shellcheck disable=SC2016  # 単一引用符内のバッククォートは markdown コードフェンスのリテラル
+  body=$(printf 'Failed Recovery Processor (#359): 通算 attempt 上限到達のため修正試行を停止します（通算 %s 回 / 上限 %s 回 / 終端理由: max-attempts）。\n\n`claude-failed` ラベルは据え置きます。手動レビューに移行してください。' \
+      "$total_attempts" "$FAILED_RECOVERY_MAX_ATTEMPTS")
+  fr_post_attempt_comment "$kind" "$number" "$body" || true
+
+  # run-summary 連携（NFR 4.2 / Req 4.6）。rs_set_result は run-summary.sh の
+  # 関数で、副作用は環境変数 RUN_SUMMARY_RESULT への代入のみ（戻り値常に 0）。
+  rs_set_result "claude-failed" || true
+
+  # NFR 4.1: `failed-recovery:` prefix と Issue/PR 番号でログ抽出可能にする。
+  # fr_log は core_utils.sh で `[YYYY-MM-DD HH:MM:SS] [$REPO] failed-recovery: $*`
+  # の 3 段 prefix を付与する。
+  fr_log "${kind}=#${number} terminated reason=max-attempts total=${total_attempts} max=${FAILED_RECOVERY_MAX_ATTEMPTS}"
+
+  return 0
+}
+
+# fr_terminate_no_progress: no-progress 判定時の終端処理。
+#
+# Args:
+#   $1 = kind ("issue" | "pr")
+#   $2 = number (^[0-9]+$ で使用前検証)
+#   $3 = total_attempts (int / 参考表示用)
+#   $4 = signature (string / 直前 signature 一致を確認した値。本文には含めず log で参照)
+#
+# 副作用:
+#   - 終端理由コメント 1 件を投稿（Req 5.3。本文に no-progress + 同原因再発を含む）
+#   - rs_set_result "claude-failed" を呼ぶ（Req 5.4 / run-summary 連携）
+#   - fr_log で終端理由をログ出力（NFR 4.1）
+#   - claude-failed ラベルは **除去しない**（Req 5.3 / 手動介入待ち）
+#
+# Returns:
+#   0 = fail-continue（コメント投稿失敗時も 0 を返す）
+#   1 = 不正な引数（kind が issue/pr 以外 or number が非数値）
+fr_terminate_no_progress() {
+  local kind="$1"
+  local number="$2"
+  local total_attempts="$3"
+  local signature="${4:-}"
+
+  # kind の不正値ガード（issue / pr のみ受理）
+  case "$kind" in
+    issue|pr) : ;;
+    *)
+      fr_warn "fr_terminate_no_progress: 不正な kind=$(printf '%s' "$kind" | tr -cd '[:alnum:]_-' | head -c 16)"
+      return 1
+      ;;
+  esac
+
+  # NFR 3.1: 番号の形式検証（^[0-9]+$）
+  if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+    fr_warn "fr_terminate_no_progress: 不正な ${kind} 番号 number=$(printf '%s' "$number" | tr -cd '[:alnum:]_-' | head -c 32)"
+    return 1
+  fi
+
+  # 終端理由コメント 1 件を投稿（Req 5.3）。本文には「no-progress」「同原因再発」
+  # 「無進捗」のキーワードを含めて運用者が手動レビュー時に検索可能にする。
+  # signature の hex 値は運用者向け本文の可読性を優先して**含めない**（log には残す）。
+  local body
+  # shellcheck disable=SC2016  # 単一引用符内のバッククォートは markdown コードフェンスのリテラル
+  body=$(printf 'Failed Recovery Processor (#359): no-progress を検出したため修正試行を停止します（通算 %s 回 / 終端理由: no-progress / 直前と同一の失敗 signature が再発・無進捗）。\n\n`claude-failed` ラベルは据え置きます。手動レビューに移行してください。' \
+      "$total_attempts")
+  fr_post_attempt_comment "$kind" "$number" "$body" || true
+
+  # run-summary 連携（Req 5.4）。rs_set_result は副作用が環境変数代入のみで
+  # 戻り値常に 0 なので fail-continue の防御 `|| true` を付ける必要は無いが、
+  # NFR 4.2 の「多重発火しない」契約を物理的に守るため明示的に 1 度だけ呼ぶ。
+  rs_set_result "claude-failed" || true
+
+  # NFR 4.1: ログには signature の先頭 8 桁を参考値として含める（運用者が
+  # `failed-recovery: ... terminated reason=no-progress` で grep 抽出可能）。
+  local sig_prefix=""
+  if [ -n "$signature" ]; then
+    sig_prefix=" signature=$(printf '%s' "$signature" | cut -c1-8)"
+  fi
+  fr_log "${kind}=#${number} terminated reason=no-progress total=${total_attempts}${sig_prefix}"
+
+  return 0
+}
