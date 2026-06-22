@@ -81,3 +81,33 @@
   (`auto-merge-design_test.sh`) を追加する際の参照点として、`process_auto_merge_design`
   が main loop の `process_auto_merge` 直後で確実に呼ばれることをスモークで確認済み
   （test fixture 設計上の前提として活用可能）
+
+### Task 5
+
+- 採用方針: 既存 `local-watcher/test/auto-merge_test.sh` (#352) を雛形にコピーし、
+  `am_` → `amd_` / `AUTO_MERGE_` → `AUTO_MERGE_DESIGN_` / 抽出 module `auto-merge.sh`
+  → `auto-merge-design.sh` の mechanical rename + design 用差分（`ready-for-review`
+  必須テスト削除 / `needs-iteration` 除外テスト追加 / 全 fixture を `-design` head
+  branch に書き換え / Case I を「impl PR → skip」に反転）で構築。61 件 PASS / 0 FAIL
+- 重要な判断:
+  - shellcheck SC2034 抑止: 既存 `auto-merge_test.sh` は file-level `disable=SC2034`
+    のみで実際は SC2034 警告が exit 1 で残存（shellcheck 仕様で file-level disable は
+    次行のみに効くため）。本 task では各代入直前に inline `# shellcheck disable=SC2034`
+    を付与し、shellcheck クリーン（警告ゼロ）を達成。コメント本文に `=` を含む文字列
+    （例: `disable=SC2034`）を書くと SC1072 で directive parse 失敗するため、文中の
+    `=` は inline コード表記を避けて平文で記述
+  - `build_pr_json` の labels_csv 引数: design 版では `ready-for-review` 必須要件が
+    無いため、labels_csv に空文字列を渡してラベル無し fixture を作る形に変更。
+    既存 helper の awk ベース parser は空文字 / 単一ラベルの両方に対応済み（既存
+    実装のまま流用可能）
+  - Case I の反転: 既存 `auto-merge_test.sh` の Case I「設計 PR → skip」を、
+    design 版では「実装 PR (`-impl` pattern) → skip」に反転（Req 2.6 / 6.7 / 非干渉
+    の二重防御を fixture でも検証）。head pattern による client-side filter で
+    impl PR が排他されることを統合経路でも確認
+  - exactly-once 検証: Case D で `gh pr merge.*--auto.*--squash.*--delete-branch.*-- 100`
+    を正規表現で 1 回マッチさせる assert を追加し、Req 3.1 の `gh pr merge --auto
+    --squash --delete-branch -- <N>` 形式（NFR 1.2 `--` 打ち切り）まで含めて検証
+- 残存課題: なし。次 task (6) は別の既存テストファイル `pr_publish_commit_status_test.sh`
+  に design head fixture を追加する作業で、本 task の auto-merge-design_test.sh とは
+  別 module（pr-reviewer.sh）への fixture 追加であり独立。task 5 の成果物は task 6 /
+  task 7 / task 8 の verify ブロックの回帰確認対象として活用される
