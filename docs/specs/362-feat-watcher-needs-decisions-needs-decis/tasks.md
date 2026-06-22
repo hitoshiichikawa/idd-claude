@@ -183,7 +183,7 @@
   - _Boundary: README.md_
   - _Depends: 1, 2, 3, 4_
 
-- [ ] 8. root ↔ repo-template 二重管理同期（byte 一致確認）
+- [x] 8. root ↔ repo-template 二重管理同期（byte 一致確認）
   - `repo-template/local-watcher/bin/issue-watcher.sh` ← `local-watcher/bin/issue-watcher.sh` を同期
   - `repo-template/local-watcher/bin/triage-prompt.tmpl` ← `local-watcher/bin/triage-prompt.tmpl` を同期
   - `repo-template/local-watcher/bin/modules/needs-decisions-auto.sh` を新規配置
