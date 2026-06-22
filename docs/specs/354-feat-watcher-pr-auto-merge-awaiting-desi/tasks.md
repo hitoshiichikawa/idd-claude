@@ -48,7 +48,7 @@
   - _Boundary: issue-watcher.sh:Config, issue-watcher.sh:Loader_
   - _Depends: 1, 2_
 
-- [ ] 4. Main loop に `process_auto_merge_design` 呼び出しを配線
+- [x] 4. Main loop に `process_auto_merge_design` 呼び出しを配線
   - `local-watcher/bin/issue-watcher.sh` の `process_auto_merge || am_warn ...` 行（line 999 付近）の **直後**に `process_auto_merge_design || amd_warn "process_auto_merge_design が想定外のエラーで終了しました（後続 Issue 処理は継続）"` を追加
   - Phase D auto-rebase の後・promote-pipeline の前に配置する順序を維持（既存 design.md「順序根拠」節準拠）
   - `process_auto_merge_design` は戻り値 0 固定（パイプライン継続 / Req 7.3）。失敗時の `amd_warn` は防衛的セーフティ
