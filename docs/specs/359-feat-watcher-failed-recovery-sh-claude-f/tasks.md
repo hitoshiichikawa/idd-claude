@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. core_utils.sh に Failed Recovery ロガーを追加
+- [x] 1. core_utils.sh に Failed Recovery ロガーを追加
   - `local-watcher/bin/modules/core_utils.sh` に `fr_log` / `fr_warn` / `fr_error` を
     既存 `pi_log` / `pr_log` と同パターンで追加（prefix `failed-recovery:`、warn/error は stderr）
   - shellcheck warning ゼロを維持
