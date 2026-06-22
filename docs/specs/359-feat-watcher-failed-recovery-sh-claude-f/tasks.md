@@ -1,14 +1,14 @@
 # Implementation Plan
 
-- [ ] 1. core_utils.sh に Failed Recovery ロガーを追加
+- [x] 1. core_utils.sh に Failed Recovery ロガーを追加
   - `local-watcher/bin/modules/core_utils.sh` に `fr_log` / `fr_warn` / `fr_error` を
     既存 `pi_log` / `pr_log` と同パターンで追加（prefix `failed-recovery:`、warn/error は stderr）
   - shellcheck warning ゼロを維持
   - 近接テストはロガー単独では追加せず、後続 task の `fr_*_test.sh` で間接検証する
   - _Requirements: NFR 4.1, NFR 5.1_
 
-- [ ] 2. issue-watcher.sh Config ブロックに FAILED_RECOVERY_* env を追加
-- [ ] 2.1 Config ブロックに env 受け取り + 値正規化を追加
+- [x] 2. issue-watcher.sh Config ブロックに FAILED_RECOVERY_* env を追加
+- [x] 2.1 Config ブロックに env 受け取り + 値正規化を追加
   - `FAILED_RECOVERY_ENABLED` / `FAILED_RECOVERY_MAX_ATTEMPTS` / `FAILED_RECOVERY_MAX_TURNS` /
     `FAILED_RECOVERY_DEV_MODEL` / `FAILED_RECOVERY_GIT_TIMEOUT` / `FAILED_RECOVERY_MAX_PRS` /
     `FAILED_RECOVERY_STATE_DIR` の宣言と既定値を `issue-watcher.sh` の Config ブロック（PR
@@ -22,8 +22,8 @@
   - _Requirements_partial: 1.5, 4.8_
   - _Boundary: issue-watcher.sh:Config_
 
-- [ ] 3. modules/failed-recovery.sh 新規モジュールを追加（gate + state 永続化レイヤ）
-- [ ] 3.1 module 雛形と gate 関数を実装
+- [x] 3. modules/failed-recovery.sh 新規モジュールを追加（gate + state 永続化レイヤ）
+- [x] 3.1 module 雛形と gate 関数を実装
   - `local-watcher/bin/modules/failed-recovery.sh` を新規作成。ファイル冒頭コメントで用途・
     配置先・依存・prefix `fr_` を明記し、function 定義のみを置く（トップレベル副作用なし）
   - `fr_is_enabled` を実装（`FAILED_RECOVERY_ENABLED=true` AND `FULL_AUTO_ENABLED=true`
@@ -35,7 +35,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, NFR 1.3, NFR 5.1, NFR 5.2_
   - _Boundary: modules/failed-recovery.sh:Gate_
 
-- [ ] 3.2 状態永続化レイヤ（fr_state_path / fr_load_state / fr_save_state）を実装
+- [x] 3.2 状態永続化レイヤ（fr_state_path / fr_load_state / fr_save_state）を実装
   - `fr_state_path` / `fr_load_state` / `fr_save_state` を `modules/failed-recovery.sh` に追加
   - 配置: `$FAILED_RECOVERY_STATE_DIR/<issue>.json`、`mkdir -p` 冪等化
   - `fr_save_state` は `mktemp -p` で同一 dir に temp file 作成 → `jq` で組み立て → `mv -f`
@@ -50,7 +50,7 @@
   - _Boundary: modules/failed-recovery.sh:State_
   - _Depends: 3.1_
 
-- [ ] 4. 候補選定レイヤ（fr_fetch_failed_issues / fr_fetch_failed_prs）を実装
+- [x] 4. 候補選定レイヤ（fr_fetch_failed_issues / fr_fetch_failed_prs）を実装
   - `fr_fetch_failed_issues` を実装。`gh issue list --search 'label:"claude-failed"
     label:"auto-dev" -label:"needs-decisions" -label:"needs-quota-wait" -label:"blocked"
     -label:"awaiting-slot"' --json number,labels,body,title,url --limit "$FAILED_RECOVERY_MAX_PRS"`
@@ -66,8 +66,8 @@
   - _Boundary: modules/failed-recovery.sh:CandidateSelection_
   - _Depends: 3.1_
 
-- [ ] 5. 失敗解析 + no-progress 検出 + Claude 起動 wrapper を実装
-- [ ] 5.1 失敗 signature 計算と no-progress 判定を実装
+- [x] 5. 失敗解析 + no-progress 検出 + Claude 起動 wrapper を実装
+- [x] 5.1 失敗 signature 計算と no-progress 判定を実装
   - `fr_compute_failure_signature` を実装。`sed -E` で timestamp / SHA / URL / 行番号 /
     `Run #` を除去 → `sha1sum` で hash 化
   - `fr_detect_no_progress` を実装。直前 state の signature と一致 + （PR 経路時は head_sha
@@ -80,7 +80,7 @@
   - _Boundary: modules/failed-recovery.sh:Decision_
   - _Depends: 3.2_
 
-- [ ] 5.2 Context 収集と Claude 起動 wrapper を実装
+- [x] 5.2 Context 収集と Claude 起動 wrapper を実装
   - `fr_collect_issue_context` を実装。`gh issue view --json comments,body,title,labels`
     で直近 5 件のコメント + `git show` 経由で spec dir 配下を集約
   - `fr_collect_pr_ci_context` を実装。`gh pr checks --json` で failing check 特定 → `gh run
@@ -99,7 +99,7 @@
   - _Boundary: modules/failed-recovery.sh:Execution_
   - _Depends: 3.1_
 
-- [ ] 6. attempt orchestrator + finalize_success を実装
+- [x] 6. attempt orchestrator + finalize_success を実装
   - `fr_should_recover` を実装（`total_attempts < FAILED_RECOVERY_MAX_ATTEMPTS` の純粋判定）
   - `fr_run_recovery_attempt` を実装。pre-attempt の `fr_should_recover` → no-progress 判定
     → 着手コメント投稿 → **試行開始時に attempt++**（Req 4.2、quota 燃焼上界保証）→
@@ -118,7 +118,7 @@
   - _Boundary: modules/failed-recovery.sh:Orchestrator_
   - _Depends: 3.2, 4, 5.1, 5.2_
 
-- [ ] 7. 終端処理（max-attempts / no-progress）と run-summary 連携を実装
+- [x] 7. 終端処理（max-attempts / no-progress）と run-summary 連携を実装
   - `fr_terminate_max_attempts` を実装。`claude-failed` 据え置き（Req 4.5）、終端理由コメント
     1 件投稿（通算試行回数 + 上限値含む / Req 4.6）、`rs_set_result claude-failed` 呼び出し
     （NFR 4.2）、`fr_log` でログ記録（NFR 4.1）
@@ -133,7 +133,7 @@
   - _Boundary: modules/failed-recovery.sh:Termination_
   - _Depends: 3.2, 6_
 
-- [ ] 8. process_failed_recovery エントリ + watcher 本体配線 + README 追記
+- [x] 8. process_failed_recovery エントリ + watcher 本体配線 + README 追記
   - `process_failed_recovery` を `modules/failed-recovery.sh` に実装。冒頭で
     `fr_is_enabled || return 0`、Issue 候補と PR 候補を列挙 → 各 candidate を直列実行 →
     重複起動防止 in-memory set、例外は `fr_warn` 吸収（fail-continue）
