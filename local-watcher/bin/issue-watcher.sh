@@ -486,6 +486,49 @@ DESIGN_REVIEW_RELEASE_HEAD_PATTERN="${DESIGN_REVIEW_RELEASE_HEAD_PATTERN:-^claud
 # Phase A の MERGE_QUEUE_GIT_TIMEOUT を流用してデフォルト 60 秒。
 DRR_GH_TIMEOUT="${DRR_GH_TIMEOUT:-${MERGE_QUEUE_GIT_TIMEOUT:-60}}"
 
+# ─── Failed Recovery Processor 設定 (#359) ───
+# `claude-failed` ラベル付き Issue（reviewer-reject 由来も含む）と auto-merge 待ち PR の
+# CI 失敗を、fresh Claude session で自動解析・修正して開発を再開させる opt-in 機能。
+# Issue 単位の **通算 attempt budget**（既定 4 / `FAILED_RECOVERY_MAX_ATTEMPTS`）を唯一の
+# カウンタとして扱い、Reviewer 内部 2/2 試行・pr-iteration 3R と掛け算しない（D-19b）。
+# 同原因再発 + 無進捗の no-progress ガードで早期終端する。
+#
+# **AND 二重 opt-in**: `FAILED_RECOVERY_ENABLED=true` AND `FULL_AUTO_ENABLED=true`
+# （#348 kill switch）が双方 ON のときのみ動作する。いずれかが OFF（既定）なら gh API
+# 呼び出しゼロ・状態ファイル不生成・コメント不投稿で本機能導入前と完全に等価（Req 1.1
+# 〜 1.5, NFR 1.3）。`=true` 厳密一致以外（未設定 / 空 / `false` / `0` / `True` /
+# `TRUE` / `1` / `on` / `yes` / typo 等）はすべて OFF に正規化（Req 1.5）。本フラグは
+# 新規追加 = opt-in 制 + 既定 false が要件のため、上記「デフォルト有効化フラグの値正規化」
+# ループには **含めない**。
+#
+# 関数本体は modules/failed-recovery.sh、ロガー fr_log / fr_warn / fr_error は core_utils.sh。
+FAILED_RECOVERY_ENABLED="${FAILED_RECOVERY_ENABLED:-false}"
+case "$FAILED_RECOVERY_ENABLED" in
+  true) : ;;
+  *)    FAILED_RECOVERY_ENABLED="false" ;;
+esac
+# Issue 単位の通算 attempt 上限。未設定 / 非整数 / 0 以下は既定 4 に正規化（Req 4.8）。
+FAILED_RECOVERY_MAX_ATTEMPTS="${FAILED_RECOVERY_MAX_ATTEMPTS:-4}"
+case "$FAILED_RECOVERY_MAX_ATTEMPTS" in
+  ''|*[!0-9]*) FAILED_RECOVERY_MAX_ATTEMPTS=4 ;;
+  *)
+    if [ "$FAILED_RECOVERY_MAX_ATTEMPTS" -le 0 ]; then
+      FAILED_RECOVERY_MAX_ATTEMPTS=4
+    fi
+    ;;
+esac
+# 1 試行あたりの Claude 実行 turn 数上限（既存 PR_ITERATION_MAX_TURNS と同既定）。
+FAILED_RECOVERY_MAX_TURNS="${FAILED_RECOVERY_MAX_TURNS:-60}"
+# Failed Recovery 専用モデル ID（既存 DEV_MODEL 連鎖で fallback）。
+FAILED_RECOVERY_DEV_MODEL="${FAILED_RECOVERY_DEV_MODEL:-${DEV_MODEL:-claude-opus-4-7}}"
+# gh / git 操作の個別タイムアウト（秒）。既存 AUTO_MERGE_GIT_TIMEOUT 等と同既定。
+FAILED_RECOVERY_GIT_TIMEOUT="${FAILED_RECOVERY_GIT_TIMEOUT:-60}"
+# 1 サイクルで処理する Issue / PR 数の上限（残りは次回サイクルに持ち越し）。
+FAILED_RECOVERY_MAX_PRS="${FAILED_RECOVERY_MAX_PRS:-3}"
+# 状態ファイル（通算カウンタ + 直前試行情報の JSON）の配置先。既定 $HOME/.issue-watcher/
+# failed-recovery/$REPO_SLUG。LOG_DIR と同じ repo-slug 分離方針（NFR 2.2, NFR 2.3）。
+FAILED_RECOVERY_STATE_DIR="${FAILED_RECOVERY_STATE_DIR:-$HOME/.issue-watcher/failed-recovery/$REPO_SLUG}"
+
 # ─── Stage Checkpoint 設定 (#68) ───
 # impl / impl-resume の Stage A/B/C 単位で完了 checkpoint を成果物
 # （impl-notes.md / review-notes.md / 既存 impl PR）の有無で観測し、失敗 Stage 以降
