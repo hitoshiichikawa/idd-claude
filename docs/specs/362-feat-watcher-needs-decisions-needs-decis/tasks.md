@@ -162,7 +162,7 @@
   - _Boundary: needs_decisions_auto_test.sh, needs-decisions-auto.sh_
   - _Depends: 1, 2.4, 3_
 
-- [ ] 7. README 更新（オプション機能表 + 詳細節 + kill switch 配線対象更新）
+- [x] 7. README 更新（オプション機能表 + 詳細節 + kill switch 配線対象更新）
   - `README.md` の「### opt-in（既定 OFF、明示的に有効化が必要）」表（行 1349 近辺）に
     `NEEDS_DECISIONS_MODE` を 1 行追加:
     - 機能名 / 制御変数 / 既定 (`all-human`) / 正規化規則（3 値以外は `all-human` 安全側） /
