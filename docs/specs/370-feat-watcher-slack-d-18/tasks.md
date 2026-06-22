@@ -99,7 +99,7 @@
   - _Boundary: needs-decisions-auto.sh (1 行), promote-pipeline.sh (1 行), local-watcher/test/needs_decisions_auto_test.sh, local-watcher/test/sn_callsite_promote_test.sh (新規)_
   - _Depends: 3.2_
 
-- [ ] 7. README オプション機能一覧への反映と static-analysis / 同期確認
+- [x] 7. README オプション機能一覧への反映と static-analysis / 同期確認
   - `README.md` の `### opt-in（既定 OFF、明示的に有効化が必要）` 表に Slack 通知行を追加:
     - 機能名: Slack 通知（重要イベント push）
     - 制御変数: `SLACK_NOTIFY_ENABLED`、既定 `false`、正規化: `=true` 厳密一致のみ有効
