@@ -66,7 +66,7 @@
   - _Boundary: modules/failed-recovery.sh:CandidateSelection_
   - _Depends: 3.1_
 
-- [ ] 5. 失敗解析 + no-progress 検出 + Claude 起動 wrapper を実装
+- [x] 5. 失敗解析 + no-progress 検出 + Claude 起動 wrapper を実装
 - [x] 5.1 失敗 signature 計算と no-progress 判定を実装
   - `fr_compute_failure_signature` を実装。`sed -E` で timestamp / SHA / URL / 行番号 /
     `Run #` を除去 → `sha1sum` で hash 化
