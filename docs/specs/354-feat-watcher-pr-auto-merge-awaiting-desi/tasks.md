@@ -104,7 +104,7 @@
   - _Requirements: NFR 4.1, NFR 4.2, NFR 4.3_
   - _Boundary: README.md_
 
-- [ ] 8. 全体 verify（shellcheck / actionlint / bash -n / 既存テスト + 新規テスト + diff -r）
+- [x] 8. 全体 verify（shellcheck / actionlint / bash -n / 既存テスト + 新規テスト + diff -r）
   - `shellcheck local-watcher/bin/modules/auto-merge-design.sh local-watcher/bin/issue-watcher.sh install.sh setup.sh .github/scripts/*.sh` で警告ゼロ（`.shellcheckrc` の SC2317 / SC2012 accepted baseline は反映済 / NFR 5.1）
   - `actionlint .github/workflows/*.yml` クリーン（本 spec で workflow は変更しないが回帰確認）
   - `bash -n local-watcher/bin/modules/auto-merge-design.sh local-watcher/bin/issue-watcher.sh` で構文 OK
