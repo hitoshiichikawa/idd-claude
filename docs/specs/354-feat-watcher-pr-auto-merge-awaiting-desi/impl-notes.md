@@ -111,3 +111,60 @@
   に design head fixture を追加する作業で、本 task の auto-merge-design_test.sh とは
   別 module（pr-reviewer.sh）への fixture 追加であり独立。task 5 の成果物は task 6 /
   task 7 / task 8 の verify ブロックの回帰確認対象として活用される
+
+### Task 6
+
+- 採用方針: `local-watcher/test/pr_publish_commit_status_test.sh` の既存 Section 1–4
+  （Issue #349 由来）は **一切変更せず**、Section 4 Case 4.E の直後に新規
+  `Section 5: design PR head fixture (Issue #354 Req 4)` を append-only で追加。
+  design.md「Design Decisions」(A) で確定済みの「`pr_publish_*` は head pattern を
+  区別しない既存設計」を fixture でも明示するため、design PR らしい局所定数
+  (`DESIGN_PR=200` / `DESIGN_SHA=40hex` / `DESIGN_TARGET_URL`) を Section 5 冒頭で
+  宣言し、`pr_publish_codex_status` / `pr_publish_claude_status` を呼ぶ 6 ケース
+  (5.A〜5.F) を追加（PASS=74 / FAIL=0、baseline 53 → +21 新規 assertion）
+- 重要な判断:
+  - **本 task はモジュール側コード変更なし**（Req 4.x はテスト追加・ドキュメント明示
+    のみで satisfy）: design.md の Decision (A) で「`pr_fetch_candidate_prs` の head
+    pattern 既定 `^claude/` は design PR を **既にカバー**しており、`pr_publish_*` の
+    AND 二重 opt-in も head pattern を区別しない」ため、design PR head sha に対する
+    publish 経路は #349 実装そのままで成立する。本 task は **既存挙動の事実を fixture
+    で固定化する**回帰防止層を追加するだけで、`modules/pr-reviewer.sh` は読むだけ
+    （編集禁止）。Section 5 冒頭コメントにこの設計上の含意を明記し、Reviewer / 将来の
+    pattern 変更時の参照点を残した
+  - **PR_REVIEWER_STATUS_CHECK_ENABLED 経由 OFF と FULL_AUTO_ENABLED 経由 OFF の差異**:
+    Case 5.C（PR gate OFF）と Case 5.D（FULL_AUTO OFF）を独立 case として分離。
+    既存仕様「suppression log は cycle あたり最大 1 行」「FULL_AUTO OFF suppression は
+    #348 既存 kill switch ログに委譲」に従い、5.C のみ
+    `count_logs "suppressed by PR_REVIEWER_STATUS_CHECK_ENABLED"` を 1 行 assert、
+    5.D は suppression log なし（#348 既存ログに委譲）を inline コメントで明示。
+    Req 4.6 の disabled 経路が **2 つの env 経由のいずれでも遮断される**ことを
+    fixture レベルで保証
+  - **Case 5.E で Req 4.5 補強**: 既存 Section 4 Case 4.A は target_url の blob URL
+    先頭 (`https://github.com/owner/test-repo/blob/`) だけ検証しており、head sha が
+    target_url に正しく伝播することを assert していなかった。Case 5.E では
+    `assert_contains "target_url に DESIGN_SHA を含む" "$gh_line" "$DESIGN_SHA"` を
+    blob URL prefix 検証と 2 段で重ね、Req 4.5（head sha が変わったら新 sha へ
+    publish される）の既存挙動を従来より厳密に固定化（コード変更ゼロで既存挙動の
+    追加保護のみ）
+  - **fixture 定数の宣言場所**: 既存 `VALID_SHA` / `VALID_PR` 宣言箇所 (line 194
+    付近) ではなく **Section 5 冒頭で局所宣言**することで、既存 Section 1–4 との
+    境界を明確化（Section 1–4 は引数として VALID_PR / VALID_SHA を使い続け、
+    Section 5 のみ DESIGN_PR / DESIGN_SHA を使う形）。これにより既存ケースの diff
+    ゼロを保証
+- 残存課題:
+  - **shellcheck 既存 false-positive (本 task スコープ外 / 別 Issue 候補)**:
+    `pr_publish_commit_status_test.sh` line 36 の Japanese コメントに含まれる
+    「`shellcheck` からは未使用に見える」「本ファイル全体で `SC2034` を抑止する」が、
+    shellcheck の directive parser に「`shellcheck`」キーワード + 直後の `SC2034` を
+    未完成 directive として認識され、pre-existing で SC1072 / SC1073 が発火している
+    （Issue #349 の commit 75873df 時点から存在）。CLAUDE.md「テスト・検証」節の
+    shellcheck 対象パスは `local-watcher/bin/*.sh install.sh setup.sh
+    .github/scripts/*.sh` であり `local-watcher/test/` 配下は含まれないため、本
+    false-positive は CI / stage-a-verify gate を blocking しない。Section 1–4
+    改変禁止制約下では本 task では修正不能。コメント本文中の語を別語に置換するだけ
+    で解消するため、別 Issue で扱うのが妥当
+  - **task 7 (README) / task 8 (全体 verify) への引き継ぎ**: 本 task で追加した
+    21 新規 assertion が回帰確認対象として活用される。stage-a-verify gate の verify
+    ブロック (tasks.md line 124–136) は `bash local-watcher/test/
+    pr_publish_commit_status_test.sh` を含んでおり、PASS=74 / FAIL=0 が task 8 で
+    そのまま reproduce される見込み
