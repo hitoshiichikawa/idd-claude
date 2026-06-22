@@ -90,6 +90,21 @@ for fn in nda_log nda_warn nda_error \
   fi
 done
 
+# Issue #370 task 6: nda_auto_continue の return 直前に `sn_notify` 呼び出しが挟まる。
+# extract_function は 1 関数しか取らないため `sn_notify` が unbound になる。
+# ローカル stub で call count と引数を観測する。
+SN_NOTIFY_CALL_COUNT=0
+SN_NOTIFY_LAST_EVENT=""
+SN_NOTIFY_LAST_RESULT=""
+SN_NOTIFY_LAST_NUMBER=""
+sn_notify() {
+  SN_NOTIFY_CALL_COUNT=$((SN_NOTIFY_CALL_COUNT + 1))
+  SN_NOTIFY_LAST_EVENT="${1:-}"
+  SN_NOTIFY_LAST_NUMBER="${2:-}"
+  SN_NOTIFY_LAST_RESULT="${4:-}"
+  return 0
+}
+
 # 本体 Config block の NEEDS_DECISIONS_MODE 正規化部分を awk で抽出（Section 2 で使用）。
 # `^NEEDS_DECISIONS_MODE=` 開始から `^esac$` 終了までを 1 ブロック分だけ取り出す。
 extract_needs_decisions_mode_block() {
@@ -405,6 +420,7 @@ echo "--- Section 5: nda_auto_continue エラーパス（Req 3.3 / 3.4） ---"
 
 # Case A: gh issue comment 失敗 → rc=1 + label remove skip + WARN
 reset_stub_state
+SN_NOTIFY_CALL_COUNT=0
 GH_COMMENT_FAIL=1
 F="$(make_triage_json '{"decisions":[{"recommendation":"adopt A"}]}')"
 NEEDS_DECISIONS_MODE="classified"
@@ -415,6 +431,8 @@ edit_count=$(count_calls "^gh issue edit")
 assert_eq "Req 3.3: gh comment 失敗 → gh edit (label remove) 呼ばれない" "0" "$edit_count"
 warn_count=$(count_warns "gh-comment-failed")
 assert_eq "Req 3.3: gh comment 失敗 → WARN ログ 1 行" "1" "$warn_count"
+# Issue #370 Req 2.5: gh comment 失敗 path では sn_notify 発火しない（rc=1 早期 return）
+assert_eq "#370 Req 2.5: 失敗 path で sn_notify は呼ばれない" "0" "$SN_NOTIFY_CALL_COUNT"
 rm -f "$F"
 cleanup_stub_state
 
@@ -434,6 +452,10 @@ cleanup_stub_state
 
 # Case C: 全成功 → rc=0 + comment 1 + edit 1（remove-label 含む）
 reset_stub_state
+SN_NOTIFY_CALL_COUNT=0
+SN_NOTIFY_LAST_EVENT=""
+SN_NOTIFY_LAST_RESULT=""
+SN_NOTIFY_LAST_NUMBER=""
 F="$(make_triage_json '{"decisions":[{"recommendation":"adopt A"}]}')"
 RC=0
 nda_auto_continue "$F" "adopt A" || RC=$?
@@ -446,6 +468,11 @@ remove_count=$(count_calls "remove-label")
 assert_eq "Req 3.3: edit には --remove-label が含まれる" "1" "$remove_count"
 ac_log_count=$(count_logs "action=auto-continue")
 assert_eq "Req 6.1: action=auto-continue ログ 1 行" "1" "$ac_log_count"
+# Issue #370 Req 2.3 task 6: 成功 path で sn_notify が auto-continued で発火
+assert_eq "#370 Req 2.3: 成功時 sn_notify が 1 回発火" "1" "$SN_NOTIFY_CALL_COUNT"
+assert_eq "#370 Req 2.3: event_type=needs-decisions-auto-continue" "needs-decisions-auto-continue" "$SN_NOTIFY_LAST_EVENT"
+assert_eq "#370 Req 3.5: result=auto-continued" "auto-continued" "$SN_NOTIFY_LAST_RESULT"
+assert_eq "#370 Req 3.3: number=42" "42" "$SN_NOTIFY_LAST_NUMBER"
 rm -f "$F"
 cleanup_stub_state
 

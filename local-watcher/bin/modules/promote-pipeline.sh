@@ -1661,6 +1661,10 @@ pp_do_promote() {
   # 親シェル側カウンタを更新（サブシェル内で変更したカウンタは失われるため）
   if [ "$rc" -eq 0 ]; then
     PP_PROMOTE_SUCCESS_COUNT=$((PP_PROMOTE_SUCCESS_COUNT + 1))
+    # Issue #370 task 6: Slack 通知 emitter（fail-open / gate OFF 時は no-op）。
+    # promote は branch 単位イベントのため Issue 番号がなく、payload 上は sentinel "0" を
+    # 用いる。URL は repo top に固定（個別 PR ではなく branch promotion のため）。
+    sn_notify promote "0" "https://github.com/$REPO" promote-success "base=${BASE_BRANCH} target=${PROMOTION_TARGET_BRANCH} candidates=${#PROMOTE_CANDIDATES[@]}" || true
   else
     PP_PROMOTE_FAILED_COUNT=$((PP_PROMOTE_FAILED_COUNT + 1))
   fi
