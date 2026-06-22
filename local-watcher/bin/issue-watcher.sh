@@ -579,6 +579,28 @@ FAILED_RECOVERY_MAX_PRS="${FAILED_RECOVERY_MAX_PRS:-3}"
 # failed-recovery/$REPO_SLUG。LOG_DIR と同じ repo-slug 分離方針（NFR 2.2, NFR 2.3）。
 FAILED_RECOVERY_STATE_DIR="${FAILED_RECOVERY_STATE_DIR:-$HOME/.issue-watcher/failed-recovery/$REPO_SLUG}"
 
+# ─── Slack 通知 emitter 設定 (#370) ───
+# 自動 merge / failed-recovery 終端 / needs-decisions 自動続行 / promote 完了といった
+# 人間が能動的に把握すべき重要イベントを Slack Incoming Webhook 経由で push 通知する
+# 補助的な観測チャネル（D-18 / 低優先）。**完全な opt-in**（Req 1.1 / NFR 1.1）。
+# `SLACK_NOTIFY_ENABLED=true` 厳密一致以外は env を読みもせず sn_notify が早期 return する
+# ため、未設定環境では本機能導入前と挙動が等価（gh / git API 呼び出し回数・ラベル遷移・
+# コミット・push に対する影響ゼロ）。webhook URL は env 経由のみで受け取り、コードベース・
+# ログ・テストフィクスチャに実値を残さない（Req 6.3 / NFR 3.1）。
+#
+#   - SLACK_NOTIFY_ENABLED: gate。`=true` 厳密一致のみ ON。それ以外（未設定 / 空文字 /
+#                           `True` / `1` / `on` / `yes` / 典型的 typo / 前後空白）は安全側
+#                           OFF として正規化する（sn_is_enabled 内で case 判定 / Req 1.3）。
+#   - SLACK_WEBHOOK_URL:    Slack Incoming Webhook URL。secret 値。`SLACK_NOTIFY_ENABLED=true`
+#                           かつ本 env が未設定 / 空のときは sn_warn を 1 行出して no-op
+#                           （Req 1.4 / 5.3）。
+#   - SLACK_NOTIFY_TIMEOUT: HTTP POST の最大経過秒数（curl --max-time）。既定 5 秒
+#                           （Req 4.5 / NFR 2.2）。非数値 / 負数 / 空文字は sn_post_webhook
+#                           内で既定 5 に正規化される。
+SLACK_NOTIFY_ENABLED="${SLACK_NOTIFY_ENABLED:-false}"
+SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
+SLACK_NOTIFY_TIMEOUT="${SLACK_NOTIFY_TIMEOUT:-5}"
+
 # ─── Stage Checkpoint 設定 (#68) ───
 # impl / impl-resume の Stage A/B/C 単位で完了 checkpoint を成果物
 # （impl-notes.md / review-notes.md / 既存 impl PR）の有無で観測し、失敗 Stage 以降
@@ -936,7 +958,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）、
 # #325 の token usage 計測（token-usage.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" "needs-decisions-auto.sh" "dep-cycle-detect.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" "needs-decisions-auto.sh" "dep-cycle-detect.sh" "slack-notify.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -1019,7 +1041,14 @@ mkdir -p "$LOG_DIR"
 # 運用者は `grep needs-decisions-mode=` で現在の needs-decisions 自動続行モードを確認できる。
 # Issue #366: cycle startup ログに `auto-rebase-semantic=` の解決値も含める（Req 1.6）。
 # 運用者は `grep auto-rebase-semantic=` で Claude semantic 解決 gate の有効状態を確認できる。
-echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-rebase-semantic=${AUTO_REBASE_SEMANTIC} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED} needs-decisions-mode=${NEEDS_DECISIONS_MODE}"
+# Issue #370: cycle startup ログに `slack-notify=` の解決値も含める（Req 1.2 / NFR 5.1）。
+# 運用者は `grep slack-notify=` で現在の Slack 通知 emitter 有効状態を確認できる。
+_idd_sn_resolved="off"
+if [ "${SLACK_NOTIFY_ENABLED:-false}" = "true" ]; then
+  _idd_sn_resolved="on"
+fi
+echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-rebase-semantic=${AUTO_REBASE_SEMANTIC} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED} needs-decisions-mode=${NEEDS_DECISIONS_MODE} slack-notify=${_idd_sn_resolved}"
+unset _idd_sn_resolved
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # doctor サブコマンド dispatch (#238 / Decision 2)
