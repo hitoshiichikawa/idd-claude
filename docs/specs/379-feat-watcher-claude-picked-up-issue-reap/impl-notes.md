@@ -64,6 +64,23 @@
 - task 5 で `process_stale_pickup_reaper` orchestrator から `sr_is_active` を呼ぶときに、3 観点の判定結果（age / lock / sess）を `sr_log` の出力経由でも観測できるため、orchestrator 側で重複ログを出さないこと（`sr_log "issue=#N skip ..."` 等は active 判定で十分代替可能）
 - task 5 の `sr_revert_to_auto_dev` は branch を触らない（`git` を呼ばない / Req 6.2）契約があり、本 task 4 で「branch 状態を見ない」（Req 6.3）と完全に整合する。Active Decision Layer は branch を一切走査しないことを実装でも確認済み
 
+### Task 5
+
+採用方針: `modules/stale-pickup-reaper.sh` 末尾に新規 2 セクション（Recovery Action Layer + Orchestrator Layer）を追加し、`sr_revert_to_auto_dev` と `process_stale_pickup_reaper` を集約。1 PATCH で複数 `--remove-label` を発行する既存パターン（`issue-watcher.sh:4794` round=1 defer / `mark_issue_needs_decisions` と同型）に揃え、auto-dev 残存確認は `gh issue view --json labels` の独立 GET で行い欠落時のみ 2 回目 PATCH で `--add-label` を発行する二段構成を採用（Req 5.1〜5.3）。orchestrator は二段ガード（`sr_is_enabled` / `SR_PROCESSED_THIS_CYCLE`）+ fail-continue ループで `process_failed_recovery` と同型の構造に統一した（NFR 5.2）。
+
+重要な判断:
+- **`SR_PROCESSED_THIS_CYCLE` の初期化位置**: in-memory set はモジュール source 時に `SR_PROCESSED_THIS_CYCLE="${SR_PROCESSED_THIS_CYCLE:-}"` で空文字に初期化。bash プロセスごと再初期化されるため、cron tick → 新規プロセス起動の流れで自動的にクリアされる。watcher サイクル中に process_stale_pickup_reaper が複数回呼ばれた場合（基本ないが防衛的）でも値が継承される設計
+- **idempotent check の 2 重実装**: `sr_revert_to_auto_dev` 関数内と `process_stale_pickup_reaper` orchestrator 内の両方で `SR_PROCESSED_THIS_CYCLE` を check する二重防御を採用。orchestrator 段で短絡することで gh API 呼び出しを節約しつつ、`sr_revert_to_auto_dev` を直接呼ばれるケース（テスト fixture / 将来の他経路）でも no-op 保証を維持
+- **gh stub の view 識別**: Section 12 のテストでは `gh issue edit ... --remove-label ...` と `gh issue view --json labels` を 1 つの stub 関数で処理するため、引数列に `view` / `edit` / `--remove-label` / `--add-label` のどれが含まれるかで分岐する設計を採用。前任の Section 7 stub（search 文字列ベース）と異なる構造のため、Section 13 では別 stub セット（`SR13_*`）として完全に分離した
+- **fixture marker の age=60m 設定**: Section 12 では実時刻ベースで age を計算する `sr_revert_to_auto_dev` のログ出力を「age=Nm」の Nm 形式で grep 検証する必要があったため、fixture marker の first_seen_at を 2026-06-22T10:00:00Z（テスト実行時刻より過去）に固定し、age が常に正の整数になる形にした
+- **不正 issue 番号 reject の網羅性**: `^[0-9]+$` 検証で reject すべき値として `abc` / `12; rm -rf /` / 空文字 / 負数 `-1` / 小数 `1.5` の 5 ケースを網羅。bash `case` の `*[!0-9]*` パターンが負号・小数点・空白・記号すべてを reject 対象として扱うことを fixture で確認した（NFR 3.1 / セキュリティ規約: 数値 ID 検証）
+- **process_stale_pickup_reaper の 2 段ガード分離**: gate OFF（`sr_is_enabled` rc=1）と「同サイクル重複起動」の 2 段を異なる check として分離。前者は orchestrator 起動直後の `return 0`、後者は候補ループ内の `continue` で表現する。Section 13a/13b の gh 呼び出し 0 回 assert が前者を構造的に検証する（NFR 1.1）
+- **active 経路でも sr_save_marker は呼ぶ**: design.md の orchestrator 擬似コードに従い、active 判定（keep）でも marker は observing として save する（first_seen_at の起算点を残し、次サイクル以降の閾値判定が成立するようにする）。Section 13c で「active 経路でも save 1 件以上発生」を確認
+
+残存課題:
+- task 6 で本体の `REQUIRED_MODULES` 配列に `stale-pickup-reaper.sh` を追加し、call site を `process_failed_recovery || fr_warn ...` の直後に追記する作業が残る。本 task 5 時点では module の関数定義のみで本体配線がないため、cron 実行時にはまだ `process_stale_pickup_reaper` は呼ばれない（gate OFF と同じ no-op 状態 / NFR 1.1 と整合）
+- task 7 で README / CLAUDE.md への反映（オプション機能一覧 + 専用節 + prefix 表）が残る。本 task で追加した env / 関数 / 状態ファイル schema を運用者ドキュメントに反映する必要がある
+
 ## AC Traceability（task 3 範囲）
 
 | AC | テスト | 場所 |
@@ -149,8 +166,37 @@ bash local-watcher/test/stale_pickup_reaper_test.sh   # 144 assertions PASS (53 
 bash local-watcher/test/fr_state_test.sh              # 51 assertions PASS（regression）
 ```
 
+## AC Traceability（task 5 範囲）
+
+| AC | テスト | 場所 |
+|----|--------|------|
+| Req 3.1 (NFR 3.1) | issue 番号 `^[0-9]+$` 検証で 5 ケース（`abc` / `12; rm -rf /` / 空文字 / `-1` / `1.5`）を reject | `local-watcher/test/stale_pickup_reaper_test.sh:Section 12d` |
+| Req 5.1 | 1 PATCH 内で `--remove-label claude-picked-up` を発行 | 同上 Section 12a |
+| Req 5.2 | 1 PATCH 内で `--remove-label claude-claimed` を発行（同一 PATCH 内に 2 種同時） | 同上 Section 12a |
+| Req 5.3 | auto-dev 残存時は `--add-label auto-dev` を呼ばない / 欠落時のみ 2 回目 PATCH で付与 | 同上 Section 12a + 12c |
+| Req 5.4 | 1 行ログ（`reason=stale-pickup orphan` / `age=Nm` / `prev_labels=csv`）を `sr_log` で記録 | 同上 Section 12a |
+| Req 5.5 | 同サイクル 2 回目呼び出しが idempotent no-op（gh 0 回呼ばれない）/ marker save が observing → reverted の 2 状態遷移を踏む | 同上 Section 12b + Section 13e |
+| Req 5.6 | 1 回目 PATCH 失敗時 rc=1 + sr_warn 記録 / in-memory set に append しない（次サイクル再評価可）/ revert 失敗時 orchestrator も WARN を記録 | 同上 Section 12e + Section 13f |
+| Req 6.1 | branch 不在でも `sr_revert_to_auto_dev` は git を呼ばない（実装で git 参照ゼロ） | `local-watcher/bin/modules/stale-pickup-reaper.sh` Recovery Action Layer（grep 確認） |
+| Req 6.2 | branch 温存（`git` を呼ばない / Recovery Action Layer 全体で git 参照ゼロ） | 同上 |
+| NFR 1.1 | gate OFF（`STALE_PICKUP_REAPER_ENABLED=false` / 未設定）で gh が 1 回も呼ばれない（構造的検証） | 同上 Section 13a + 13b |
+| NFR 1.2 | 既存ラベル契約（claude-picked-up / claude-claimed / auto-dev）を変更せず remove / add の組み合わせのみで状態遷移 | 同上 Section 12a + 12c（追加ラベル定数なし） |
+| NFR 2.1 | `SR_PROCESSED_THIS_CYCLE` in-memory set への append / case 短絡で 2 回目 no-op を実現 | 同上 Section 12a + 12b |
+| NFR 3.1 | gh コマンドに `--` を伝達してオプション解釈打ち切り / 数値 ID 検証 | 同上 Section 12a + 12d |
+| NFR 3.2 | secrets を含む env を Issue コメント・ログに出さない（実装で `GH_TOKEN` 等の出力ゼロ） | `local-watcher/bin/modules/stale-pickup-reaper.sh` Recovery Action Layer（grep 確認） |
+| NFR 5.2 | revert 失敗時も orchestrator は rc=0 を返す（fail-continue / watcher サイクル落ちない） | 同上 Section 13f |
+
+## 検証コマンド（task 5 範囲）
+
+```sh
+shellcheck local-watcher/bin/modules/stale-pickup-reaper.sh local-watcher/bin/modules/core_utils.sh local-watcher/bin/issue-watcher.sh local-watcher/test/stale_pickup_reaper_test.sh
+bash -n local-watcher/bin/modules/stale-pickup-reaper.sh local-watcher/test/stale_pickup_reaper_test.sh local-watcher/bin/issue-watcher.sh
+bash local-watcher/test/stale_pickup_reaper_test.sh   # 184 assertions PASS (40 件追加 = Section 12: 25 + Section 13: 15)
+bash local-watcher/test/fr_state_test.sh              # 51 assertions PASS（regression）
+```
+
 ## 確認事項
 
-なし（task 2 / task 3 / task 4 仕様内で完結 / 既存仕様との整合性確認済み）。
+なし（task 5 仕様内で完結 / 既存仕様との整合性確認済み）。
 
 STATUS: complete
