@@ -21,9 +21,8 @@
 #   - sr_check_session    : lock 保持 pid の生存を kill -0 で観測（観点 3）
 #   - sr_is_active        : 3 観点 AND 結合（全観点 rc=0 のときのみ inactive 確定）
 #
-#   後続 task で以下を追加予定（task 5 以降）:
-#   - sr_revert_to_auto_dev : ラベル除去 + auto-dev 残存確認
-#   - process_stale_pickup_reaper : watcher 本体からの単一エントリ
+#   - sr_revert_to_auto_dev      : ラベル除去 + auto-dev 残存確認（同サイクル冪等）
+#   - process_stale_pickup_reaper : watcher 本体からの単一エントリ（fail-continue / 戻り値常に 0）
 #
 # 配置先:
 #   $HOME/bin/modules/stale-pickup-reaper.sh（install.sh が local-watcher/bin/modules/ から配置する）
@@ -541,4 +540,244 @@ sr_is_active() {
   fi
   sr_log "issue=#$issue_id keep age=$age lock=$lock sess=$sess"
   return 0    # active or unknown → keep
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Recovery Action Layer
+#
+# `sr_is_active` で「非アクティブ確定」となった Issue から `claude-picked-up` /
+# `claude-claimed` を除去し、`auto-dev` の残存を確認・必要なら付与する。branch は
+# 一切触らない（Req 6.2 / `git` を呼ばない）。同サイクル内の重複起動は
+# `SR_PROCESSED_THIS_CYCLE` in-memory set で防ぐ（NFR 2.1）。
+#
+# 関連 AC:
+#   - Req 3.1 NFR 3.1: issue 番号 `^[0-9]+$` 検証（未信頼入力 sanitize）
+#   - Req 5.1: claude-picked-up 除去
+#   - Req 5.2: claude-claimed 除去
+#   - Req 5.3: auto-dev 残存確認 / 欠落時に再付与
+#   - Req 5.4: 終端理由 + 経過時間を 1 行ログ記録
+#   - Req 5.5: 同一サイクル内の重複呼び出しを idempotent な no-op で吸収
+#   - Req 5.6: ラベル除去 / 付与失敗時は中途半端な状態を残さず次サイクル再評価
+#   - Req 6.1: branch 不在でも復旧継続（branch を見ない）
+#   - Req 6.2: branch 温存（`git` を呼ばない）
+#   - NFR 1.2: 既存ラベル契約（remove / add の組み合わせ）を変更しない
+#   - NFR 2.1: SR_PROCESSED_THIS_CYCLE で同サイクル重複起動防止
+#   - NFR 3.1: gh コマンドは `--` でオプション解釈打ち切り、issue を数値検証
+#   - NFR 3.2: secrets をログに出さない
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# 同サイクル内に既に revert 済みの Issue 番号を保持する（NFR 2.1 / Req 5.5）。
+# orchestrator 起動の度に bash プロセスごと再初期化されるため、明示 unset は不要。
+SR_PROCESSED_THIS_CYCLE="${SR_PROCESSED_THIS_CYCLE:-}"
+
+# 非アクティブ確定 Issue から claude-picked-up / claude-claimed を除去し、auto-dev の
+# 残存を確認する。1 PATCH で複数 `--remove-label` を発行する既存パターン
+# （issue-watcher.sh:4794 等の round=1 defer と同型）に揃える。
+#
+# Args:
+#   $1 = issue number (`^[0-9]+$` を満たす整数)
+#   $2 = marker_json  (first_seen_at から経過分数の算出 / prev_labels CSV ログ用)
+#
+# Returns:
+#   0 = reverted（または同サイクル内 2 回目以降の idempotent no-op）
+#   1 = failed（gh API 失敗 / 不正な issue 番号 等。caller は marker を observing のまま
+#        温存し次サイクルで再評価する / Req 5.6）
+#
+# 副作用:
+#   - gh issue edit を最大 2 回発行する（remove ラベル PATCH / 必要時 add-label PATCH）
+#   - SR_PROCESSED_THIS_CYCLE に当該 issue 番号を append（重複起動防止）
+#   - sr_log で 1 行（issue / reason / 経過分 / prev_labels）を記録
+sr_revert_to_auto_dev() {
+  local issue="$1"
+  local marker_json="${2:-{\}}"
+
+  # NFR 3.1: issue 番号の数値検証（未信頼入力 sanitize）。
+  # 不正値は gh / git に流す前に reject（path 横断・引数注入の予防）。
+  case "$issue" in
+    ''|*[!0-9]*)
+      sr_warn "sr_revert_to_auto_dev: 不正な issue 番号 issue=$(printf '%q' "$issue")（数値以外 / reject）"
+      return 1
+      ;;
+  esac
+
+  # NFR 2.1: 同サイクル内 2 回目以降は idempotent no-op（gh API を 1 回も呼ばない）。
+  case " $SR_PROCESSED_THIS_CYCLE " in
+    *" $issue "*)
+      sr_log "issue=#$issue skip (already processed in this cycle)"
+      return 0
+      ;;
+  esac
+
+  # marker から prev_labels CSV と経過分数を算出（ログ用 / 副作用なし）。
+  local prev_labels_csv=""
+  prev_labels_csv=$(printf '%s' "$marker_json" | jq -r '
+    if (.last_known_labels // null) | type == "array"
+    then (.last_known_labels | join(","))
+    else ""
+    end
+  ' 2>/dev/null) || prev_labels_csv=""
+
+  local age_minutes="?"
+  local first_seen_at
+  first_seen_at=$(printf '%s' "$marker_json" | jq -r '.first_seen_at // empty' 2>/dev/null) || first_seen_at=""
+  if [ -n "$first_seen_at" ]; then
+    local first_epoch=""
+    first_epoch=$(date -d "$first_seen_at" +%s 2>/dev/null) || first_epoch=""
+    if [ -z "$first_epoch" ]; then
+      first_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$first_seen_at" "+%s" 2>/dev/null) || first_epoch=""
+    fi
+    if [ -n "$first_epoch" ]; then
+      local now_epoch
+      now_epoch=$(date +%s)
+      age_minutes=$(( (now_epoch - first_epoch) / 60 ))
+    fi
+  fi
+
+  # 1 回目 PATCH: claude-picked-up / claude-claimed を 1 リクエストで除去
+  # （round=1 defer / mark_issue_needs_decisions と同型 / Req 5.1, 5.2）。
+  if ! gh issue edit "$issue" --repo "$REPO" -- \
+      --remove-label "$LABEL_PICKED" \
+      --remove-label "$LABEL_CLAIMED" >/dev/null 2>&1; then
+    sr_warn "sr_revert_to_auto_dev: issue=#$issue ラベル除去失敗（claude-picked-up / claude-claimed）"
+    return 1
+  fi
+
+  # 2 回目: 現在のラベルを取得し、auto-dev 欠落時のみ付与する（Req 5.3）。
+  # 取得失敗時は WARN + 付与 skip（remove が成功している以上、半端な状態は残らない /
+  # 次サイクルで dispatcher が auto-dev 不在に気付けば再判定の機会がある / Req 5.6）。
+  local labels_json
+  if ! labels_json=$(gh issue view "$issue" --repo "$REPO" --json labels 2>/dev/null); then
+    sr_warn "sr_revert_to_auto_dev: issue=#$issue 現ラベル取得失敗（auto-dev 付与判定 skip）"
+  else
+    local has_autodev
+    has_autodev=$(printf '%s' "$labels_json" | jq -r --arg trigger "$LABEL_TRIGGER" '
+      if (.labels // null) | type == "array"
+      then (any(.labels[]; .name == $trigger))
+      else false
+      end
+    ' 2>/dev/null) || has_autodev="false"
+    if [ "$has_autodev" != "true" ]; then
+      if ! gh issue edit "$issue" --repo "$REPO" -- \
+          --add-label "$LABEL_TRIGGER" >/dev/null 2>&1; then
+        sr_warn "sr_revert_to_auto_dev: issue=#$issue auto-dev 付与失敗（次サイクル再評価へ）"
+        return 1
+      fi
+    fi
+  fi
+
+  # 重複起動防止 set に append（NFR 2.1）。space-separated で idempotent に追加。
+  SR_PROCESSED_THIS_CYCLE="$SR_PROCESSED_THIS_CYCLE $issue"
+  sr_log "issue=#$issue reverted reason=stale-pickup orphan age=${age_minutes}m prev_labels=$prev_labels_csv"
+  return 0
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Orchestrator Layer
+#
+# 1 watcher サイクルの SPR エントリ。Gate → Candidate → Marker update → Active 判定 →
+# Revert を直列実行し、全例外を fail-continue で吸収する（NFR 5.2）。watcher サイクル
+# 全体を絶対に落とさない（戻り値は常に 0）。
+#
+# 関連 AC:
+#   - Req 1.1〜1.4 / NFR 1.1: gate OFF / 不正値で副作用ゼロ（gh stub が 1 回も呼ばれない）
+#   - Req 5.5 / NFR 2.1: 同サイクル内重複起動防止（SR_PROCESSED_THIS_CYCLE）
+#   - Req 5.6: 例外を sr_warn で吸収して次の候補へ進む（fail-continue）
+#   - NFR 5.2: watcher サイクルを落とさない（戻り値常に 0）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+process_stale_pickup_reaper() {
+  # 1 段目 gate: opt-in OFF なら gh API を一切呼ばずに return 0（NFR 1.1）。
+  if ! sr_is_enabled; then
+    return 0
+  fi
+
+  sr_log "process_stale_pickup_reaper: 起動 (THRESHOLD_MINUTES=${STALE_PICKUP_REAPER_THRESHOLD_MINUTES} MAX_ISSUES=${STALE_PICKUP_REAPER_MAX_ISSUES})"
+
+  # 候補列挙（Req 2.x）。失敗時は sr_fetch_candidates が `[]` を返すため fail-continue。
+  local candidates_json
+  candidates_json=$(sr_fetch_candidates 2>/dev/null || echo "[]")
+  if [ -z "$candidates_json" ]; then
+    candidates_json="[]"
+  fi
+  local candidates_count
+  candidates_count=$(printf '%s' "$candidates_json" | jq -r 'length' 2>/dev/null || echo "0")
+  if ! [[ "$candidates_count" =~ ^[0-9]+$ ]]; then
+    candidates_count=0
+  fi
+  sr_log "process_stale_pickup_reaper: 候補 ${candidates_count} 件"
+
+  local now_iso
+  now_iso=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u '+%Y-%m-%dT%H:%M:%S')
+
+  local i=0
+  while [ "$i" -lt "$candidates_count" ]; do
+    local issue_number labels_json_compact marker_json first_seen_at
+    issue_number=$(printf '%s' "$candidates_json" | jq -r --argjson i "$i" '.[$i].number // empty' 2>/dev/null || echo "")
+
+    # NFR 3.1: 数値以外の issue 番号は skip（後続関数も検証するが orchestrator 段で早期 reject）
+    if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+      sr_warn "process_stale_pickup_reaper: 不正な issue 番号 index=${i}（skip）"
+      i=$((i + 1))
+      continue
+    fi
+
+    # 2 段目 gate（NFR 2.1）: 既に同サイクル内で revert 処理した Issue は skip。
+    case " $SR_PROCESSED_THIS_CYCLE " in
+      *" $issue_number "*)
+        sr_log "issue=#$issue_number skip (already processed in this cycle)"
+        i=$((i + 1))
+        continue
+        ;;
+    esac
+
+    # 候補の labels を `["name1","name2",...]` の JSON 配列文字列に変換（sr_save_marker 引数用）。
+    labels_json_compact=$(printf '%s' "$candidates_json" | jq -c --argjson i "$i" '
+      [(.[$i].labels // []) | .[].name]
+    ' 2>/dev/null) || labels_json_compact="[]"
+    if [ -z "$labels_json_compact" ]; then
+      labels_json_compact="[]"
+    fi
+
+    # marker をロードし first_seen_at / last_seen_at を更新（observing に保存）。
+    marker_json=$(sr_load_marker "$issue_number" 2>/dev/null || echo "{}")
+    if [ -z "$marker_json" ]; then
+      marker_json="{}"
+    fi
+    first_seen_at=$(printf '%s' "$marker_json" | jq -r '.first_seen_at // empty' 2>/dev/null || echo "")
+    if [ -z "$first_seen_at" ]; then
+      first_seen_at="$now_iso"
+    fi
+
+    if ! sr_save_marker "$issue_number" "$first_seen_at" "$now_iso" "$labels_json_compact" "observing" ""; then
+      sr_warn "process_stale_pickup_reaper: issue=#${issue_number} marker save 失敗（next-cycle で再試行）"
+      i=$((i + 1))
+      continue
+    fi
+
+    # 保存後の marker を再ロード（first_seen_at を含む完全な JSON を sr_is_active へ渡す）。
+    marker_json=$(sr_load_marker "$issue_number" 2>/dev/null || echo "{}")
+    if [ -z "$marker_json" ]; then
+      marker_json="{}"
+    fi
+
+    # 3 観点 AND 判定（Req 3.1〜3.5）。アクティブの可能性ありなら何もせず次へ。
+    if sr_is_active "$marker_json"; then
+      i=$((i + 1))
+      continue
+    fi
+
+    # 非アクティブ確定 → revert（Req 5.x）。失敗時は marker を observing のまま温存。
+    if sr_revert_to_auto_dev "$issue_number" "$marker_json"; then
+      # 成功時は marker を status=reverted で更新（Req 5.5 の冪等性 / 再観測時の状態識別）。
+      if ! sr_save_marker "$issue_number" "$first_seen_at" "$now_iso" "$labels_json_compact" "reverted" "$now_iso"; then
+        sr_warn "process_stale_pickup_reaper: issue=#${issue_number} reverted marker save 失敗（実害なし / 次サイクル再保存）"
+      fi
+    else
+      sr_warn "process_stale_pickup_reaper: issue=#${issue_number} revert 失敗（observing のまま温存 / 次サイクル再評価）"
+    fi
+    i=$((i + 1))
+  done
+
+  sr_log "process_stale_pickup_reaper: サマリ candidates=${candidates_count}"
+  return 0
 }
