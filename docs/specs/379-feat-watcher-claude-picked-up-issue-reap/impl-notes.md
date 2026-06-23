@@ -31,6 +31,46 @@
 - task 3 で `sr_fetch_candidates`（gh API filter）を実装する際、本 task の `sr_save_marker` が要求する 4 引数（first_seen_at / last_seen_at / labels_json / status / revert_at）を呼出側から正しく生成する必要がある。`labels_json` は `gh issue list --json labels` の出力を `jq -c '[.labels[].name]'` で配列文字列化して渡すのが自然
 - task 5 で `process_stale_pickup_reaper` orchestrator から本 layer を呼ぶときに、observing → reverted 状態遷移を `sr_save_marker` の `status` / `revert_at` 引数の組で表現することを確認した（observing 時は `revert_at=""`、reverted 時は `revert_at=<now ISO 8601>`）
 
+### Task 3
+
+採用方針: `sr_fetch_candidates` を `modules/stale-pickup-reaper.sh` 末尾の新規 `Candidate Selection Layer` セクションに追加し、`failed-recovery.sh` の `fr_fetch_failed_issues` と同型の 4 段ガード（timeout / JSON 検証 / 空入力 / 非 array fallback）を踏襲。`gh --search` の `label:"A" OR label:"B"` 構文は server-side で安定しないため、`claude-picked-up` / `claude-claimed` の **2 クエリを個別発行** → `jq` の `unique_by(.number)` で結合 + dedup する設計（design.md "API Contract" 節 + tasks.md task 3 仕様に準拠 / Req 2.1, 2.2, 2.5）。
+
+重要な判断:
+- **`hold` ラベルは literal 文字列で扱う**: tasks.md / design.md 双方が `-label:"hold"` を literal で記述しており、`LABEL_HOLD` 定数は本体 `issue-watcher.sh:59-97` に存在しないため新規 LABEL 定数を追加せず literal で渡す方針を採用（grep 確認済み / 新規 LABEL 定数追加は禁止 / CLAUDE.md「機能追加ガイドライン §3」の後方互換規約と整合）。それ以外の除外ラベル（`claude-failed` / `needs-decisions` / `awaiting-design-review` / `needs-quota-wait` / `blocked` / `staged-for-release`）は既存 `LABEL_*` 定数を参照する
+- **2 クエリ分離 + jq 結合の選択**: `failed-recovery.sh` は単一クエリで `label:"A" label:"B"` の AND だけを使うため 1 クエリ完結だが、SPR は **2 ラベルの OR** を扱う必要があり、`gh --search` の OR / 単一 search 内 union が server-side で安定しないため別クエリ + client-side dedup（jq `unique_by(.number)`）の方式を採用した。design.md の "API Contract" 節も `gh issue list --search "label:\"<picked\|claimed>\""` の擬似記法で 2 クエリ展開を前提とする
+- **truncate は jq 側で `.[0:N]`**: `--limit "$STALE_PICKUP_REAPER_MAX_ISSUES"` を各クエリに付けても 2 クエリ合算で 2N まで膨れるため、結合後に jq `.[0:$limit]` で最終 truncate する（NFR 1.2 の上限契約を完全準拠）。`--argjson limit` 経由で sanitize（NFR 3.1）
+- **stub テストで `gh` / `timeout` を関数化**: `failed-recovery.sh` も含め、本体は `timeout <sec> gh ...` で直接呼ぶ実装パターンのため、bash 関数として `timeout()` / `gh()` を test fixture で定義することで stub 可能になる。tasks.md 仕様の「`timeout()` も関数定義する形」を採用し、production コードに `${SR_TIMEOUT_CMD:-timeout}` のような間接呼び出しを入れない（既存 `fr_fetch_failed_issues` と同じ直接呼び出しパターンを温存）
+- **gh stub の stdout / trace 分離**: 初回実装で関数定義レベル `} >> "$SR_GH_TRACE"` で stdout 全体を redirect していたため、`cat "$SR_GH_PICKED_RESPONSE"` の出力も trace 側に流れて caller `$(gh ...)` が空文字を受け取る trap に遭遇。trace 書き込みは `{ printf ...; } >> "$SR_GH_TRACE"` のブロック単位で隔離する形に修正し、関数本体の stdout は JSON response として保つ構造に整理した
+
+残存課題:
+- task 4 で `sr_check_marker_age` / `sr_check_slot_lock` / `sr_check_session` / `sr_is_active` を実装する際、本 task の `sr_fetch_candidates` が返す JSON の各要素（`{number, labels, title, url, updatedAt}`）から marker.last_known_labels 更新値を生成する必要がある。`jq -c '[.labels[].name]'` で配列文字列化して `sr_save_marker` の第 4 引数に渡すパターンが自然
+- task 5 の `process_stale_pickup_reaper` orchestrator から本関数を呼ぶときに、`STALE_PICKUP_REAPER_GH_TIMEOUT` の Config 正規化（task 1 で `--state open` / `--repo` と共に確立済み）が呼び出し時点で解決されることを確認した（遅延束縛 / `sr_marker_path` と同パターン）
+
+## AC Traceability（task 3 範囲）
+
+| AC | テスト | 場所 |
+|----|--------|------|
+| Req 2.1 | search 文字列に `label:"claude-picked-up"` 含む | `local-watcher/test/stale_pickup_reaper_test.sh:Section 7a` |
+| Req 2.2 | search 文字列に `label:"claude-claimed"` 含む | 同上 Section 7a |
+| Req 2.3 | 人間判断待ち 6 ラベル（needs-decisions / awaiting-design-review / needs-quota-wait / blocked / staged-for-release / hold）の `-label:"..."` 除外を search に含む | 同上 Section 7a（6 ラベル個別 assert） |
+| Req 2.4 | `-label:"claude-failed"` 除外を search に含む（failed-recovery 領分との分離） | 同上 Section 7a |
+| Req 2.5 | 2 クエリ結合後 jq `unique_by(.number)` で dedup（#100 重複が 1 件に集約）+ server-side filter のみ使用 | 同上 Section 7a（dedup 3 件 assert） |
+| NFR 1.2 | `--repo owner/test-repo` / `--state open` / `--limit 20` / `--json number,labels,title,url,updatedAt` の伝達 / `STALE_PICKUP_REAPER_MAX_ISSUES=5` で動的反映 | 同上 Section 7a + 7e |
+| NFR 3.1 | 既存 `LABEL_*` 定数参照 / jq `--argjson limit` 経由（literal 展開しない） | 同上 Section 7a（label 文字列が定数値と一致） |
+| NFR 5.2 | gh 失敗（rc≠0）/ 非 JSON 出力 / 空文字で `[]` + `sr_warn` 1 行以上 + rc=0（fail-continue） | 同上 Section 7b / 7c / 7d |
+| 設計 timeout | `timeout 60` で gh 呼び出しを保護（`STALE_PICKUP_REAPER_GH_TIMEOUT` 反映） | 同上 Section 7a（SR_TIMEOUT_TRACE 検証） |
+
+## 検証コマンド（task 3 範囲）
+
+```sh
+shellcheck local-watcher/bin/modules/stale-pickup-reaper.sh local-watcher/bin/issue-watcher.sh local-watcher/bin/modules/core_utils.sh local-watcher/test/stale_pickup_reaper_test.sh
+bash -n local-watcher/bin/issue-watcher.sh local-watcher/bin/modules/stale-pickup-reaper.sh
+bash local-watcher/test/stale_pickup_reaper_test.sh   # 116 assertions PASS
+bash local-watcher/test/fr_state_test.sh              # 51 assertions PASS（regression）
+diff -r .claude/agents repo-template/.claude/agents   # 空
+diff -r .claude/rules repo-template/.claude/rules     # 空
+```
+
 ## AC Traceability（task 1 範囲）
 
 | AC | テスト | 場所 |
@@ -66,6 +106,6 @@ bash local-watcher/test/fr_state_test.sh              # 51 assertions PASS（reg
 
 ## 確認事項
 
-なし（task 2 仕様内で完結 / 既存仕様との整合性確認済み）。
+なし（task 2 / task 3 仕様内で完結 / 既存仕様との整合性確認済み）。
 
 STATUS: complete
