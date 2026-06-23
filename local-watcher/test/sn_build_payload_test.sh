@@ -180,13 +180,44 @@ case "$block_text" in
   *) fail "design.md: blocks[0].text.text 構造が想定外: $block_text" ;;
 esac
 
+# ─────────────────────────────────────────────────────────────
+# Issue #390: claude-pickup 正常系（Req 1〜3 / payload 必須フィールド）
+#   - event_type=claude-pickup が enum で受理され well-formed JSON が出力されること
+#   - Issue 番号 / Issue URL / mode 識別子（detail 中の mode=impl）/ event_type が含まれること
+# ─────────────────────────────────────────────────────────────
+payload_pickup=$(sn_build_payload "claude-pickup" "390" "https://github.com/owner/test-repo/issues/390" "success" "mode=impl slot=1" 2>/dev/null)
+if [ -z "$payload_pickup" ]; then
+  fail "#390 Req 3.2: claude-pickup payload 出力が空"
+elif printf '%s' "$payload_pickup" | jq -e . >/dev/null 2>&1; then
+  pass "#390 Req 3.2: claude-pickup payload が well-formed JSON"
+else
+  fail "#390 Req 3.2: claude-pickup payload が well-formed JSON ではない: $payload_pickup"
+fi
+case "$payload_pickup" in
+  *"claude-pickup"*) pass "#390 Req 3.1: payload に event_type=claude-pickup を含む" ;;
+  *) fail "#390 Req 3.1: claude-pickup event_type を含まず: $payload_pickup" ;;
+esac
+case "$payload_pickup" in
+  *"#390"*) pass "#390 Req 2.1: payload に Issue 番号 #390 を含む" ;;
+  *) fail "#390 Req 2.1: Issue 番号を含まず" ;;
+esac
+case "$payload_pickup" in
+  *"https://github.com/owner/test-repo/issues/390"*) pass "#390 Req 2.2: payload に Issue URL を含む" ;;
+  *) fail "#390 Req 2.2: Issue URL を含まず" ;;
+esac
+block_text_pickup=$(printf '%s' "$payload_pickup" | jq -r '.blocks[0].text.text' 2>/dev/null || echo "")
+case "$block_text_pickup" in
+  *"mode=impl"*) pass "#390 Req 2.3: detail 内に mode 識別子（mode=impl）を含む" ;;
+  *) fail "#390 Req 2.3: detail に mode 識別子が無い: $block_text_pickup" ;;
+esac
+
 # ============================================================
 # Section 3: sn_build_payload — event_type enum 検証（Req 3.1）
 # ============================================================
 echo ""
 echo "--- Section 3: event_type enum 検証（Req 3.1） ---"
 
-for evt in "auto-merge" "auto-merge-design" "failed-recovery" "needs-decisions-auto-continue" "promote"; do
+for evt in "auto-merge" "auto-merge-design" "failed-recovery" "needs-decisions-auto-continue" "promote" "claude-pickup"; do
   if sn_build_payload "$evt" "1" "https://example.com" "success" "" >/dev/null 2>&1; then
     pass "Req 3.1: event_type=$evt は受理される"
   else

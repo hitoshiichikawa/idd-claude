@@ -2,10 +2,11 @@
 # slack-notify.sh — watcher 重要イベントの Slack 通知 emitter モジュール（#370）
 #
 # 用途:
-#   自動 merge / failed-recovery 終端 / needs-decisions 自動続行 / promote 完了といった
-#   **人間が能動的に把握すべき重要イベント**を、Slack Incoming Webhook 経由で push 通知する
-#   補助的な観測チャネル（D-18 / 低優先）。callsite 側は `sn_notify` を 1 行呼ぶだけで
-#   gate 評価・payload 構築・HTTP POST・ログ出力・失敗ハンドリングを本 module 内に閉じて実行する。
+#   自動 merge / failed-recovery 終端 / needs-decisions 自動続行 / promote 完了 /
+#   impl 着手（claude-pickup）といった **人間が能動的に把握すべき重要イベント 6 種**を、
+#   Slack Incoming Webhook 経由で push 通知する補助的な観測チャネル（D-18 / 低優先）。
+#   callsite 側は `sn_notify` を 1 行呼ぶだけで gate 評価・payload 構築・HTTP POST・
+#   ログ出力・失敗ハンドリングを本 module 内に閉じて実行する。
 #
 #   主な関数:
 #     - sn_log / sn_warn / sn_error : 3 段 prefix ロガー
@@ -96,7 +97,7 @@ sn_scrub_secrets() {
 #
 #   Args:
 #     $1 event_type : "auto-merge" | "auto-merge-design" | "failed-recovery" |
-#                     "needs-decisions-auto-continue" | "promote"
+#                     "needs-decisions-auto-continue" | "promote" | "claude-pickup"
 #     $2 number     : Issue / PR 番号（数値 / promote は sentinel "0" 許容）
 #     $3 url        : GitHub URL（呼出側で組み立て済）
 #     $4 result     : "success" | "recovered" | "max-attempts" | "no-progress" |
@@ -115,7 +116,7 @@ sn_build_payload() {
 
   # event_type の enum 検証
   case "$event_type" in
-    auto-merge|auto-merge-design|failed-recovery|needs-decisions-auto-continue|promote) : ;;
+    auto-merge|auto-merge-design|failed-recovery|needs-decisions-auto-continue|promote|claude-pickup) : ;;
     *)
       sn_warn "sn_build_payload: 不正な event_type=$(printf '%s' "$event_type" | tr -cd '[:alnum:]_-' | head -c 32)"
       return 1
@@ -243,7 +244,7 @@ sn_post_webhook() {
 # sn_notify: callsite 側が呼ぶ唯一の public entry point（Req 1.4 / 2.1〜2.6 / 4.4）
 #
 #   Args:
-#     $1 event_type : enum（sn_build_payload と同じ 5 値）
+#     $1 event_type : enum（sn_build_payload と同じ 6 値）
 #     $2 number     : Issue / PR 番号
 #     $3 url        : GitHub URL
 #     $4 result     : enum
