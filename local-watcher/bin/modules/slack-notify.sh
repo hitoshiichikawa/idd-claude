@@ -96,13 +96,22 @@ sn_scrub_secrets() {
 # sn_build_payload: Slack Incoming Webhook 用 JSON payload を構築（Req 3.1〜3.6 / NFR 3.2）
 #
 #   Args:
-#     $1 event_type : "auto-merge" | "auto-merge-design" | "failed-recovery" |
-#                     "needs-decisions-auto-continue" | "promote" | "claude-pickup"
+#     $1 event_type : "auto-merge" | "auto-merge-design" |
+#                     "auto-merge-merged" | "auto-merge-design-merged" |
+#                     "failed-recovery" | "needs-decisions-auto-continue" |
+#                     "promote" | "claude-pickup"
 #     $2 number     : Issue / PR 番号（数値 / promote は sentinel "0" 許容）
 #     $3 url        : GitHub URL（呼出側で組み立て済）
-#     $4 result     : "success" | "recovered" | "max-attempts" | "no-progress" |
-#                     "auto-continued" | "promote-success"
+#     $4 result     : "armed" | "merged" | "recovered" | "max-attempts" |
+#                     "no-progress" | "auto-continued" | "promote-success" |
+#                     "success"（後方互換のため温存。新規 callsite は使わない）
 #     $5 detail     : 任意の追加文脈（secret scrub 対象）
+#
+#   Issue #388 (本 PR):
+#     - armed/merged を判別可能にするため event_type に `auto-merge-merged` /
+#       `auto-merge-design-merged` を追加（Req 2.1, 2.2, 3.5）
+#     - 旧 callsite（armed 通知）は result=success から result=armed に切り替えるが、
+#       enum 上は `success` を温存し旧ログ・旧 callsite を破壊しない（Req 3.5 / NFR 1.1）
 #
 #   Stdout: JSON 1 行（rc=0 時のみ）
 #   Returns: 0 = success / 1 = 引数 enum / 数値 / jq 失敗
@@ -115,8 +124,9 @@ sn_build_payload() {
   local detail="${5:-}"
 
   # event_type の enum 検証
+  # Issue #388: `auto-merge-merged` / `auto-merge-design-merged` を追加（Req 2.1, 2.2）
   case "$event_type" in
-    auto-merge|auto-merge-design|failed-recovery|needs-decisions-auto-continue|promote|claude-pickup) : ;;
+    auto-merge|auto-merge-design|auto-merge-merged|auto-merge-design-merged|failed-recovery|needs-decisions-auto-continue|promote|claude-pickup) : ;;
     *)
       sn_warn "sn_build_payload: 不正な event_type=$(printf '%s' "$event_type" | tr -cd '[:alnum:]_-' | head -c 32)"
       return 1
@@ -244,7 +254,7 @@ sn_post_webhook() {
 # sn_notify: callsite 側が呼ぶ唯一の public entry point（Req 1.4 / 2.1〜2.6 / 4.4）
 #
 #   Args:
-#     $1 event_type : enum（sn_build_payload と同じ 6 値）
+#     $1 event_type : enum（sn_build_payload と同じ 8 値）
 #     $2 number     : Issue / PR 番号
 #     $3 url        : GitHub URL
 #     $4 result     : enum
