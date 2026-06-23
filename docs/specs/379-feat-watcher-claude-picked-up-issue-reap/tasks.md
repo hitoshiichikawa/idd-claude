@@ -66,7 +66,7 @@
   - _Boundary: stale-pickup-reaper.sh (Candidate Selection Layer)_
   - _Depends: 2_
 
-- [ ] 4. アクティブ判定レイヤ（3 観点 AND）を実装
+- [x] 4. アクティブ判定レイヤ（3 観点 AND）を実装
   - 以下 4 関数を実装:
     - `sr_check_marker_age "<marker_json>"` — `first_seen_at` を `date -d` (Linux) /
       `date -j -f` (macOS 互換) で epoch 化し、現在時刻との差を分換算で閾値判定。
