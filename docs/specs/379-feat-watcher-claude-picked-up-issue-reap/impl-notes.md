@@ -81,6 +81,19 @@
 - task 6 で本体の `REQUIRED_MODULES` 配列に `stale-pickup-reaper.sh` を追加し、call site を `process_failed_recovery || fr_warn ...` の直後に追記する作業が残る。本 task 5 時点では module の関数定義のみで本体配線がないため、cron 実行時にはまだ `process_stale_pickup_reaper` は呼ばれない（gate OFF と同じ no-op 状態 / NFR 1.1 と整合）
 - task 7 で README / CLAUDE.md への反映（オプション機能一覧 + 専用節 + prefix 表）が残る。本 task で追加した env / 関数 / 状態ファイル schema を運用者ドキュメントに反映する必要がある
 
+### Task 6
+
+採用方針: `issue-watcher.sh` の `REQUIRED_MODULES` 配列に `"stale-pickup-reaper.sh"` を `"failed-recovery.sh"` の直後に挿入し、call site を `process_failed_recovery || fr_warn ...` の直後に 1 行追記（`process_stale_pickup_reaper || sr_warn "..."`）して watcher 本体から起動可能な配線を完成させた。同タスク内テストとして `stale_pickup_reaper_test.sh` 末尾に Section 14（9 assertions）を追加し、構文・順序契約・integration smoke・gate OFF 副作用ゼロを多段で検証した。
+
+重要な判断:
+- **integration smoke を「subshell 内で REQUIRED_MODULES 順 source」方式に倒した**: `issue-watcher.sh` 全体を source すると config init / cron entry / main loop が走るため、subshell で本体 source を避け、`REQUIRED_MODULES=( ... )` の配列値だけ正規表現で抽出して各 module を `MODULES_DIR/<name>` から順次 source する方式を採用。これにより本体スクリプトの副作用に影響されず `declare -F sr_is_enabled` / `declare -F process_stale_pickup_reaper` の定義有無のみを軽量に観測できる
+- **subshell に config 最小 env を事前注入**: `quota-aware.sh` 等は top-level で `LOG_DIR` を参照しており、本体 source 順では config init で解決済みのため source 時にエラーにならないが、smoke 用 subshell では config init を経由しないため `set -u` の下で「LOG_DIR: unbound variable」になる。`set -eo pipefail`（`u` を外す）+ `: "${REPO:=...}" / "${LOG_DIR:=/tmp/smoke-log-$$}" / "${SLOT_LOCK_DIR:=/tmp/smoke-slot-$$}"` で本体の config init と等価な最小 env を事前注入し、smoke 後に `rm -rf` で掃除する形に整理した
+- **順序契約と call site 順序の 2 段検証**: Section 14b で `REQUIRED_MODULES` 行内の `"failed-recovery.sh" "stale-pickup-reaper.sh"` 連接、call site で `process_failed_recovery` 行番号 < `process_stale_pickup_reaper` 行番号の 2 段検証を入れた。将来 module / call site が誤って入れ替わる事故を grep 検知できる
+- **gate OFF 副作用ゼロを「実体経由」で再検証**: Section 13 が `sr_fetch_candidates` stub 経由で gate OFF 副作用ゼロを確認しているのに対し、Section 14c は本体配線が解決した REQUIRED_MODULES 順 source 経由で `process_stale_pickup_reaper` を実体定義のまま呼び、`gh` stub の trace を観測する形で「本体配線経由でも gate OFF で gh 0 回」を構造的に再確認した（NFR 1.1 二重防御）
+
+残存課題:
+- task 7 で README / CLAUDE.md への反映（オプション機能一覧 + 専用節 + prefix 表）が残る。本 task で追加した本体配線は cron 実行時の起動経路を完成させたが、`STALE_PICKUP_REAPER_ENABLED=true` への切替方法を運用者ドキュメントに反映する必要がある
+
 ## AC Traceability（task 3 範囲）
 
 | AC | テスト | 場所 |
@@ -195,8 +208,27 @@ bash local-watcher/test/stale_pickup_reaper_test.sh   # 184 assertions PASS (40 
 bash local-watcher/test/fr_state_test.sh              # 51 assertions PASS（regression）
 ```
 
+## AC Traceability（task 6 範囲）
+
+| AC | テスト | 場所 |
+|----|--------|------|
+| Req 1.1 | REQUIRED_MODULES に `stale-pickup-reaper.sh` を含み、順 source 後に `sr_is_enabled` / `process_stale_pickup_reaper` が両方 `declare -F` で定義済み + call site 順序 (fr → spr) | `local-watcher/test/stale_pickup_reaper_test.sh:Section 14b` |
+| Req 1.4 | `bash -n local-watcher/bin/issue-watcher.sh` で構文 OK（gate OFF 既定で本体スクリプト全体が正しく parse される）| 同上 Section 14a |
+| NFR 1.1 | `STALE_PICKUP_REAPER_ENABLED` 未設定で本体配線経由でも `gh` stub が 0 回呼ばれない（構造的検証 / 本体配線 + sr_is_enabled gate の 2 段防御）| 同上 Section 14c |
+| NFR 1.2 | REQUIRED_MODULES で `failed-recovery.sh` の直後に `stale-pickup-reaper.sh` が並ぶ順序契約 + call site が `process_failed_recovery` の直後行 | 同上 Section 14b |
+| NFR 1.3 | gate OFF で副作用ゼロ（gh 0 回 + rc=0 / 標準出力汚染なし） | 同上 Section 14c |
+
+## 検証コマンド（task 6 範囲）
+
+```sh
+shellcheck local-watcher/bin/modules/stale-pickup-reaper.sh local-watcher/bin/modules/core_utils.sh local-watcher/bin/issue-watcher.sh local-watcher/test/stale_pickup_reaper_test.sh
+bash -n local-watcher/bin/issue-watcher.sh local-watcher/test/stale_pickup_reaper_test.sh
+bash local-watcher/test/stale_pickup_reaper_test.sh   # 193 assertions PASS (9 件追加 = Section 14)
+bash local-watcher/test/fr_state_test.sh              # 51 assertions PASS（regression）
+```
+
 ## 確認事項
 
-なし（task 5 仕様内で完結 / 既存仕様との整合性確認済み）。
+なし（task 6 仕様内で完結 / 既存仕様との整合性確認済み / 順序契約・call site 順序が grep で再検証可能）。
 
 STATUS: complete
