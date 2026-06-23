@@ -56,6 +56,31 @@ REPO_DIR="${REPO_DIR:-$HOME/work/your-repo}"
 # REPO から repo-unique な slug を導出（lock / log / 一時ファイルの隔離に使う）
 REPO_SLUG="$(echo "$REPO" | tr '/' '-')"
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# per-repo env ファイル ロード（Issue #386 / F8）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# crontab 行長限界（~1024 文字）で `command too long` を回避するため、watcher 起動時に
+# per-repo env ファイル（`WATCHER_ENV_FILE` 明示パス または `$HOME/.issue-watcher/<REPO_SLUG>.env`）
+# を source して `*_ENABLED` 系フラグを供給する。inline cron env が env ファイル値より優先される
+# 単一順序 precedence（Req 4.1〜4.4）を保証するため、ロード時点は本体内の **すべての**
+# `*_ENABLED` 系 `${VAR:-default}` 評価より前 = REPO_SLUG 算出直後の本位置に置く。
+# 候補ファイル不在時は何もせず（Req 5.1 / NFR 1.1）、本機能導入前と完全に byte 等価な
+# 起動経路を辿る。
+#
+# 配置順序の制約上、`REQUIRED_MODULES` ローダ（line 1052 付近）より前の本位置で
+# `env-loader.sh` のみ単独 source する必要がある（env ファイル経由で供給される値は
+# 後続の Config 行の `${VAR:-default}` で参照されるため、Config 行より前に確定させる
+# 必要がある）。本 module は他 module に依存しない自己完結関数群（el_log / el_warn /
+# el_resolve_env_file / el_apply_env_file / el_load）のみを定義するため、単独 source
+# しても他 module の前方参照を踏まない。
+IDD_ENV_LOADER_PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/modules/env-loader.sh"
+if [ -f "$IDD_ENV_LOADER_PATH" ]; then
+  # shellcheck source=/dev/null
+  . "$IDD_ENV_LOADER_PATH"
+  el_load
+fi
+unset IDD_ENV_LOADER_PATH
+
 LABEL_TRIGGER="auto-dev"
 LABEL_CLAIMED="claude-claimed"
 LABEL_PICKED="claude-picked-up"
@@ -1160,7 +1185,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）、
 # #325 の token usage 計測（token-usage.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" "stale-pickup-reaper.sh" "needs-decisions-auto.sh" "dep-cycle-detect.sh" "slack-notify.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "env-loader.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" "stale-pickup-reaper.sh" "needs-decisions-auto.sh" "dep-cycle-detect.sh" "slack-notify.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
