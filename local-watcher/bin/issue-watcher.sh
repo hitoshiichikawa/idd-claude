@@ -621,10 +621,9 @@ FAILED_RECOVERY_STATE_DIR="${FAILED_RECOVERY_STATE_DIR:-$HOME/.issue-watcher/fai
 # 本フラグは新規追加 = opt-in 制 + 既定 false が要件のため、上記
 # 「デフォルト有効化フラグの値正規化」ループには **含めない**（failed-recovery と同方針）。
 #
-# 関数本体は modules/stale-pickup-reaper.sh（task 2 以降で新規追加）、ロガー
-# sr_log / sr_warn / sr_error は core_utils.sh に集約する。`sr_is_enabled` は
-# task 1 時点で本ファイル末尾近傍（Config ブロック直後）に暫定実装され、task 2 で
-# stale-pickup-reaper.sh へ移送される予定。
+# 関数本体は modules/stale-pickup-reaper.sh に集約する（task 2 で本体から移送済み /
+# Persistence Layer 含む）。ロガー sr_log / sr_warn / sr_error は core_utils.sh に集約。
+# REQUIRED_MODULES への登録と call site 配線は task 6 で実施予定。
 STALE_PICKUP_REAPER_ENABLED="${STALE_PICKUP_REAPER_ENABLED:-false}"
 case "$STALE_PICKUP_REAPER_ENABLED" in
   true) : ;;
@@ -665,24 +664,10 @@ case "$STALE_PICKUP_REAPER_GH_TIMEOUT" in
     ;;
 esac
 
-# Stale Pickup Reaper の単独 opt-in gate（純粋関数 / 副作用なし / Req 1.1〜1.4 /
-# NFR 1.1）。`STALE_PICKUP_REAPER_ENABLED=true` 厳密一致のときのみ 0 を返し、それ以外
-# （未設定 / 空 / `false` / 0 / True / TRUE / 1 / on / yes / 前後空白 / typo 等）は
-# 1 を返して OFF として扱う。Config ブロック側 `case` で値は既に `true` / `false` に
-# 正規化されているが、本関数も二重防御として `=true` のみ enabled として読む。
-#
-# 本関数は task 1 時点での暫定実装。task 2 で modules/stale-pickup-reaper.sh へ
-# 移送される予定だが、テスト（stale_pickup_reaper_test.sh Section 1）が
-# extract_function で本関数を切り出して評価できるよう、トップレベル副作用なしの
-# 関数定義のみで配置する。
-#
-# Returns:
-#   0 = enabled（処理可）
-#   1 = disabled（処理しない）
-sr_is_enabled() {
-  [ "${STALE_PICKUP_REAPER_ENABLED:-false}" = "true" ] || return 1
-  return 0
-}
+# Stale Pickup Reaper の `sr_is_enabled` ゲート関数および永続化レイヤ（sr_marker_path /
+# sr_load_marker / sr_save_marker）は modules/stale-pickup-reaper.sh に集約されている
+# （task 2 で本体から module 側へ移送）。`REQUIRED_MODULES` への登録と call site
+# 配線は task 6 で行う。
 
 # ─── Slack 通知 emitter 設定 (#370) ───
 # 自動 merge / failed-recovery 終端 / needs-decisions 自動続行 / promote 完了といった
