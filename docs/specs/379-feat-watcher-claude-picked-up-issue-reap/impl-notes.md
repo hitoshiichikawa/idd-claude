@@ -46,6 +46,24 @@
 - task 4 で `sr_check_marker_age` / `sr_check_slot_lock` / `sr_check_session` / `sr_is_active` を実装する際、本 task の `sr_fetch_candidates` が返す JSON の各要素（`{number, labels, title, url, updatedAt}`）から marker.last_known_labels 更新値を生成する必要がある。`jq -c '[.labels[].name]'` で配列文字列化して `sr_save_marker` の第 4 引数に渡すパターンが自然
 - task 5 の `process_stale_pickup_reaper` orchestrator から本関数を呼ぶときに、`STALE_PICKUP_REAPER_GH_TIMEOUT` の Config 正規化（task 1 で `--state open` / `--repo` と共に確立済み）が呼び出し時点で解決されることを確認した（遅延束縛 / `sr_marker_path` と同パターン）
 
+### Task 4
+
+採用方針: `modules/stale-pickup-reaper.sh` 末尾に新規 `Active Decision Layer` セクションを追加し、3 観点 AND 判定の 4 関数（`sr_check_marker_age` / `sr_check_slot_lock` / `sr_check_session` / `sr_is_active`）を集約。設計の戻り値語義（`sr_is_active`: 0=keep / 1=inactive 確定）を `if sr_is_active` の自然構文で表現できるように 3 観点関数も「0=非アクティブ寄り / 1 以上=アクティブの可能性あり」に揃え、AND 結合は `[ "$age" = "0" ] && [ "$lock" = "0" ] && [ "$sess" = "0" ]` のシンプル分岐で表現した（誤検出回避を最優先 / Req 3.1〜3.5）。
+
+重要な判断:
+- **`slot_lock` の rc=2 解釈**: tasks.md / design.md は `flock` 失敗（権限等）を rc=2「保持の可能性あり」とするが、`flock` の rc は「取得失敗（他プロセス保持中）」と「flock binary 失敗」両方を非 0 で返すため、実装上は「`command -v flock` 失敗のみ rc=2」「`flock -n` の取得失敗は rc=1（保持中）」に分離した。これにより本 layer の `sr_is_active` で AND 判定するときに `rc=1` も `rc=2` も同等に「アクティブ可能性あり」として扱える（`[ "$lock" = "0" ]` 判定で 1 / 2 双方が「非 0 = keep 寄与」になる / Req 3.4 と整合）
+- **`date` の OS 互換**: GNU date `-d "$first_seen_at" +%s` を優先、失敗時 BSD date `-j -f "%Y-%m-%dT%H:%M:%SZ" "$first_seen_at" "+%s"` を fallback として試行。両方失敗時は safe-side fresh（rc=1）に倒す。GNU date は ISO 8601 を直接認識するが BSD date は format 指定が必須のため、`sr_save_marker` で書き出す ISO 8601 UTC 形式（`%Y-%m-%dT%H:%M:%SZ`）に format を固定した
+- **3 観点関数の引数互換性**: tasks.md は 4 関数すべて `"<marker_json>"` を引数に取る設計だが、現実装では `sr_check_slot_lock` / `sr_check_session` は marker_json を参照しない（lock file glob と pid 取得のみ）。将来拡張用に `_marker_json="${1:-}"` で引数を受け取り `:` で no-op 参照（SC2034 抑止）する形で互換性を維持。これにより `sr_is_active` 側は引数を素通しできる（呼出規約統一）
+- **`sr_check_session` の pid 取得失敗を safe-side で即 return**: 各 lock file から pid を取得できないケース（fuser/lsof 失敗・空出力）は「保持の可能性あり」として `return 1` で即終了する。設計上「全 pid 検査して全て非生存なら no-session」と書きたいが、pid 取得失敗を「pid 不在 = 非アクティブ」と誤読すると誤検出になるため、保守的に「1 lock でも pid 取得不能なら may-have-session」に倒した（Req 3.4 と整合）
+- **`sr_log` を `sr_is_active` 内で呼ぶ**: design.md は判定根拠を 1 行ログとして記録する（Req 3.5 / NFR 4.1 / NFR 4.2）。`sr_log` は core_utils.sh に集約済みのため `module/stale-pickup-reaper.sh` 側で再定義しない。issue 番号は marker_json の `.issue` から `jq -r '.issue // "?"'` で抽出（不在時は `?` で fallback）
+- **テストでの flock 保持の同期**: Section 9c の「別プロセスで flock 保持中」を構成するために、background subshell + named pipe (実態は `mktemp` ファイル) で「flock 取得完了」を同期する設計を採用。`flock -x 9 -c "sleep 30"` を直接 background させると flock 取得が完了する前に親が `sr_check_slot_lock` を呼ぶ race condition があり、ready_file の消失を最大 5 秒 poll で待つ形に整理。test 終了時に `kill $bg_pid` + `wait` で確実に背景プロセスを掃除し、後続 section に影響させない
+- **Section 10 の 99999 pid 不在保証**: Linux `/proc/sys/kernel/pid_max` が 99999 を超える環境（例: 4194304）では 99999 が現役 pid である可能性があるため、pid_max を読み出して 99999 < pid_max のときは Section 10c を SKIP する判定を入れた。同様に Section 10e は fuser / lsof の binary 実在環境で「双方不在ケース」を構成できないため SKIP。SKIP 判定を入れることでテストが環境依存で false-fail しない設計
+- **Section 11 の sr_is_active stub テスト構造**: 3 観点関数を bash 関数として上書きし、戻り値（`age_rc` / `lock_rc` / `sess_rc`）を 2^3 = 8 通りで網羅。test 終了時に `unset -f sr_check_*` で stub を解除し、後続 section に影響させない。`extract_function` で本物を再 source する保険も入れた（現実装では Section 11 が最終 section だが、将来 section 追加時の安全弁）
+
+残存課題:
+- task 5 で `process_stale_pickup_reaper` orchestrator から `sr_is_active` を呼ぶときに、3 観点の判定結果（age / lock / sess）を `sr_log` の出力経由でも観測できるため、orchestrator 側で重複ログを出さないこと（`sr_log "issue=#N skip ..."` 等は active 判定で十分代替可能）
+- task 5 の `sr_revert_to_auto_dev` は branch を触らない（`git` を呼ばない / Req 6.2）契約があり、本 task 4 で「branch 状態を見ない」（Req 6.3）と完全に整合する。Active Decision Layer は branch を一切走査しないことを実装でも確認済み
+
 ## AC Traceability（task 3 範囲）
 
 | AC | テスト | 場所 |
@@ -104,8 +122,35 @@ bash local-watcher/test/stale_pickup_reaper_test.sh   # 91 assertions PASS
 bash local-watcher/test/fr_state_test.sh              # 51 assertions PASS（regression）
 ```
 
+## AC Traceability（task 4 範囲）
+
+| AC | テスト | 場所 |
+|----|--------|------|
+| Req 3.1 (観点 1) | 閾値超で rc=0 (aged) / 閾値未満で rc=1 (fresh) / 境界 45 分で rc=0 | `local-watcher/test/stale_pickup_reaper_test.sh:Section 8a, 8b, 8c` |
+| Req 3.1 (観点 2) | lock file 不在 / 空 lock file / flock 保持中で 3 経路 rc 検証 | 同上 Section 9a, 9b, 9c |
+| Req 3.1 (観点 3) | lock file 不在 / 自プロセス pid / 不在 pid で session 検出 | 同上 Section 10a, 10b, 10c |
+| Req 3.1 (AND) | 8 通り 2^3 組み合わせで「全 0 のみ rc=1, 他は rc=0」を assert | 同上 Section 11（8 ケース） |
+| Req 3.2 | 1 観点でも rc>0 のとき sr_is_active が rc=0 (keep) を返す（7 ケース assert） | 同上 Section 11 |
+| Req 3.3 | 全関数 read-only / gh を呼ばない（実装で gh 参照ゼロ + テストで stub なしで動く） | `local-watcher/bin/modules/stale-pickup-reaper.sh` の Active Decision Layer（grep 確認） |
+| Req 3.4 | first_seen_at 不在 / date parse 失敗 / pid 取得失敗 / flock 不在 / lock=2 (判定不能) → safe-side | 同上 Section 8d, 8e, 8f / 10d, 10e / 11（lock=2 ケース） |
+| Req 3.5 | `age=N lock=N sess=N` 形式の判定根拠を 1 行ログ記録 | 同上 Section 11（ログ形式 grep assert） |
+| Req 4.2 | 閾値未満で復旧対象外（rc=1 fresh） | 同上 Section 8a |
+| Req 4.4 | 閾値 env 変更で判定境界も追従（10 分閾値で 5 分 fresh / 15 分 aged） | 同上 Section 8g |
+| Req 6.3 | branch 状態を見ない（実装で `git` 参照ゼロ） | `local-watcher/bin/modules/stale-pickup-reaper.sh` の Active Decision Layer（grep 確認） |
+| NFR 4.1 | 判定イベント種別と issue 番号 (#42) を 1 行ログ記録 | 同上 Section 11（`grep issue=#42` assert） |
+| NFR 4.2 | 見送り（keep）理由の `age=N lock=N sess=N` を 1 行ログ記録 | 同上 Section 11（keep ログ件数 + 値形式 grep） |
+
+## 検証コマンド（task 4 範囲）
+
+```sh
+shellcheck local-watcher/bin/modules/stale-pickup-reaper.sh local-watcher/bin/modules/core_utils.sh local-watcher/bin/issue-watcher.sh local-watcher/test/stale_pickup_reaper_test.sh
+bash -n local-watcher/bin/modules/stale-pickup-reaper.sh local-watcher/test/stale_pickup_reaper_test.sh local-watcher/bin/issue-watcher.sh
+bash local-watcher/test/stale_pickup_reaper_test.sh   # 144 assertions PASS (53 件追加)
+bash local-watcher/test/fr_state_test.sh              # 51 assertions PASS（regression）
+```
+
 ## 確認事項
 
-なし（task 2 / task 3 仕様内で完結 / 既存仕様との整合性確認済み）。
+なし（task 2 / task 3 / task 4 仕様内で完結 / 既存仕様との整合性確認済み）。
 
 STATUS: complete
