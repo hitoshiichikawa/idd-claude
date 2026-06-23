@@ -1660,6 +1660,184 @@ fi
 unset -f gh sr_fetch_candidates sr_load_marker sr_save_marker sr_revert_to_auto_dev sr_is_active
 
 # ============================================================
+# Section 14: 本体配線（REQUIRED_MODULES と call site / task 6 / Req 1.1, 1.4 / NFR 1.1, 1.2, 1.3）
+#
+# 検証観点:
+#   14a: bash -n で issue-watcher.sh の構文 OK
+#   14b: REQUIRED_MODULES 順 source 後に sr_is_enabled / process_stale_pickup_reaper の
+#        両方が定義済みになることを integration smoke で確認（issue-watcher.sh 全体は
+#        config init / cron entry / main loop が走るため source せず、module path だけ
+#        REQUIRED_MODULES 配列値から抽出して順次 source する subshell smoke）
+#   14c: STALE_PICKUP_REAPER_ENABLED 未設定で process_stale_pickup_reaper を直接呼び
+#        gh stub が 0 回呼ばれることを確認（NFR 1.1 の構造的検証 / call site が gate OFF
+#        既定で副作用ゼロを満たすか）
+# ============================================================
+echo ""
+echo "--- Section 14: 本体配線（REQUIRED_MODULES + call site / task 6 / Req 1.1, 1.4 / NFR 1.1, 1.2, 1.3） ---"
+
+# ── 14a: bash -n で issue-watcher.sh の構文 OK ──
+rc_14a=0
+bash -n "$WATCHER_SH" >/dev/null 2>&1 || rc_14a=$?
+assert_eq "Req 1.4 / NFR 1.2: bash -n で issue-watcher.sh の構文 OK" "0" "$rc_14a"
+
+# ── 14b: REQUIRED_MODULES 順 source 後に 2 関数が両方定義済み ──
+# issue-watcher.sh から REQUIRED_MODULES=( ... ) 行を grep し、subshell 内で配列順に
+# 各 module を source する。issue-watcher.sh 全体は config init / cron entry / main loop が
+# 走るため source しない（軽量 integration smoke）。
+WATCHER_BIN_DIR="$(cd "$(dirname "$WATCHER_SH")" && pwd)"
+MODULES_DIR="$WATCHER_BIN_DIR/modules"
+
+# REQUIRED_MODULES の配列値だけを抽出（1 行で書かれている前提 / issue-watcher.sh:1052）
+required_modules_line=$(grep -m1 '^REQUIRED_MODULES=' "$WATCHER_SH" || true)
+if [ -z "$required_modules_line" ]; then
+  echo "FAIL: Req 1.1: REQUIRED_MODULES 行が issue-watcher.sh から抽出できない"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+else
+  echo "PASS: 前提: REQUIRED_MODULES 行を抽出できた"
+  PASS_COUNT=$((PASS_COUNT + 1))
+fi
+
+# 配線確認: REQUIRED_MODULES 行内に "stale-pickup-reaper.sh" が含まれること
+if echo "$required_modules_line" | grep -q '"stale-pickup-reaper.sh"'; then
+  echo "PASS: Req 1.1: REQUIRED_MODULES に stale-pickup-reaper.sh が含まれる"
+  PASS_COUNT=$((PASS_COUNT + 1))
+else
+  echo "FAIL: Req 1.1: REQUIRED_MODULES に stale-pickup-reaper.sh が含まれない"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+# 配線確認: failed-recovery.sh の直後に stale-pickup-reaper.sh が並ぶこと（順序契約）
+if echo "$required_modules_line" | grep -q '"failed-recovery.sh" "stale-pickup-reaper.sh"'; then
+  echo "PASS: NFR 1.2: REQUIRED_MODULES で failed-recovery.sh の直後に stale-pickup-reaper.sh"
+  PASS_COUNT=$((PASS_COUNT + 1))
+else
+  echo "FAIL: NFR 1.2: REQUIRED_MODULES の順序契約（failed-recovery.sh → stale-pickup-reaper.sh）が崩れている"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+# call site 配線確認: process_failed_recovery 行の後ろに process_stale_pickup_reaper 行がある
+fr_line=$(grep -n '^process_failed_recovery ||' "$WATCHER_SH" | head -1 | cut -d: -f1)
+spr_line=$(grep -n '^process_stale_pickup_reaper ||' "$WATCHER_SH" | head -1 | cut -d: -f1)
+if [ -n "$fr_line" ] && [ -n "$spr_line" ] && [ "$spr_line" -gt "$fr_line" ]; then
+  echo "PASS: Req 1.1 / NFR 1.2: process_stale_pickup_reaper の call site が process_failed_recovery の後（fr=$fr_line, spr=$spr_line）"
+  PASS_COUNT=$((PASS_COUNT + 1))
+else
+  echo "FAIL: Req 1.1 / NFR 1.2: process_stale_pickup_reaper の call site が見つからないか順序が逆（fr=$fr_line, spr=$spr_line）"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+# integration smoke: subshell 内で各 module を順次 source し declare -F で 2 関数の定義を確認
+# REQUIRED_MODULES 配列値を bash の eval で再構築し、$MODULES_DIR の各 module を順次 source する。
+# 注意: 各 module はトップレベル副作用を持たない契約（CLAUDE.md「機能追加ガイドライン §1」）。
+smoke_output=$(
+  bash -c '
+    set -eo pipefail
+    # issue-watcher.sh が REQUIRED_MODULES を source する時点では config init で
+    # 解決済みの最小 env 群（LOG_DIR / REPO / REPO_SLUG / SLOT_LOCK_DIR / BASE_BRANCH 等）
+    # を smoke 用にも事前設定する（subshell で set -u を外し、本体と同じ前提を再現）。
+    MODULES_DIR="$1"
+    required_modules_line="$2"
+    : "${REPO:=owner/test-repo}"
+    : "${REPO_SLUG:=owner-test-repo}"
+    : "${BASE_BRANCH:=main}"
+    : "${LOG_DIR:=/tmp/smoke-log-$$}"
+    : "${SLOT_LOCK_DIR:=/tmp/smoke-slot-$$}"
+    mkdir -p "$LOG_DIR" "$SLOT_LOCK_DIR"
+    # REQUIRED_MODULES=( ... ) の値部分から各 module 名を抽出
+    arr_str=$(echo "$required_modules_line" | sed -E "s/^REQUIRED_MODULES=\( //; s/ \)$//")
+    # shellcheck disable=SC2086
+    eval "modules=( $arr_str )"
+    for m in "${modules[@]}"; do
+      mod_path="$MODULES_DIR/$m"
+      if [ ! -f "$mod_path" ]; then
+        echo "MISSING:$m"
+        exit 2
+      fi
+      # shellcheck disable=SC1090
+      . "$mod_path"
+    done
+    # 2 関数の定義を確認
+    if declare -F sr_is_enabled >/dev/null; then echo "sr_is_enabled:defined"; else echo "sr_is_enabled:missing"; fi
+    if declare -F process_stale_pickup_reaper >/dev/null; then echo "process_stale_pickup_reaper:defined"; else echo "process_stale_pickup_reaper:missing"; fi
+    rm -rf "$LOG_DIR" "$SLOT_LOCK_DIR"
+  ' _ "$MODULES_DIR" "$required_modules_line" 2>&1
+) || true
+
+if echo "$smoke_output" | grep -q '^sr_is_enabled:defined$'; then
+  echo "PASS: Req 1.1: REQUIRED_MODULES 順 source 後に sr_is_enabled が declare -F で定義済み"
+  PASS_COUNT=$((PASS_COUNT + 1))
+else
+  echo "FAIL: Req 1.1: REQUIRED_MODULES 順 source 後に sr_is_enabled が定義されない"
+  echo "  smoke_output: $smoke_output"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+if echo "$smoke_output" | grep -q '^process_stale_pickup_reaper:defined$'; then
+  echo "PASS: Req 1.1: REQUIRED_MODULES 順 source 後に process_stale_pickup_reaper が declare -F で定義済み"
+  PASS_COUNT=$((PASS_COUNT + 1))
+else
+  echo "FAIL: Req 1.1: REQUIRED_MODULES 順 source 後に process_stale_pickup_reaper が定義されない"
+  echo "  smoke_output: $smoke_output"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+# ── 14c: gate OFF（STALE_PICKUP_REAPER_ENABLED 未設定）で gh stub が 0 回呼ばれない ──
+# subshell 内で REQUIRED_MODULES を順次 source して本物の process_stale_pickup_reaper を
+# 定義し、gh / sr_log を stub したうえで process_stale_pickup_reaper を直接呼ぶ。
+# 期待: sr_is_enabled が rc=1 で早期 return → gh stub 0 回呼ばれない（NFR 1.1）。
+SR14C_GH_TRACE="$(mktemp)"
+trap 'rm -f "$SR_WARN_TRACE" "$SR12_GH_TRACE" "$SR12_GH_VIEW_RESPONSE" "$SR12_GH_REMOVE_RC_FILE" "$SR12_GH_VIEW_RC_FILE" "$SR12_GH_ADD_RC_FILE" "$SR12_LOG_TRACE" "$SR13_GH_TRACE" "$SR13_REVERT_COUNT_FILE" "$SR13_SAVE_TRACE" "$SR14C_GH_TRACE"' EXIT
+
+smoke_14c=$(
+  GH_TRACE="$SR14C_GH_TRACE" MODULES_DIR="$MODULES_DIR" REQ_LINE="$required_modules_line" \
+  bash -c '
+    set -eo pipefail
+    : "${REPO:=owner/test-repo}"
+    : "${REPO_SLUG:=owner-test-repo}"
+    : "${BASE_BRANCH:=main}"
+    : "${LOG_DIR:=/tmp/smoke-log-$$}"
+    : "${SLOT_LOCK_DIR:=/tmp/smoke-slot-$$}"
+    mkdir -p "$LOG_DIR" "$SLOT_LOCK_DIR"
+    arr_str=$(echo "$REQ_LINE" | sed -E "s/^REQUIRED_MODULES=\( //; s/ \)$//")
+    # shellcheck disable=SC2086
+    eval "modules=( $arr_str )"
+    for m in "${modules[@]}"; do
+      # shellcheck disable=SC1090
+      . "$MODULES_DIR/$m"
+    done
+    # gh stub: 呼ばれたら trace に append（gate OFF 検証で「0 回」を assert する）
+    gh() {
+      printf "gh" >> "$GH_TRACE"
+      for arg in "$@"; do printf " %s" "$arg" >> "$GH_TRACE"; done
+      printf "\n" >> "$GH_TRACE"
+      return 0
+    }
+    # sr_log / sr_warn は no-op（標準出力汚染防止）
+    sr_log() { :; }
+    sr_warn() { :; }
+    # ENABLED 未設定で直接呼ぶ
+    unset STALE_PICKUP_REAPER_ENABLED
+    rc=0
+    process_stale_pickup_reaper || rc=$?
+    rm -rf "$LOG_DIR" "$SLOT_LOCK_DIR"
+    echo "rc=$rc"
+  ' 2>&1
+)
+
+if echo "$smoke_14c" | grep -q '^rc=0$'; then
+  echo "PASS: NFR 1.1: ENABLED 未設定で process_stale_pickup_reaper が rc=0（即 return）"
+  PASS_COUNT=$((PASS_COUNT + 1))
+else
+  echo "FAIL: NFR 1.1: ENABLED 未設定で process_stale_pickup_reaper が rc!=0"
+  echo "  smoke_14c: $smoke_14c"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+gh_calls_14c=$(grep -c '^gh ' "$SR14C_GH_TRACE" || true)
+gh_calls_14c=${gh_calls_14c:-0}
+assert_eq "NFR 1.1 / NFR 1.3: ENABLED 未設定で本体配線経由でも gh stub が 0 回呼ばれない" "0" "$gh_calls_14c"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
