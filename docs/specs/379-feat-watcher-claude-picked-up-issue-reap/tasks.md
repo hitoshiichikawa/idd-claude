@@ -43,7 +43,7 @@
   - _Boundary: stale-pickup-reaper.sh (Persistence Layer)_
   - _Depends: 1_
 
-- [ ] 3. 候補選定レイヤ（gh API filter）を実装
+- [x] 3. 候補選定レイヤ（gh API filter）を実装
   - `sr_fetch_candidates` を実装:
     - `gh issue list --search "label:\"$LABEL_PICKED\" -label:\"$LABEL_FAILED\"
       -label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\"
