@@ -1083,37 +1083,79 @@ pp_issue_has_label() {
     '.labels // [] | map(.name) | index($l)' >/dev/null 2>&1
 }
 
+# pp_extract_linked_issues: `gh pr list --json number,headRefName,headRepositoryOwner,
+# closingIssuesReferences` の JSON 出力を受け取り、`staged-for-release` 自動付与対象
+# Issue 番号集合を抽出する純関数ヘルパー（#389）。
+#
+# 抽出ロジック:
+#   - fork PR を除外（headRepositoryOwner.login != $owner の PR は対象外 / NFR 2.4）
+#   - 各 PR について以下 2 経路で Issue 番号を導出し、和集合で重複排除する:
+#     1. closingIssuesReferences[].number（GitHub 自動リンク。base=default branch のみ生成）
+#     2. headRefName が `^claude/issue-([0-9]+)-impl-` に一致した場合のキャプチャ値
+#        （#389: base=default branch でない gitflow 運用での補完経路）
+#   - 抽出した数値 ID は jq の `capture` で `^[0-9]+$` を満たしているが、bash 側でも
+#     使用直前に再検証する（NFR 4.2 / 防御層）
+#
+# 入力（$1）: gh pr list の JSON 文字列（配列）
+# 入力（$2）: repo_owner（fork 判定用、headRepositoryOwner.login と完全一致比較）
+# 出力（stdout）: 抽出された Issue 番号を 1 行 1 件、numeric 昇順で unique 出力
+# 戻り値: 常に 0（jq エラーは空出力として扱う）
+#
+# Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 2.3, NFR 4.1, NFR 4.2
+pp_extract_linked_issues() {
+  local prs_json="$1"
+  local repo_owner="$2"
+  # jq 内で fork 除外 + 2 経路の和集合 + unique を一括処理する。head 経路は
+  # `capture` で `^claude/issue-(?<n>[0-9]+)-impl-` に一致するもののみ採用し、不一致
+  # （人間 PR / 設計 PR / 他フォーマット）は素通り（Req 1.3）。`headRefName` は未信頼
+  # 文字列なので `--arg owner` 同様に jq 内で扱い、bash 展開を経由させない（NFR 4.1）。
+  echo "$prs_json" | jq -r \
+    --arg owner "$repo_owner" \
+    '[.[]
+      | select((.headRepositoryOwner.login // "") == $owner)
+      | (
+          ((.closingIssuesReferences // []) | map(.number))
+          +
+          ((.headRefName // "")
+            | [capture("^claude/issue-(?<n>[0-9]+)-impl-") // empty | .n | tonumber])
+        )
+      | .[]
+    ] | unique | .[]' 2>/dev/null
+}
+
 # pp_collect_merged_issues: Phase A 直後の状態で「`BASE_BRANCH` に merge 済みかつ
 # `Closes #N` でリンクされている Issue」を抽出し、未付与の Issue には
 # `staged-for-release` を自動付与する。fork PR は除外する（NFR 2.4）。
 # 自動付与と人間付与の source 区別は行わない（Req 2.1.2、同一ラベル共有）。
 #
+# #389: `closingIssuesReferences` は GitHub 側で「PR の base がリポジトリの default
+# branch」のときだけ自動生成されるため、gitflow 運用（`BASE_BRANCH=develop` 等）では
+# 空になる。head ブランチ名 `^claude/issue-([0-9]+)-impl-` からの導出経路を併用して
+# base ブランチが default かどうかに依存しない収集を行う（pp_extract_linked_issues 参照）。
+#
 # stdout: 現時点で `staged-for-release` を持つ全 open Issue の番号を 1 行 1 件で出力
 #         （次のステップで ST 判定する対象集合になる）
-# Requirements: 2.1, NFR 2.4, NFR 5.2
+# Requirements: 2.1, NFR 2.4, NFR 5.2, #389 Req 1.1-1.5
 pp_collect_merged_issues() {
   local repo_owner="${REPO%%/*}"
   local recent_merged_prs_json
   # 1. is:merged base:$BASE_BRANCH の直近 PR を取得（最新 50 件、Req 5.2 範囲）
+  #    #389: headRefName を取得フィールドに追加（head ブランチ名経路の導出ソース）。
+  #    gh API 呼び出し回数は変えない（Req 3.5）。
   if ! recent_merged_prs_json=$(timeout "$PROMOTE_GIT_TIMEOUT" gh pr list \
       --repo "$REPO" \
       --state merged \
       --base "$BASE_BRANCH" \
-      --json number,headRepositoryOwner,closingIssuesReferences \
+      --json number,headRefName,headRepositoryOwner,closingIssuesReferences \
       --limit 50 2>/dev/null); then
     pp_warn "merged PR の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
     return 0
   fi
 
-  # 2. fork PR を除外（NFR 2.4）し、closingIssuesReferences から Issue 番号を抽出
+  # 2. fork PR を除外（NFR 2.4）し、closingIssuesReferences と headRefName 両経路から
+  #    Issue 番号を抽出（#389 Req 1.1, 1.2, 1.4 / 和集合 + 重複排除）
   local linked_issues
-  linked_issues=$(echo "$recent_merged_prs_json" | jq -r \
-    --arg owner "$repo_owner" \
-    '[.[]
-      | select((.headRepositoryOwner.login // "") == $owner)
-      | (.closingIssuesReferences // [])[]
-      | .number
-    ] | unique | .[]')
+  linked_issues=$(pp_extract_linked_issues "$recent_merged_prs_json" "$repo_owner")
 
   # 3. 各 Issue について `staged-for-release` ラベルの有無を確認し、
   #    未付与なら自動付与する（重複付与は抑止 / Req 2.1.1, 2.1.3）
@@ -1122,6 +1164,13 @@ pp_collect_merged_issues() {
   if [ -n "$linked_issues" ]; then
     while IFS= read -r issue_number; do
       [ -n "$issue_number" ] || continue
+      # #389 Req 1.5 / NFR 4.2: 数値 ID を使用直前に再検証する。jq の capture で
+      # `^[0-9]+$` 一致は保証されているが、closingIssuesReferences 側の異常値も含めて
+      # 防御層として bash 側でも `^[0-9]+$` を確認し、不正値は `gh issue edit` 引数や
+      # URL に展開しない。
+      if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+        continue
+      fi
       if pp_issue_has_label "$issue_number" "$LABEL_STAGED_FOR_RELEASE"; then
         # AC 2.1.3: 既付与なら API 再送しない
         skipped=$((skipped + 1))
