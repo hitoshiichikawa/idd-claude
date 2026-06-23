@@ -861,6 +861,131 @@ pr_publish_claude_status() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pr_publish_claude_status_from_branch: PR が存在する状態で claude-review status を
+#   publish する catch-up 経路（Issue #374）。
+#   入力: $1 = pr_number, $2 = sha, $3 = head_ref（例: claude/issue-123-impl-foo）,
+#         $4 = pr_url（target_url fallback 用）
+#   出力: なし（log のみ）
+#   戻り値: 0 固定（best-effort / skip / publish 失敗いずれもパイプライン継続）
+#
+#   背景（Issue #374）:
+#     per-task ループ運用（PER_TASK_LOOP_ENABLED=true）では `publish_claude_review_status`
+#     が Reviewer round=1〜3 直後に呼ばれる時系列が PjM の impl PR 作成より前になるため、
+#     `gh pr list --head <branch>` で PR が解決できず WARN skip で終わってしまう。
+#     本関数は `process_pr_reviewer` の review loop（open PR を scan する経路）から
+#     呼ばれることで「PR が GitHub 側に存在する状態」を構造的に保証し、AND 二重 opt-in
+#     成立時の claude-review status を確実に publish する catch-up 経路を提供する。
+#
+#   設計判断:
+#     - AND 二重 opt-in（`pr_status_check_enabled`）成立時のみ動作。OFF は外部副作用ゼロで
+#       即 return（Req 5.1, 5.2 / NFR 1.1）。
+#     - head_ref から issue 番号を抽出（`claude/issue-<N>-...`）。一致しなければ silent skip
+#       （他 head pattern は本機能対象外）。
+#     - workspace は呼び出し元 pr_run_review_for_pr 完了時点で BASE_BRANCH に復帰している
+#       前提のため、head 側の `docs/specs/<N>-*/review-notes.md` を `git ls-tree` + `git show`
+#       で読み出す（checkout 不要 / 副作用ゼロ）。
+#     - 既存 `parse_review_result` を呼び出して RESULT を抽出する（contract 流用 / NFR 1.3）。
+#     - 既存 `pr_publish_claude_status` をそのまま呼ぶ（codex 経路と対称 / API 経路は #349 完成形を維持）。
+#     - PR 未解決 / file 不在 / parse 失敗いずれも WARN を 1 行残して return 0
+#       （silent fail 禁止 / Req 3.1〜3.5）。
+pr_publish_claude_status_from_branch() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local head_ref="${3:-}"
+  local pr_url="${4:-}"
+
+  # AND 二重 opt-in 早期判定（Req 5.1, 5.2 / NFR 1.1）
+  if ! pr_status_check_enabled; then
+    # suppression ログは pr_publish_commit_status 側の cycle あたり 1 行制限に委ねる
+    # （本関数で重複ログを出さない / Req 5.5 / NFR 3.3）。
+    return 0
+  fi
+
+  # head_ref から issue 番号を抽出（claude/issue-<N>-...）
+  local issue_number=""
+  if [[ "$head_ref" =~ ^claude/issue-([0-9]+)- ]]; then
+    issue_number="${BASH_REMATCH[1]}"
+  fi
+  if [ -z "$issue_number" ]; then
+    # 本関数対象外 head（design / 他 prefix 等）→ silent skip
+    return 0
+  fi
+
+  # spec dir を origin/$head_ref の tree から解決（cwd は呼び出し元で REPO_DIR / NFR 1.1）。
+  # `git ls-tree --name-only` で `docs/specs/<N>-<slug>/` の直下エントリ群を列挙し、
+  # `<N>-` で始まる最初のディレクトリを採用する。
+  # `--` でオプション解釈を打ち切り（path 由来のフラグ注入予防 / 既存 hardening 同方針）。
+  local tree_out spec_dir_rel=""
+  if ! tree_out=$(timeout "$PR_REVIEWER_GIT_TIMEOUT" \
+      git ls-tree --name-only "origin/${head_ref}" -- "docs/specs/" 2>/dev/null); then
+    pr_warn "claude-review status publish (catch-up): docs/specs 列挙失敗 branch=${head_ref} pr=#${pr_number} reason=ls-tree-failed"
+    return 0
+  fi
+  # `docs/specs/<N>-...` 形式の path から `<N>-` で始まるディレクトリを抽出
+  spec_dir_rel=$(echo "$tree_out" \
+    | awk -v n="${issue_number}-" -F/ '$3 != "" && index($3, n) == 1 { print "docs/specs/" $3; exit }')
+  if [ -z "$spec_dir_rel" ]; then
+    pr_warn "claude-review status publish (catch-up): docs/specs/${issue_number}-* 不在 branch=${head_ref} pr=#${pr_number} reason=spec-dir-not-found"
+    return 0
+  fi
+
+  local notes_rel="${spec_dir_rel}/review-notes.md"
+  # review-notes.md を head から取得（cat-file -e で存在確認 → show で内容取得）
+  if ! git cat-file -e "origin/${head_ref}:${notes_rel}" 2>/dev/null; then
+    pr_warn "claude-review status publish (catch-up): review-notes.md 不在 branch=${head_ref} pr=#${pr_number} path='${notes_rel}' reason=file-not-found"
+    return 0
+  fi
+
+  local notes_tmp
+  notes_tmp=$(mktemp -t idd-claude-pr-claude-notes.XXXXXX 2>/dev/null || mktemp)
+  if ! git show "origin/${head_ref}:${notes_rel}" >"$notes_tmp" 2>/dev/null; then
+    pr_warn "claude-review status publish (catch-up): review-notes.md 取得失敗 branch=${head_ref} pr=#${pr_number} path='${notes_rel}' reason=git-show-failed"
+    rm -f "$notes_tmp" 2>/dev/null || true
+    return 0
+  fi
+
+  # parse_review_result は issue-watcher.sh 本体で定義（モジュール load 後）。
+  # 万一未ロード状態で呼ばれた場合は silent skip（NFR 1.1 安全側）。
+  if ! declare -F parse_review_result >/dev/null 2>&1; then
+    pr_warn "claude-review status publish (catch-up): parse_review_result 未ロード branch=${head_ref} pr=#${pr_number} reason=parse-helper-missing"
+    rm -f "$notes_tmp" 2>/dev/null || true
+    return 0
+  fi
+
+  local parsed parse_rc=0
+  parsed=$(parse_review_result "$notes_tmp") || parse_rc=$?
+  rm -f "$notes_tmp" 2>/dev/null || true
+
+  if [ "$parse_rc" -ne 0 ] || [ -z "$parsed" ]; then
+    pr_warn "claude-review status publish (catch-up): parse_review_result 失敗 branch=${head_ref} pr=#${pr_number} rc=${parse_rc} reason=parse-failed"
+    return 0
+  fi
+
+  local result
+  result=$(echo "$parsed" | cut -f1)
+  case "$result" in
+    approve|reject) ;;
+    *)
+      pr_warn "claude-review status publish (catch-up): 不正な RESULT '${result}' branch=${head_ref} pr=#${pr_number} reason=invalid-result"
+      return 0
+      ;;
+  esac
+
+  # target_url: review-notes.md の blob URL（PR head sha 指定）。組み立て不能時は PR URL に fallback。
+  local target_url=""
+  if [ -n "$sha" ] && [ -n "$spec_dir_rel" ]; then
+    target_url="https://github.com/${REPO}/blob/${sha}/${spec_dir_rel}/review-notes.md"
+  elif [ -n "$pr_url" ]; then
+    target_url="$pr_url"
+  fi
+
+  pr_log "claude-review status publish (catch-up): branch=${head_ref} pr=#${pr_number} sha=${sha} result=${result} spec=${spec_dir_rel}"
+  # publish 失敗時も pr_publish_claude_status / pr_publish_commit_status 側で WARN 出力済み。
+  pr_publish_claude_status "$pr_number" "$sha" "$result" "$target_url" || true
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pr_run_review_for_pr: 1 PR 分のレビューを統括する（task 4〜6 の orchestration）
 #   入力: $1 = pr_json（pr_fetch_candidate_prs の単一要素）, $2 = tool
 #   戻り値: 0 = success / 1 = failure（一時的・skip 相当）/ 2 = skip（重複検出）/
@@ -1152,5 +1277,80 @@ process_pr_reviewer() {
 
   # 念のため最終確認で base branch に戻す
   git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# process_claude_review_status_catchup (Issue #374)
+#
+# `claude-review` commit status の catch-up publish processor。per-task ループ運用で
+# `publish_claude_review_status` が PR 作成より前の時間軸で発火して WARN skip した
+# 分を、サイクル毎に open PR を scan して読み直し publish する（Req 1.4 / 4.1 / 4.2）。
+#
+# 起動条件:
+#   - AND 二重 opt-in（PR_REVIEWER_STATUS_CHECK_ENABLED=true AND FULL_AUTO_ENABLED=true）。
+#     OFF（既定）なら gh / git 呼び出しを一切発火させずに即 return（Req 5.1 / 5.2 / NFR 1.1）。
+#   - `PR_REVIEWER_ENABLED` の値には依存しない（README #349 設計どおり、claude-review 単独
+#     有効化を維持）。
+#
+# 処理:
+#   - 候補 PR は `pr_fetch_candidate_prs`（既存）を再利用し、open / 非 draft /
+#     PR_REVIEWER_HEAD_PATTERN（既定 `^claude/`）に一致 / 非 fork のもの。
+#   - 各 PR について `pr_publish_claude_status_from_branch` を呼ぶ（PR 未解決 /
+#     review-notes.md 不在 / parse 失敗いずれも WARN + skip / Req 3.x）。
+#   - 戻り値は 0 固定（後続 processor を阻害しない / NFR 1.1）。
+#
+# 設計上の判断:
+#   - 既存 `process_pr_reviewer` 内の `pr_run_review_for_pr` 経路に embed する案も検討したが、
+#     その経路は `PR_REVIEWER_ENABLED=true` のときのみ発火するため、claude-review 単独有効化
+#     を README で約束している契約と矛盾する。本 processor は AND 二重 opt-in のみで gate する
+#     独立経路として実装し、PR_REVIEWER_ENABLED の値に依存しない（Req 5.x / 既存契約 #349 維持）。
+#   - 同一 (sha, context) への重複 publish は GitHub の latest-wins 仕様で吸収される（Req 4.3）。
+#     非 per-task 経路の `publish_claude_review_status` 直接呼びと併走しても、最終的に
+#     最新の RESULT が反映された state に収束する（Req 4.5）。
+# ─────────────────────────────────────────────────────────────────────────────
+process_claude_review_status_catchup() {
+  # AND 二重 opt-in 早期判定（Req 5.1 / 5.2 / NFR 1.1）
+  if ! pr_status_check_enabled; then
+    return 0
+  fi
+
+  # 候補 PR 列挙（既存 process_pr_reviewer と同じ helper を使う / fail-safe で "[]" を返す）
+  local prs_json total
+  prs_json=$(pr_fetch_candidate_prs)
+  total=$(echo "$prs_json" | jq 'length' 2>/dev/null || echo 0)
+  if [ "$total" -eq 0 ]; then
+    return 0
+  fi
+
+  # 上限件数（PR_REVIEWER_MAX_PRS）で truncate する点も process_pr_reviewer と整合させる。
+  local target_count="$total" overflow=0
+  if [ -n "${PR_REVIEWER_MAX_PRS:-}" ] && [ "$total" -gt "$PR_REVIEWER_MAX_PRS" ]; then
+    target_count="$PR_REVIEWER_MAX_PRS"
+    overflow=$((total - PR_REVIEWER_MAX_PRS))
+  fi
+
+  pr_log "claude-review catch-up: 対象候補 ${total} 件、処理対象 ${target_count} 件（overflow=${overflow}）"
+
+  local pr_iter
+  pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]" 2>/dev/null || echo "")
+  if [ -z "$pr_iter" ]; then
+    return 0
+  fi
+
+  local processed=0
+  while IFS= read -r pr_json; do
+    [ -z "$pr_json" ] && continue
+    local pr_number head_ref sha pr_url
+    pr_number=$(echo "$pr_json" | jq -r '.number')
+    head_ref=$(echo "$pr_json"  | jq -r '.headRefName')
+    sha=$(echo "$pr_json"       | jq -r '.headRefOid')
+    pr_url=$(echo "$pr_json"    | jq -r '.url')
+
+    pr_publish_claude_status_from_branch "$pr_number" "$sha" "$head_ref" "$pr_url" || true
+    processed=$((processed + 1))
+  done <<< "$pr_iter"
+
+  pr_log "claude-review catch-up: サマリ processed=${processed} overflow=${overflow}"
   return 0
 }

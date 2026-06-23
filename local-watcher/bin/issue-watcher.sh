@@ -1502,6 +1502,14 @@ process_design_review_release() {
 # （PR_REVIEWER_ENABLED!=true なら即 return 0 で本機能導入前と等価、NFR 1.1）。
 process_pr_reviewer || pr_warn "process_pr_reviewer が想定外のエラーで終了しました（後続 Issue 処理は継続）"
 
+# Issue #374 claude-review Catch-up Processor を PR Reviewer の直後に実行。
+# per-task ループ運用で `publish_claude_review_status` が PR 作成より前の時間軸で発火して
+# WARN skip した分を、open PR scan で読み直して publish する catch-up 経路。
+# AND 二重 opt-in（PR_REVIEWER_STATUS_CHECK_ENABLED=true AND FULL_AUTO_ENABLED=true）が
+# 成立した場合のみ動作。OFF（既定）なら即 return 0 で本機能導入前と等価（NFR 1.1）。
+# `PR_REVIEWER_ENABLED` の値には依存しない（claude-review 単独有効化を維持）。
+process_claude_review_status_catchup || pr_warn "process_claude_review_status_catchup が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+
 # Security Review Processor (#279) を PR Reviewer の直後・PR Iteration の直前に実行。
 # advisory 固定動作（ラベル操作なし）のため PR Reviewer の needs-iteration 付与とは
 # 競合しない。PR タイムライン上で「外部 AI レビュー → セキュリティレビュー → iteration

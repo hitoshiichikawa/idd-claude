@@ -2828,6 +2828,16 @@ required status checks による auto-merge ゲートに組み込めるように
   で抽出した `RESULT: approve` → `state=success`、`RESULT: reject` → `state=failure`。
   target_url は review-notes.md の GitHub blob URL（PR head sha 指定）。
 
+  なお per-task ループ運用（`PER_TASK_LOOP_ENABLED=true`）では Reviewer round=1〜3 直後の
+  publish 試行が PjM の impl PR 作成より前の時間軸に並ぶため、`gh pr list --head <branch>` が
+  PR を解決できず WARN skip で終わるケースが構造的に発生します。これに対する catch-up として、
+  watcher サイクル毎に `process_claude_review_status_catchup`（modules/pr-reviewer.sh）が
+  AND 二重 opt-in 配下で open PR を scan し、対応する head 側の `review-notes.md` から RESULT
+  を読み直して publish します（#374）。GitHub の latest-wins セマンティクスにより、Reviewer
+  ステージ直後の publish と catch-up publish が同じ (sha, context) に重なっても最新値に収束
+  します（Req 4.3 / 4.5）。catch-up は `PR_REVIEWER_ENABLED` の値に依存せず動作するため、
+  claude-review 単独有効化（codex / antigravity を使わない構成）でも catch-up は機能します。
+
 ### Publish の挙動と既知の特性
 
 - **同一 (sha, context) への再 POST**: GitHub Commit Status API の latest-wins 仕様により
