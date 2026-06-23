@@ -803,6 +803,100 @@ _sav_handle_failure() {
   esac
 }
 
+# ─── _SAV_LAST_EXEC_ELAPSED / _SAV_LAST_EXEC_RC（_sav_exec_with_timeout 結果露出 / #377） ───
+#
+# 直近の `_sav_exec_with_timeout` 呼び出しの経過秒数と exit code を露出する
+# モジュールスコープ変数。command substitution 経由ではなく call site が同一プロセスで
+# 呼ぶため、ここに代入した値は呼び出し側から読める。
+# _SAV_LAST_EXEC_RC は本ヘルパーの戻り値と同値（caller 側は `|| rc=$?` で受け取るのが標準）。
+_SAV_LAST_EXEC_ELAPSED=0
+_SAV_LAST_EXEC_RC=0
+
+# ─── _sav_exec_with_timeout ───
+#
+# verify コマンドを wall-clock 制限付きで実行し、孫プロセスを含めて確実に終了させる
+# ヘルパー（#377 Req 2.1〜2.5 / Req 3.1〜3.4）。テスト容易性のため `stage_a_verify_run`
+# から切り出した独立関数として配置する。
+#
+# 設計上の二段防御:
+#   1. `setsid` で verify cmd を新規 session（pgid leader）として起動する。これにより
+#      cmd の子孫プロセス全体が単一の pgid に属し、後段の `kill -- -<pgid>` で一括終了
+#      可能な状態を確立する（util-linux 標準 / macOS は brew 経由で提供、CLAUDE.md 既載）。
+#   2. `timeout --kill-after=<grace> --signal=TERM` を維持し、wall-clock 上限到達時に
+#      まず SIGTERM、grace 秒経過後に SIGKILL を送出する（既存契約 rc=124 / Req 2.3, 2.4）。
+#   3. 復帰後（rc=124 時）に `kill -KILL -- -<pgid>` を best-effort で broadcast し、
+#      timeout 経路で取り残された孫プロセスを確実に掃除する（Req 2.5）。setsid 由来の
+#      pgid は子 bash のものではなく setsid セッション全体のリーダ pid と一致するため、
+#      `kill -- -$child_pid` で session 配下を一括 kill できる。
+#
+# 出力経路（#377 Req 3.1〜3.4）:
+#   - stdout / stderr とも process substitution を使わず、直接ファイルへリダイレクトする
+#     ことで pipe 満杯による write block を物理的に排除する。
+#   - 一時ファイル経路は caller（stage_a_verify_run）が mktemp で作成して渡す。本関数
+#     自身は path を受け取るのみで、削除責務は caller 側にある。
+#
+# 入力:
+#   $1 = cmd       — bash -c に渡す verify コマンド文字列
+#   $2 = timeout   — wall-clock 上限秒数（整数。timeout コマンドの解釈に従う）
+#   $3 = kill_after — grace 秒数（整数。SIGTERM 後の SIGKILL までの猶予）
+#   $4 = stdout_path — stdout の書き出し先（"/dev/null" 許容）
+#   $5 = stderr_path — stderr の書き出し先（"/dev/null" 許容）
+# 戻り値: verify cmd の exit code（タイムアウト時は 124 / GNU timeout 規約）
+# 副作用:
+#   - _SAV_LAST_EXEC_RC / _SAV_LAST_EXEC_ELAPSED を更新（観測性 / Req 4.1）
+#   - $REPO_DIR への cd（subshell 内で完結。caller 環境への副作用なし）
+#   - rc=124 時に pgid 配下の残存プロセスへ SIGKILL を broadcast
+_sav_exec_with_timeout() {
+  local _cmd="$1"
+  local _timeout="$2"
+  local _kill_after="$3"
+  local _stdout_path="$4"
+  local _stderr_path="$5"
+  local _rc=0
+  local _start _end
+
+  # 経過秒計測（date +%s ベース。$SECONDS は subshell 越えで巻き戻る場合があるため避ける）。
+  _start=$(date +%s 2>/dev/null || echo 0)
+
+  # setsid + timeout + bash -c で verify cmd を新規 session で起動する。
+  # 起動形式について:
+  #   - `setsid timeout ... bash -c "$_cmd"` を直接 background 起動して pid を取得する。
+  #     setsid は新規 session を確立し、当該プロセスツリーは独立した process group を持つ。
+  #     timeout は SIGTERM を bash に送るが、setsid 配下なので pgid 全体への broadcast は
+  #     後段の `kill -- -<pgid>` で別途実施する（timeout の SIGTERM 単体では孫に届かない
+  #     ことがあるため）。
+  #   - 出力は process substitution ではなく直接 redirect で受ける（pipe deadlock 回避 /
+  #     Req 3.1, 3.2）。
+  setsid timeout --kill-after="${_kill_after}" --signal=TERM "${_timeout}" \
+      bash -c "cd \"$REPO_DIR\" && $_cmd" \
+      >"$_stdout_path" 2>"$_stderr_path" &
+  local _child_pid=$!
+
+  # 子プロセスの終了を待機。`wait` は signal 受信時に 128+signo を返す可能性があるが、
+  # ここでは timeout 配下なので child pid が exit して通常 rc を返す前提（_rc は 0 / 非 0 /
+  # 124 / 137 等）。
+  wait "$_child_pid" 2>/dev/null || _rc=$?
+
+  _end=$(date +%s 2>/dev/null || echo 0)
+  _SAV_LAST_EXEC_ELAPSED=$(( _end - _start ))
+  if [ "$_SAV_LAST_EXEC_ELAPSED" -lt 0 ]; then
+    # 時計巻き戻り等の異常系では 0 にフォールバック（観測性ログの sanity）。
+    _SAV_LAST_EXEC_ELAPSED=0
+  fi
+
+  # #377 Req 2.4, 2.5: timeout 強制終了経路（rc=124 / SIGKILL は 137）で、setsid セッション
+  # 配下に孫プロセスが残っていれば pgid 全体に SIGKILL を broadcast する。kill 対象の
+  # pgid は child の pid と一致する（setsid 直後の child が pgid leader になる規約）。
+  # best-effort（既に exit 済みなら ESRCH で no-op）。silent fail を許容する（既に全プロセスが
+  # 終了済みのケースが正常 / Req 2.5）。
+  if [ "$_rc" -eq 124 ] || [ "$_rc" -eq 137 ]; then
+    kill -KILL -- "-${_child_pid}" 2>/dev/null || true
+  fi
+
+  _SAV_LAST_EXEC_RC="$_rc"
+  return "$_rc"
+}
+
 # ─── stage_a_verify_run ───
 #
 # Stage A Verify Module の統合ランナー。`run_impl_pipeline` の Stage A 成功直後・
@@ -868,51 +962,72 @@ stage_a_verify_run() {
 
   # ── Execute ──
   local _timeout="${STAGE_A_VERIFY_TIMEOUT:-600}"
+  # #377: timeout 強制終了時の grace 値を env 化（既定 10 = 現行ハードコードと同値）。
+  # 既定値で従来挙動を再現するため未設定時は完全に後方互換（Req 5.1, 5.2）。
+  local _kill_after="${STAGE_A_VERIFY_KILL_AFTER:-10}"
   # cmd の shell エスケープは printf %q で安全側に倒し、ログ復元性を確保する。
-  sav_log "EXEC issue=#${NUMBER:-?} timeout=${_timeout}s cmd=$(printf '%q' "$cmd")"
-  local rc=0
-  # #364: stderr を一時ファイルに別捕捉してパス不在 WARN 降格判定（diff の exit=2 +
-  # No such file or directory）に使う。同時に stdout/stderr の両方を $LOG にも append
-  # して、既存の grep 経路（`grep '\[.*\] stage-a-verify:'` / FAILED / TIMEOUT 行の追跡）と
-  # 後続トラブルシュート（実コマンドの実出力閲覧）を温存する（NFR 1.1 / Req 3.x）。
-  # 一時ファイルは $TMPDIR 配下に mktemp で作り、ENV による予測攻撃を防ぐ（CLAUDE.md §5/§6）。
-  local _stderr_path
+  sav_log "EXEC issue=#${NUMBER:-?} timeout=${_timeout}s kill_after=${_kill_after}s cmd=$(printf '%q' "$cmd")"
+
+  # #364 / #377: 出力を一時ファイル経由で捕捉する。
+  #   - #364: stderr を別捕捉してパス不在 WARN 降格判定の入力にする。
+  #   - #377: process substitution（`> >(tee ...)` / `2> >(tee ...)`）を完全に廃止し、
+  #     stdout/stderr ともに直接 mktemp ファイルへリダイレクトする。process substitution は
+  #     verify cmd の孫プロセスが pipe write-end を握り続けると read 側 subshell が EOF
+  #     を受け取れず永久 wait する deadlock 経路を持っていた（#374 で 1h21m hang を観測）。
+  #     一時ファイル方式なら write block が起きず、timeout signal の伝播が阻害されない
+  #     （Req 3.1, 3.2）。verify 完了後に両 tempfile を $LOG へ append することで既存 grep
+  #     経路（`grep '\[.*\] stage-a-verify:'` / FAILED / TIMEOUT 行抽出）を温存する（Req 3.3）。
+  # 一時ファイルは mktemp で作り、ENV による予測攻撃を防ぐ（CLAUDE.md §5/§6 / NFR 4.2）。
+  local _stdout_path _stderr_path
+  _stdout_path=$(mktemp 2>/dev/null) || _stdout_path=""
   _stderr_path=$(mktemp 2>/dev/null) || _stderr_path=""
-  if [ -z "$_stderr_path" ]; then
-    # mktemp 失敗時は WARN 降格判定を skip して従来挙動に倒す（fail-open）。
+
+  local rc=0
+  local _elapsed=0
+  if [ -z "$_stdout_path" ] || [ -z "$_stderr_path" ]; then
+    # mktemp 失敗時は WARN 降格判定（stderr 解析）を skip して従来挙動に倒す（fail-open）。
+    # process substitution は使わず、ここでも redirect 経路で deadlock を回避する。
     sav_warn "mktemp に失敗したため stderr 捕捉せずに従来経路で実行"
-    (cd "$REPO_DIR" && timeout --kill-after=10 "$_timeout" bash -c "$cmd") \
-        >> "$LOG" 2>&1 || rc=$?
+    # 残ったほうの tempfile があれば掃除
+    if [ -n "$_stdout_path" ]; then rm -f "$_stdout_path" 2>/dev/null || true; fi
+    if [ -n "$_stderr_path" ]; then rm -f "$_stderr_path" 2>/dev/null || true; fi
+    _stdout_path=""
+    _stderr_path=""
+    _sav_exec_with_timeout "$cmd" "$_timeout" "$_kill_after" "/dev/null" "/dev/null" || rc=$?
+    _elapsed="${_SAV_LAST_EXEC_ELAPSED:-0}"
   else
-    # stderr を一時ファイルへ振り分けつつ、$LOG にも同じ stderr を append する（tee 相当）。
-    # bash の Process Substitution（`> >(...)`）で stdout/stderr を別系統に流し、それぞれ
-    # tee で $LOG 末尾に append しつつ stderr のみ _stderr_path にも書く。stdout も後続
-    # トラブルシュートの観測情報なので $LOG に保持する。
-    (cd "$REPO_DIR" && timeout --kill-after=10 "$_timeout" bash -c "$cmd") \
-        > >(tee -a "$LOG" >/dev/null) \
-        2> >(tee -a "$LOG" "$_stderr_path" >/dev/null) \
-        || rc=$?
-    # bash の Process Substitution は親より遅延終了することがあり、その後の `cat _stderr_path`
-    # が空を返す事象を起こす。`wait` で子孫の収束を待つ（fail-safe / 既に終了済みなら no-op）。
-    wait 2>/dev/null || true
+    _sav_exec_with_timeout "$cmd" "$_timeout" "$_kill_after" "$_stdout_path" "$_stderr_path" || rc=$?
+    _elapsed="${_SAV_LAST_EXEC_ELAPSED:-0}"
+    # 既存 grep 経路維持のため stdout/stderr を $LOG へ append する（Req 3.3）。
+    # 一時ファイル不在は theoretical だが防御的に check。
+    if [ -f "$_stdout_path" ]; then
+      cat "$_stdout_path" >> "$LOG" 2>/dev/null || true
+    fi
+    if [ -f "$_stderr_path" ]; then
+      cat "$_stderr_path" >> "$LOG" 2>/dev/null || true
+    fi
   fi
 
   local _stderr_text=""
   if [ -n "$_stderr_path" ] && [ -f "$_stderr_path" ]; then
     _stderr_text=$(cat "$_stderr_path" 2>/dev/null || true)
-    rm -f "$_stderr_path" 2>/dev/null || true
   fi
+  # tempfile を確実に掃除（trap ではなく明示削除 / mktemp で予測不能名なので残置リスク低）。
+  if [ -n "$_stdout_path" ]; then rm -f "$_stdout_path" 2>/dev/null || true; fi
+  if [ -n "$_stderr_path" ]; then rm -f "$_stderr_path" 2>/dev/null || true; fi
 
   # ── 結果分岐 ──
   case "$rc" in
     0)
-      sav_log "SUCCESS exit=0"
+      sav_log "SUCCESS exit=0 elapsed=${_elapsed}s"
       stage_a_verify_reset_round
       _SAV_LAST_OUTCOME="success"
       return 0
       ;;
     124)
-      sav_warn "TIMEOUT timeout=${_timeout}s exit=124"
+      # #377 Req 4.1, 4.2: 診断ログに elapsed と kill_after を追加し、事後解析で
+      # 「設定 timeout に対して実際に何秒で kill されたか」を即座に特定できるようにする。
+      sav_warn "TIMEOUT timeout=${_timeout}s kill_after=${_kill_after}s elapsed=${_elapsed}s exit=124 cmd=$(printf '%q' "$cmd")"
       local _hf_rc=0
       _sav_handle_failure "timeout" "$_timeout" || _hf_rc=$?
       # _sav_handle_failure 戻り値（1=round1 差し戻し / 2=round2 escalate）を run サマリ
