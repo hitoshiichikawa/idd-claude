@@ -21,7 +21,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 4.1, 4.3, 4.4, NFR 1.1, NFR 1.3_
   - _Boundary: stale-pickup-reaper.sh (Config + Gate), core_utils.sh (Logger)_
 
-- [ ] 2. 永続化レイヤ（marker JSON state）を実装
+- [x] 2. 永続化レイヤ（marker JSON state）を実装
   - `local-watcher/bin/modules/stale-pickup-reaper.sh` を新規作成し、ファイル冒頭
     コメントで「用途 / 配置先 / 依存 / セットアップ参照先」を `failed-recovery.sh`
     と同パターンで明記
