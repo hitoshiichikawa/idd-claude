@@ -159,6 +159,117 @@ full_auto_enabled() {
     *) return 1 ;;
   esac
 }
+
+# ─── extract_review_result_token <path> ───
+#
+# review-notes.md 全文を scan し、`RESULT: approve` または `RESULT: reject` トークンの
+# **最後のマッチ**を採用して `approve` / `reject` を stdout に echo する（Issue #63）。
+#
+# 抽出ルール（Issue #63 Req 1.x）:
+#   - 全文 scan（行頭固定マッチではない）
+#   - 行頭・行末のバッククォート / bullet (`-` `*`) / blockquote (`>`) / 引用符 / 空白等の
+#     decoration を許容（前後の文字を問わない）
+#   - 同一行内に末尾プローズが続いても許容（例: `RESULT: approve ...`）
+#   - 複数マッチ時は **ファイル順で最後のマッチ** を採用
+#   - lowercase の `approve` / `reject` のみ受理（`Approve` / `APPROVE` は不可、Req 1.7）
+#   - "approve" / "reject" の前後は word boundary 相当（後続が単語文字なら不採用）
+#
+# 戻り値:
+#   0 = マッチあり（stdout に approve / reject）
+#   1 = マッチなし（stdout は空、ファイル無も含む）
+#
+# 配置メモ (#385): `parse_review_result` の依存関数として、`parse_review_result` と
+# 同じく Config ブロック直後に前出ししている。元位置（line 6558 相当）からの move 理由は
+# `parse_review_result` 側コメント参照。
+extract_review_result_token() {
+  local path="$1"
+  [ -f "$path" ] || return 1
+
+  # `RESULT:` の後に 1 個以上の空白、続いて `approve` または `reject`、
+  # その直後が単語文字でない（または行末）場合のみマッチ。
+  # grep -oE で全マッチを行ごとに抽出 → tail -1 で最後の 1 件を採用。
+  # set -euo pipefail 下で grep no-match (rc=1) を呑み込むため `|| true` を付与。
+  local matches last
+  matches=$(grep -oE 'RESULT:[[:space:]]+(approve|reject)([^[:alnum:]_]|$)' "$path" 2>/dev/null || true)
+  [ -n "$matches" ] || return 1
+  last=$(printf '%s\n' "$matches" | tail -n 1)
+
+  # 末尾の境界文字を取り除いて approve / reject だけを残す。
+  case "$last" in
+    *approve*) echo "approve"; return 0 ;;
+    *reject*)  echo "reject";  return 0 ;;
+  esac
+  return 1
+}
+
+# ─── parse_review_result <path> ───
+#
+# review-notes.md から RESULT 行（最後に出現するもの）と Findings の Category / Target を
+# 抽出する。RESULT 行抽出は `extract_review_result_token` に委譲し、装飾・インライン記述
+# (Issue #63) に耐性を持つ。
+# stdout に TSV 1 行で出力: <result>\t<categories>\t<target_ids>
+#
+# - result      ∈ {approve, reject}
+# - categories  = カンマ区切り（reject 時のみ。approve 時は空文字）
+# - target_ids  = カンマ区切り requirement ID または `boundary:<component>` 形式
+#
+# 戻り値:
+#   0 = 抽出成功
+#   2 = ファイル有だが RESULT トークン欠落 / 値不正（装飾起因の parse 失敗）
+#   3 = ファイル不在（Reviewer subagent が Write 漏れ / Issue #296 で導入）
+#
+# rc=2 と rc=3 の使い分け（Issue #296 Req 1）:
+#   - rc=2 は #63 で確立した装飾耐性パースを経た上でも RESULT 行が抽出できなかった
+#     ケース（「装飾起因 parse 失敗」）。
+#   - rc=3 は `review-notes.md` 自体が存在しないケース（Reviewer subagent の Write 漏れ）。
+#     呼び出し側で 1 回限定リトライを試みる経路を発火させるためのシグナル。
+#
+# 配置メモ (#385): bash は top-level コードを順次実行するため、関数定義は最初の
+# 呼び出し（`process_claude_review_status_catchup` の call site / line 1573 相当）
+# より物理的に前に配置する必要がある。元 #349 / #374 で本関数をスクリプト中盤
+# （line 6617 相当）に置いた結果、catch-up 経路から見て前方参照となり catch-up の
+# `declare -F parse_review_result` ガードが false 評価となって `reason=parse-helper-missing`
+# の WARN を残して safe-skip し、AND 二重 opt-in（`PR_REVIEWER_STATUS_CHECK_ENABLED=true`
+# AND `FULL_AUTO_ENABLED=true`）環境で `claude-review` commit status が永久に publish
+# されない silent load-order bug を発生させた。#385 では本関数を `full_auto_enabled` の
+# 直後（Config ブロック内）に move し、全 caller が定義位置より後ろに来ることを構造的に
+# 保証する。catch-up 側の `declare -F` 保険ガードは温存する（Req 3.3）。
+parse_review_result() {
+  local path="$1"
+  if [ ! -f "$path" ]; then
+    # Issue #296 Req 1.1: ファイル不在は装飾起因 parse 失敗（rc=2）とは区別して rc=3 で返す。
+    return 3
+  fi
+
+  local result
+  if ! result=$(extract_review_result_token "$path"); then
+    # Issue #296 Req 1.2: ファイル存在下での RESULT 抽出失敗は装飾起因 parse 失敗として rc=2。
+    return 2
+  fi
+  case "$result" in
+    approve|reject) ;;
+    *) return 2 ;;
+  esac
+
+  local categories=""
+  local target_ids=""
+  if [ "$result" = "reject" ]; then
+    # Findings ブロックの "**Category**: ..." 行と "**Target**: ..." 行を抽出。
+    # Findings は markdown bullet なので、行頭の "- " も含めて許容する。
+    categories=$(grep -E '^[[:space:]]*-[[:space:]]+\*\*Category\*\*:' "$path" \
+                   | sed -E 's/^[[:space:]]*-[[:space:]]+\*\*Category\*\*:[[:space:]]*//' \
+                   | sed -E 's/[[:space:]]+$//' \
+                   | paste -sd, - || true)
+    target_ids=$(grep -E '^[[:space:]]*-[[:space:]]+\*\*Target\*\*:' "$path" \
+                   | sed -E 's/^[[:space:]]*-[[:space:]]+\*\*Target\*\*:[[:space:]]*//' \
+                   | sed -E 's/（.*$//' \
+                   | sed -E 's/[[:space:]]+$//' \
+                   | paste -sd, - || true)
+  fi
+
+  printf '%s\t%s\t%s\n' "$result" "$categories" "$target_ids"
+  return 0
+}
 # Issue #362: needs-decisions 自動続行のモード切替。`safe` 分類かつ `FULL_AUTO_ENABLED=true`
 # のときのみ PM 第一推奨で自動続行する。値は 3 値（`all-human` / `classified` / `all-auto`）
 # のいずれかに正規化し、未設定 / 空 / 不正値・typo はすべて安全側 `all-human` に倒す
@@ -6555,101 +6666,10 @@ ${design_pr_note}
 EOF
 }
 
-# ─── extract_review_result_token <path> ───
-#
-# review-notes.md 全文を scan し、`RESULT: approve` または `RESULT: reject` トークンの
-# **最後のマッチ**を採用して `approve` / `reject` を stdout に echo する（Issue #63）。
-#
-# 抽出ルール（Issue #63 Req 1.x）:
-#   - 全文 scan（行頭固定マッチではない）
-#   - 行頭・行末のバッククォート / bullet (`-` `*`) / blockquote (`>`) / 引用符 / 空白等の
-#     decoration を許容（前後の文字を問わない）
-#   - 同一行内に末尾プローズが続いても許容（例: `RESULT: approve ...`）
-#   - 複数マッチ時は **ファイル順で最後のマッチ** を採用
-#   - lowercase の `approve` / `reject` のみ受理（`Approve` / `APPROVE` は不可、Req 1.7）
-#   - "approve" / "reject" の前後は word boundary 相当（後続が単語文字なら不採用）
-#
-# 戻り値:
-#   0 = マッチあり（stdout に approve / reject）
-#   1 = マッチなし（stdout は空、ファイル無も含む）
-extract_review_result_token() {
-  local path="$1"
-  [ -f "$path" ] || return 1
-
-  # `RESULT:` の後に 1 個以上の空白、続いて `approve` または `reject`、
-  # その直後が単語文字でない（または行末）場合のみマッチ。
-  # grep -oE で全マッチを行ごとに抽出 → tail -1 で最後の 1 件を採用。
-  # set -euo pipefail 下で grep no-match (rc=1) を呑み込むため `|| true` を付与。
-  local matches last
-  matches=$(grep -oE 'RESULT:[[:space:]]+(approve|reject)([^[:alnum:]_]|$)' "$path" 2>/dev/null || true)
-  [ -n "$matches" ] || return 1
-  last=$(printf '%s\n' "$matches" | tail -n 1)
-
-  # 末尾の境界文字を取り除いて approve / reject だけを残す。
-  case "$last" in
-    *approve*) echo "approve"; return 0 ;;
-    *reject*)  echo "reject";  return 0 ;;
-  esac
-  return 1
-}
-
-# ─── parse_review_result <path> ───
-#
-# review-notes.md から RESULT 行（最後に出現するもの）と Findings の Category / Target を
-# 抽出する。RESULT 行抽出は `extract_review_result_token` に委譲し、装飾・インライン記述
-# (Issue #63) に耐性を持つ。
-# stdout に TSV 1 行で出力: <result>\t<categories>\t<target_ids>
-#
-# - result      ∈ {approve, reject}
-# - categories  = カンマ区切り（reject 時のみ。approve 時は空文字）
-# - target_ids  = カンマ区切り requirement ID または `boundary:<component>` 形式
-#
-# 戻り値:
-#   0 = 抽出成功
-#   2 = ファイル有だが RESULT トークン欠落 / 値不正（装飾起因の parse 失敗）
-#   3 = ファイル不在（Reviewer subagent が Write 漏れ / Issue #296 で導入）
-#
-# rc=2 と rc=3 の使い分け（Issue #296 Req 1）:
-#   - rc=2 は #63 で確立した装飾耐性パースを経た上でも RESULT 行が抽出できなかった
-#     ケース（「装飾起因 parse 失敗」）。
-#   - rc=3 は `review-notes.md` 自体が存在しないケース（Reviewer subagent の Write 漏れ）。
-#     呼び出し側で 1 回限定リトライを試みる経路を発火させるためのシグナル。
-parse_review_result() {
-  local path="$1"
-  if [ ! -f "$path" ]; then
-    # Issue #296 Req 1.1: ファイル不在は装飾起因 parse 失敗（rc=2）とは区別して rc=3 で返す。
-    return 3
-  fi
-
-  local result
-  if ! result=$(extract_review_result_token "$path"); then
-    # Issue #296 Req 1.2: ファイル存在下での RESULT 抽出失敗は装飾起因 parse 失敗として rc=2。
-    return 2
-  fi
-  case "$result" in
-    approve|reject) ;;
-    *) return 2 ;;
-  esac
-
-  local categories=""
-  local target_ids=""
-  if [ "$result" = "reject" ]; then
-    # Findings ブロックの "**Category**: ..." 行と "**Target**: ..." 行を抽出。
-    # Findings は markdown bullet なので、行頭の "- " も含めて許容する。
-    categories=$(grep -E '^[[:space:]]*-[[:space:]]+\*\*Category\*\*:' "$path" \
-                   | sed -E 's/^[[:space:]]*-[[:space:]]+\*\*Category\*\*:[[:space:]]*//' \
-                   | sed -E 's/[[:space:]]+$//' \
-                   | paste -sd, - || true)
-    target_ids=$(grep -E '^[[:space:]]*-[[:space:]]+\*\*Target\*\*:' "$path" \
-                   | sed -E 's/^[[:space:]]*-[[:space:]]+\*\*Target\*\*:[[:space:]]*//' \
-                   | sed -E 's/（.*$//' \
-                   | sed -E 's/[[:space:]]+$//' \
-                   | paste -sd, - || true)
-  fi
-
-  printf '%s\t%s\t%s\n' "$result" "$categories" "$target_ids"
-  return 0
-}
+# Issue #349 / #374 / #385: `extract_review_result_token()` / `parse_review_result()` の定義は
+# Config ブロック直後（line 184 / line 237 付近）に move 済み。bash の top-level 逐次実行下で
+# `process_claude_review_status_catchup`（line 1573 付近）から前方参照されないことを構造的に
+# 保証するため。詳細は move 先の関数ヘッダコメント参照。
 
 # ─── reviewer_skip_files_match <pattern> ───
 #
