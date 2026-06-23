@@ -149,7 +149,7 @@
   - _Boundary: issue-watcher.sh (REQUIRED_MODULES + call site)_
   - _Depends: 5_
 
-- [ ] 7. README / CLAUDE.md 反映と最終検証
+- [x] 7. README / CLAUDE.md 反映と最終検証
   - `README.md`:
     - 「オプション機能（標準有効 / 常時有効）一覧」表に `STALE_PICKUP_REAPER_ENABLED`
       行を追加（既定 OFF / opt-in / 二重 opt-in 不要を明記）
