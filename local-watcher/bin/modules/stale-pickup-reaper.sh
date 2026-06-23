@@ -14,8 +14,9 @@
 #   - sr_load_marker   : marker JSON 読み出し（不在 / parse 失敗で `{}` を返す fail-open）
 #   - sr_save_marker   : marker JSON の atomic write（mktemp → mv -f）
 #
-#   後続 task で以下を追加予定（task 3 以降）:
-#   - sr_fetch_candidates  : 候補列挙（label filter）
+#   - sr_fetch_candidates  : 候補列挙（label filter / claude-picked-up + claude-claimed）
+#
+#   後続 task で以下を追加予定（task 4 以降）:
 #   - sr_check_marker_age / sr_check_slot_lock / sr_check_session / sr_is_active
 #   - sr_revert_to_auto_dev : ラベル除去 + auto-dev 残存確認
 #   - process_stale_pickup_reaper : watcher 本体からの単一エントリ
@@ -201,5 +202,110 @@ sr_save_marker() {
     sr_warn "sr_save_marker: atomic rename 失敗 issue=$issue_number"
     return 1
   fi
+  return 0
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Candidate Selection Layer
+#
+# `claude-picked-up` / `claude-claimed` ラベルが残ったままの open Issue を server-side
+# filter で列挙し、Stale Pickup Reaper の入力となる候補集合を返す。failed-recovery
+# (#359) の `fr_fetch_failed_issues` と同方針の 4 段ガード（timeout / JSON 検証 /
+# 空入力 / 非 array fallback）を踏襲し、取得失敗時は空 JSON 配列 `[]` を返して
+# `sr_warn` 1 行で警告（fail-continue）。
+#
+# 関連 AC:
+#   - Req 2.1: claude-picked-up ラベル付き Issue を走査対象とする
+#   - Req 2.2: claude-claimed ラベル付き Issue も走査対象に含める
+#   - Req 2.3: 人間判断待ちラベル（needs-decisions / awaiting-design-review /
+#              needs-quota-wait / blocked / staged-for-release / hold）を server-side
+#              filter で除外
+#   - Req 2.4: claude-failed Issue は failed-recovery の領分のため除外
+#   - Req 2.5: server-side label filter のみで走査する（client-side filter 不使用）
+#   - NFR 1.2: `--repo` / `--state open` で対象範囲を明示し既存 dispatcher と整合
+#   - NFR 3.1: 既存 `LABEL_*` 定数を参照し未定義ラベル文字列の inline 展開を避ける
+#   - NFR 5.2: 取得失敗時も非破壊（sr_warn + `[]` 返却 / fail-continue）
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# sr_fetch_candidates: claude-picked-up / claude-claimed Issue 群を列挙する。
+#
+# 仕様:
+#   - 2 クエリを発行する（`gh --search` の `label:"A" OR label:"B"` 構文は
+#     server-side で安定しないため、1 次条件を分けて発行し jq で結合する方式を
+#     採用 / failed-recovery と異なる点）。
+#     クエリ 1: `label:"$LABEL_PICKED"` + 除外条件
+#     クエリ 2: `label:"$LABEL_CLAIMED"` + 除外条件
+#   - 除外条件（両クエリ共通 / Req 2.3, 2.4）:
+#       -label:"$LABEL_FAILED"
+#       -label:"$LABEL_NEEDS_DECISIONS"
+#       -label:"$LABEL_AWAITING_DESIGN"
+#       -label:"$LABEL_NEEDS_QUOTA_WAIT"
+#       -label:"$LABEL_BLOCKED"
+#       -label:"$LABEL_STAGED_FOR_RELEASE"
+#       -label:"hold"   # LABEL_HOLD 定数は未定義のため literal で渡す（design.md 準拠）
+#   - 取得後、jq で 2 結果を結合 + `unique_by(.number)` で dedup し、`--limit
+#     "$STALE_PICKUP_REAPER_MAX_ISSUES"` で truncate（jq 側で `.[0:N]`）。
+#   - `timeout "$STALE_PICKUP_REAPER_GH_TIMEOUT"` で外部呼び出しを保護。
+#   - 取得失敗（timeout / gh エラー / 非 JSON / 空文字）時は `sr_warn` 1 行 + `[]` 返却。
+#
+# Stdout: JSON 配列文字列（候補なし / 取得失敗時は `[]`）
+# Returns: 0（常に。fail-continue）
+sr_fetch_candidates() {
+  local exclude_filter
+  exclude_filter="-label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_BLOCKED\" -label:\"$LABEL_STAGED_FOR_RELEASE\" -label:\"hold\""
+
+  # クエリ 1: claude-picked-up 候補
+  local picked_json
+  if ! picked_json=$(timeout "$STALE_PICKUP_REAPER_GH_TIMEOUT" gh issue list \
+      --repo "$REPO" \
+      --state open \
+      --search "label:\"$LABEL_PICKED\" $exclude_filter" \
+      --json number,labels,title,url,updatedAt \
+      --limit "$STALE_PICKUP_REAPER_MAX_ISSUES" 2>/dev/null); then
+    sr_warn "sr_fetch_candidates: gh issue list 失敗（label:$LABEL_PICKED / timeout または API エラー）"
+    echo "[]"
+    return 0
+  fi
+  # 空文字 / 非 JSON は安全側で `[]` に正規化（fr_fetch_failed_issues と同パターン）
+  if [ -z "$picked_json" ]; then
+    picked_json="[]"
+  fi
+  if ! printf '%s' "$picked_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    sr_warn "sr_fetch_candidates: gh issue list が JSON 配列を返さなかった（label:$LABEL_PICKED）"
+    picked_json="[]"
+  fi
+
+  # クエリ 2: claude-claimed 候補
+  local claimed_json
+  if ! claimed_json=$(timeout "$STALE_PICKUP_REAPER_GH_TIMEOUT" gh issue list \
+      --repo "$REPO" \
+      --state open \
+      --search "label:\"$LABEL_CLAIMED\" $exclude_filter" \
+      --json number,labels,title,url,updatedAt \
+      --limit "$STALE_PICKUP_REAPER_MAX_ISSUES" 2>/dev/null); then
+    sr_warn "sr_fetch_candidates: gh issue list 失敗（label:$LABEL_CLAIMED / timeout または API エラー）"
+    echo "[]"
+    return 0
+  fi
+  if [ -z "$claimed_json" ]; then
+    claimed_json="[]"
+  fi
+  if ! printf '%s' "$claimed_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    sr_warn "sr_fetch_candidates: gh issue list が JSON 配列を返さなかった（label:$LABEL_CLAIMED）"
+    claimed_json="[]"
+  fi
+
+  # 2 結果を結合 + dedup + truncate（jq で完結 / NFR 3.1: --argjson 経由）
+  local merged_json
+  if ! merged_json=$(jq -n -c \
+      --argjson picked "$picked_json" \
+      --argjson claimed "$claimed_json" \
+      --argjson limit "$STALE_PICKUP_REAPER_MAX_ISSUES" \
+      '($picked + $claimed) | unique_by(.number) | .[0:$limit]' 2>/dev/null); then
+    sr_warn "sr_fetch_candidates: jq 結合 / dedup 失敗"
+    echo "[]"
+    return 0
+  fi
+  printf '%s' "$merged_json"
   return 0
 }
