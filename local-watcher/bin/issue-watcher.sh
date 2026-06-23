@@ -10988,6 +10988,10 @@ _slot_run_issue() {
       return 1
     fi
     slot_log "ラベル付け替え: claude-claimed → claude-picked-up（impl 着手）"
+    # Issue #390: impl 着手（claude-pickup）を Slack に 1 通通知（gate / URL preflight /
+    # fail-open はすべて sn_notify 内に閉じている。`|| true` は既存 5 イベント callsite と
+    # 同形の fail-open 防御）。
+    sn_notify claude-pickup "$NUMBER" "https://github.com/$REPO/issues/$NUMBER" success "mode=${MODE} slot=${IDD_SLOT_NUMBER}" || true
   fi
 
   # ── ピックアップ表明コメント（claim 表明ラベルは Dispatcher が事前に付与済）──
