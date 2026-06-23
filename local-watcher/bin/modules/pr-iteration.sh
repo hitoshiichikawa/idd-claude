@@ -224,18 +224,28 @@ pi_read_last_run() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# pi_general_filter_self: watcher 自身の自動投稿コメントを除外（marker ベース）
+# pi_general_filter_self: PR Iteration Processor 自身の自動投稿コメントを除外
+#   （prefix `idd-claude:pr-iteration` 単位の判定 / Issue #400 Req 2）
 #   入力: stdin に一般コメント JSON 配列
 #   出力: stdout にフィルタ後の JSON 配列
-#   AC #55 Req 2.1, 2.7
+#   AC #55 Req 2.1, 2.7 / #400 Req 2.1〜2.5
 #
-#   判定: comment.body 中に `idd-claude:` で始まる HTML hidden marker を含むなら
-#   watcher 投稿として除外する。GitHub user 同一性に依存しない（cron 実行ホストが
-#   異なる GitHub user で動いていても確実に除外できる）。`@claude` 文字列には
-#   一切依存しない（Req 2.7）。
+#   判定: comment.body 中に `idd-claude:pr-iteration` を含む HTML hidden marker
+#         （`idd-claude:pr-iteration round=...` / `idd-claude:pr-iteration-processing` /
+#         `idd-claude:pr-iteration-529-warning` 等）を持つコメントを self として除外する。
+#         GitHub user 同一性に依存しない（cron 実行ホストが異なる GitHub user で動いて
+#         いても確実に除外できる）。`@claude` 文字列には一切依存しない（Req 2.7）。
+#
+#   Issue #400: 旧実装は `contains("idd-claude:")` で **全** prefix を除外していたため
+#         PR Reviewer 投稿 (`idd-claude:pr-reviewer`) や他系統 (security-review /
+#         quota-reset / auto-rebase 等) も self として落ちる事故が起きていた。本関数は
+#         `idd-claude:pr-iteration` prefix のみを対象とし、他系統の hidden marker は
+#         keep する。`idd-claude:pr-iteration` という substring 判定は前方一致互換で、
+#         将来 `idd-claude:pr-iteration-foo` 形式の新サブ種別が追加されても自動的に
+#         self として扱われる（#400 Req 2.5 前方互換）。
 # ─────────────────────────────────────────────────────────────────────────────
 pi_general_filter_self() {
-  jq '[.[] | select((.body // "") | contains("idd-claude:") | not)]'
+  jq '[.[] | select((.body // "") | contains("idd-claude:pr-iteration") | not)]'
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -863,6 +873,11 @@ pi_build_iteration_prompt() {
   # `git diff <base>..<head> -- <path>` を Bash ツールで実行して取得する設計に切り替えた）
 
   # AC 3.1: 最新 review の line コメントを取得（reviews 配列の最後の要素 = 時系列で最新）
+  #
+  # Issue #400 Req 5.2 / 5.3: line-comment 経路にも一般コメント経路と同じ self-filter 規約
+  # （`idd-claude:pr-iteration` 含むコメントを除外、他 prefix は keep）を適用する。Req 5.1
+  # の通り「`idd-claude:` を含む文字列を一律除外する self-filter は新規導入しない」原則を守り、
+  # PR Iteration Processor 自身の marker のみを限定除外する。
   local line_comments_json="[]"
   local reviews_json latest_review_id
   if reviews_json=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
@@ -872,7 +887,10 @@ pi_build_iteration_prompt() {
       local raw_line
       if raw_line=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
           gh api "/repos/${REPO}/pulls/${pr_number}/reviews/${latest_review_id}/comments" 2>/dev/null); then
-        line_comments_json=$(echo "$raw_line" | jq '[.[] | {id, path, line, user: (.user.login // ""), body}]')
+        line_comments_json=$(echo "$raw_line" \
+          | jq '[.[]
+                | {id, path, line, user: (.user.login // ""), body}
+                | select((.body // "") | contains("idd-claude:pr-iteration") | not)]')
       fi
     fi
   fi
