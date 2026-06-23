@@ -130,6 +130,35 @@ case "$FULL_AUTO_ENABLED" in
   true) : ;;
   *)    FULL_AUTO_ENABLED="false" ;;
 esac
+# Issue #348 / #375: full-auto 系 processor の単一 kill switch 判定関数。
+# 引数: なし
+# 戻り値: 0 = kill switch ON（= full-auto を許可） / 1 = OFF（= 全 full-auto 抑止）
+# 副作用: なし（純粋関数）
+#
+# `FULL_AUTO_ENABLED` env を `=true` 厳密一致で判定する（Req 1.2, 1.3）。
+# 値正規化に失敗した状態（未設定 / 空 / `False` / `True` / `1` / `on` / typo）は
+# すべて OFF として扱う（NFR 1.1 安全側）。本関数は **すべての** full-auto 系
+# processor の入口で AND 条件として参照される（Req 2.1〜2.5）。`full_auto_enabled`
+# が 1 を返した場合、当該 processor は外部副作用なしで早期 return する（Req 2.1〜2.5）。
+#
+# 配置メモ (#375): bash は top-level コードを順次実行するため、関数定義は最初の
+# 呼び出し（`process_auto_merge` / `process_auto_merge_design` の call site /
+# line 1168 / 1178 相当、および `dr_unblock_sweep` / `process_needs_decisions_auto` /
+# `dep-cycle-detect` 等）より物理的に前に配置する必要がある。元 #348 で本関数を
+# スクリプト末尾近く（line 9926 相当）に置いた結果、call site から見て前方参照と
+# なり `command not found` (rc=127) を返す load-order bug を発生させた。#375 では
+# 本関数を `FULL_AUTO_ENABLED` 正規化処理の直後（Config ブロック内）に move し、
+# 全 caller が定義位置より後ろに来ることを構造的に保証する。
+#
+# Config ブロックで値正規化が完了している前提だが、外部から `FULL_AUTO_ENABLED` を
+# unset した状態で本関数だけが evaluation される万が一の経路でも安全側に倒すため、
+# `${FULL_AUTO_ENABLED:-false}` で fallback する。
+full_auto_enabled() {
+  case "${FULL_AUTO_ENABLED:-false}" in
+    true) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 # Issue #362: needs-decisions 自動続行のモード切替。`safe` 分類かつ `FULL_AUTO_ENABLED=true`
 # のときのみ PM 第一推奨で自動続行する。値は 3 値（`all-human` / `classified` / `all-auto`）
 # のいずれかに正規化し、未設定 / 空 / 不正値・typo はすべて安全側 `all-human` に倒す
@@ -9909,26 +9938,9 @@ dr_unblock_gate_enabled() {
   esac
 }
 
-# Issue #348: full-auto 系 processor の単一 kill switch 判定関数。
-# 引数: なし
-# 戻り値: 0 = kill switch ON（= full-auto を許可） / 1 = OFF（= 全 full-auto 抑止）
-# 副作用: なし（純粋関数）
-#
-# `FULL_AUTO_ENABLED` env を `=true` 厳密一致で判定する（Req 1.2, 1.3）。
-# 値正規化に失敗した状態（未設定 / 空 / `False` / `True` / `1` / `on` / typo）は
-# すべて OFF として扱う（NFR 1.1 安全側）。本関数は **すべての** full-auto 系
-# processor の入口で AND 条件として参照される（Req 2.1〜2.5）。`full_auto_enabled`
-# が 1 を返した場合、当該 processor は外部副作用なしで早期 return する（Req 2.1〜2.5）。
-#
-# Config ブロックで値正規化が完了している前提だが、外部から `FULL_AUTO_ENABLED` を
-# unset した状態で本関数だけが evaluation される万が一の経路でも安全側に倒すため、
-# `${FULL_AUTO_ENABLED:-false}` で fallback する。
-full_auto_enabled() {
-  case "${FULL_AUTO_ENABLED:-false}" in
-    true) return 0 ;;
-    *) return 1 ;;
-  esac
-}
+# Issue #348 / #375: `full_auto_enabled()` の定義は Config ブロック直後（line 133 付近）に
+# 移動済み。bash の top-level 実行順序上、関数定義は最初の呼び出し（process_auto_merge /
+# process_auto_merge_design 等）より前に置く必要があるため、本箇所には残さない。
 
 # ─── publish_claude_review_status <round> ─────────────────────────────────────
 #
