@@ -9700,8 +9700,21 @@ _resume_branch_assert_slug_match() {
 # 構造化ログ prefix `dr:` で grep 集計できるようにする（Req 6.1〜6.3 / NFR 2.1〜2.2）。
 # helper スクリプト化はせず watcher 単体で完結させる（install.sh の配布対象拡張を
 # 避けるため）。
+#
+# Issue #392 (Req 1.1, 1.2 / NFR 3.1): `dr_log` / `dr_warn` は stderr に書き出す。
+# 理由: `dr_resolve_one` は stdout を「機械可読な戻り値」（`resolved` / `open` /
+# `closed unmerged` / `api error` のいずれか厳密 1 行）に予約しており、その実装中で
+# `dr_log` を呼ぶ経路（OPEN + `staged-for-release` 解決パス）が存在する。`dr_log`
+# が stdout に echo すると、`dr_unblock_resolve_one_issue` 側の
+# `verdict=$(dr_resolve_one ...)` で **ログ行と戻り値の両方** が `$verdict` に
+# 連結捕捉され、未知の verdict と判定されて `BASE_BRANCH != main` 環境の
+# `DEP_AUTO_UNBLOCK` が完全停止する事象が実機再現した（#117 / #115）。`dr_warn` は
+# 既に `>&2` だったが、本意は「stdout 汚染ゼロ」なので `dr_log` も `>&2` に揃える。
+# cron 経由（`>>cron.log 2>&1`）では stderr も cron.log へ集約されるため、既存
+# 集計 grep（`grep ' dr:'` / `grep 'verdict='` 等）は本修正で破壊しない（NFR 3.1）。
+# `dr_error` は本修正前から `>&2`（Req 4.3）。
 dr_log() {
-  echo "[$(date '+%F %T')] dr: $*"
+  echo "[$(date '+%F %T')] dr: $*" >&2
 }
 dr_warn() {
   echo "[$(date '+%F %T')] dr: WARN: $*" >&2
