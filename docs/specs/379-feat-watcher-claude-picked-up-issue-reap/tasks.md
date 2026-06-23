@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Config ブロックと logger を追加（gate / env 正規化 / 観測点）
+- [x] 1. Config ブロックと logger を追加（gate / env 正規化 / 観測点）
   - `issue-watcher.sh` の Failed Recovery Config ブロック直後（行 609 付近）に
     Stale Pickup Reaper 設定節を新規追加し、以下 5 env を宣言:
     - `STALE_PICKUP_REAPER_ENABLED`（既定 `false`、`true` 厳密一致のみ ON、それ以外は
@@ -21,7 +21,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 4.1, 4.3, 4.4, NFR 1.1, NFR 1.3_
   - _Boundary: stale-pickup-reaper.sh (Config + Gate), core_utils.sh (Logger)_
 
-- [ ] 2. 永続化レイヤ（marker JSON state）を実装
+- [x] 2. 永続化レイヤ（marker JSON state）を実装
   - `local-watcher/bin/modules/stale-pickup-reaper.sh` を新規作成し、ファイル冒頭
     コメントで「用途 / 配置先 / 依存 / セットアップ参照先」を `failed-recovery.sh`
     と同パターンで明記
@@ -43,7 +43,7 @@
   - _Boundary: stale-pickup-reaper.sh (Persistence Layer)_
   - _Depends: 1_
 
-- [ ] 3. 候補選定レイヤ（gh API filter）を実装
+- [x] 3. 候補選定レイヤ（gh API filter）を実装
   - `sr_fetch_candidates` を実装:
     - `gh issue list --search "label:\"$LABEL_PICKED\" -label:\"$LABEL_FAILED\"
       -label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\"
@@ -66,7 +66,7 @@
   - _Boundary: stale-pickup-reaper.sh (Candidate Selection Layer)_
   - _Depends: 2_
 
-- [ ] 4. アクティブ判定レイヤ（3 観点 AND）を実装
+- [x] 4. アクティブ判定レイヤ（3 観点 AND）を実装
   - 以下 4 関数を実装:
     - `sr_check_marker_age "<marker_json>"` — `first_seen_at` を `date -d` (Linux) /
       `date -j -f` (macOS 互換) で epoch 化し、現在時刻との差を分換算で閾値判定。
@@ -96,7 +96,7 @@
   - _Boundary: stale-pickup-reaper.sh (Active Decision Layer)_
   - _Depends: 2_
 
-- [ ] 5. 復旧アクションレイヤと orchestrator を実装
+- [x] 5. 復旧アクションレイヤと orchestrator を実装
   - `sr_revert_to_auto_dev "<issue>" "<marker_json>"` を実装:
     - NFR 3.1: `issue` は `^[0-9]+$` で検証
     - `gh issue edit "$issue" --repo "$REPO" -- --remove-label "$LABEL_PICKED"
@@ -131,7 +131,7 @@
   - _Boundary: stale-pickup-reaper.sh (Recovery Action + Orchestrator)_
   - _Depends: 3, 4_
 
-- [ ] 6. 本体配線（REQUIRED_MODULES と call site）
+- [x] 6. 本体配線（REQUIRED_MODULES と call site）
   - `issue-watcher.sh` の `REQUIRED_MODULES` 配列（行 990）に
     `"stale-pickup-reaper.sh"` を `"failed-recovery.sh"` の直後に追加
   - call site を `process_failed_recovery || fr_warn ...` の直後（行 1528 付近）に
@@ -149,7 +149,7 @@
   - _Boundary: issue-watcher.sh (REQUIRED_MODULES + call site)_
   - _Depends: 5_
 
-- [ ] 7. README / CLAUDE.md 反映と最終検証
+- [x] 7. README / CLAUDE.md 反映と最終検証
   - `README.md`:
     - 「オプション機能（標準有効 / 常時有効）一覧」表に `STALE_PICKUP_REAPER_ENABLED`
       行を追加（既定 OFF / opt-in / 二重 opt-in 不要を明記）
