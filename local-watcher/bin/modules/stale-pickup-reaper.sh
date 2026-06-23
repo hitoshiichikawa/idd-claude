@@ -16,8 +16,12 @@
 #
 #   - sr_fetch_candidates  : 候補列挙（label filter / claude-picked-up + claude-claimed）
 #
-#   後続 task で以下を追加予定（task 4 以降）:
-#   - sr_check_marker_age / sr_check_slot_lock / sr_check_session / sr_is_active
+#   - sr_check_marker_age : marker.first_seen_at の経過時間を閾値判定（観点 1）
+#   - sr_check_slot_lock  : slot lock file の保持状態を flock で観測（観点 2）
+#   - sr_check_session    : lock 保持 pid の生存を kill -0 で観測（観点 3）
+#   - sr_is_active        : 3 観点 AND 結合（全観点 rc=0 のときのみ inactive 確定）
+#
+#   後続 task で以下を追加予定（task 5 以降）:
 #   - sr_revert_to_auto_dev : ラベル除去 + auto-dev 残存確認
 #   - process_stale_pickup_reaper : watcher 本体からの単一エントリ
 #
@@ -308,4 +312,233 @@ sr_fetch_candidates() {
   fi
   printf '%s' "$merged_json"
   return 0
+}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Active Decision Layer
+#
+# 復旧候補 Issue が「現在もアクティブな処理セッションに握られているか」を 3 観点
+# （marker 経過時間 / slot ロック保持 / セッション存在）の AND で判定する。
+# 1 つでも「アクティブの可能性あり」を示すと revert 候補から外し、3 観点すべてが
+# 「非アクティブ寄り」と確定したときのみ非アクティブと判定する（誤検出回避優先 /
+# Req 3.1〜3.5 / NFR 4.1 / NFR 4.2）。
+#
+# 関連 AC:
+#   - Req 3.1: 3 観点 AND で「非アクティブ」確定
+#   - Req 3.2: いずれか 1 観点でも「アクティブの可能性あり」なら revert しない
+#   - Req 3.3: 判定中の副作用ゼロ（read-only / gh を呼ばない）
+#   - Req 3.4: 根拠取得失敗時は「アクティブの可能性あり」として safe-side fallback
+#   - Req 3.5: 判定根拠を 1 行ログ（age / lock / sess）で記録
+#   - Req 4.2: 経過時間が閾値未満なら復旧対象とせず継続観測
+#   - Req 6.3: branch 状態を「アクティブ」根拠にしない（本 layer は branch を見ない）
+#   - NFR 4.1: 判定イベント種別と issue 番号を 1 行ログで記録
+#   - NFR 4.2: 見送り理由を 1 行ログで記録
+#
+# 戻り値の語義（design.md "Service Interface" 節と整合）:
+#   - sr_check_marker_age:  0=aged (閾値超), 1=fresh (閾値未満 / 不明)
+#   - sr_check_slot_lock:   0=no slot lock, 1=some slot lock held, 2=判定不能（権限等）
+#   - sr_check_session:     0=no session detected, 1=session may be alive (safe-side 含む)
+#   - sr_is_active:         0=active or unknown (keep / 何もしない),
+#                           1=inactive (revert へ進む)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+# marker.first_seen_at から現在までの経過分数を閾値判定する純粋関数（Req 3.1 観点 1 /
+# Req 4.2 / Req 4.4 / NFR 4.1）。
+#
+# Args: $1 = marker_json (string)
+# Returns:
+#   0 = aged   (経過時間 >= $STALE_PICKUP_REAPER_THRESHOLD_MINUTES)
+#   1 = fresh  (閾値未満 / first_seen_at 不在 / date parse 失敗 / 全て safe-side fresh)
+#
+# 副作用なし（read-only）。`date` 系の挙動は GNU date（Linux）と BSD date（macOS）の
+# 両方を順に試行する。両方失敗時は Req 3.4 の safe-side fallback として fresh 扱い。
+sr_check_marker_age() {
+  local marker_json="$1"
+  local first_seen_at
+  first_seen_at=$(printf '%s' "$marker_json" | jq -r '.first_seen_at // empty' 2>/dev/null)
+  if [ -z "$first_seen_at" ]; then
+    # first_seen_at 不在 / 空文字 → safe-side fresh（初回観測扱い / Req 4.2 と整合）
+    return 1
+  fi
+
+  # GNU date (Linux) を優先、失敗時 BSD date (macOS) fallback、両方失敗は safe-side fresh
+  local first_epoch=""
+  first_epoch=$(date -d "$first_seen_at" +%s 2>/dev/null) || first_epoch=""
+  if [ -z "$first_epoch" ]; then
+    first_epoch=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$first_seen_at" "+%s" 2>/dev/null) || first_epoch=""
+  fi
+  if [ -z "$first_epoch" ]; then
+    # date parse 失敗 → safe-side fresh（Req 3.4 / 保守的 fallback）
+    return 1
+  fi
+
+  local now_epoch
+  now_epoch=$(date +%s)
+  local age_minutes=$(( (now_epoch - first_epoch) / 60 ))
+
+  if [ "$age_minutes" -ge "$STALE_PICKUP_REAPER_THRESHOLD_MINUTES" ]; then
+    return 0  # aged: 閾値超
+  fi
+  return 1   # fresh: 閾値未満
+}
+
+# Slot lock file の保持状態を `flock -n -x` で観測する（Req 3.1 観点 2 / Req 3.4）。
+#
+# Args: $1 = marker_json (将来拡張用。現状未使用 / 引数を受け取るが解析しない)
+# Returns:
+#   0 = no slot lock held (全 lock file が `flock -n` で取得成功 = 非アクティブ寄り)
+#   1 = some slot lock held (1 つでも `flock -n` で取得失敗 = アクティブの可能性あり)
+#   2 = 判定不能（flock binary 不在 等 / Req 3.4 で 1 と同等の safe-side として扱う）
+#
+# 副作用なし（試行的 flock は -n で non-blocking、true を即解放するため lock を奪わない）。
+# lock file glob が 1 つもマッチしないとき（slot lock が一切無い）は rc=0（no lock held）。
+sr_check_slot_lock() {
+  # 将来拡張用に引数を受け取るが本実装では未参照（SC2034 を `:` 参照で意図的に抑止）
+  local _marker_json="${1:-}"
+  : "$_marker_json"
+
+  # `flock` binary が無い環境では判定不能 → safe-side（rc=2）
+  if ! command -v flock >/dev/null 2>&1; then
+    return 2
+  fi
+
+  # glob 展開: lock file が無いケースは `*` がそのまま残るため `-f` で実在チェック
+  local lockfile
+  local some_held=0
+  local any_exists=0
+  # shellcheck disable=SC2231  # glob 展開を意図する
+  for lockfile in "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-"*.lock; do
+    [ -f "$lockfile" ] || continue
+    any_exists=1
+    # `flock -n -x <lockfile> true`: non-blocking で排他取得を試行 → 即 true で解放。
+    # 既に他プロセスが排他保持中なら rc != 0（取得失敗 = 保持中）。
+    if ! flock -n -x "$lockfile" true 2>/dev/null; then
+      some_held=1
+      break  # 1 つでも保持中なら結論確定。残りを試行する必要なし
+    fi
+  done
+
+  if [ "$any_exists" = "0" ]; then
+    # lock file が 1 つも存在しない → no lock held
+    return 0
+  fi
+  if [ "$some_held" = "1" ]; then
+    return 1  # 1 つでも保持中 = アクティブの可能性あり
+  fi
+  return 0    # 全 lock file が取得可能 = no slot lock held
+}
+
+# Lock file 保持 pid の生存確認で「watcher / claude セッション存在」を判定する
+# （Req 3.1 観点 3 / Req 3.4）。
+#
+# Args: $1 = marker_json (将来拡張用 / 現状未使用)
+# Returns:
+#   0 = no session detected (lock file 不在 / 全 pid が非生存)
+#   1 = session may be alive (1 件でも pid 生存 / fuser & lsof 不在で判定不能含む safe-side)
+#
+# 副作用なし（pid 取得・生存確認のみ）。Linux は `fuser`、macOS は `lsof -t` で
+# lock file 保持 pid を取得し、`kill -0 <pid>` で生存確認する。fuser / lsof どちらも
+# 不在の環境では Req 3.4 の safe-side として rc=1 を返す。
+sr_check_session() {
+  # 将来拡張用に引数を受け取るが本実装では未参照（SC2034 を `:` 参照で意図的に抑止）
+  local _marker_json="${1:-}"
+  : "$_marker_json"
+
+  # lock file が一切無いケースは「保持 pid 自体が存在しない」= no session
+  local lockfile
+  local any_lockfile=0
+  for lockfile in "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-"*.lock; do
+    [ -f "$lockfile" ] || continue
+    any_lockfile=1
+    break
+  done
+  if [ "$any_lockfile" = "0" ]; then
+    return 0
+  fi
+
+  # pid 取得手段の選定: Linux fuser → macOS lsof の順に試行。両方不在は safe-side。
+  local pid_tool=""
+  if command -v fuser >/dev/null 2>&1; then
+    pid_tool="fuser"
+  elif command -v lsof >/dev/null 2>&1; then
+    pid_tool="lsof"
+  else
+    return 1  # fuser / lsof 双方不在 → safe-side（Req 3.4）
+  fi
+
+  # 各 lock file から pid を取得し生存確認
+  local pids pid
+  for lockfile in "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-"*.lock; do
+    [ -f "$lockfile" ] || continue
+    pids=""
+    case "$pid_tool" in
+      fuser)
+        # `fuser <file>` は stdout に pid を空白区切りで出力（stderr に file 名等を出すため抑止）
+        pids=$(fuser "$lockfile" 2>/dev/null || true)
+        ;;
+      lsof)
+        # `lsof -t` は pid のみを改行区切りで出力
+        pids=$(lsof -t "$lockfile" 2>/dev/null || true)
+        ;;
+    esac
+
+    if [ -z "$pids" ]; then
+      # この lock file からは pid を取得できなかった → safe-side で「保持の可能性あり」
+      # （他 lock file で生存 pid を見つけても結論変わらないので即 return しない / 累積判定）
+      # ただし lock file が存在する以上、pid 取得自体ができないのは Req 3.4 の対象として
+      # safe-side 寄りに倒す。次の lock file 検査を続けるが、ここで return 1 しても良い。
+      return 1
+    fi
+
+    for pid in $pids; do
+      # pid が数値であることを念のため検証（NFR 3.1 / fuser 出力に他文字混入の保険）
+      case "$pid" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      if kill -0 "$pid" 2>/dev/null; then
+        return 1  # 1 件でも生存 pid あり = session may be alive
+      fi
+    done
+  done
+
+  # すべての pid が非生存（または lock file 自体が 0 件）→ no session detected
+  return 0
+}
+
+# 3 観点（marker_age / slot_lock / session）の AND 結合で「非アクティブ」確定を判定する
+# （Req 3.1, 3.2, 3.3, 3.4, 3.5 / Req 6.3 / NFR 4.1 / NFR 4.2）。
+#
+# 戻り値の語義（design.md "Service Interface" / `if sr_is_active` の自然構文）:
+#   0 = active or unknown (keep / 復旧アクションを行わない)
+#   1 = inactive (revert へ進む)
+#
+# AND 判定: age == 0 AND lock == 0 AND sess == 0 のときのみ「非アクティブ確定」（return 1）。
+# それ以外（いずれか 1 観点でも「アクティブの可能性あり」を示す）は keep（return 0）。
+#
+# 判定根拠は `sr_log` で 1 行記録（Req 3.5 / NFR 4.1 / NFR 4.2）:
+#   非アクティブ確定時: `issue=#N inactive (age>threshold, no slot lock, no session) age=$age lock=$lock sess=$sess`
+#   keep 時:            `issue=#N keep age=$age lock=$lock sess=$sess`
+#
+# Args: $1 = marker_json (string)
+sr_is_active() {
+  local marker_json="$1"
+  local age lock sess
+  local issue_id
+
+  # issue 番号を marker JSON から抽出（ログ識別用 / 未含有時は `?` で fallback）
+  issue_id=$(printf '%s' "$marker_json" | jq -r '.issue // "?"' 2>/dev/null) || issue_id="?"
+
+  age=0
+  sr_check_marker_age "$marker_json" || age=$?
+  lock=0
+  sr_check_slot_lock "$marker_json" || lock=$?
+  sess=0
+  sr_check_session "$marker_json" || sess=$?
+
+  if [ "$age" = "0" ] && [ "$lock" = "0" ] && [ "$sess" = "0" ]; then
+    sr_log "issue=#$issue_id inactive (age>threshold, no slot lock, no session) age=$age lock=$lock sess=$sess"
+    return 1  # inactive 確定 → revert へ
+  fi
+  sr_log "issue=#$issue_id keep age=$age lock=$lock sess=$sess"
+  return 0    # active or unknown → keep
 }
