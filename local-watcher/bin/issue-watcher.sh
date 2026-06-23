@@ -9434,6 +9434,119 @@ _stage_checkpoint_assert_slug_match() {
   return 1
 }
 
+# spec-dir 経路の slug guard を発火させる前に「resumable state が実在するか」を判定する
+# read-only ヘルパ（Issue #383 Req 1, 3）。Issue #114 が守る fork/mirror 番号衝突誤 resume
+# 防止は resumable state が実在する Issue では従来どおり発火し、resumable state が一切
+# 不在の fresh issue については slug guard を skip して Stage A を新規実装として継続させる。
+#
+# resumable state の定義（Req 3.1, OR 条件 / 4 観点いずれか 1 つでも真なら実在）:
+#   (a) `stage_checkpoint_find_impl_pr` が OPEN または MERGED 状態の impl PR を 1 件以上検出
+#   (b) origin 上に `refs/heads/claude/issue-<N>-impl-*` 形式の branch が 1 本以上存在
+#   (c) 検出対象 spec dir 配下で `impl-notes.md` が branch HEAD 上で tracked
+#   (d) 検出対象 spec dir 配下で `review-notes.md` が branch HEAD 上で tracked
+#
+# 引数:
+#   $1 = 検出対象の spec dir 絶対パス（`$WT/docs/specs/<N>-<slug>` 形式）
+# 戻り値:
+#   0 = resumable state 実在（呼び出し元は従来どおり slug guard を発火）
+#   1 = resumable state 不在（呼び出し元は slug guard を skip して Stage A 継続）
+#   2 = 判定失敗（gh API エラー・git エラー等。NFR 2.1 の safe-side により呼び出し元は
+#       0 と同等に扱い slug guard を発火させる）
+# 副作用:
+#   - LOG に `stage-checkpoint:` prefix で 1 行の判定結果ログを出力（Req 4.1, 4.3）
+#   - 検出失敗時は `stage-checkpoint: WARN` 形式で観測失敗の事実を 1 行出力（Req 4.3）
+#
+# `BRANCH` 変数はこの時点では未確定なので、(b) の branch 判定は
+# `_resume_branch_assert_slug_match` と同様に slug 不問の prefix マッチ
+# （`refs/heads/claude/issue-<N>-impl-*`）で行う（確認事項参照）。
+_stage_checkpoint_has_resumable_state() {
+  local spec_dir="$1"
+  local issue_num="${NUMBER:-}"
+
+  # 入力検証: Issue 番号が numeric でない場合は判定不能 → safe-side（実在扱い）
+  case "$issue_num" in
+    ''|*[!0-9]*)
+      echo "stage-checkpoint: WARN resumable-state-detection issue=#${issue_num:-?} reason=invalid-issue-number" >&2
+      return 2
+      ;;
+  esac
+
+  local detection_failed="false"
+
+  # (a) 既存 impl PR を gh から観測。stage_checkpoint_find_impl_pr の戻り値:
+  #     0 = OPEN/MERGED の impl PR あり / 1 = なし / 2 = gh API エラー
+  local pr_info pr_rc=0
+  pr_info=$(stage_checkpoint_find_impl_pr 2>/dev/null) || pr_rc=$?
+  case "$pr_rc" in
+    0)
+      echo "stage-checkpoint: resumable-state-found issue=#${issue_num} observation=impl-pr detail=${pr_info}" | tee -a "$LOG"
+      return 0
+      ;;
+    1)
+      : # 不在。後続観点へ
+      ;;
+    *)
+      echo "stage-checkpoint: WARN resumable-state-detection issue=#${issue_num} observation=impl-pr reason=gh-api-failure rc=${pr_rc}" >&2
+      detection_failed="true"
+      ;;
+  esac
+
+  # (b) origin 上に `claude/issue-<N>-impl-*` ブランチが 1 本でも存在するか。
+  # `_resume_branch_assert_slug_match` と同じ prefix マッチを使う（slug 不問）。
+  local prefix="claude/issue-${issue_num}-impl-"
+  local remote_refs ls_rc=0
+  remote_refs=$(timeout 30 git ls-remote --heads origin -- "refs/heads/${prefix}*" 2>/dev/null) || ls_rc=$?
+  if [ "$ls_rc" -eq 0 ]; then
+    if [ -n "$remote_refs" ]; then
+      echo "stage-checkpoint: resumable-state-found issue=#${issue_num} observation=impl-branch detail=${prefix}*" | tee -a "$LOG"
+      return 0
+    fi
+  else
+    echo "stage-checkpoint: WARN resumable-state-detection issue=#${issue_num} observation=impl-branch reason=ls-remote-failure rc=${ls_rc}" >&2
+    detection_failed="true"
+  fi
+
+  # (c) / (d) 検出対象 spec dir 配下の impl-notes.md / review-notes.md を branch HEAD 上で
+  # tracked 判定する。worktree の HEAD は base ブランチ（spec-dir 検出時点）なので、
+  # umbrella spec が main に merge 済みでも impl-notes.md / review-notes.md は通常
+  # impl PR ブランチ側にのみ存在するため、ここで tracked = resumable state ありとみなす。
+  #
+  # REPO_DIR は worktree path に上書き済（呼び出し元 _slot_run_issue が REPO_DIR=$WT に
+  # 設定する）ため、`git -C "$REPO_DIR"` と spec_dir は同一 worktree を指す。
+  local rel
+  rel="docs/specs/$(basename "$spec_dir")"
+
+  local impl_tracked review_tracked
+  if impl_tracked=$(git -C "$REPO_DIR" ls-tree --name-only HEAD -- "$rel/impl-notes.md" 2>/dev/null); then
+    if [ -n "$impl_tracked" ]; then
+      echo "stage-checkpoint: resumable-state-found issue=#${issue_num} observation=impl-notes detail=${rel}/impl-notes.md" | tee -a "$LOG"
+      return 0
+    fi
+  else
+    echo "stage-checkpoint: WARN resumable-state-detection issue=#${issue_num} observation=impl-notes reason=git-ls-tree-failure" >&2
+    detection_failed="true"
+  fi
+
+  if review_tracked=$(git -C "$REPO_DIR" ls-tree --name-only HEAD -- "$rel/review-notes.md" 2>/dev/null); then
+    if [ -n "$review_tracked" ]; then
+      echo "stage-checkpoint: resumable-state-found issue=#${issue_num} observation=review-notes detail=${rel}/review-notes.md" | tee -a "$LOG"
+      return 0
+    fi
+  else
+    echo "stage-checkpoint: WARN resumable-state-detection issue=#${issue_num} observation=review-notes reason=git-ls-tree-failure" >&2
+    detection_failed="true"
+  fi
+
+  # 全 4 観点で「不在」または「観測失敗」。安全側挙動として、観測失敗が 1 件でも
+  # あれば 2（実在不明）を返し、呼び出し元は slug guard 発火経路に倒す（NFR 2.1）。
+  if [ "$detection_failed" = "true" ]; then
+    return 2
+  fi
+
+  # 全 4 観点が確定的に「不在」だった場合のみ slug guard を skip する。
+  return 1
+}
+
 # origin の `claude/issue-<N>-impl-*` ブランチを resume 候補として検出した際に
 # 行うスラグ照合（Req 2.1, 2.2, 2.3）。origin の全 impl-* ブランチを ls-remote で
 # 列挙し、expected-slug と一致するブランチが 1 つでも見つかれば match、見つからず
@@ -10548,17 +10661,35 @@ _slot_run_issue() {
       SLUG=$(basename "$EXISTING_SPEC_DIR" | sed "s/^${NUMBER}-//")
       echo "📂 既存 spec 検出: $EXISTING_SPEC_DIR (slug=$SLUG)" | tee -a "$LOG"
     else
-      # Req 1.4, 1.5: docs/specs/<N>-* は存在するが expected-slug と一致するものがない
-      # → 先頭候補を mismatch 対象として LOG/escalate し、当該 Issue を skip する。
+      # Issue #383 Req 1.2, 1.5: docs/specs/<N>-* は存在するが expected-slug と一致する
+      # ものがないケースは、umbrella spec を sub-issue が共有する構成での fresh issue を
+      # 誤 block しないため、resumable state が実在するときのみ slug guard を発火させる。
+      # resumable state 不在（fresh issue）なら slug guard を skip して Stage A を新規実装
+      # として継続する（SLUG は Issue タイトル由来の EXPECTED_SLUG を採用）。
+      # 判定失敗（gh API エラー等）は NFR 2.1 の safe-side に倒して従来の発火経路を維持する。
       local _first="${SPEC_CANDIDATES[0]}"
-      if ! _stage_checkpoint_assert_slug_match "$EXPECTED_SLUG" "$_first"; then
-        return 1
-      fi
-      # 防御: _stage_checkpoint_assert_slug_match が 0 を返した（一致した）場合の
-      # フォールバック（実装上は到達しないが silent fail を作らないため）
-      HAS_EXISTING_SPEC=true
-      EXISTING_SPEC_DIR="$_first"
-      SLUG=$(basename "$EXISTING_SPEC_DIR" | sed "s/^${NUMBER}-//")
+      local _resumable_rc=0
+      _stage_checkpoint_has_resumable_state "$_first" || _resumable_rc=$?
+      case "$_resumable_rc" in
+        1)
+          # Req 1.2, 1.3, 1.4: resumable state 不在 → slug guard skip。`needs-decisions`
+          # 付与なし / escalation コメント投稿なし / SLUG は Issue タイトル由来を採用。
+          echo "stage-checkpoint: slug-guard-skipped issue=#${NUMBER:-?} expected=${EXPECTED_SLUG} found=$(basename "$_first" | sed "s/^${NUMBER}-//") reason=no-resumable-state" | tee -a "$LOG"
+          SLUG="$EXPECTED_SLUG"
+          ;;
+        *)
+          # Req 2.1, 2.3 / NFR 2.1: resumable state 実在（0）/ 判定失敗の safe-side（2）/
+          # 想定外 rc は全て従来どおり slug guard を発火させる方に倒す（safe-side default）。
+          if ! _stage_checkpoint_assert_slug_match "$EXPECTED_SLUG" "$_first"; then
+            return 1
+          fi
+          # 防御: _stage_checkpoint_assert_slug_match が 0 を返した（一致した）場合の
+          # フォールバック（実装上は到達しないが silent fail を作らないため）
+          HAS_EXISTING_SPEC=true
+          EXISTING_SPEC_DIR="$_first"
+          SLUG=$(basename "$EXISTING_SPEC_DIR" | sed "s/^${NUMBER}-//")
+          ;;
+      esac
     fi
   else
     # Req 1.6: `docs/specs/<N>-*/` が存在しないとき → 本要件のスラグ照合は発火させず
