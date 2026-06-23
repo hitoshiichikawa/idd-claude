@@ -131,7 +131,7 @@
   - _Boundary: stale-pickup-reaper.sh (Recovery Action + Orchestrator)_
   - _Depends: 3, 4_
 
-- [ ] 6. 本体配線（REQUIRED_MODULES と call site）
+- [x] 6. 本体配線（REQUIRED_MODULES と call site）
   - `issue-watcher.sh` の `REQUIRED_MODULES` 配列（行 990）に
     `"stale-pickup-reaper.sh"` を `"failed-recovery.sh"` の直後に追加
   - call site を `process_failed_recovery || fr_warn ...` の直後（行 1528 付近）に
