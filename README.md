@@ -828,6 +828,135 @@ Settings → Secrets and variables → Actions → **Secrets** タブ
 
 ---
 
+## per-repo env ファイル（crontab 行長限界の解消 / F8 / Issue #386）
+
+idd-claude watcher は `*_ENABLED` 系の opt-in フラグを crontab 行内に inline 環境変数として
+列挙する運用が定着しており、フラグ追加が継続した結果、**crontab 1 行が ~1024 文字の
+`command too long` 限界に到達**する事象が複数 repo で発生しています。本機能（F8）は watcher
+起動時に **per-repo の env ファイル** を source して flag を供給する経路を追加し、crontab 行を
+schedule / `REPO` / `REPO_DIR` / `BASE_BRANCH` といった repo 識別系の最小限に保てるようにします。
+
+### 探索順
+
+watcher は起動時の **REPO_SLUG 算出直後**（`*_ENABLED` 系 default 評価より前）に、以下の順で
+env ファイルを 1 度だけ探索します。
+
+1. `WATCHER_ENV_FILE`（絶対パス指定、明示優先）
+2. `$HOME/.issue-watcher/<REPO_SLUG>.env`（`<REPO_SLUG>` は `REPO` の `/` を `-` に変換した値）
+
+いずれの候補も読取可能でなければ、本機能導入前と完全に **byte 等価な起動経路**（環境変数集合・
+ログ・exit code）を辿ります。opt-in は「ファイルの存在」のみで判定し、新規 gate env は
+導入しません。
+
+### 形式（`KEY=VALUE`）
+
+- 1 行 1 件の `KEY=VALUE` 形式
+- 行頭 `#` のコメント行・空行・空白のみ行は無視
+- `KEY` は bash 識別子規約に従う（`[A-Za-z_][A-Za-z0-9_]*`）
+- `VALUE` 中に `$HOME` / `$VAR` / `$(...)` を含めて評価可能（運用者管理ファイル = 信頼境界の
+  内側として扱うため、コマンド置換も許可）
+
+例:
+
+```ini
+# ~/.issue-watcher/owner-myrepo.env
+FULL_AUTO_ENABLED=true
+DEP_AUTO_UNBLOCK_ENABLED=true
+AUTO_MERGE_ENABLED=true
+PROMOTE_PIPELINE_ENABLED=true
+
+# webhook URL は別ファイルから読み込んで env ファイル本体に平文埋め込みしない
+SLACK_NOTIFY_ENABLED=true
+SLACK_WEBHOOK_URL=$(cat $HOME/.config/idd-claude/slack-webhook)
+
+PARALLEL_SLOTS=2
+WORKTREE_BASE_DIR=$HOME/.issue-watcher/worktrees
+```
+
+### precedence（inline cron env > env ファイル）
+
+同一 `KEY` が **inline cron env**（crontab 行 / launchd plist の `EnvironmentVariables` /
+watcher 起動シェルの環境）と env ファイルの両方に存在する場合、**inline 値が優先** されます。
+これにより、一時的な override / 実験的なフラグ調整 / 特定 repo の例外設定を crontab 1 行で
+完結できます。
+
+```cron
+# inline で FULL_AUTO_ENABLED=false を渡せば、env ファイル側 `FULL_AUTO_ENABLED=true` は無視される
+*/2 * * * * REPO=owner/repo REPO_DIR=$HOME/work/repo FULL_AUTO_ENABLED=false $HOME/bin/issue-watcher.sh
+```
+
+precedence は全 `KEY` に一貫して適用されます。
+
+### 推奨パーミッション
+
+env ファイルにはコマンド置換経由で機密情報（webhook URL 等）を流すケースがあるため、
+**所有者のみ読書可能（`chmod 600`）** を推奨します:
+
+```bash
+mkdir -p "$HOME/.issue-watcher"
+chmod 700 "$HOME/.issue-watcher"
+touch "$HOME/.issue-watcher/owner-myrepo.env"
+chmod 600 "$HOME/.issue-watcher/owner-myrepo.env"
+```
+
+watcher は env ファイル内の値を log / Issue コメント / PR 本文 / 標準ログへ平文出力しません
+（NFR 2.2）。採用したファイルパスのみが起動時に 1 行ログとして出ます:
+
+```
+[2026-06-23 09:00:01] [owner/repo] env-loader: env ファイル採用: /home/user/.issue-watcher/owner-repo.env
+```
+
+### 異常系
+
+- **読取不能**（権限不足等）: warn を `>&2` に出して当該ファイルを無視し、watcher は継続
+- **構文不正行**（`=` 欠落 / `KEY` が識別子として無効）: 当該行のみ skip + warn（パスと行番号を
+  含む）、後続行の処理は継続
+- **コマンド置換失敗**: 当該 `KEY` を未設定のまま残し、warn + 次行へ継続。inline cron env が
+  当該 KEY を定義していれば inline 値で補完される（precedence 維持）
+
+1 行のタイプミスや権限ミスで repo の cron が無音停止する事故を防ぎます。
+
+### 移行ガイド（既存 inline 列挙 → env ファイル）
+
+precedence「inline > env ファイル」を活用して **段階移行** が可能です:
+
+1. **env ファイルを作成**（既存 inline 列挙と同じ値を `KEY=VALUE` で 1 行ずつ並べる）
+
+   ```bash
+   cat > "$HOME/.issue-watcher/owner-myrepo.env" <<'EOF'
+   FULL_AUTO_ENABLED=true
+   DEP_AUTO_UNBLOCK_ENABLED=true
+   AUTO_MERGE_ENABLED=true
+   # ... 既存 inline 列挙をそのまま転記 ...
+   EOF
+   chmod 600 "$HOME/.issue-watcher/owner-myrepo.env"
+   ```
+
+2. **watcher を 1 サイクル動かし、起動ログで env ファイル採用を確認**（`grep 'env-loader:' $HOME/.issue-watcher/logs/<repo-slug>/dispatcher.log`）。
+   この時点では inline 列挙が優先されるため、挙動は不変。
+
+3. **crontab 行から inline 列挙を 1 つずつ削除**（precedence により env ファイル側の値が
+   採用されるようになる）。1 つ削除するたびに 1 サイクル動かして観測値を確認。
+
+4. **最終的に crontab 行が `REPO` / `REPO_DIR` / `BASE_BRANCH` + watcher パスのみ**になる:
+
+   ```cron
+   */2 * * * * REPO=owner/myrepo REPO_DIR=$HOME/work/myrepo BASE_BRANCH=main $HOME/bin/issue-watcher.sh
+   ```
+
+5. **戻したいときは env ファイルから当該行を削るか inline で override**。
+
+### Out of Scope（本機能では実装しない）
+
+- env ファイルを有効化する新規 gate env の導入（opt-in は「ファイルの存在」のみ）
+- 既存 crontab 行から env ファイルへの **自動移行スクリプト**（手動 / 上記移行ガイド参照）
+- `install.sh` / `setup.sh` 内での **テンプレート展開・scaffold**
+- env ファイルの **暗号化 / KMS 連携 / secrets manager 統合**
+- 起動後の **hot reload / inotify**（本機能は起動時 1 回限りの source）
+- env ファイル内での **他 env ファイルの再帰 source**
+- **launchd plist 側**の env ファイル取扱変更（plist の `EnvironmentVariables` は inline cron
+  env と同じ precedence 階に置きます）
+
 ## ブランチ運用と `BASE_BRANCH`
 
 idd-claude は **base branch を表す `BASE_BRANCH` env var**（Actions 経路では repository
