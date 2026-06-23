@@ -94,6 +94,42 @@
 残存課題:
 - task 7 で README / CLAUDE.md への反映（オプション機能一覧 + 専用節 + prefix 表）が残る。本 task で追加した本体配線は cron 実行時の起動経路を完成させたが、`STALE_PICKUP_REAPER_ENABLED=true` への切替方法を運用者ドキュメントに反映する必要がある
 
+### Task 7
+
+採用方針: README.md / CLAUDE.md への運用者ドキュメント反映と最終静的解析を担当する markdown-only 変更タスク。Failed Recovery Processor (#359) の節構造を base 雛形として `## Stale Pickup Reaper (#379)` 節を新規追加し、Failed Recovery との領分差分（claude-failed は #359 / claude-picked-up・claude-claimed は #379）を明確化。CLAUDE.md prefix 表には `sr_` 行を既存パターン（rs_ の直後・issue-watcher 本体内 entry の直前）に追加。本タスクはコード変更を伴わないため近接 unit test 追加なし、tasks.md 末尾の verify ブロック（最終静的解析 5 種）で全 PASS を確認した。
+
+重要な判断:
+- **opt-in テーブルでの行配置**: 「Failed Recovery Processor」行（行 1361）の直後に `STALE_PICKUP_REAPER_ENABLED` 行を挿入する位置を採用。Failed Recovery と Stale Pickup Reaper は領分差分が明確（claude-failed vs claude-picked-up/claude-claimed の補完関係）であり、テーブル上で連続配置することで「failed-recovery が拾わない gap を埋める Processor」という相対的位置付けを表現できる
+- **opt-in テーブル行のカラム数 / 既存スタイル準拠**: 既存 opt-in テーブルは `| 機能 | 制御変数 | 既定 | 正規化規則 | 追加 env（必須/推奨） | 詳細 | 関連 |` の 7 カラム構成。Failed Recovery 行をテンプレ化し、`必須前提` ではなく `推奨` のみで `追加 env` 列を埋めた（本機能は単独 opt-in で `FULL_AUTO_ENABLED` の前提が不要なため、Failed Recovery 行とは異なり「**前提**:」記述を削除）
+- **新節の章構成**: Failed Recovery 節と同じ章立てを採用（注 / 対象判定 / 二重 opt-in（本機能では領分差分） / アクティブセッション判定 / 復旧アクション / 除外ラベル / state ファイル / 環境変数 / cron 例 / Migration Note / 再配置注意）。Failed Recovery にない節「**Failed Recovery Processor (#359) との領分差分**」を追加し、両 Processor のラベル軸分離を表で明示
+- **CLAUDE.md prefix 表での配置**: 表は module 追加順（アルファベット順ではない）になっており、末尾の `pt_ / sc_ / tc_ / dr_` 行（本体内 entry）の直前に `sr_` 行を追加するのが既存パターンと整合する。`rs_` （run-summary）の直後に挿入することで「module 系 entry の末尾」「本体内 entry の直前」という構造を維持
+- **markdown 規約準拠**: README.md は h1 1 個・h2 階層・コードフェンス言語タグ（`bash`）・内部リンク相対パス（`#failed-recovery-processor-359` 等の anchor）を維持。CLAUDE.md は既存表 format（`| prefix | module / 領域 |` の 2 カラム）に揃え、列幅 / 区切り `|` の位置を統一
+- **5 env table の網羅性**: `STALE_PICKUP_REAPER_ENABLED` / `..._THRESHOLD_MINUTES` / `..._STATE_DIR` / `..._MAX_ISSUES` / `..._GH_TIMEOUT` の全 5 env を表に含め、それぞれの既定値 / 推奨 / 用途を運用者が一覧で把握できる形にした（design.md の env table と同一構成）
+- **「単独 opt-in」の明示と Failed Recovery との対比**: 章の冒頭 `> 注` ブロックで「**`FULL_AUTO_ENABLED` 配下には入らない**」「ラベル除去のみで claude session 起動・コード変更・git push を行わないため impact 範囲が桁違いに小さい」と明示し、Failed Recovery の二重 opt-in との設計差異を運用者が誤読しないよう先頭で宣言
+
+残存課題:
+- なし（task 7 は最終 task / 全 7 task 完了 / 静的解析・近接テスト・同期 diff の verify 全 PASS / Issue #379 の AC・NFR をすべてカバー）
+
+## AC Traceability（task 7 範囲）
+
+| AC | テスト | 場所 |
+|----|--------|------|
+| Req 1.4 | README.md 新節で「gate OFF（既定）では完全 skip」「gh API 呼び出しゼロで本機能導入前と完全に等価」を明記 | `README.md` `## Stale Pickup Reaper (#379)` 節の `> 注` ブロック + `Migration Note` 節 |
+| NFR 1.1 | README.md 新節で「既定で OFF / 明示的に true を設定するまで完全に skip」「既存環境変数は不変」「既存ラベルは不変」「cron / launchd 登録文字列の書き換え必要（有効化時のみ）」を明記 | `README.md` `## Stale Pickup Reaper (#379)` 節の `Migration Note` 節 |
+| NFR 5.1 | `shellcheck local-watcher/bin/modules/stale-pickup-reaper.sh local-watcher/bin/modules/core_utils.sh local-watcher/bin/issue-watcher.sh` 警告ゼロ + `bash -n local-watcher/bin/issue-watcher.sh` エラーなし | verify block 1〜2 行目 |
+| NFR 5.2 | `bash local-watcher/test/stale_pickup_reaper_test.sh` 全 193 assertions PASS（task 6 までの近接テスト 3 経路 + 構造的検証 + 配線検証） | verify block 3 行目 |
+| NFR 6.1 | `diff -r .claude/agents repo-template/.claude/agents` 空 + `diff -r .claude/rules repo-template/.claude/rules` 空（本 spec で `.claude/{agents,rules}` を編集していないため初期状態が維持される / `repo-template/local-watcher/` は構造的に存在しないため diff 対象外） | verify block 4〜5 行目 |
+
+## 検証コマンド（task 7 範囲 / spec 最終 verify と同一）
+
+```sh
+shellcheck local-watcher/bin/modules/stale-pickup-reaper.sh local-watcher/bin/modules/core_utils.sh local-watcher/bin/issue-watcher.sh   # 警告ゼロ
+bash -n local-watcher/bin/issue-watcher.sh                                                                                              # エラーなし
+bash local-watcher/test/stale_pickup_reaper_test.sh                                                                                     # 193 assertions PASS（task 6 と同じ件数 / task 7 は markdown-only のためテスト件数追加なし）
+diff -r .claude/agents repo-template/.claude/agents                                                                                     # 空
+diff -r .claude/rules repo-template/.claude/rules                                                                                       # 空
+```
+
 ## AC Traceability（task 3 範囲）
 
 | AC | テスト | 場所 |
@@ -229,6 +265,6 @@ bash local-watcher/test/fr_state_test.sh              # 51 assertions PASS（reg
 
 ## 確認事項
 
-なし（task 6 仕様内で完結 / 既存仕様との整合性確認済み / 順序契約・call site 順序が grep で再検証可能）。
+なし（task 1〜7 すべて仕様内で完結 / requirements.md・design.md・tasks.md との整合性確認済み / 全 AC・NFR が `## AC Traceability（task N 範囲）` 表で網羅 / static check + 近接テスト 193 assertions + agents/rules 同期 diff すべて PASS）。
 
 STATUS: complete
