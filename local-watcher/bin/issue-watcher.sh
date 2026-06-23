@@ -608,6 +608,82 @@ FAILED_RECOVERY_MAX_PRS="${FAILED_RECOVERY_MAX_PRS:-3}"
 # failed-recovery/$REPO_SLUG。LOG_DIR と同じ repo-slug 分離方針（NFR 2.2, NFR 2.3）。
 FAILED_RECOVERY_STATE_DIR="${FAILED_RECOVERY_STATE_DIR:-$HOME/.issue-watcher/failed-recovery/$REPO_SLUG}"
 
+# ─── Stale Pickup Reaper 設定 (#379) ───
+# セッション喪失で `claude-picked-up` / `claude-claimed` ラベルが取り残された Issue を
+# 検出し、3 観点（marker 経過時間 / slot ロック保持 / セッション存在）AND 判定で
+# 非アクティブと確定したものだけを `auto-dev` 状態へ戻す opt-in processor。
+# `claude-failed` は failed-recovery (#359) の領分なので扱わない。
+#
+# **単独 opt-in**: `STALE_PICKUP_REAPER_ENABLED=true` 厳密一致のみ ON（failed-recovery
+# のような二重 opt-in は不要 / design.md "FULL_AUTO_ENABLED 配下に置くか単独 gate か"
+# 節）。`=true` 以外（未設定 / 空 / `false` / `0` / `True` / `TRUE` / `1` / `on` /
+# `yes` / 前後空白 / typo 等）は安全側 `false` に正規化する（Req 1.3 / NFR 1.1）。
+# 本フラグは新規追加 = opt-in 制 + 既定 false が要件のため、上記
+# 「デフォルト有効化フラグの値正規化」ループには **含めない**（failed-recovery と同方針）。
+#
+# 関数本体は modules/stale-pickup-reaper.sh（task 2 以降で新規追加）、ロガー
+# sr_log / sr_warn / sr_error は core_utils.sh に集約する。`sr_is_enabled` は
+# task 1 時点で本ファイル末尾近傍（Config ブロック直後）に暫定実装され、task 2 で
+# stale-pickup-reaper.sh へ移送される予定。
+STALE_PICKUP_REAPER_ENABLED="${STALE_PICKUP_REAPER_ENABLED:-false}"
+case "$STALE_PICKUP_REAPER_ENABLED" in
+  true) : ;;
+  *)    STALE_PICKUP_REAPER_ENABLED="false" ;;
+esac
+# pickup 系ラベル滞留の許容時間（分）。未設定 / 非整数 / 0 以下は既定 45 に正規化（Req 4.3）。
+# 既定 45 分は典型的 impl 時間 + 30 分マージンの保守側目安（design.md Risk Register 参照）。
+STALE_PICKUP_REAPER_THRESHOLD_MINUTES="${STALE_PICKUP_REAPER_THRESHOLD_MINUTES:-45}"
+case "$STALE_PICKUP_REAPER_THRESHOLD_MINUTES" in
+  ''|*[!0-9]*) STALE_PICKUP_REAPER_THRESHOLD_MINUTES=45 ;;
+  *)
+    if [ "$STALE_PICKUP_REAPER_THRESHOLD_MINUTES" -le 0 ]; then
+      STALE_PICKUP_REAPER_THRESHOLD_MINUTES=45
+    fi
+    ;;
+esac
+# marker JSON の配置先。failed-recovery と同じ $HOME/.issue-watcher/ 配下 repo-slug
+# 分離方針（NFR 2.3）。`/tmp` 配下の予測可能名は使用しない。
+STALE_PICKUP_REAPER_STATE_DIR="${STALE_PICKUP_REAPER_STATE_DIR:-$HOME/.issue-watcher/stale-pickup/$REPO_SLUG}"
+# 1 サイクルで処理する候補 Issue 数の上限。未設定 / 非整数 / 0 以下は既定 20 に正規化。
+STALE_PICKUP_REAPER_MAX_ISSUES="${STALE_PICKUP_REAPER_MAX_ISSUES:-20}"
+case "$STALE_PICKUP_REAPER_MAX_ISSUES" in
+  ''|*[!0-9]*) STALE_PICKUP_REAPER_MAX_ISSUES=20 ;;
+  *)
+    if [ "$STALE_PICKUP_REAPER_MAX_ISSUES" -le 0 ]; then
+      STALE_PICKUP_REAPER_MAX_ISSUES=20
+    fi
+    ;;
+esac
+# 個別 gh 操作のタイムアウト（秒）。未設定 / 非整数 / 0 以下は既定 60 に正規化。
+STALE_PICKUP_REAPER_GH_TIMEOUT="${STALE_PICKUP_REAPER_GH_TIMEOUT:-60}"
+case "$STALE_PICKUP_REAPER_GH_TIMEOUT" in
+  ''|*[!0-9]*) STALE_PICKUP_REAPER_GH_TIMEOUT=60 ;;
+  *)
+    if [ "$STALE_PICKUP_REAPER_GH_TIMEOUT" -le 0 ]; then
+      STALE_PICKUP_REAPER_GH_TIMEOUT=60
+    fi
+    ;;
+esac
+
+# Stale Pickup Reaper の単独 opt-in gate（純粋関数 / 副作用なし / Req 1.1〜1.4 /
+# NFR 1.1）。`STALE_PICKUP_REAPER_ENABLED=true` 厳密一致のときのみ 0 を返し、それ以外
+# （未設定 / 空 / `false` / 0 / True / TRUE / 1 / on / yes / 前後空白 / typo 等）は
+# 1 を返して OFF として扱う。Config ブロック側 `case` で値は既に `true` / `false` に
+# 正規化されているが、本関数も二重防御として `=true` のみ enabled として読む。
+#
+# 本関数は task 1 時点での暫定実装。task 2 で modules/stale-pickup-reaper.sh へ
+# 移送される予定だが、テスト（stale_pickup_reaper_test.sh Section 1）が
+# extract_function で本関数を切り出して評価できるよう、トップレベル副作用なしの
+# 関数定義のみで配置する。
+#
+# Returns:
+#   0 = enabled（処理可）
+#   1 = disabled（処理しない）
+sr_is_enabled() {
+  [ "${STALE_PICKUP_REAPER_ENABLED:-false}" = "true" ] || return 1
+  return 0
+}
+
 # ─── Slack 通知 emitter 設定 (#370) ───
 # 自動 merge / failed-recovery 終端 / needs-decisions 自動続行 / promote 完了といった
 # 人間が能動的に把握すべき重要イベントを Slack Incoming Webhook 経由で push 通知する

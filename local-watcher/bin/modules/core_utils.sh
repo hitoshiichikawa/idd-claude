@@ -158,6 +158,20 @@ fr_error() {
   echo "[$(date '+%F %T')] [$REPO] failed-recovery: ERROR: $*" >&2
 }
 
+# stale-pickup-reaper 専用ロガー（識別用 prefix と timestamp 形式を Issue Watcher と揃える）
+# Issue #379: 既存 `fr_log` / `pi_log` と同形式の
+# `[YYYY-MM-DD HH:MM:SS] [$REPO] stale-pickup:` prefix を用いる。`sr_warn` / `sr_error`
+# は `>&2` に出力（NFR 4.1 / 4.2 の 1 行ログ可観測性）。
+sr_log() {
+  echo "[$(date '+%F %T')] [$REPO] stale-pickup: $*"
+}
+sr_warn() {
+  echo "[$(date '+%F %T')] [$REPO] stale-pickup: WARN: $*" >&2
+}
+sr_error() {
+  echo "[$(date '+%F %T')] [$REPO] stale-pickup: ERROR: $*" >&2
+}
+
 # ─── Issue #259: Claude API 529 Overloaded detector ───
 #
 # Claude API の一時的な過負荷 (HTTP 529 Overloaded) は claude CLI の stream-json
