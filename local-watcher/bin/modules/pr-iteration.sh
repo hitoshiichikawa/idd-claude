@@ -1043,6 +1043,58 @@ pi_auto_commit_and_push() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_classify_round_outcome: round 終了時の outcome を 1 単語で分類する純粋関数
+#   入力: $1=commit_pushed ("true" | "false")
+#         $2=new_streak (非負整数。加算済みの no-progress 連続カウンタ値)
+#         $3=limit      (非負整数。PR_ITERATION_NO_PROGRESS_LIMIT 値)
+#   出力: stdout に下記いずれか 1 単語
+#           "success"     - commit 有り → 通常 finalize（needs-iteration を外す）に進む
+#           "escalate"    - commit 無し かつ streak >= limit → claude-failed へ昇格
+#           "no-progress" - commit 無し かつ streak < limit → needs-iteration 据え置き
+#   返り値: 0 固定
+#
+#   設計判断 (#397 fix):
+#     - commit_pushed=false の round は no-progress streak の状態に関わらず、
+#       finalize 経路（needs-iteration → awaiting-design-review / ready-for-review）に
+#       進ませない。streak が limit 未満なら next cycle で再 pickup されるよう
+#       needs-iteration を据え置き、limit 到達時のみ escalate に倒す。
+#     - 旧実装（#122 まで）は no-progress でも streak<limit なら finalize 成功扱いに
+#       なっており、PR が候補プールから外れて no-progress カウンタが二度と加算されない
+#       silent deadlock を起こしていた（#397）。本関数の "no-progress" 分類はその
+#       deadlock を断ち切る分岐点。
+#     - 純粋関数（副作用なし / グローバル参照なし）として実装し、テストで隔離検証可能。
+#     - 不正値の場合（commit_pushed が "true"/"false" 以外、または非数値 streak/limit）は
+#       安全側に倒して "no-progress" を返す（NFR 2.1: 判定情報が取得不能なら success に
+#       倒さない）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_classify_round_outcome() {
+  local commit_pushed="${1-}"
+  local new_streak="${2-}"
+  local limit="${3-}"
+
+  # commit_pushed=true は最優先（streak は呼び出し元で 0 にリセットされている前提）
+  if [ "$commit_pushed" = "true" ]; then
+    echo "success"
+    return 0
+  fi
+
+  # commit_pushed が "false" でない場合は安全側に no-progress 扱い
+  if [ "$commit_pushed" != "false" ]; then
+    echo "no-progress"
+    return 0
+  fi
+
+  # streak / limit が数値で取れているときのみ escalate 判定。それ以外は no-progress に倒す
+  # （NFR 2.1: 判定情報不足時は finalize=success に進ませない安全側挙動）。
+  if [[ "$new_streak" =~ ^[0-9]+$ ]] && [[ "$limit" =~ ^[0-9]+$ ]] && [ "$new_streak" -ge "$limit" ]; then
+    echo "escalate"
+    return 0
+  fi
+  echo "no-progress"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_run_iteration: 1 PR 分の iteration を実行（fresh context Claude 起動）
 #   入力: $1=pr_json
 #   戻り値: 0=success(commit+push or reply-only), 1=failure, 2=escalated(round上限到達),
@@ -1383,6 +1435,7 @@ pi_run_iteration() {
 
     # Issue #122 Req 6.2: round 終了時点で no-progress 連続カウンタが加算されたら
     # PR 番号 / kind / 加算後の連続カウンタ / 上限値を 1 行ログに記録
+    # Issue #397 Req 5.1: design / impl 両 kind で同一フォーマットで出力する。
     if [ "$commit_pushed" = "false" ]; then
       pi_log "PR #${pr_number}: kind=${kind} round=${next_round} no-progress-streak=${new_streak} limit=${PR_ITERATION_NO_PROGRESS_LIMIT}"
     fi
@@ -1393,14 +1446,42 @@ pi_run_iteration() {
       return 1
     fi
 
-    # Issue #122 Req 3.3 / 6.3: no-progress 連続カウンタが上限以上に達したら escalate
-    if [ "$new_streak" -ge "$PR_ITERATION_NO_PROGRESS_LIMIT" ]; then
-      pi_log "PR #${pr_number}: kind=${kind} round=${next_round} no-progress-streak=${new_streak} reason=no-progress escalate"
-      pi_escalate_to_failed "$pr_number" "$next_round" "$max_rounds" "no-progress" "$new_streak" || true
-      return 2
-    fi
+    # Issue #397: round 終了時の outcome を 3 way に分類（success / escalate / no-progress）。
+    # 旧実装は commit 無しでも streak < limit なら finalize 成功扱いに倒れていた
+    # （`needs-iteration` を外して `awaiting-design-review` / `ready-for-review` に遷移）。
+    # その結果 PR が候補プールから外れて no-progress streak が永久に加算されず escalation
+    # に到達しない silent deadlock が発生していた。本分岐で no-progress を独立扱いにする。
+    local outcome
+    outcome=$(pi_classify_round_outcome "$commit_pushed" "$new_streak" "$PR_ITERATION_NO_PROGRESS_LIMIT")
+    case "$outcome" in
+      escalate)
+        # Issue #122 Req 3.3 / 6.3 / Issue #397 Req 2.3 / 2.4 / 5.3:
+        # no-progress 連続カウンタが上限以上 → claude-failed 昇格。
+        # ログには PR 番号 / kind / round / reason / streak / limit を含める（Req 5.3）。
+        pi_log "PR #${pr_number}: kind=${kind} round=${next_round} no-progress-streak=${new_streak} limit=${PR_ITERATION_NO_PROGRESS_LIMIT} reason=no-progress escalate"
+        pi_escalate_to_failed "$pr_number" "$next_round" "$max_rounds" "no-progress" "$new_streak" || true
+        return 2
+        ;;
+      no-progress)
+        # Issue #397 Req 1.1〜1.3 / 2.1 / 2.2 / 4.1 / 4.2 / 5.2:
+        # commit が無かった round では finalize（needs-iteration 除去）に進まず、
+        # `needs-iteration` を据え置いて return する。`action=success` ログは出さない。
+        # streak は marker 上で既に加算済み（次サイクルで pi_read_no_progress_streak が拾う）。
+        pi_log "PR #${pr_number}: kind=${kind} round=${next_round} action=no-progress (needs-iteration を残置, streak=${new_streak}/${PR_ITERATION_NO_PROGRESS_LIMIT})"
+        return 1
+        ;;
+      success)
+        : # 通常 finalize に進む
+        ;;
+      *)
+        # 想定外: 安全側に倒して needs-iteration 据え置き
+        pi_warn "PR #${pr_number}: kind=${kind} round=${next_round} unknown round outcome='${outcome}' (needs-iteration を残置)"
+        return 1
+        ;;
+    esac
 
-    # AC 6.2 (#26) / #35 AC 3.1 / 3.2: kind に応じたラベル遷移
+    # AC 6.2 (#26) / #35 AC 3.1 / 3.2 / Issue #397 Req 3.1〜3.3 / 4.3:
+    # commit_pushed=true（outcome=success）のみここに到達する。kind に応じたラベル遷移を実施。
     local finalize_ok=false
     case "$kind" in
       design)
