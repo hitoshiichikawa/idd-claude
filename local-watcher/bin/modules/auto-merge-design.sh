@@ -191,7 +191,14 @@ amd_enable_auto_merge_for_pr() {
     # Req 9.1: 成功時の log line（PR 番号 / head sha / head branch / 動作）
     amd_log "PR #${pr_number}: auto-merge enabled (squash, delete-branch) head=${head_ref} sha=${head_sha} url=${pr_url}"
     # Issue #370 task 4: Slack 通知 emitter（fail-open / gate OFF 時は no-op）
-    sn_notify auto-merge-design "$pr_number" "$pr_url" success "head=${head_ref} sha=${head_sha}" || true
+    # Issue #388 Req 1.2, 1.3: result=success → result=armed に変更し、Slack 受信者が
+    # 「merge 完了」ではなく「merge 有効化（armed）」だと判別できるようにする。
+    sn_notify auto-merge-design "$pr_number" "$pr_url" armed "armed (squash on green checks) head=${head_ref} sha=${head_sha}" || true
+    # Issue #388 Req 2.2: design PR にも同等に pending state を積み、
+    # `SLACK_NOTIFY_MERGED_ENABLED=true` で merged 通知が発火する経路を提供する。
+    if declare -F amm_save_pending >/dev/null 2>&1; then
+      amm_save_pending "$pr_number" "auto-merge-design-merged" "$head_ref" "$head_sha" "$pr_url" || true
+    fi
     rm -f "$stderr_file" 2>/dev/null || true
     return 0
   fi
