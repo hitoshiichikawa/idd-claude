@@ -96,7 +96,7 @@
   - _Boundary: stale-pickup-reaper.sh (Active Decision Layer)_
   - _Depends: 2_
 
-- [ ] 5. 復旧アクションレイヤと orchestrator を実装
+- [x] 5. 復旧アクションレイヤと orchestrator を実装
   - `sr_revert_to_auto_dev "<issue>" "<marker_json>"` を実装:
     - NFR 3.1: `issue` は `^[0-9]+$` で検証
     - `gh issue edit "$issue" --repo "$REPO" -- --remove-label "$LABEL_PICKED"
