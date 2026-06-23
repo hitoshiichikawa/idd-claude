@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. Config ブロックと logger を追加（gate / env 正規化 / 観測点）
+- [x] 1. Config ブロックと logger を追加（gate / env 正規化 / 観測点）
   - `issue-watcher.sh` の Failed Recovery Config ブロック直後（行 609 付近）に
     Stale Pickup Reaper 設定節を新規追加し、以下 5 env を宣言:
     - `STALE_PICKUP_REAPER_ENABLED`（既定 `false`、`true` 厳密一致のみ ON、それ以外は
