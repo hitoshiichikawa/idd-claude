@@ -803,6 +803,34 @@ SLACK_NOTIFY_ENABLED="${SLACK_NOTIFY_ENABLED:-false}"
 SLACK_WEBHOOK_URL="${SLACK_WEBHOOK_URL:-}"
 SLACK_NOTIFY_TIMEOUT="${SLACK_NOTIFY_TIMEOUT:-5}"
 
+# ─── Auto-Merge Merged Notify Processor 設定 (#388) ───
+# `auto-merge` / `auto-merge-design` で armed された PR の実 merge 完了を後続サイクルで
+# 観測し、「merge 完了」を表す Slack 通知（event_type=auto-merge-merged /
+# auto-merge-design-merged）を 1 度だけ送るための補助 processor。armed と merged を
+# Slack 上で分離して受信者が判別可能にする（Req 1.x / 2.x）。
+#
+# **完全な opt-in**（Req 3.4 / NFR 4.1）。`SLACK_NOTIFY_MERGED_ENABLED=true` 厳密一致
+# 以外は state file も書かれず、本 processor は gh API ゼロ呼び出しで早期 return する
+# （本機能導入前 = #388 修正前と完全に等価）。`SLACK_NOTIFY_ENABLED=true` だけが有効な
+# ユーザには「armed 通知の文面と result 値が変わる」修正のみ反映され、新規 merged 通知
+# は発火しない（README migration note 参照）。
+#
+#   - SLACK_NOTIFY_MERGED_ENABLED: 本 processor の gate。`=true` 厳密一致のみ ON。
+#                                  それ以外（未設定 / 空 / `True` / `1` / `on` / typo /
+#                                  前後空白）はすべて安全側 OFF として正規化する
+#                                  （amm_resolve_gate_enabled / Req 3.5 / NFR 4.1）。
+#   - AUTO_MERGE_MERGED_STATE_DIR: pending state ファイルの配置先。既定は
+#                                  `$HOME/.issue-watcher/auto-merge-pending/<repo-slug>`
+#                                  （CLAUDE.md §6 準拠 / NFR 4.4 / 通常変更不要）。
+#   - AUTO_MERGE_MERGED_MAX_CHECKS: 1 サイクルあたりの `gh pr view` 呼び出し上限件数。
+#                                  既定 50。state file 数で自然制約されるが、保険として
+#                                  上限を持つ（NFR 3.2）。
+#   - AUTO_MERGE_MERGED_GH_TIMEOUT: 1 件あたりの `gh pr view` タイムアウト（秒）。既定 60。
+SLACK_NOTIFY_MERGED_ENABLED="${SLACK_NOTIFY_MERGED_ENABLED:-false}"
+AUTO_MERGE_MERGED_STATE_DIR="${AUTO_MERGE_MERGED_STATE_DIR:-$HOME/.issue-watcher/auto-merge-pending/$REPO_SLUG}"
+AUTO_MERGE_MERGED_MAX_CHECKS="${AUTO_MERGE_MERGED_MAX_CHECKS:-50}"
+AUTO_MERGE_MERGED_GH_TIMEOUT="${AUTO_MERGE_MERGED_GH_TIMEOUT:-60}"
+
 # ─── Stage Checkpoint 設定 (#68) ───
 # impl / impl-resume の Stage A/B/C 単位で完了 checkpoint を成果物
 # （impl-notes.md / review-notes.md / 既存 impl PR）の有無で観測し、失敗 Stage 以降
@@ -1160,7 +1188,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）、
 # #325 の token usage 計測（token-usage.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" "stale-pickup-reaper.sh" "needs-decisions-auto.sh" "dep-cycle-detect.sh" "slack-notify.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "promote-pipeline.sh" "pr-iteration.sh" "pr-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery.sh" "stale-pickup-reaper.sh" "needs-decisions-auto.sh" "dep-cycle-detect.sh" "slack-notify.sh" "auto-merge-merged.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -1378,6 +1406,15 @@ process_auto_merge || am_warn "process_auto_merge が想定外のエラーで終
 #   独立 processor として共存する（Req 5.2, 5.3）。配置順序は #352 直後（impl と対称）/
 #   Promote Pipeline 前（Req 5.4 / 8.4）。
 process_auto_merge_design || amd_warn "process_auto_merge_design が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+
+# Auto-Merge Merged Notify Processor (#388) — modules/auto-merge-merged.sh が定義
+#   `auto-merge` / `auto-merge-design` で armed された PR の実 merge 完了を pending
+#   state file 突合 + `gh pr view` で観測し、event_type=auto-merge-merged /
+#   auto-merge-design-merged の Slack 通知を 1 度だけ送信する。
+#   `SLACK_NOTIFY_MERGED_ENABLED=true` 厳密一致以外は早期 return（gh API ゼロ呼び出し /
+#   NFR 4.1）。armed 直後ではなく後続サイクルで観測するため、本 processor 単体では
+#   armed 動作自体を遅らせない（auto-merge / auto-merge-design の直後に直列配置）。
+process_auto_merge_merged || amm_warn "process_auto_merge_merged が想定外のエラーで終了しました（後続 Issue 処理は継続）"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Phase B: Promote Pipeline Processor (#15) + Phase E: Path Overlap Checker (#18)
