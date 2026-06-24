@@ -112,7 +112,7 @@
   - _Boundary: adjudicator.sh, pr-reviewer.sh_
   - _Depends: 5_
 
-- [ ] 7. pr-iteration.sh の excessive filter 拡張と近接テスト
+- [x] 7. pr-iteration.sh の excessive filter 拡張と近接テスト
   - `local-watcher/bin/modules/pr-iteration.sh` に `pi_general_filter_excessive` を新規追加
     （stdin: JSON 配列、stdout: フィルタ後。gate OFF 時は jq pass-through で no-op /
     NFR 1.1 既存件数挙動維持）
