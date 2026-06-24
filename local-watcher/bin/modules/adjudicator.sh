@@ -21,9 +21,10 @@
 #     不一致を検出した場合は WARN を stderr に出し戻り値 4 を返す（書式ドリフトによる
 #     silent 取りこぼし防止 / ae-mdm 設計レビュー #4 / Req 1.1, 5.5）。
 #
-#   後続関数（adj_classify_findings / adj_validate_decisions / adj_apply_label_decision /
-#   adj_read_reviewer_verdict / adj_apply_status_decision / adj_post_decision_comment /
-#   adj_run_for_pr / pr_catchup_should_defer_for_adjudicator）は task 4-6 で追加予定。
+#   後続関数（adj_run_for_pr / pr_catchup_should_defer_for_adjudicator）は task 6 で追加予定。
+#   task 4: adj_classify_findings / adj_validate_decisions（claude 呼び出し + 妥当性検証）
+#   task 5: adj_apply_label_decision / adj_read_reviewer_verdict / adj_apply_status_decision /
+#           adj_post_decision_comment（label / status publish + Reviewer 先行優先 + 観測 comment）
 #
 # 配置先:
 #   $HOME/bin/modules/adjudicator.sh（install.sh が local-watcher/bin/modules/ から配置する）
@@ -567,6 +568,343 @@ adj_validate_decisions() {
   ' >/dev/null 2>&1; then
     adj_warn "validation failed: summary 集計が decisions の verdict 集計と不整合"
     return 1
+  fi
+
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# adj_apply_label_decision: 裁定結果に基づき needs-iteration ラベルを add/remove
+#   入力: $1 = pr_number, $2 = legitimate_count
+#   出力: なし（log のみ）
+#   戻り値: 0 = ok / 1 = ラベル操作失敗 / 2 = 入力検証失敗
+#
+#   Req: 2.1 (legitimate ≥1 で needs-iteration 付与/維持) /
+#        2.2 (legitimate ゼロで needs-iteration 解消) /
+#        2.3 (codex 失敗 = findings 空 = legitimate ゼロ経路でも本関数として一貫処理)
+#
+#   挙動:
+#     - legitimate_count > 0 → `gh pr edit --add-label needs-iteration`（既付与で冪等 no-op）
+#     - legitimate_count == 0 → `gh pr edit --remove-label needs-iteration`（未付与で冪等 no-op）
+#     - gh の `--add-label` / `--remove-label` は既存ラベル / 不在ラベルに対しても idempotent。
+#       追加前 / 削除前の現状確認は行わず、`gh` の冪等性に委ねる（pr_add_iteration_label の
+#       既存設計と同方針 / NFR 1.1 観測ログ規約の最小化）。
+#     - 失敗時は WARN を 1 行残して rc=1 を返す。silent fail にしない（design.md Error Handling）。
+# ─────────────────────────────────────────────────────────────────────────────
+adj_apply_label_decision() {
+  local pr_number="${1:-}"
+  local legitimate_count="${2:-}"
+
+  # 入力検証（pr_publish_commit_status と同方針）
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    adj_warn "adj_apply_label_decision: 無効な PR 番号 '${pr_number}'"
+    return 2
+  fi
+  case "$legitimate_count" in
+    ''|*[!0-9]*)
+      adj_warn "adj_apply_label_decision: 無効な legitimate_count '${legitimate_count}'"
+      return 2
+      ;;
+  esac
+
+  local label="${LABEL_NEEDS_ITERATION:-needs-iteration}"
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+
+  if [ "$legitimate_count" -gt 0 ]; then
+    # `--` でオプション解釈打ち切り（未信頼値の混入予防 / CLAUDE.md §5 同方針）
+    if ! timeout "$timeout_s" \
+        gh pr edit "$pr_number" --repo "$REPO" --add-label "$label" >/dev/null 2>&1; then
+      adj_warn "adj_apply_label_decision: PR #${pr_number}: ${label} 付与失敗"
+      return 1
+    fi
+    adj_log "PR #${pr_number}: ${label} を付与（legitimate=${legitimate_count} / 既付与で冪等 no-op）"
+  else
+    if ! timeout "$timeout_s" \
+        gh pr edit "$pr_number" --repo "$REPO" --remove-label "$label" >/dev/null 2>&1; then
+      adj_warn "adj_apply_label_decision: PR #${pr_number}: ${label} 解消失敗"
+      return 1
+    fi
+    adj_log "PR #${pr_number}: ${label} を解消（legitimate=0 / 未付与で冪等 no-op）"
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# adj_read_reviewer_verdict: head_ref の review-notes.md 最終 verdict を読む
+#   入力: $1 = head_ref（例: claude/issue-404-...）
+#   出力: stdout に "approve" / "reject" / ""（不在 / RESULT 行不在）のいずれか
+#   戻り値: 0 固定（不在 / 取得失敗は空文字列として返す）
+#
+#   Req: 3.3 / 3.5（Reviewer 先行優先 / Architecture Decision: claude-review publisher contention）
+#
+#   挙動:
+#     - head_ref から issue 番号を抽出（`claude/issue-<N>-...`）。一致しなければ空文字列。
+#     - `git ls-tree --name-only origin/<head_ref> -- docs/specs/` で <N>- 始まりの spec
+#       ディレクトリを解決（pr_publish_claude_status_from_branch / #374 の経路を流用）。
+#     - `git show origin/<head_ref>:<spec>/review-notes.md` の中身を grep し、最終 `RESULT:`
+#       行から approve / reject を抽出（design.md 関数 contract）。
+#     - review-notes.md 不在 / RESULT 行不在は **空文字列**を返す（adjudicator は legitimate
+#       件数のみで判定する経路へ落ちる / Behavior contract）。
+#     - 取得失敗（ls-tree / cat-file / git show 失敗）も空文字列で返す（fail-safe）。
+#
+#   注: cwd は呼び出し元（issue-watcher.sh の processor 経路）で REPO_DIR を維持している前提。
+#       本関数は git ls-tree / git show のみ呼び出し副作用なし。
+# ─────────────────────────────────────────────────────────────────────────────
+adj_read_reviewer_verdict() {
+  local head_ref="${1:-}"
+
+  if [ -z "$head_ref" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  # head_ref から issue 番号を抽出
+  local issue_number=""
+  if [[ "$head_ref" =~ ^claude/issue-([0-9]+)- ]]; then
+    issue_number="${BASH_REMATCH[1]}"
+  fi
+  if [ -z "$issue_number" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+
+  # spec dir を origin/<head_ref> の tree から解決（catch-up 経路の解決手順を流用）
+  local tree_out spec_dir_rel=""
+  if ! tree_out=$(timeout "$timeout_s" \
+      git ls-tree --name-only "origin/${head_ref}" -- "docs/specs/" 2>/dev/null); then
+    printf '%s\n' ""
+    return 0
+  fi
+  spec_dir_rel=$(printf '%s\n' "$tree_out" \
+    | awk -v n="${issue_number}-" -F/ '$3 != "" && index($3, n) == 1 { print "docs/specs/" $3; exit }')
+  if [ -z "$spec_dir_rel" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  local notes_rel="${spec_dir_rel}/review-notes.md"
+
+  # review-notes.md 存在確認（不在は空文字列で返す）
+  if ! git cat-file -e "origin/${head_ref}:${notes_rel}" 2>/dev/null; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  # git show で内容を取得し、最終 `RESULT: approve|reject` 行を抽出。
+  # extract_review_result_token と同じ word boundary 規約に揃える（issue-watcher.sh:209）。
+  local notes_body
+  if ! notes_body=$(git show "origin/${head_ref}:${notes_rel}" 2>/dev/null); then
+    printf '%s\n' ""
+    return 0
+  fi
+  if [ -z "$notes_body" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  local matches last
+  matches=$(printf '%s' "$notes_body" \
+    | grep -oE 'RESULT:[[:space:]]+(approve|reject)([^[:alnum:]_]|$)' 2>/dev/null || true)
+  if [ -z "$matches" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+  last=$(printf '%s\n' "$matches" | tail -n 1)
+  case "$last" in
+    *approve*) printf '%s\n' "approve" ;;
+    *reject*)  printf '%s\n' "reject"  ;;
+    *)         printf '%s\n' ""        ;;
+  esac
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# adj_apply_status_decision: 裁定結果 + Reviewer verdict から claude-review status を publish
+#   入力: $1 = pr_number, $2 = sha, $3 = legitimate_count, $4 = pr_url, $5 = head_ref
+#   出力: なし（log は pr_publish_claude_status / pr_publish_commit_status 側で）
+#   戻り値: pr_publish_claude_status の戻り値（0/1/2/3/4）
+#
+#   Req: 3.2 (claude-review publish 主体) / 3.3 (legitimate ゼロで success) /
+#        3.4 (legitimate ≥1 で failure) / 3.5 (Reviewer reject で failure 強制 / 先行優先)
+#
+#   挙動（Architecture Decision: claude-review publisher contention / Reviewer 先行優先）:
+#     1. `adj_read_reviewer_verdict <head_ref>` で Reviewer の最終 verdict を取得
+#     2. verdict が "reject" → legitimate_count に依らず result="reject"（status=failure）を publish
+#     3. それ以外（"approve" / "" 不在 / RESULT 行不在）→ legitimate_count で分岐:
+#        - legitimate_count > 0 → result="reject"（failure）
+#        - legitimate_count == 0 → result="approve"（success）
+#     4. `pr_publish_claude_status` を流用（既存関数 = claude-review context の唯一の publisher）
+# ─────────────────────────────────────────────────────────────────────────────
+adj_apply_status_decision() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local legitimate_count="${3:-}"
+  local pr_url="${4:-}"
+  local head_ref="${5:-}"
+
+  # 入力検証（後段 pr_publish_commit_status でも検証されるが、ここで Reviewer 先行優先の
+  # 経路に進む前に早期 reject しておく）
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    adj_warn "adj_apply_status_decision: 無効な PR 番号 '${pr_number}'"
+    return 2
+  fi
+  if ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+    adj_warn "adj_apply_status_decision: 無効な sha '${sha}'"
+    return 2
+  fi
+  case "$legitimate_count" in
+    ''|*[!0-9]*)
+      adj_warn "adj_apply_status_decision: 無効な legitimate_count '${legitimate_count}'"
+      return 2
+      ;;
+  esac
+
+  # Reviewer 先行優先（Behavior contract 2 / Req 3.5）
+  local reviewer_verdict
+  reviewer_verdict=$(adj_read_reviewer_verdict "$head_ref" 2>/dev/null || true)
+
+  local result
+  if [ "$reviewer_verdict" = "reject" ]; then
+    # 独立 Reviewer reject は legitimate 件数に依らず failure に倒す（上書き防止）
+    result="reject"
+    adj_log "PR #${pr_number}: Reviewer reject 検出（review-notes.md）→ claude-review=failure（legitimate=${legitimate_count} を上書き / 先行優先）"
+  else
+    # Reviewer 不在 / RESULT 行不在 / approve のいずれかなら legitimate 件数のみで verdict 決定
+    if [ "$legitimate_count" -gt 0 ]; then
+      result="reject"
+      adj_log "PR #${pr_number}: legitimate=${legitimate_count} → claude-review=failure（Reviewer verdict='${reviewer_verdict}'）"
+    else
+      result="approve"
+      adj_log "PR #${pr_number}: legitimate=0 → claude-review=success（Reviewer verdict='${reviewer_verdict}'）"
+    fi
+  fi
+
+  # target_url は呼び出し元から渡された PR URL を流用（review-notes.md の blob URL を組み立てる
+  # ことも可能だが、adjudicator 経路では Reviewer verdict と adjudicator 判定の合成のため
+  # blob URL は意味的に弱い。PR URL で十分 / pr_publish_codex_status と対称）。
+  pr_publish_claude_status "$pr_number" "$sha" "$result" "$pr_url"
+  return $?
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# adj_post_decision_comment: 裁定結果サマリ + excessive 個別 marker を PR コメントに投稿
+#   入力: $1 = pr_number, $2 = sha, $3 = findings_json, $4 = decisions_json
+#   出力: なし（log のみ）
+#   戻り値: 0 = ok（重複 skip 含む）/ 1 = 投稿失敗 / 2 = 入力検証失敗
+#
+#   Req: 4.1 (PR コメント or ログで観測可能) / 4.3 (hidden marker key の self-filter 非衝突) /
+#        NFR 1.2 (excessive 個別 marker は pi_general_filter_excessive の入力キー)
+#
+#   挙動:
+#     1. (sha, kind=decision) 重複チェック: `pr_already_processed` を流用（marker prefix
+#        は本関数で発行する `idd-claude:pr-adjudicator sha=<sha> kind=decision` 形式に対し
+#        pr_already_processed は `idd-claude:pr-reviewer sha=... kind=...` を見るため
+#        prefix 衝突しない設計）。
+#        → 本関数では `pr_already_processed` を直接呼ばず、同等の重複検査を `idd-claude:pr-adjudicator`
+#          prefix で行う（既存関数の流用方針は task 5 contract の通り、但し prefix が
+#          `pr-reviewer` 固定のため、本関数では adjudicator 専用の同形ヘルパーをインライン）。
+#     2. summary コメント本文を組み立て、末尾に hidden marker
+#        `<!-- idd-claude:pr-adjudicator sha=<sha> kind=decision -->` を付与して投稿
+#     3. excessive と判定された finding ごとに hidden marker
+#        `<!-- idd-claude:pr-adjudicator-excessive id=<N> sha=<sha> -->` を含む追加コメントを
+#        1 件投稿（pi 側 self-filter のキーとして使う / NFR 1.2）。
+#
+#   prefix 設計（design.md Data Models）:
+#     - `pr-adjudicator` prefix は既存 `pr-reviewer` / `pr-iteration` のいずれとも前方一致
+#       しない（#400 確立の self-filter 規約と非衝突 / Req 4.3）。
+# ─────────────────────────────────────────────────────────────────────────────
+adj_post_decision_comment() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local findings_json="${3:-}"
+  local decisions_json="${4:-}"
+
+  # 入力検証
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    adj_warn "adj_post_decision_comment: 無効な PR 番号 '${pr_number}'"
+    return 2
+  fi
+  if ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+    adj_warn "adj_post_decision_comment: 無効な sha '${sha}'"
+    return 2
+  fi
+
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+
+  # ── 重複判定: 既存コメントに同 (sha, kind=decision) marker が在れば skip ──
+  # pr_already_processed は `idd-claude:pr-reviewer` prefix を前提とするため流用しない。
+  # 同等の検査を `idd-claude:pr-adjudicator` prefix で行う（jq --arg でリテラル渡し / CLAUDE.md §5）。
+  local comments_json
+  if comments_json=$(timeout "$timeout_s" \
+      gh api "/repos/${REPO}/issues/${pr_number}/comments" 2>/dev/null); then
+    if echo "$comments_json" | jq -e \
+        --arg sha "$sha" \
+        'any(.[]; (.body // "") | test("idd-claude:pr-adjudicator sha=" + $sha + "[^>]*kind=decision"))' \
+        >/dev/null 2>&1; then
+      adj_log "PR #${pr_number}: 裁定コメント既存（sha=${sha} kind=decision）→ 再投稿 skip"
+      return 0
+    fi
+  else
+    # 取得失敗時は安全側（重複投稿回避）に倒し既存扱いで skip（pr_already_processed と同方針）
+    adj_warn "PR #${pr_number}: 既存コメント取得失敗（重複判定を skip = 安全側で既存扱い）"
+    return 0
+  fi
+
+  # ── サマリコメント本文の組み立て ──
+  # decisions_json から legitimate / excessive 件数とサマリ表を組み立てる。
+  # 未信頼入力（codex 出力由来 / Claude 出力由来）は jq に --arg で渡し、filter inline 展開禁止。
+  local total legitimate excessive
+  total=$(printf '%s' "$decisions_json" | jq -r '.summary.total // 0' 2>/dev/null || echo "0")
+  legitimate=$(printf '%s' "$decisions_json" | jq -r '.summary.legitimate // 0' 2>/dev/null || echo "0")
+  excessive=$(printf '%s' "$decisions_json" | jq -r '.summary.excessive // 0' 2>/dev/null || echo "0")
+  case "$total" in ''|*[!0-9]*) total=0 ;; esac
+  case "$legitimate" in ''|*[!0-9]*) legitimate=0 ;; esac
+  case "$excessive" in ''|*[!0-9]*) excessive=0 ;; esac
+
+  local summary_body
+  summary_body=$(printf '## 自動裁定サマリ\n\n- total: %s\n- legitimate: %s\n- excessive: %s\n\n<!-- idd-claude:pr-adjudicator sha=%s kind=decision -->\n' \
+    "$total" "$legitimate" "$excessive" "$sha")
+
+  if ! timeout "$timeout_s" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$summary_body" >/dev/null 2>&1; then
+    adj_warn "PR #${pr_number}: 裁定サマリコメント投稿失敗（sha=${sha}）"
+    return 1
+  fi
+  adj_log "PR #${pr_number}: 裁定サマリコメント投稿（sha=${sha} total=${total} legit=${legitimate} excess=${excessive}）"
+
+  # ── excessive 個別 marker コメントの投稿 ──
+  # findings_json と decisions_json を id で突合し、verdict=excessive のものに対して
+  # 1 件ずつ marker 付きコメントを投稿する（pi 側 self-filter のキー / NFR 1.2）。
+  # decisions の id 採番は 1〜N（adj_validate_decisions で連番検証済み）。
+  # 未信頼値（reason / file / message）は jq --arg / --argjson で渡し、filter inline 展開禁止。
+  if [ "$excessive" -gt 0 ]; then
+    local excessive_rows
+    # excessive な decisions の (id, severity, file, line, reason) を TSV 化
+    excessive_rows=$(printf '%s' "$decisions_json" | jq -r '
+      .decisions
+      | map(select(.verdict == "excessive"))
+      | .[]
+      | [ (.id | tostring), (.severity // ""), (.file // ""), ((.line // 0) | tostring), (.reason // "") ]
+      | @tsv
+    ' 2>/dev/null) || excessive_rows=""
+
+    if [ -n "$excessive_rows" ]; then
+      while IFS=$'\t' read -r fid fseverity ffile fline freason; do
+        [ -z "$fid" ] && continue
+        local body
+        body=$(printf '## 自動裁定: excessive\n\n- id: %s\n- severity: %s\n- file: %s\n- line: %s\n- 理由: %s\n\n<!-- idd-claude:pr-adjudicator-excessive id=%s sha=%s -->\n' \
+          "$fid" "$fseverity" "$ffile" "$fline" "$freason" "$fid" "$sha")
+        if ! timeout "$timeout_s" \
+            gh pr comment "$pr_number" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+          adj_warn "PR #${pr_number}: excessive marker コメント投稿失敗（id=${fid} sha=${sha}）"
+          # 個別 marker 投稿失敗は致命的ではないため、サマリは投稿済みのまま続行
+          continue
+        fi
+        adj_log "PR #${pr_number}: excessive marker 投稿（id=${fid} sha=${sha}）"
+      done <<<"$excessive_rows"
+    fi
   fi
 
   return 0
