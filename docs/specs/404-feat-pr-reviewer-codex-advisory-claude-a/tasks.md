@@ -141,7 +141,7 @@
   - _Boundary: README.md_
   - _Depends: 7_
 
-- [ ] 9. 静的解析・既存テスト退行確認・E2E スモーク
+- [x] 9. 静的解析・既存テスト退行確認・E2E スモーク
   - `shellcheck local-watcher/bin/*.sh local-watcher/bin/modules/*.sh install.sh setup.sh
     .github/scripts/*.sh` 警告ゼロ確認
   - `actionlint .github/workflows/*.yml` クリーン確認
