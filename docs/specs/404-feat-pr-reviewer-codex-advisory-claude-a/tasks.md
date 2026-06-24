@@ -16,7 +16,7 @@
   - _Requirements: 5.1, 5.3, 5.5, 4.4_
   - _Boundary: core_utils.sh, issue-watcher.sh_
 
-- [ ] 2. adjudicator-prompt.tmpl の作成と read-only 契約の明示
+- [x] 2. adjudicator-prompt.tmpl の作成と read-only 契約の明示
   - `local-watcher/bin/adjudicator-prompt.tmpl` を新規作成
   - プレースホルダ: `{PR}` / `{SHA}` / `{BASE}` / `{HEAD}` / `{REVIEW_TEXT}` / `{SPEC_DIR}` /
     `{REQUIREMENTS_MD}`（解決不能時は `(none)`）
