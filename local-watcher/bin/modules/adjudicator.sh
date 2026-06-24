@@ -909,3 +909,304 @@ adj_post_decision_comment() {
 
   return 0
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# adj_resolve_spec_dir_from_head_ref: head_ref から docs/specs/<N>-<slug>/ 絶対パスを解決
+#   入力: $1 = head_ref（例: claude/issue-404-impl-foo）
+#   出力: stdout に絶対パス（`pwd` 基準で resolve）または空文字列（不在 / 解決不能時）
+#   戻り値: 0 固定（fail-safe / 解決不能でも空文字列で返す）
+#
+#   挙動:
+#     - head_ref から issue 番号を抽出（`claude/issue-<N>-...`）。一致しなければ空文字列。
+#     - `git ls-tree --name-only origin/<head_ref> -- docs/specs/` で <N>- 始まりの spec
+#       ディレクトリを解決（pr_publish_claude_status_from_branch / #374 catch-up と同じ経路）。
+#     - 解決された相対パスを cwd 基準で結合して絶対パス相当を返す（呼び出し元
+#       adj_classify_findings は cwd 非依存で動作するが、placeholder 解決 / requirements.md
+#       読み出しのため絶対パスがあると便利）。
+#     - 取得失敗 / 不在は空文字列で返す（fail-safe）。
+#
+#   注: 本関数は read-only（git ls-tree のみ）で副作用なし。cwd が REPO_DIR であることを前提とする
+#       （pr-reviewer.sh からの hook 呼び出し時点で REPO_DIR / NFR 1.1）。
+# ─────────────────────────────────────────────────────────────────────────────
+adj_resolve_spec_dir_from_head_ref() {
+  local head_ref="${1:-}"
+  if [ -z "$head_ref" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  local issue_number=""
+  if [[ "$head_ref" =~ ^claude/issue-([0-9]+)- ]]; then
+    issue_number="${BASH_REMATCH[1]}"
+  fi
+  if [ -z "$issue_number" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+  local tree_out spec_dir_rel=""
+  if ! tree_out=$(timeout "$timeout_s" \
+      git ls-tree --name-only "origin/${head_ref}" -- "docs/specs/" 2>/dev/null); then
+    printf '%s\n' ""
+    return 0
+  fi
+  spec_dir_rel=$(printf '%s\n' "$tree_out" \
+    | awk -v n="${issue_number}-" -F/ '$3 != "" && index($3, n) == 1 { print "docs/specs/" $3; exit }')
+  if [ -z "$spec_dir_rel" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  # 相対パスを cwd 基準で絶対化（pwd は呼び出し元 REPO_DIR の前提）
+  local cwd
+  cwd=$(pwd 2>/dev/null) || cwd=""
+  if [ -n "$cwd" ]; then
+    printf '%s\n' "${cwd}/${spec_dir_rel}"
+  else
+    printf '%s\n' "$spec_dir_rel"
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# adj_log_summary: 裁定 1 行サマリを観測ログに出力
+#   入力: $1 = pr_number, $2 = sha, $3 = total, $4 = legitimate, $5 = excessive
+#   出力: adj_log 1 行のみ（NFR 1.1 観測ログ 10 行以内に収める集計形式 / Req 4.2）
+#   戻り値: 0 固定
+# ─────────────────────────────────────────────────────────────────────────────
+adj_log_summary() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local total="${3:-0}"
+  local legitimate="${4:-0}"
+  local excessive="${5:-0}"
+  adj_log "裁定サマリ pr=#${pr_number} sha=${sha} total=${total} legitimate=${legitimate} excessive=${excessive}"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# adj_synthesize_all_legitimate_decisions: fallback 用に「全 finding を legitimate と扱う」
+#   decisions JSON を合成する（Req 1.4「迷ったら legitimate」の徹底）
+#   入力: $1 = findings_json (adj_extract_findings 出力)
+#   出力: stdout に `{"decisions":[...全件 legitimate...],"summary":{...}}` を流す
+#   戻り値: 0 = ok / 1 = findings_json が不正
+#
+#   用途:
+#     - adj_classify_findings 失敗（rc=1/2/3）/ adj_validate_decisions 失敗（rc=1）/
+#       adj_extract_findings reconciliation mismatch（rc=4）時、`legitimate` fallback モードで
+#       「全 finding を legitimate 扱い」に倒すための合成 decisions を生成する。
+#     - adj_post_decision_comment / adj_apply_status_decision の入力契約に揃える。
+# ─────────────────────────────────────────────────────────────────────────────
+adj_synthesize_all_legitimate_decisions() {
+  local findings_json="${1:-[]}"
+
+  # findings_json が valid JSON 配列か検証
+  if ! printf '%s' "$findings_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    return 1
+  fi
+
+  printf '%s' "$findings_json" | jq -c '
+    . as $f
+    | (length) as $n
+    | {
+        decisions: [
+          range(0; $n) as $i
+          | {
+              id: ($i + 1),
+              severity: ($f[$i].severity // ""),
+              file: ($f[$i].file // ""),
+              line: ($f[$i].line // 0),
+              verdict: "legitimate",
+              reason: "fallback: 確信が持てないため legitimate に倒す（Req 1.4）"
+            }
+        ],
+        summary: { total: $n, legitimate: $n, excessive: 0 }
+      }
+  '
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# adj_run_for_pr: 1 PR 分の adjudicator フローをオーケストレートする
+#   入力: $1 = pr_number, $2 = sha, $3 = review_text（codex stdout 全文。空 = codex 失敗）,
+#         $4 = pr_url, $5 = head_ref
+#   出力: adj_log によるサマリ 1 行（NFR 1.1 / Req 4.2）と各内部関数のログ
+#   戻り値: 常に 0（呼び出し元 pr_run_review_for_pr は `|| adj_warn` で吸収するが、本関数
+#           自身も fail-safe で非ゼロ exit を伝搬しない / Invariants）
+#
+#   Req: 2.6, 3.1, 3.2, 3.6, 4.2, 5.2, 5.4 / NFR 1.1, NFR 2.1
+#
+#   フロー（design.md sequenceDiagram / Components and Interfaces 節 + Error Handling 節）:
+#     0. gate OFF → 即 return 0（NFR 2.1 観測ログ diff ゼロ）
+#     1. review_text 空（codex exec-failed）→ findings ゼロ経路へ合流（Req 2.3 / 3.6）
+#        legitimate ゼロ判定でラベル解消 + Reviewer reject 不検出なら success 経路
+#     2. adj_extract_findings → rc=4（reconciliation mismatch）→ fallback モード適用
+#     3. findings ゼロ → label remove + status publish（Reviewer 先行優先は内部で処理）
+#     4. MAX_FINDINGS で truncate（コスト抑制 / WARN 1 行）
+#     5. adj_classify_findings → rc=1/2/3 → fallback モード適用
+#     6. adj_validate_decisions → rc=1 → fallback モード適用
+#     7. 正常経路: adj_apply_label_decision → adj_apply_status_decision → adj_post_decision_comment
+#     8. adj_log_summary で 1 行サマリ
+#
+#   fallback モード（PR_REVIEWER_ADJUDICATOR_FALLBACK_ON_FAIL）:
+#     - passthrough（既定）: publish / label / marker を全て skip、catch-up に引き継がせる
+#       （marker 不在 → pr_catchup_should_defer_for_adjudicator が false → catch-up 続行）
+#     - legitimate: 全 finding を legitimate 扱い（needs-iteration 維持 + claude-review=failure）
+# ─────────────────────────────────────────────────────────────────────────────
+adj_run_for_pr() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local review_text="${3:-}"
+  local pr_url="${4:-}"
+  local head_ref="${5:-}"
+
+  # 0. gate OFF 早期 return（NFR 2.1 完全 no-op / gh / claude / log 発火ゼロ）
+  if ! adj_gate_enabled; then
+    return 0
+  fi
+
+  # 入力検証（後段 publisher でも検証されるが、早期 reject）
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    adj_warn "adj_run_for_pr: 無効な PR 番号 '${pr_number}'"
+    return 0
+  fi
+  if ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+    adj_warn "adj_run_for_pr: 無効な sha '${sha}'"
+    return 0
+  fi
+
+  local fallback_mode="${PR_REVIEWER_ADJUDICATOR_FALLBACK_ON_FAIL:-passthrough}"
+
+  # 1. review_text 空（codex exec-failed）→ findings ゼロ経路へ合流（Req 2.3 / 3.6）
+  if [ -z "$review_text" ]; then
+    adj_log "PR #${pr_number}: codex review_text 空（codex exec-failed）→ findings ゼロ経路（Req 3.6）"
+    adj_apply_label_decision "$pr_number" "0" || true
+    adj_apply_status_decision "$pr_number" "$sha" "0" "$pr_url" "$head_ref" || true
+    adj_log_summary "$pr_number" "$sha" "0" "0" "0"
+    return 0
+  fi
+
+  # 2. findings 抽出（reconciliation check 内蔵）
+  local findings_json findings_rc=0
+  findings_json=$(adj_extract_findings "$review_text") || findings_rc=$?
+
+  if [ "$findings_rc" -eq 4 ]; then
+    # reconciliation mismatch → fallback モード適用
+    adj_warn "PR #${pr_number}: findings reconciliation mismatch → fallback=${fallback_mode}"
+    if [ "$fallback_mode" = "legitimate" ]; then
+      # 全件 legitimate に倒して publish 経路へ
+      local synth_decisions
+      if synth_decisions=$(adj_synthesize_all_legitimate_decisions "$findings_json" 2>/dev/null); then
+        local total leg
+        total=$(printf '%s' "$synth_decisions" | jq -r '.summary.total // 0' 2>/dev/null || echo "0")
+        leg=$(printf '%s' "$synth_decisions" | jq -r '.summary.legitimate // 0' 2>/dev/null || echo "0")
+        case "$total" in ''|*[!0-9]*) total=0 ;; esac
+        case "$leg" in ''|*[!0-9]*) leg=0 ;; esac
+        adj_apply_label_decision "$pr_number" "$leg" || true
+        adj_apply_status_decision "$pr_number" "$sha" "$leg" "$pr_url" "$head_ref" || true
+        adj_post_decision_comment "$pr_number" "$sha" "$findings_json" "$synth_decisions" || true
+        adj_log_summary "$pr_number" "$sha" "$total" "$leg" "0"
+      else
+        adj_warn "PR #${pr_number}: fallback=legitimate 経路で decisions 合成失敗 → skip"
+      fi
+    else
+      adj_log "PR #${pr_number}: fallback=passthrough → adjudicator skip（catch-up に引き継ぎ）"
+    fi
+    return 0
+  fi
+
+  # findings_json は valid JSON 配列のはず（adj_extract_findings の契約）
+  local findings_count
+  findings_count=$(printf '%s' "$findings_json" | jq -r 'if type=="array" then length else 0 end' 2>/dev/null || echo "0")
+  case "$findings_count" in ''|*[!0-9]*) findings_count=0 ;; esac
+
+  # 3. findings ゼロ経路（指摘なし / `## 指摘事項` 不在 等。codex VERDICT 経路の通常成功ケース）
+  if [ "$findings_count" -eq 0 ]; then
+    adj_apply_label_decision "$pr_number" "0" || true
+    adj_apply_status_decision "$pr_number" "$sha" "0" "$pr_url" "$head_ref" || true
+    adj_log_summary "$pr_number" "$sha" "0" "0" "0"
+    return 0
+  fi
+
+  # 4. MAX_FINDINGS で truncate（コスト抑制 / WARN 1 行）
+  local max_findings="${PR_REVIEWER_ADJUDICATOR_MAX_FINDINGS:-50}"
+  case "$max_findings" in ''|*[!0-9]*) max_findings=50 ;; esac
+  if [ "$findings_count" -gt "$max_findings" ]; then
+    adj_warn "PR #${pr_number}: findings_count=${findings_count} > MAX=${max_findings} → 先頭 ${max_findings} 件に truncate"
+    findings_json=$(printf '%s' "$findings_json" | jq -c --argjson n "$max_findings" '.[0:$n]')
+    findings_count="$max_findings"
+  fi
+
+  # 5. spec_dir / base_ref / head_ref を解決して classify 呼び出し
+  local spec_dir
+  spec_dir=$(adj_resolve_spec_dir_from_head_ref "$head_ref")
+  local base_ref="${BASE_BRANCH:-main}"
+
+  local decisions_json classify_rc=0
+  decisions_json=$(adj_classify_findings "$pr_number" "$sha" "$findings_json" "$spec_dir" "$base_ref" "$head_ref") || classify_rc=$?
+
+  if [ "$classify_rc" -ne 0 ]; then
+    # rc=1/2/3 すべて fallback モード適用
+    adj_warn "PR #${pr_number}: adj_classify_findings 失敗 (rc=${classify_rc}) → fallback=${fallback_mode}"
+    if [ "$fallback_mode" = "legitimate" ]; then
+      local synth_decisions
+      if synth_decisions=$(adj_synthesize_all_legitimate_decisions "$findings_json" 2>/dev/null); then
+        local total leg
+        total=$(printf '%s' "$synth_decisions" | jq -r '.summary.total // 0' 2>/dev/null || echo "0")
+        leg=$(printf '%s' "$synth_decisions" | jq -r '.summary.legitimate // 0' 2>/dev/null || echo "0")
+        case "$total" in ''|*[!0-9]*) total=0 ;; esac
+        case "$leg" in ''|*[!0-9]*) leg=0 ;; esac
+        adj_apply_label_decision "$pr_number" "$leg" || true
+        adj_apply_status_decision "$pr_number" "$sha" "$leg" "$pr_url" "$head_ref" || true
+        adj_post_decision_comment "$pr_number" "$sha" "$findings_json" "$synth_decisions" || true
+        adj_log_summary "$pr_number" "$sha" "$total" "$leg" "0"
+      else
+        adj_warn "PR #${pr_number}: fallback=legitimate 経路で decisions 合成失敗 → skip"
+      fi
+    else
+      adj_log "PR #${pr_number}: fallback=passthrough → adjudicator skip（catch-up に引き継ぎ）"
+    fi
+    return 0
+  fi
+
+  # 6. validate（Req 1.5 件数一致 / verdict / summary 整合）
+  if ! adj_validate_decisions "$findings_json" "$decisions_json"; then
+    adj_warn "PR #${pr_number}: adj_validate_decisions 失敗 → fallback=${fallback_mode}"
+    if [ "$fallback_mode" = "legitimate" ]; then
+      local synth_decisions
+      if synth_decisions=$(adj_synthesize_all_legitimate_decisions "$findings_json" 2>/dev/null); then
+        local total leg
+        total=$(printf '%s' "$synth_decisions" | jq -r '.summary.total // 0' 2>/dev/null || echo "0")
+        leg=$(printf '%s' "$synth_decisions" | jq -r '.summary.legitimate // 0' 2>/dev/null || echo "0")
+        case "$total" in ''|*[!0-9]*) total=0 ;; esac
+        case "$leg" in ''|*[!0-9]*) leg=0 ;; esac
+        adj_apply_label_decision "$pr_number" "$leg" || true
+        adj_apply_status_decision "$pr_number" "$sha" "$leg" "$pr_url" "$head_ref" || true
+        adj_post_decision_comment "$pr_number" "$sha" "$findings_json" "$synth_decisions" || true
+        adj_log_summary "$pr_number" "$sha" "$total" "$leg" "0"
+      else
+        adj_warn "PR #${pr_number}: fallback=legitimate 経路で decisions 合成失敗 → skip"
+      fi
+    else
+      adj_log "PR #${pr_number}: fallback=passthrough → adjudicator skip（catch-up に引き継ぎ）"
+    fi
+    return 0
+  fi
+
+  # 7. 正常経路（label → status → comment）
+  local total legitimate excessive
+  total=$(printf '%s' "$decisions_json" | jq -r '.summary.total // 0' 2>/dev/null || echo "0")
+  legitimate=$(printf '%s' "$decisions_json" | jq -r '.summary.legitimate // 0' 2>/dev/null || echo "0")
+  excessive=$(printf '%s' "$decisions_json" | jq -r '.summary.excessive // 0' 2>/dev/null || echo "0")
+  case "$total" in ''|*[!0-9]*) total=0 ;; esac
+  case "$legitimate" in ''|*[!0-9]*) legitimate=0 ;; esac
+  case "$excessive" in ''|*[!0-9]*) excessive=0 ;; esac
+
+  adj_apply_label_decision "$pr_number" "$legitimate" || true
+  adj_apply_status_decision "$pr_number" "$sha" "$legitimate" "$pr_url" "$head_ref" || true
+  adj_post_decision_comment "$pr_number" "$sha" "$findings_json" "$decisions_json" || true
+
+  # 8. 1 行サマリ（NFR 1.1 観測ログ ≤10 行 / Req 4.2）
+  adj_log_summary "$pr_number" "$sha" "$total" "$legitimate" "$excessive"
+  return 0
+}

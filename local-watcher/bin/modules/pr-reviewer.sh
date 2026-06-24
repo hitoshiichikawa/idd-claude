@@ -1572,6 +1572,13 @@ pr_run_review_for_pr() {
   # 場合のみ実行。gate OFF / publish 失敗いずれもパイプラインを止めない（Req 5.3, 5.5）。
   pr_publish_codex_status "$pr_number" "$sha" "$review_text" "$pr_url" || true
 
+  # Issue #404 / adjudicator hook: codex 結果確定直後に adjudicator を chain する。
+  # gate OFF（PR_REVIEWER_ADJUDICATOR_ENABLED != true）時は adj_run_for_pr 内部で即 return 0
+  # するため完全 no-op（NFR 2.1 / 既存ラベル付与・status publish ロジックは残置）。
+  # gate ON 時は adjudicator が後発で同 (sha, claude-review) を上書き publish する（Req 3.2）。
+  adj_run_for_pr "$pr_number" "$sha" "$review_text" "$pr_url" "$head_ref" \
+    || adj_warn "adj_run_for_pr 想定外の失敗 (pr=#${pr_number} sha=${sha})"
+
   return 0
 }
 
@@ -1801,10 +1808,89 @@ process_claude_review_status_catchup() {
     sha=$(echo "$pr_json"       | jq -r '.headRefOid')
     pr_url=$(echo "$pr_json"    | jq -r '.url')
 
+    # Issue #404 / adjudicator catch-up suppression: adjudicator 管轄 PR
+    # （gate ON + marker `<!-- idd-claude:pr-adjudicator sha=<sha> -->` 存在）は
+    # adjudicator が単独 publisher として claude-review を確定するため catch-up を defer
+    # （Architecture Decision: claude-review publisher contention / Behavior contract 1）。
+    # gate OFF / marker 不在 / sha 不一致は false 返却 → 既存 catch-up 経路を継続（NFR 1.1）。
+    if pr_catchup_should_defer_for_adjudicator "$pr_number" "$sha"; then
+      pr_log "claude-review catch-up: PR #${pr_number} を adjudicator 管轄として skip (sha=${sha})"
+      continue
+    fi
+
     pr_publish_claude_status_from_branch "$pr_number" "$sha" "$head_ref" "$pr_url" || true
     processed=$((processed + 1))
   done <<< "$pr_iter"
 
   pr_log "claude-review catch-up: サマリ processed=${processed} overflow=${overflow}"
   return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_catchup_should_defer_for_adjudicator (Issue #404)
+#
+# adjudicator 管轄 PR で catch-up を skip するかどうかを判定する read-only helper。
+#   入力: $1 = pr_number, $2 = sha
+#   出力: なし
+#   戻り値: 0 = defer（catch-up を skip）/ 1 = catch-up 続行
+#
+# Req: 3.2 (adjudicator が claude-review を publish) / 4.3 (marker key の self-filter 非衝突)
+#
+# 挙動（Architecture Decision: claude-review publisher contention / Behavior contract 1, 4）:
+#   - gate OFF（PR_REVIEWER_ADJUDICATOR_ENABLED != true）→ 即 return 1（既存 catch-up
+#     挙動を維持 / NFR 1.1）。
+#   - gate ON + adjudicator marker `<!-- idd-claude:pr-adjudicator sha=<sha> ... -->` が
+#     PR コメントに 1 件以上ある場合 → return 0（defer）。
+#   - gate ON + marker 不在（adjudicator が exec 失敗 / passthrough fallback で marker
+#     未投稿）→ return 1（catch-up が引き継ぎ publish）。
+#   - gate ON + marker 存在だが sha 不一致 → return 1（別 sha の marker は対象外）。
+#   - gh API 失敗 → return 1（安全側で catch-up 続行 / adjudicator marker 不在として扱う /
+#     passthrough 経路と整合）。
+#
+# 副作用なし（`gh pr view --json comments` の read-only fetch のみ）。
+# 未信頼入力対策: pr_number は ^[0-9]+$、sha は ^[0-9a-f]{7,40}$ で strict 検証してから
+# 使用（pr_publish_commit_status と同方針）。jq には --arg でリテラル渡し（filter inline
+# 展開禁止 / CLAUDE.md §5）。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_catchup_should_defer_for_adjudicator() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+
+  # gate OFF 早期 return（NFR 1.1 既存 catch-up 挙動を維持）
+  if ! adj_gate_enabled; then
+    return 1
+  fi
+
+  # 入力検証（未信頼入力 / 安全側）
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  if ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+    return 1
+  fi
+
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+
+  # gh pr view --json comments で marker を fetch
+  # --jq でクエリを実行し、結果は本文文字列のリスト（改行区切り）
+  local comments_body
+  if ! comments_body=$(timeout "$timeout_s" \
+      gh pr view "$pr_number" --repo "$REPO" --json comments \
+      --jq '.comments[].body' 2>/dev/null); then
+    # gh 取得失敗 → 安全側で catch-up 続行（marker 不在として扱う）
+    return 1
+  fi
+
+  if [ -z "$comments_body" ]; then
+    return 1
+  fi
+
+  # marker `<!-- idd-claude:pr-adjudicator sha=<sha> ` の存在を厳密一致で判定
+  # （sha 不一致の marker は別 sha 対象として無視 / Behavior contract）。
+  # `--` でオプション解釈打ち切り（未信頼 sha 値の混入予防 / CLAUDE.md §5）。
+  local needle="idd-claude:pr-adjudicator sha=${sha}"
+  if printf '%s\n' "$comments_body" | grep -F -q -- "$needle"; then
+    return 0
+  fi
+  return 1
 }
