@@ -591,6 +591,50 @@ PR_REVIEWER_GIT_TIMEOUT="${PR_REVIEWER_GIT_TIMEOUT:-120}"
 # レビュー実行コマンドの最大経過秒数。
 PR_REVIEWER_EXEC_TIMEOUT="${PR_REVIEWER_EXEC_TIMEOUT:-600}"
 
+# ─── PR Reviewer exec-failed リトライ抑止 / 診断性向上設定 (#403) ───
+# 同一 head sha での連続 `kind=exec-failed`（codex / antigravity の非ゼロ終了 / 空出力 /
+# workspace-modified 含む実行失敗扱い）を hidden marker で永続カウントし、上限到達 PR を
+# 候補から除外することで rate-limit 持続事故を防ぐ（Issue #403）。
+# 既定 ON だが、運用上は `PR_REVIEWER_ENABLED=true` の opt-in 経路の中で動作するため、
+# 本機能による外部副作用は本機能導入前と同等の安全側拡張に留まる（Req 4.x / NFR 1.1）。
+#
+# 上限既定値 3（pr-iteration の no-progress-streak 既定と整合 / NFR 2.1）。1 以上の整数のみ
+# 受理し、不正値（非数値 / 0 以下 / 空）は既定 3 に正規化する（NFR 1.2 安全側）。
+PR_REVIEWER_EXEC_FAIL_LIMIT="${PR_REVIEWER_EXEC_FAIL_LIMIT:-3}"
+case "$PR_REVIEWER_EXEC_FAIL_LIMIT" in
+  ''|*[!0-9]*) PR_REVIEWER_EXEC_FAIL_LIMIT="3" ;;
+  *)
+    if [ "$PR_REVIEWER_EXEC_FAIL_LIMIT" -lt 1 ] 2>/dev/null; then
+      PR_REVIEWER_EXEC_FAIL_LIMIT="3"
+    fi
+    ;;
+esac
+# stderr 抜粋サイズ（コメント本文に埋める末尾優先抜粋のバイト数）。既定 8KB（旧 1KB から拡張）。
+# 不正値（非数値 / 0 以下 / 空）は既定 8192 に正規化（NFR 1.2 / Req 3.1）。
+PR_REVIEWER_STDERR_EXCERPT_BYTES="${PR_REVIEWER_STDERR_EXCERPT_BYTES:-8192}"
+case "$PR_REVIEWER_STDERR_EXCERPT_BYTES" in
+  ''|*[!0-9]*) PR_REVIEWER_STDERR_EXCERPT_BYTES="8192" ;;
+  *)
+    if [ "$PR_REVIEWER_STDERR_EXCERPT_BYTES" -lt 1 ] 2>/dev/null; then
+      PR_REVIEWER_STDERR_EXCERPT_BYTES="8192"
+    fi
+    ;;
+esac
+# stderr artifact 保存先ディレクトリ。`$HOME/.issue-watcher/` 配下（CLAUDE.md 機能追加
+# ガイドライン 6 / Req 3.5）。空文字に正規化された場合は artifact 保存を skip する fail-safe。
+PR_REVIEWER_STDERR_ARTIFACT_DIR="${PR_REVIEWER_STDERR_ARTIFACT_DIR:-$HOME/.issue-watcher/pr-reviewer-artifacts}"
+# stderr artifact 保存上限（1MB 既定）。これを超える stderr は末尾を優先して保存し、
+# truncation 発生の旨を観測ログに記録する（Req 3.4）。
+PR_REVIEWER_STDERR_ARTIFACT_MAX_BYTES="${PR_REVIEWER_STDERR_ARTIFACT_MAX_BYTES:-1048576}"
+case "$PR_REVIEWER_STDERR_ARTIFACT_MAX_BYTES" in
+  ''|*[!0-9]*) PR_REVIEWER_STDERR_ARTIFACT_MAX_BYTES="1048576" ;;
+  *)
+    if [ "$PR_REVIEWER_STDERR_ARTIFACT_MAX_BYTES" -lt 1 ] 2>/dev/null; then
+      PR_REVIEWER_STDERR_ARTIFACT_MAX_BYTES="1048576"
+    fi
+    ;;
+esac
+
 # ─── PR Reviewer Commit Status Publishing 設定 (#349) ───
 # codex / antigravity Reviewer の VERDICT および Claude Reviewer の RESULT を、
 # GitHub Commit Status API (`POST /repos/{owner}/{repo}/statuses/{sha}`) 経由で
