@@ -84,7 +84,7 @@
   - _Boundary: adjudicator.sh_
   - _Depends: 4_
 
-- [ ] 6. adj_run_for_pr オーケストレーション + pr-reviewer.sh hook + catch-up suppression + no-op テスト
+- [x] 6. adj_run_for_pr オーケストレーション + pr-reviewer.sh hook + catch-up suppression + no-op テスト
   - `adjudicator.sh` に `adj_run_for_pr` を追加（入力: pr_number / sha / review_text / pr_url /
     head_ref。gate OFF / review_text 空（codex 失敗）/ findings ゼロを早期処理し、
     `adj_extract_findings` → `adj_classify_findings` → `adj_validate_decisions` →
