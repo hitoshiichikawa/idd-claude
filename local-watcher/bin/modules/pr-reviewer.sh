@@ -264,6 +264,385 @@ pr_already_processed() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Issue #403: exec-failed リトライ抑止 / 診断性向上 ─────────────────────────────
+#
+# 同一 head sha で連続 exec-failed が `PR_REVIEWER_EXEC_FAIL_LIMIT` に達した PR を
+# 候補から除外することで、外部レビューツール（codex / antigravity）の rate-limit
+# 持続事故を防ぐ。連続失敗カウンタは PR body の hidden marker に永続化する
+# （pr-iteration の no-progress-streak 方式と整合 / Req 1.4）。
+#
+# marker 形式（GitHub UI 上では非表示）:
+#   <!-- idd-claude:pr-reviewer-exec-fail-streak sha=<sha> streak=<N> tool=<tool> last-updated=<ISO8601> -->
+#
+# 主要関数:
+#   - pr_extract_exec_fail_streak  : marker から (streak, sha) を抽出（純粋関数）
+#   - pr_read_exec_fail_streak     : PR body を取得 → marker から streak を返す
+#   - pr_write_exec_fail_streak    : PR body を更新 → marker を新しい値に書き換え
+#   - pr_reset_exec_fail_streak    : streak=0 で marker を書き戻し（sha 変化 / 成功時）
+#   - pr_increment_exec_fail_streak: exec-failed 確定時の streak+1 永続化
+#   - pr_save_stderr_artifact      : stderr 全文を `$HOME/.issue-watcher/...` に保存
+#   - pr_truncate_stderr_tail      : stderr の末尾優先抜粋（excerpt 用）
+#   - pr_post_exec_fail_escalation_comment: 上限到達時の advisory コメント 1 回投稿
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_extract_exec_fail_streak: marker 文字列から streak と sha を抽出（純粋関数）
+#   入力: $1 = pr_body 文字列
+#   出力: stdout に `<sha>\t<streak>` の TSV 1 行（marker 不在時は `\t0`）
+#   戻り値: 0 固定
+#   Req: 1.1, 1.4 / NFR 1.2
+#
+#   - marker 形式: `<!-- idd-claude:pr-reviewer-exec-fail-streak sha=<sha> streak=<N> ... -->`
+#   - 複数 marker が混在する場合は末尾（最新）を採用（pr-iteration と整合）。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_extract_exec_fail_streak() {
+  local pr_body="${1-}"
+  if [ -z "$pr_body" ]; then
+    printf '\t0\n'
+    return 0
+  fi
+  local marker_line sha streak
+  marker_line=$(echo "$pr_body" \
+    | grep -oE 'idd-claude:pr-reviewer-exec-fail-streak [^>]+' \
+    | tail -1)
+  if [ -z "$marker_line" ]; then
+    printf '\t0\n'
+    return 0
+  fi
+  sha=$(printf '%s' "$marker_line" \
+    | grep -oE 'sha=[0-9a-f]+' \
+    | head -1 \
+    | sed -E 's|sha=||')
+  streak=$(printf '%s' "$marker_line" \
+    | grep -oE 'streak=[0-9]+' \
+    | head -1 \
+    | sed -E 's|streak=||')
+  printf '%s\t%s\n' "${sha:-}" "${streak:-0}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_read_exec_fail_streak: PR body から (recorded_sha, streak) を取得
+#   入力: $1 = pr_number
+#   出力: stdout に `<recorded_sha>\t<streak>` の TSV 1 行
+#   戻り値: 0 固定（取得失敗時は安全側で `\t0` を返す = リトライ抑止寄り）
+#   Req: 1.1, 1.4, 1.5 / NFR 1.2
+#
+#   - gh pr view 失敗時は WARN + `\t0` 返却で安全側に倒す（Req 1.5）。
+#   - 観測ログは pr_log で記録するが、stdout は TSV を保つため >&2 へ送る。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_read_exec_fail_streak() {
+  local pr_number="${1:-}"
+  local body
+  if ! body=$(timeout "${PR_REVIEWER_GIT_TIMEOUT:-120}" \
+      gh pr view "$pr_number" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null); then
+    pr_warn "PR #${pr_number}: body 取得に失敗、exec-fail-streak は 0 として扱います"
+    printf '\t0\n'
+    return 0
+  fi
+  pr_extract_exec_fail_streak "$body"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_write_exec_fail_streak: PR body の hidden marker を新しい (sha, streak) で書き換え
+#   入力: $1 = pr_number, $2 = sha, $3 = streak
+#   戻り値: 0 = ok / 1 = body 取得 or 書き込み失敗
+#   Req: 1.1, 1.2, 1.3, 1.4, 1.5 / NFR 1.2
+#
+#   - 既存 marker（同 prefix）は sed で 1 つに集約。無ければ末尾に追記。
+#   - 副作用は PR body 書き込み 1 回のみ。冪等性は GitHub 側の latest-wins に委ねる。
+#   - 失敗時は WARN を残して 1 を返す（呼び出し側は安全側に倒す）。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_write_exec_fail_streak() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local streak="${3:-0}"
+  local tool="${4:-none}"
+  local now
+  now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+
+  local body
+  if ! body=$(timeout "${PR_REVIEWER_GIT_TIMEOUT:-120}" \
+      gh pr view "$pr_number" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null); then
+    pr_warn "PR #${pr_number}: body 取得に失敗、exec-fail-streak の永続化を skip"
+    return 1
+  fi
+
+  local marker="<!-- idd-claude:pr-reviewer-exec-fail-streak sha=${sha} streak=${streak} tool=${tool} last-updated=${now} -->"
+  local new_body
+  if echo "$body" | grep -qE 'idd-claude:pr-reviewer-exec-fail-streak '; then
+    # 既存 marker を 1 つに集約（複数あった場合も全部置換）
+    new_body=$(echo "$body" | sed -E "s|<!-- idd-claude:pr-reviewer-exec-fail-streak [^>]*-->|${marker}|g")
+  else
+    new_body="${body}
+
+${marker}"
+  fi
+
+  if ! timeout "${PR_REVIEWER_GIT_TIMEOUT:-120}" \
+      gh pr edit "$pr_number" --repo "$REPO" --body "$new_body" >/dev/null 2>&1; then
+    pr_warn "PR #${pr_number}: PR body への exec-fail-streak marker 書き込みに失敗"
+    return 1
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_reset_exec_fail_streak: 連続失敗カウンタをリセット（sha 変化 / 成功到達時）
+#   入力: $1 = pr_number, $2 = sha（現在の head sha）, $3 = tool
+#   戻り値: 0 固定（書き込み失敗時も呼び出し側の流れを止めない）
+#   Req: 1.2, 1.3 / NFR 1.2
+#
+#   - 旧 streak が既に 0 かつ sha が同一なら no-op（gh 呼び出し回避 / 冪等性）。
+#   - それ以外は marker を (sha, 0) で書き戻し、次サイクル以降の起点を更新する。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_reset_exec_fail_streak() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local tool="${3:-none}"
+
+  local tsv recorded_sha prev_streak
+  tsv=$(pr_read_exec_fail_streak "$pr_number")
+  recorded_sha=$(printf '%s' "$tsv" | awk -F'\t' '{print $1}')
+  prev_streak=$(printf '%s' "$tsv" | awk -F'\t' '{print $2}')
+  prev_streak="${prev_streak:-0}"
+
+  # 既に 0 かつ sha 一致なら no-op（外部呼び出し回避 / NFR 4.2 冪等性）
+  if [ "$prev_streak" = "0" ] && [ "$recorded_sha" = "$sha" ]; then
+    return 0
+  fi
+
+  pr_write_exec_fail_streak "$pr_number" "$sha" "0" "$tool" || true
+  pr_log "PR #${pr_number}: exec-fail-streak reset sha=${sha} tool=${tool} prev_streak=${prev_streak} prev_sha=${recorded_sha:-<none>}"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_increment_exec_fail_streak: 連続失敗カウンタを +1 して永続化
+#   入力: $1 = pr_number, $2 = sha, $3 = tool
+#   出力: stdout に新しい streak 値（整数 1 行）
+#   戻り値: 0 = ok / 1 = 永続化失敗（戻り値の streak は呼び出し元で参照可能）
+#   Req: 1.1, 1.2 / NFR 1.2
+#
+#   - 既存 marker の sha が現在 sha と異なる場合は「sha 変化扱い」で 1 から始める
+#     （Req 1.2 リセットを増分書き込み側でも fail-safe に保証）。
+#   - 永続化失敗時は WARN を残しつつ「streak を加算した値」を stdout に返す
+#     （上限到達判定は呼び出し側で行う / Req 1.5 安全側）。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_increment_exec_fail_streak() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local tool="${3:-none}"
+
+  local tsv recorded_sha prev_streak
+  tsv=$(pr_read_exec_fail_streak "$pr_number")
+  recorded_sha=$(printf '%s' "$tsv" | awk -F'\t' '{print $1}')
+  prev_streak=$(printf '%s' "$tsv" | awk -F'\t' '{print $2}')
+  prev_streak="${prev_streak:-0}"
+
+  local new_streak
+  if [ -n "$recorded_sha" ] && [ "$recorded_sha" != "$sha" ]; then
+    # sha が変化していたので 1 から始める（Req 1.2 fail-safe）
+    new_streak=1
+  else
+    new_streak=$((prev_streak + 1))
+  fi
+
+  local write_rc=0
+  pr_write_exec_fail_streak "$pr_number" "$sha" "$new_streak" "$tool" || write_rc=1
+  printf '%s\n' "$new_streak"
+  return "$write_rc"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_exec_fail_limit_reached: 上限到達判定（候補除外 / エスカレーション用）
+#   入力: $1 = pr_number, $2 = sha
+#   戻り値: 0 = 上限到達（候補から除外） / 1 = 未到達
+#   出力: なし
+#   Req: 2.1, 2.2, 2.4, 2.5 / NFR 2.1
+#
+#   - 同一 sha の連続失敗カウンタが `PR_REVIEWER_EXEC_FAIL_LIMIT` 以上なら除外。
+#   - 異なる sha が marker に記録されていた場合は除外しない（新 sha では新たにスタート）。
+#   - 上限 env 値は本体 Config ブロックで正規化済み（不正値 → 3 / NFR 1.2）。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_exec_fail_limit_reached() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local limit="${PR_REVIEWER_EXEC_FAIL_LIMIT:-3}"
+
+  local tsv recorded_sha streak
+  tsv=$(pr_read_exec_fail_streak "$pr_number")
+  recorded_sha=$(printf '%s' "$tsv" | awk -F'\t' '{print $1}')
+  streak=$(printf '%s' "$tsv" | awk -F'\t' '{print $2}')
+  streak="${streak:-0}"
+
+  # 記録された sha と現在の sha が異なる → 新 sha では未到達
+  if [ -n "$recorded_sha" ] && [ "$recorded_sha" != "$sha" ]; then
+    return 1
+  fi
+
+  if [ "$streak" -ge "$limit" ] 2>/dev/null; then
+    return 0
+  fi
+  return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_truncate_stderr_tail: stderr ファイル / 文字列を末尾優先で `N` バイトに切り出す
+#   入力: $1 = err_file（ファイルパス）, $2 = max_bytes（既定 8192）
+#   出力: stdout に末尾優先の抜粋
+#   戻り値: 0 固定
+#   Req: 3.1, 3.4
+#
+#   - `tail -c "$max_bytes"` で末尾優先（先頭の prompt echo に埋もれない / Req 3.4）。
+#   - ファイル不在 / 読み出し失敗時は空文字列を返す。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_truncate_stderr_tail() {
+  local err_file="${1:-}"
+  local max_bytes="${2:-8192}"
+  [ -f "$err_file" ] || return 0
+  tail -c "$max_bytes" "$err_file" 2>/dev/null || true
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_save_stderr_artifact: stderr 全文を `$HOME/.issue-watcher/...` に保存
+#   入力: $1 = pr_number, $2 = sha, $3 = tool, $4 = err_file
+#   出力: stdout に保存先 absolute パス（保存失敗 / 空 stderr / artifact dir 不在時は空）
+#   戻り値: 0 固定
+#   Req: 3.1, 3.4, 3.5 / NFR 3.2
+#
+#   - 保存先: `$PR_REVIEWER_STDERR_ARTIFACT_DIR/<sanitized_repo>/pr-<N>-<sha8>-<tool>-<ts>.log`
+#   - `PR_REVIEWER_STDERR_ARTIFACT_DIR` が空文字に正規化されていれば skip（fail-safe / Req 3.1 fallback）。
+#   - stderr 全体が `PR_REVIEWER_STDERR_ARTIFACT_MAX_BYTES` 超なら末尾優先で保存し、
+#     観測ログに truncation の旨を記録する（Req 3.4）。
+#   - 予測可能名の `/tmp` 直下は使わず `$HOME/.issue-watcher/` 配下に置く（Req 3.5）。
+#   - sha は ^[0-9a-f]+$ で事前検証して path 由来のフラグ注入予防（CLAUDE.md 5 番）。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_save_stderr_artifact() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local tool="${3:-none}"
+  local err_file="${4:-}"
+  local dir="${PR_REVIEWER_STDERR_ARTIFACT_DIR:-}"
+  local max_bytes="${PR_REVIEWER_STDERR_ARTIFACT_MAX_BYTES:-1048576}"
+
+  # 保存先未設定 / fail-safe skip
+  if [ -z "$dir" ]; then
+    return 0
+  fi
+  # 空 stderr は保存しない（artifact のノイズを抑える）
+  if [ ! -s "$err_file" ]; then
+    return 0
+  fi
+  # 入力検証（未信頼値 / CLAUDE.md 5 番）
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  if ! [[ "$sha" =~ ^[0-9a-f]+$ ]]; then
+    return 0
+  fi
+  # tool 名を a-z0-9_- に sanitize（marker 由来だが防御的）
+  local safe_tool
+  safe_tool=$(printf '%s' "$tool" | tr -c 'a-z0-9_-' '_' | head -c 32)
+  [ -z "$safe_tool" ] && safe_tool="none"
+
+  # REPO は `owner/name` 形式 → ファイル名向けに `_` 区切りへ変換
+  local repo_slug
+  repo_slug=$(printf '%s' "${REPO:-unknown}" | tr '/' '_' | tr -c 'A-Za-z0-9_-' '_' | head -c 80)
+  [ -z "$repo_slug" ] && repo_slug="unknown"
+
+  local repo_dir="${dir%/}/${repo_slug}"
+  if ! mkdir -p "$repo_dir" 2>/dev/null; then
+    pr_warn "PR #${pr_number}: artifact dir '${repo_dir}' の作成に失敗、保存を skip"
+    return 0
+  fi
+
+  local sha8="${sha:0:8}"
+  local ts
+  ts=$(date -u '+%Y%m%dT%H%M%SZ')
+  local artifact_path="${repo_dir}/pr-${pr_number}-${sha8}-${safe_tool}-${ts}.log"
+
+  local total_bytes truncated="false"
+  total_bytes=$(wc -c < "$err_file" 2>/dev/null | tr -d ' ')
+  total_bytes="${total_bytes:-0}"
+
+  if [ "$total_bytes" -gt "$max_bytes" ] 2>/dev/null; then
+    # 1MB 超は末尾優先で保存し、truncation の旨をログ記録（Req 3.4）
+    tail -c "$max_bytes" "$err_file" >"$artifact_path" 2>/dev/null || {
+      pr_warn "PR #${pr_number}: artifact 末尾抜粋保存に失敗 path='${artifact_path}'"
+      return 0
+    }
+    truncated="true"
+    pr_log "PR #${pr_number}: stderr artifact truncated total=${total_bytes}B saved=${max_bytes}B (末尾優先) path='${artifact_path}'"
+  else
+    if ! cp -f "$err_file" "$artifact_path" 2>/dev/null; then
+      pr_warn "PR #${pr_number}: artifact 保存に失敗 path='${artifact_path}'"
+      return 0
+    fi
+    pr_log "PR #${pr_number}: stderr artifact saved bytes=${total_bytes} path='${artifact_path}' truncated=${truncated}"
+  fi
+
+  printf '%s' "$artifact_path"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pr_post_exec_fail_escalation_comment: 上限到達時の advisory コメントを 1 回投稿
+#   入力: $1 = pr_number, $2 = sha, $3 = tool, $4 = streak（記録された連続失敗回数）
+#   戻り値: 0 = ok（重複 skip 含む） / 1 = 投稿失敗
+#   Req: 2.3, 2.7
+#
+#   - 同一 (sha, kind=exec-fail-escalated) marker が既存なら再投稿しない（重複防止 / Req 2.3）。
+#   - ラベル付与は行わない（`claude-failed` / `needs-quota-wait` との重複セマンティクスを
+#     避ける / 要件 Open Questions の安全側デフォルト / Req 2.7）。
+#   - 本文に運用者向け復旧手順（rate-limit 解消待ち / 新 commit push / 連続失敗回数）を含める。
+# ─────────────────────────────────────────────────────────────────────────────
+pr_post_exec_fail_escalation_comment() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local tool="${3:-none}"
+  local streak="${4:-0}"
+  local limit="${PR_REVIEWER_EXEC_FAIL_LIMIT:-3}"
+
+  # 重複防止: (sha, kind=exec-fail-escalated) marker を流用（pr_already_processed と整合）
+  if pr_already_processed "$pr_number" "$sha" "exec-fail-escalated"; then
+    pr_log "PR #${pr_number}: kind=exec-fail-escalated sha=${sha} の advisory コメントは既存のため再投稿しません"
+    return 0
+  fi
+
+  local marker body detail
+  marker=$(pr_build_marker "$sha" "exec-fail-escalated" "$tool")
+  # shellcheck disable=SC2016  # 単一引用符内のバッククォートはマークダウン記法のリテラル
+  detail=$(cat <<__ESCALATION_EOF__
+レビューツール \`${tool}\` の実行失敗（\`kind=exec-failed\`）が同一 head sha (\`${sha}\`) で **${streak} 回連続** したため、本 PR への自動レビュー実行を一時停止しました（上限値: ${PR_REVIEWER_EXEC_FAIL_LIMIT:-3}）。
+
+**主な原因（推定）**:
+- 外部レビューツール側の rate-limit（HTTP 429）/ API quota 到達
+- timeout / network 一時障害
+- ツール側の bug / 設定不備
+
+**自動再開条件**:
+- 新しい commit を本 PR に push して **head sha を変化** させる → 連続失敗カウンタは自動リセットされ、次サイクルから通常通りレビュー実行が再開されます
+
+**運用者対応**:
+1. 直近の \`exec-failed\` コメントに記載された stderr 抜粋 / artifact ファイルを確認し、原因を特定してください
+2. rate-limit / quota が原因の場合は、外部ツールの quota 復旧を待ってから新 commit を push してください
+3. ツール側の不具合が疑われる場合は \`PR_REVIEWER_CODEX_CMD\` / \`PR_REVIEWER_ANTIGRAVITY_CMD\` の設定を見直してください
+
+> 本通知は **advisory** であり、ラベル付与・auto-merge ブロック等は行いません。
+__ESCALATION_EOF__
+)
+  body=$(printf '## 自動レビュー: 連続失敗による一時停止\n\n%s\n\n%s' "$detail" "$marker")
+
+  if ! timeout "${PR_REVIEWER_GIT_TIMEOUT:-120}" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+    pr_warn "PR #${pr_number}: exec-fail-escalated advisory コメントの投稿に失敗"
+    return 1
+  fi
+  pr_log "PR #${pr_number}: exec-fail-escalated advisory コメント投稿 sha=${sha} tool=${tool} streak=${streak} limit=${limit}"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pr_fetch_candidate_prs: 候補 PR を JSON 配列で返す（task 4.2）
 #   出力: stdout に jq 配列形式の JSON 1 行（候補なし / 失敗時は "[]"）
 #   戻り値: 0 固定（失敗は degraded path = "[]" + WARN に倒す）
@@ -1041,6 +1420,22 @@ pr_run_review_for_pr() {
     return 2
   fi
 
+  # Issue #403 Req 1.6: 連続失敗カウンタの現在値をサイクル毎の観測ログに 1 行で出力
+  local _streak_tsv _streak_sha _streak_val
+  _streak_tsv=$(pr_read_exec_fail_streak "$pr_number")
+  _streak_sha=$(printf '%s' "$_streak_tsv" | awk -F'\t' '{print $1}')
+  _streak_val=$(printf '%s' "$_streak_tsv" | awk -F'\t' '{print $2}')
+  _streak_val="${_streak_val:-0}"
+  pr_log "PR #${pr_number}: exec-fail-streak observe pr=#${pr_number} sha=${sha} recorded_sha=${_streak_sha:-<none>} streak=${_streak_val} limit=${PR_REVIEWER_EXEC_FAIL_LIMIT:-3}"
+
+  # Issue #403 Req 2.2, 2.3, 2.4: 上限到達 PR は外部レビューツール呼び出しを抑止
+  if pr_exec_fail_limit_reached "$pr_number" "$sha"; then
+    # 初回検出サイクルのみ advisory コメント投稿（重複は marker で抑止 / Req 2.3）
+    pr_post_exec_fail_escalation_comment "$pr_number" "$sha" "$tool" "$_streak_val"
+    pr_log "PR #${pr_number}: exec-fail-streak が上限に達したため外部レビューツール呼び出しを抑止 sha=${sha} streak=${_streak_val} limit=${PR_REVIEWER_EXEC_FAIL_LIMIT:-3}"
+    return 2
+  fi
+
   pr_log "PR #${pr_number}: レビュー着手 tool=${tool} head=${head_ref} base=${base_ref} sha=${sha} (${pr_url})"
 
   # cmd template を tool 別に解決
@@ -1094,20 +1489,38 @@ pr_run_review_for_pr() {
   # read-only invariant 違反（Decision 8）→ workspace-modified エラーコメント、exec-error
   if [ "$wsmod" = "modified" ]; then
     pr_error "PR #${pr_number}: レビュー実行がワークツリーを変更しました（read-only invariant 違反）。tracked 変更を破棄し workspace-modified を報告"
+    # Issue #403 Req 1.1: workspace-modified も実行失敗扱いで streak +1（NFR 2.1 / Req 2.x）
+    local _ws_streak
+    _ws_streak=$(pr_increment_exec_fail_streak "$pr_number" "$sha" "$tool" 2>/dev/null || echo "0")
+    pr_warn "PR #${pr_number}: exec-fail-streak inc (workspace-modified) pr=#${pr_number} sha=${sha} tool=${tool} exit_code=0 streak=${_ws_streak} limit=${PR_REVIEWER_EXEC_FAIL_LIMIT:-3}"
     pr_post_error_comment "$pr_number" "$sha" "workspace-modified" \
-      "レビューツール \`${tool}\` の実行がワークツリーを変更しました。read-only 制約に違反するため tracked 変更を破棄しました。ツールの sandbox / read-only 設定（codex は \`--sandbox read-only\`）と \`PR_REVIEWER_*_CMD\` を確認してください。" \
+      "レビューツール \`${tool}\` の実行がワークツリーを変更しました。read-only 制約に違反するため tracked 変更を破棄しました。ツールの sandbox / read-only 設定（codex は \`--sandbox read-only\`）と \`PR_REVIEWER_*_CMD\` を確認してください。\n\n連続失敗カウンタ: ${_ws_streak}/${PR_REVIEWER_EXEC_FAIL_LIMIT:-3}（同一 head sha）" \
       "$tool"
     return 3
   fi
 
-  # 実行失敗（非ゼロ終了）→ exec-failed エラーコメント（stderr 1KB 抜粋付き、AC 4.5）
+  # 実行失敗（非ゼロ終了）→ exec-failed エラーコメント（stderr 末尾優先抜粋 + artifact 保存、Issue #403）
   if [ "$exec_rc" -ne 0 ]; then
-    local err_excerpt detail
-    err_excerpt=$(head -c 1024 "$err_file" 2>/dev/null || echo "")
+    local err_excerpt artifact_path detail
+    # Req 3.1, 3.4: 末尾優先抜粋（既定 8KB / 旧 1KB から拡張、prompt echo に埋もれない）
+    err_excerpt=$(pr_truncate_stderr_tail "$err_file" "${PR_REVIEWER_STDERR_EXCERPT_BYTES:-8192}")
+    # Req 3.1, 3.4, 3.5: artifact ファイル保存（$HOME/.issue-watcher/... 配下、1MB 超は末尾優先）
+    artifact_path=$(pr_save_stderr_artifact "$pr_number" "$sha" "$tool" "$err_file")
+    # Req 1.1: 連続失敗カウンタを +1 して永続化（戻り値の streak を取得）
+    local _ef_streak
+    _ef_streak=$(pr_increment_exec_fail_streak "$pr_number" "$sha" "$tool" 2>/dev/null || echo "0")
+    # Req 3.3 / NFR 3.2: WARN ログに PR / sha / tool / exit / streak / artifact を 1 行で含める
+    pr_warn "PR #${pr_number}: exec-failed pr=#${pr_number} sha=${sha} tool=${tool} exit=${exec_rc} streak=${_ef_streak} limit=${PR_REVIEWER_EXEC_FAIL_LIMIT:-3} artifact='${artifact_path:-<none>}'"
     pr_error "PR #${pr_number}: レビュー実行コマンドが非ゼロ終了 (exit=${exec_rc}, tool=${tool})"
+    # Req 3.2: コメント本文に exit code / tool / streak / sha / artifact パス / stderr 抜粋を含める
+    local artifact_line=""
+    if [ -n "$artifact_path" ]; then
+      # shellcheck disable=SC2016  # 単一引用符内のバッククォートは markdown コード記号のリテラル
+      artifact_line=$(printf '\nstderr artifact (watcher host のみ参照可): `%s`\n' "$artifact_path")
+    fi
     # shellcheck disable=SC2016  # 単一引用符内のバッククォートは markdown コードフェンスのリテラル
-    detail=$(printf 'レビュー実行コマンドが非ゼロ終了しました（exit=%s, tool=%s）。\n\n```\n%s\n```' \
-      "$exec_rc" "$tool" "$err_excerpt")
+    detail=$(printf 'レビュー実行コマンドが非ゼロ終了しました（exit=%s, tool=%s, head sha=%s）。\n\n連続失敗カウンタ: %s/%s（同一 head sha）\n%s\nstderr 末尾抜粋（最大 %s バイト）:\n```\n%s\n```' \
+      "$exec_rc" "$tool" "$sha" "${_ef_streak}" "${PR_REVIEWER_EXEC_FAIL_LIMIT:-3}" "$artifact_line" "${PR_REVIEWER_STDERR_EXCERPT_BYTES:-8192}" "$err_excerpt")
     pr_post_error_comment "$pr_number" "$sha" "exec-failed" "$detail" "$tool"
     return 3
   fi
@@ -1128,9 +1541,12 @@ pr_run_review_for_pr() {
   fi
 
   if [ -z "$review_text" ]; then
-    pr_warn "PR #${pr_number}: レビュー結果が空。exec-failed として扱う"
+    # Issue #403 Req 1.1: 空出力も exec-failed 扱いで streak +1
+    local _empty_streak
+    _empty_streak=$(pr_increment_exec_fail_streak "$pr_number" "$sha" "$tool" 2>/dev/null || echo "0")
+    pr_warn "PR #${pr_number}: exec-failed pr=#${pr_number} sha=${sha} tool=${tool} exit=0 reason=empty-output streak=${_empty_streak} limit=${PR_REVIEWER_EXEC_FAIL_LIMIT:-3}"
     pr_post_error_comment "$pr_number" "$sha" "exec-failed" \
-      "レビュー実行は成功しましたが出力が空でした（tool=${tool}）。\`PR_REVIEWER_*_CMD\` / prompt を確認してください。" \
+      "レビュー実行は成功しましたが出力が空でした（tool=${tool}, head sha=${sha}）。\`PR_REVIEWER_*_CMD\` / prompt を確認してください。\n\n連続失敗カウンタ: ${_empty_streak}/${PR_REVIEWER_EXEC_FAIL_LIMIT:-3}（同一 head sha）" \
       "$tool"
     return 3
   fi
@@ -1139,6 +1555,9 @@ pr_run_review_for_pr() {
   if ! pr_post_review_comment "$pr_number" "$sha" "$review_text" "$tool"; then
     return 1
   fi
+
+  # Issue #403 Req 1.3: 同一 head sha でレビュー成功（コメント投稿到達）したら streak をリセット
+  pr_reset_exec_fail_streak "$pr_number" "$sha" "$tool" || true
 
   # AC 5.1〜5.4: VERDICT 検出 → 件数 > 0 で needs-iteration ラベル付与
   local match_count
@@ -1217,8 +1636,8 @@ process_pr_reviewer() {
   local resolved_tool resolve_rc=0
   resolved_tool=$(pr_resolve_tool) || resolve_rc=$?
 
-  # ③ AC 1.2 / NFR 3.1: サイクル開始の 1 行サマリログ
-  pr_log "cycle start: tool=${resolved_tool} max_prs=${PR_REVIEWER_MAX_PRS:-unset} git_timeout=${PR_REVIEWER_GIT_TIMEOUT:-unset}s exec_timeout=${PR_REVIEWER_EXEC_TIMEOUT:-unset}s head_pattern=${PR_REVIEWER_HEAD_PATTERN:-unset}"
+  # ③ AC 1.2 / NFR 3.1: サイクル開始の 1 行サマリログ（#403 で exec_fail_limit / stderr_excerpt_bytes を追加）
+  pr_log "cycle start: tool=${resolved_tool} max_prs=${PR_REVIEWER_MAX_PRS:-unset} git_timeout=${PR_REVIEWER_GIT_TIMEOUT:-unset}s exec_timeout=${PR_REVIEWER_EXEC_TIMEOUT:-unset}s head_pattern=${PR_REVIEWER_HEAD_PATTERN:-unset} exec_fail_limit=${PR_REVIEWER_EXEC_FAIL_LIMIT:-3} stderr_excerpt_bytes=${PR_REVIEWER_STDERR_EXCERPT_BYTES:-8192}"
 
   # ④ AC 2.5: none（rc=2）は PR 列挙もコメントも行わず静かに skip
   if [ "$resolve_rc" -eq 2 ]; then
@@ -1275,17 +1694,28 @@ process_pr_reviewer() {
   fi
 
   # ⑪ レビュー loop
-  local reviewed=0 skip=0 fail=0 errored=0
+  local reviewed=0 skip=0 fail=0 errored=0 escalated=0
   local pr_iter
   pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]" 2>/dev/null || echo "")
   if [ -z "$pr_iter" ]; then
-    pr_log "サマリ: tool=${resolved_tool} reviewed=0 skip=0 fail=0 errored=0（iterate 対象なし）"
+    pr_log "サマリ: tool=${resolved_tool} reviewed=0 skip=0 fail=0 errored=0 escalated=0（iterate 対象なし）"
     return 0
   fi
 
   while IFS= read -r pr_json; do
     [ -z "$pr_json" ] && continue
     local rc=0
+    # Issue #403 NFR 3.1: 上限到達 PR を escalated 件数で観測する。
+    # pr_run_review_for_pr は上限到達時 rc=2 を返すため、呼び出し前に判定して
+    # escalated 件数を独立にカウントする（rc=2 自体は重複検出と上限到達の双方を含む）。
+    local _pr_number_obs _pr_sha_obs
+    _pr_number_obs=$(echo "$pr_json" | jq -r '.number' 2>/dev/null || echo "")
+    _pr_sha_obs=$(echo "$pr_json" | jq -r '.headRefOid' 2>/dev/null || echo "")
+    if [ -n "$_pr_number_obs" ] && [ -n "$_pr_sha_obs" ] \
+        && pr_exec_fail_limit_reached "$_pr_number_obs" "$_pr_sha_obs"; then
+      escalated=$((escalated + 1))
+    fi
+
     pr_run_review_for_pr "$pr_json" "$resolved_tool" || rc=$?
     case $rc in
       0) reviewed=$((reviewed + 1)) ;;
@@ -1297,7 +1727,7 @@ process_pr_reviewer() {
     git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
   done <<< "$pr_iter"
 
-  pr_log "サマリ: tool=${resolved_tool} reviewed=${reviewed} skip=${skip} fail=${fail} errored=${errored} overflow=${skipped_overflow}"
+  pr_log "サマリ: tool=${resolved_tool} reviewed=${reviewed} skip=${skip} fail=${fail} errored=${errored} escalated=${escalated} overflow=${skipped_overflow}"
 
   # 念のため最終確認で base branch に戻す
   git checkout "$BASE_BRANCH" >/dev/null 2>&1 || true
