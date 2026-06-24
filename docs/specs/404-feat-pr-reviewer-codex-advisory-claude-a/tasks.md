@@ -48,7 +48,7 @@
   - _Boundary: adjudicator.sh, issue-watcher.sh_
   - _Depends: 1_
 
-- [ ] 4. classify / validate / fallback ロジックと近接テスト
+- [x] 4. classify / validate / fallback ロジックと近接テスト
   - `adjudicator.sh` に以下を追加: `adj_classify_findings`（Claude CLI 呼び出し / `--output-format
     json` / mktemp で prompt 一時ファイル）/ `adj_validate_decisions`（JSON schema 検証、不整合時
     は呼び出し元で全 legitimate に倒す sentinel を返す）
