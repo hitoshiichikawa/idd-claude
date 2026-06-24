@@ -127,7 +127,7 @@
   - _Boundary: pr-iteration.sh_
   - _Depends: 6_
 
-- [ ] 8. README 反映とドキュメント要件（Req 6.x）
+- [x] 8. README 反映とドキュメント要件（Req 6.x）
   - README.md の「オプション機能一覧（opt-in、既定 OFF）」表に 1 行追加（gate 名 / 既定 OFF /
     詳細リンク / 関連 `#404`）
   - 新規 h2 節「PR Reviewer Adjudicator (#404)」を `## PR Reviewer Processor (#261)` の後に挿入。
