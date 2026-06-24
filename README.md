@@ -2909,6 +2909,47 @@ watcher は対象 PR の既存コメント群を `gh api .../issues/<n>/comments
 | `PR_REVIEWER_MAX_PRS` | `5` | 1 サイクルあたりの処理上限 |
 | `PR_REVIEWER_GIT_TIMEOUT` | `120` | git / gh 各操作の個別 timeout（秒） |
 | `PR_REVIEWER_EXEC_TIMEOUT` | `600` | レビュー実行コマンドの最大経過秒数 |
+| `PR_REVIEWER_EXEC_FAIL_LIMIT` | `3` | 同一 head sha での連続 `exec-failed`（非ゼロ終了 / 空出力 / workspace-modified）上限。上限到達後は当該 PR を候補から除外し外部レビューツール呼び出しを抑止する（[#403](#pr-reviewer-exec-failed-リトライ抑止-403)）。1 以上の整数のみ受理し、不正値は既定 3 に正規化 |
+| `PR_REVIEWER_STDERR_EXCERPT_BYTES` | `8192` | `exec-failed` エラーコメント本文に埋め込む stderr 抜粋のバイト数（末尾優先）。旧 1KB から拡張し prompt echo に埋もれずに 429 等の真因を確認しやすくする（[#403](#pr-reviewer-exec-failed-リトライ抑止-403)）。不正値は既定 8192 に正規化 |
+| `PR_REVIEWER_STDERR_ARTIFACT_DIR` | `$HOME/.issue-watcher/pr-reviewer-artifacts` | `exec-failed` 時の stderr 全文を保存する artifact ディレクトリ。空文字なら保存 skip（[#403](#pr-reviewer-exec-failed-リトライ抑止-403)） |
+| `PR_REVIEWER_STDERR_ARTIFACT_MAX_BYTES` | `1048576` | artifact 保存上限（バイト）。これを超える stderr は末尾優先で truncate して保存する。不正値は既定 1MB に正規化 |
+
+### exec-failed リトライ抑止 (#403)
+
+外部レビューツール（`codex` / `antigravity`）の実行失敗（HTTP 429 / rate-limit / timeout 等）が
+同一 head sha で繰り返し発生した場合、watcher は次サイクル以降も `PR_REVIEWER_EXEC_TIMEOUT`
+秒のレビュー実行を再試行し続け、結果として外部 API の rate-limit を持続させる事故が発生
+していました（複数 repo の PR merge が同時停止する報告例: ae-mdm 162 件 / altpocket-server
+59 件の `exit=1` ログ観測）。
+
+本機能では:
+
+- **連続失敗カウンタの永続化**: PR body の hidden marker
+  `<!-- idd-claude:pr-reviewer-exec-fail-streak sha=<sha> streak=<N> tool=<tool> last-updated=<ISO8601> -->`
+  に `(sha, streak)` を記録し、cron / 再起動をまたいで参照可能にする。新しい commit で
+  head sha が変化したタイミング、あるいは同一 sha でレビュー成功（コメント投稿到達）した
+  タイミングで自動的に 0 にリセットする。
+- **上限到達時のリトライ抑止**: 同一 sha の連続失敗が `PR_REVIEWER_EXEC_FAIL_LIMIT`（既定 3）
+  に達すると、当該 PR を候補から除外して外部レビューツールを呼び出さない。新しい commit が
+  push されて head sha が変わるまで抑止が継続する。
+- **エスカレーション通知**: 上限到達を初めて検出したサイクルに限り、当該 PR に **advisory
+  コメントを 1 回だけ投稿**する。ラベル付与 (`claude-failed` / `needs-quota-wait` 等) は行わず
+  既存のラベル運用と干渉しない。本文には連続失敗回数・推定原因・運用者の復旧手順（新 commit を
+  push して head sha を変える / `PR_REVIEWER_*_CMD` を見直す等）を含める。
+- **stderr 抜粋拡張と artifact 保存**: `exec-failed` コメント本文に埋め込む stderr 抜粋を
+  既定 8KB に拡張（旧 1KB から）し、末尾優先で切り出すことで prompt echo に埋もれずに 429
+  等の真因を運用者が直接確認できるようにする。さらに stderr 全文を
+  `$HOME/.issue-watcher/pr-reviewer-artifacts/<owner_repo>/pr-<N>-<sha8>-<tool>-<ts>.log` に
+  保存し、コメント本文に artifact パスを記載する。1MB 超は末尾優先で truncate される。
+
+**migration note**:
+
+- 本機能は既定 ON ですが、`PR_REVIEWER_ENABLED=true` の opt-in 経路の中でのみ動作するため、
+  `PR_REVIEWER_ENABLED` 未設定の運用環境では従来通り何もしません。
+- 既存挙動の影響範囲は「同一 sha での連続 `exec-failed` のリトライ回数」が無制限 → 既定 3 回に
+  抑制される点のみです。`PR_REVIEWER_EXEC_FAIL_LIMIT=999999` 等を明示すれば実質従来挙動に戻せます。
+- 既存の正常系（成功時のレビュー実行・コメント投稿・VERDICT → `needs-iteration` ラベル付与・
+  commit status publish）は不変です（同一サイクル内 streak=0 のままなら処理経路は変わりません）。
 
 ### 利用方法（opt-in 手順）
 
