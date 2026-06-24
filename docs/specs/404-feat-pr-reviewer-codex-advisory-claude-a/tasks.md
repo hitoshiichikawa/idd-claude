@@ -63,7 +63,7 @@
   - _Boundary: adjudicator.sh_
   - _Depends: 2, 3_
 
-- [ ] 5. label / status publish 反映と Reviewer 先行優先 + 近接テスト
+- [x] 5. label / status publish 反映と Reviewer 先行優先 + 近接テスト
   - `adjudicator.sh` に以下を追加: `adj_apply_label_decision`（`gh pr edit --add-label` /
     `--remove-label` 冪等使用）/ `adj_read_reviewer_verdict`（head_ref から `review-notes.md` を
     `git show <head>:docs/specs/<N>-<slug>/review-notes.md` で読み、最終行 `RESULT: approve|reject`
