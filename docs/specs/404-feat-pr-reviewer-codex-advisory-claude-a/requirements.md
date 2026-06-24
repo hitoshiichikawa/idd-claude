@@ -54,10 +54,11 @@ idd-claude の PR Reviewer（`local-watcher/bin/modules/pr-reviewer.sh`）は現
 
 1. The PR Reviewer module shall codex 実行結果に基づく `codex-review` commit status を従来どおり publish する（advisory として可視性は維持）
 2. The Claude adjudicator shall 裁定結果に基づき `claude-review` commit status を `success` / `failure` / `pending` のいずれかで publish する
-3. When Claude adjudicator が legitimate 指摘ゼロと判定する, the Claude adjudicator shall `claude-review` status を `success` で publish する
+3. When Claude adjudicator が legitimate 指摘ゼロと判定し、かつ既存独立 Reviewer の最終 verdict が `reject` でない（approve / 不在 / RESULT 行不在のいずれか）, the Claude adjudicator shall `claude-review` status を `success` で publish する
 4. When Claude adjudicator が legitimate 指摘を 1 件以上検出する, the Claude adjudicator shall `claude-review` status を `failure` で publish する
-5. When codex が exec-failed / rate-limit 等で指摘を出せない, the Claude adjudicator shall `codex-review` status の失敗を理由に `claude-review` status を `failure` にしない（codex 不在でも legitimate ゼロと判定できれば `success` を publish する）
-6. The PR Reviewer module shall `codex-review` を必須 status check として要求するロジックを watcher 側に持たない（必須化 / advisory 化は consumer repo の branch protection 設定に委ねる）
+5. When 既存独立 Reviewer の最終 verdict が `reject` である, the Claude adjudicator shall legitimate 指摘ゼロであっても `claude-review` status を `failure` で publish する（Reviewer 判定の上書き防止）
+6. When codex が exec-failed / rate-limit 等で指摘を出せない, the Claude adjudicator shall `codex-review` status の失敗を理由に `claude-review` status を `failure` にしない（codex 不在でも legitimate ゼロと判定でき、且つ Reviewer reject も検出されなければ `success` を publish する）
+7. The PR Reviewer module shall `codex-review` を必須 status check として要求するロジックを watcher 側に持たない（必須化 / advisory 化は consumer repo の branch protection 設定に委ねる）
 
 ---
 

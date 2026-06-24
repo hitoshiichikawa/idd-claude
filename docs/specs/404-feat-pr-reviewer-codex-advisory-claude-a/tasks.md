@@ -8,8 +8,10 @@
     `PR_REVIEWER_ADJUDICATOR_ENABLED` / `PR_REVIEWER_ADJUDICATOR_MODEL` /
     `PR_REVIEWER_ADJUDICATOR_EXEC_TIMEOUT` / `PR_REVIEWER_ADJUDICATOR_PROMPT` /
     `PR_REVIEWER_ADJUDICATOR_FALLBACK_ON_FAIL` / `PR_REVIEWER_ADJUDICATOR_MAX_FINDINGS`
-  - `PR_REVIEWER_ADJUDICATOR_ENABLED` / `..._FALLBACK_ON_FAIL` は `case` で安全側正規化
-    （`true` / `legitimate|passthrough` 以外を既定に倒す）
+  - `PR_REVIEWER_ADJUDICATOR_ENABLED` は `case` で安全側正規化（`true` 厳密以外を `false`）。
+    `PR_REVIEWER_ADJUDICATOR_FALLBACK_ON_FAIL` は既定 `passthrough` で `case` 正規化
+    （`legitimate` / `passthrough` 以外を `passthrough` に倒す。SPOF 緩和 / Architecture
+    Decision: claude-review publisher contention 参照）
   - shellcheck 警告ゼロ + 既存 env 名・既定値の変更なしを確認（diff レビュー）
   - _Requirements: 5.1, 5.3, 5.5, 4.4_
   - _Boundary: core_utils.sh, issue-watcher.sh_
@@ -32,12 +34,15 @@
     を明記、トップレベル副作用なし、関数 prefix `adj_`）
   - 実装関数: `adj_gate_enabled` / `adj_extract_findings`
   - `adj_extract_findings` は codex 形式 `[high|medium|low] <file>:<line> — <内容>` を awk
-    で parse し JSON 配列化（指摘ゼロでも `"[]"` 返却 / fail-safe）
+    で parse し JSON 配列化（指摘ゼロでも `"[]"` 返却 / fail-safe）。**reconciliation check** を
+    内蔵: codex 出力の `## 指摘事項` 見出し配下 bullet 行数と parse 件数を突合し、件数不一致
+    検出時は戻り値 4 を返す（ae-mdm 設計レビュー #4 / 書式ドリフトによる silent 取りこぼし防止）
   - `local-watcher/bin/issue-watcher.sh` の `REQUIRED_MODULES` 配列に `"adjudicator.sh"` を
     追加（`"pr-reviewer.sh"` の隣）
   - 近接テスト追加: `local-watcher/test/adj_resolve_gate_test.sh`（`=true` 厳密 / `True` / 空 /
     typo 各ケースで安全側 OFF）、`local-watcher/test/adj_extract_findings_test.sh`（空 / 単一 /
-    多重 / 不正行混在）。`extract_function` イディオム踏襲
+    多重 / 不正行混在 / **reconciliation 不一致**ケースで rc=4）。`extract_function`
+    イディオム踏襲
   - shellcheck 警告ゼロ + `bash -n` OK
   - _Requirements: 1.1, 5.1, 5.5_
   - _Boundary: adjudicator.sh, issue-watcher.sh_
@@ -58,22 +63,28 @@
   - _Boundary: adjudicator.sh_
   - _Depends: 2, 3_
 
-- [ ] 5. label / status publish 反映と近接テスト
+- [ ] 5. label / status publish 反映と Reviewer 先行優先 + 近接テスト
   - `adjudicator.sh` に以下を追加: `adj_apply_label_decision`（`gh pr edit --add-label` /
-    `--remove-label` 冪等使用）/ `adj_apply_status_decision`（既存 `pr_publish_claude_status` を
-    流用）/ `adj_post_decision_comment`（hidden marker `kind=decision` + 重複防止判定は既存
+    `--remove-label` 冪等使用）/ `adj_read_reviewer_verdict`（head_ref から `review-notes.md` を
+    `git show <head>:docs/specs/<N>-<slug>/review-notes.md` で読み、最終行 `RESULT: approve|reject`
+    を抽出。不在 / RESULT 行不在は空文字列を返す / Architecture Decision: claude-review
+    publisher contention の Reviewer 先行優先）/ `adj_apply_status_decision`（既存
+    `pr_publish_claude_status` を流用。publish 直前に `adj_read_reviewer_verdict` を呼び、
+    reject 検出時は legitimate 件数に依らず `claude-review = failure` を publish）/
+    `adj_post_decision_comment`（hidden marker `kind=decision` + 重複防止判定は既存
     `pr_already_processed` 流用）
   - excessive と判定された finding ごとに hidden marker
     `<!-- idd-claude:pr-adjudicator-excessive id=<N> sha=<sha> -->` を含むコメントを投稿
     （pi 側 self-filter のキーとして使う）
-  - 近接テスト追加: `local-watcher/test/adj_publish_decision_test.sh`（stub gh で
-    needs-iteration add / remove + claude-review status publish の 4 ケース
-    [legit ≥1 / legit ゼロ / codex 失敗 / claude 失敗] を検証）
+  - 近接テスト追加: `local-watcher/test/adj_publish_decision_test.sh`（stub gh + stub git で
+    needs-iteration add / remove + claude-review status publish の 5 ケース
+    [legit ≥1 / legit ゼロ + Reviewer approve / legit ゼロ + Reviewer reject / codex 失敗 +
+    Reviewer approve / claude 失敗] を検証）
   - _Requirements: 2.1, 2.2, 2.3, 3.2, 3.3, 3.4, 3.5, 4.1, 4.3, NFR 1.2_
   - _Boundary: adjudicator.sh_
   - _Depends: 4_
 
-- [ ] 6. adj_run_for_pr オーケストレーション + pr-reviewer.sh hook + no-op テスト
+- [ ] 6. adj_run_for_pr オーケストレーション + pr-reviewer.sh hook + catch-up suppression + no-op テスト
   - `adjudicator.sh` に `adj_run_for_pr` を追加（入力: pr_number / sha / review_text / pr_url /
     head_ref。gate OFF / review_text 空（codex 失敗）/ findings ゼロを早期処理し、
     `adj_extract_findings` → `adj_classify_findings` → `adj_validate_decisions` →
@@ -82,10 +93,22 @@
   - `local-watcher/bin/modules/pr-reviewer.sh` の `pr_run_review_for_pr` 末尾
     （`pr_publish_codex_status` 直後）に `adj_run_for_pr ... || adj_warn ...` を 1 行追加。
     既存ラベル付与・status publish ロジックは残置（gate OFF 完全等価 / NFR 2.1）
-  - 近接テスト追加: `local-watcher/test/adj_integration_no_op_test.sh` — gate OFF 時に
-    `adj_run_for_pr` を呼んでも gh / claude が 1 度も発火せず log 行ゼロであることを stub で確認
-    （NFR 2.1）。stub gh / stub claude の呼び出し回数記録ファイルが空であることを assert
-  - _Requirements: 2.6, 3.1, 3.6, 4.2, 5.2, 5.4, NFR 1.1, NFR 2.1_
+  - **catch-up suppression**（Architecture Decision: claude-review publisher contention / ae-mdm
+    設計レビュー #1 への対応）: `pr-reviewer.sh` 末尾に `pr_catchup_should_defer_for_adjudicator
+    <pr_number> <sha>` helper を追加（gate ON + adjudicator marker `<!-- idd-claude:pr-adjudicator
+    sha=<sha> -->` を `gh pr view --json comments` で fetch し sha 一致判定。gate OFF / marker
+    不在 / sha 不一致なら false 返却）。`process_claude_review_status_catchup` のループ内、
+    `pr_publish_claude_status_from_branch` 呼び出し直前に
+    `pr_catchup_should_defer_for_adjudicator "$pr_number" "$sha" && continue` を 1 行挿入
+  - 近接テスト追加:
+    - `local-watcher/test/adj_integration_no_op_test.sh` — gate OFF 時に `adj_run_for_pr` を
+      呼んでも gh / claude が 1 度も発火せず log 行ゼロであることを stub で確認（NFR 2.1）。
+      stub gh / stub claude の呼び出し回数記録ファイルが空であることを assert
+    - `local-watcher/test/pr_catchup_suppression_test.sh` — gate ON + marker 存在 sha 一致で
+      `pr_catchup_should_defer_for_adjudicator` が 0（defer）/ gate OFF で 1（catch-up 続行）/
+      gate ON + marker 不在で 1（passthrough 経路で catch-up 引き継ぎ）/ gate ON + marker 存在
+      sha 不一致で 1 を返すことを assert
+  - _Requirements: 2.6, 3.1, 3.2, 3.6, 4.2, 5.2, 5.4, NFR 1.1, NFR 2.1_
   - _Boundary: adjudicator.sh, pr-reviewer.sh_
   - _Depends: 5_
 
@@ -153,7 +176,7 @@ shellcheck local-watcher/bin/*.sh local-watcher/bin/modules/*.sh install.sh setu
   bash local-watcher/test/pr_publish_commit_status_test.sh && \
   bash local-watcher/test/pr_publish_claude_status_from_branch_test.sh && \
   bash local-watcher/test/pr_default_prompt_test.sh && \
-  for t in local-watcher/test/adj_resolve_gate_test.sh local-watcher/test/adj_extract_findings_test.sh local-watcher/test/adj_classify_test.sh local-watcher/test/adj_publish_decision_test.sh local-watcher/test/adj_integration_no_op_test.sh local-watcher/test/pi_general_filter_excessive_test.sh; do [ -f "$t" ] && bash "$t" || true; done && \
+  for t in local-watcher/test/adj_resolve_gate_test.sh local-watcher/test/adj_extract_findings_test.sh local-watcher/test/adj_classify_test.sh local-watcher/test/adj_publish_decision_test.sh local-watcher/test/adj_integration_no_op_test.sh local-watcher/test/pr_catchup_suppression_test.sh local-watcher/test/pi_general_filter_excessive_test.sh; do [ -f "$t" ] && bash "$t" || true; done && \
   diff -r .claude/agents repo-template/.claude/agents && \
   diff -r .claude/rules repo-template/.claude/rules
 ```
