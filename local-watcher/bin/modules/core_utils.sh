@@ -172,6 +172,21 @@ sr_error() {
   echo "[$(date '+%F %T')] [$REPO] stale-pickup: ERROR: $*" >&2
 }
 
+# adjudicator 専用ロガー（識別用 prefix と timestamp 形式を Issue Watcher と揃える）
+# Issue #404 Req 4.4: 既存 `pr_log` / `pi_log` と同形式の
+# `[YYYY-MM-DD HH:MM:SS] [$REPO] adjudicator:` prefix を用いる。`adj_warn` / `adj_error`
+# は `>&2` に出力（NFR 1.1 観測ログ規約と整合 / 既存ログ stderr/stdout 分離契約を変更しない /
+# Req 5.5）。関数本体は modules/adjudicator.sh 配置予定（task 3 以降で導入）。
+adj_log() {
+  echo "[$(date '+%F %T')] [$REPO] adjudicator: $*"
+}
+adj_warn() {
+  echo "[$(date '+%F %T')] [$REPO] adjudicator: WARN: $*" >&2
+}
+adj_error() {
+  echo "[$(date '+%F %T')] [$REPO] adjudicator: ERROR: $*" >&2
+}
+
 # ─── Issue #259: Claude API 529 Overloaded detector ───
 #
 # Claude API の一時的な過負荷 (HTTP 529 Overloaded) は claude CLI の stream-json
