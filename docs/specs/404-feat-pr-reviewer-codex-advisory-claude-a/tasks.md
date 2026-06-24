@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. logger 関数追加と env Config 拡張（前提整備）
+- [x] 1. logger 関数追加と env Config 拡張（前提整備）
   - `local-watcher/bin/modules/core_utils.sh` の既存 `pr_log` / `pi_log` 等と同形式で `adj_log` /
     `adj_warn` / `adj_error` を末尾追記する（時刻 + `[$REPO]` + `adjudicator:` prefix）
   - `local-watcher/bin/issue-watcher.sh` の Config ブロックに `# ─── PR Reviewer Adjudicator
