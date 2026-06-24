@@ -29,7 +29,7 @@
   - _Boundary: adjudicator-prompt.tmpl_
   - _Depends: 1_
 
-- [ ] 3. adjudicator.sh モジュール骨格と gate / findings parse の実装＋テスト
+- [x] 3. adjudicator.sh モジュール骨格と gate / findings parse の実装＋テスト
   - `local-watcher/bin/modules/adjudicator.sh` を新規作成（先頭コメントに用途 / 配置先 / 依存
     を明記、トップレベル副作用なし、関数 prefix `adj_`）
   - 実装関数: `adj_gate_enabled` / `adj_extract_findings`
