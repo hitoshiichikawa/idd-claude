@@ -727,6 +727,74 @@ case "$PR_REVIEWER_ADJUDICATOR_MAX_FINDINGS" in
     ;;
 esac
 
+# ─── Design PR Reviewer 設定 (#407) ───
+# 設計 PR (`claude/issue-<N>-design-<slug>`) に対する独立 Claude 設計レビュアを起動し、
+# `claude-review` commit status を publish する Processor。impl PR 用 Reviewer / #404
+# adjudicator とは別コンポーネント（Req 7.1〜7.4）。
+#
+# **完全な opt-in（既定 OFF / Req 6.1, 6.2 / NFR 1.1, 2.1）**: `DESIGN_REVIEWER_ENABLED=true`
+# 厳密一致以外は process_pr_design_reviewer が早期 return し、未設定環境では本機能導入前と
+# 完全に等価な挙動を保つ。gate OFF 時は claude / gh / git の呼び出しゼロで状態ファイル不生成
+# （NFR 2.1 観測ログ diff ゼロ）。
+#
+# `claude-review` は本機能導入後、impl 系（adjudicator #404 + catch-up #374）と design 系
+# （本機能）の独立した publisher を持つが、catch-up は `review-notes.md` 不在の設計 PR で
+# silent skip し、本機能は header pattern を design に厳格化することで両者の対象 PR が
+# 構造的に分離される（design.md「`claude-review` publisher contention」節）。
+#
+# 関数本体は modules/pr-design-reviewer.sh、ロガー pdr_log / pdr_warn / pdr_error は
+# core_utils.sh 配置済み。REQUIRED_MODULES への pr-design-reviewer.sh 追加と dispatcher
+# 配線は task 3 / task 6 で実施する。
+DESIGN_REVIEWER_ENABLED="${DESIGN_REVIEWER_ENABLED:-false}"
+# 値正規化: `true` 厳密一致のみ通し、それ以外はすべて `false` に固定する（Req 6.1 安全側）。
+case "$DESIGN_REVIEWER_ENABLED" in
+  true) : ;;
+  *)    DESIGN_REVIEWER_ENABLED="false" ;;
+esac
+# 設計 Reviewer 呼び出しモデル（既存 PR_REVIEWER_ADJUDICATOR_MODEL 命名規約踏襲）。
+# 空文字なら既定にフォールバック。
+DESIGN_REVIEWER_MODEL="${DESIGN_REVIEWER_MODEL:-claude-sonnet-4-5}"
+if [ -z "$DESIGN_REVIEWER_MODEL" ]; then
+  DESIGN_REVIEWER_MODEL="claude-sonnet-4-5"
+fi
+# claude 実行 timeout 秒。既存 PR_REVIEWER_ADJUDICATOR_EXEC_TIMEOUT と同じ case パターン
+# で非数値 / 0 以下を既定 300 に正規化（NFR 4.1 既定 5 分以内）。
+DESIGN_REVIEWER_EXEC_TIMEOUT="${DESIGN_REVIEWER_EXEC_TIMEOUT:-300}"
+case "$DESIGN_REVIEWER_EXEC_TIMEOUT" in
+  ''|*[!0-9]*) DESIGN_REVIEWER_EXEC_TIMEOUT="300" ;;
+  *)
+    if [ "$DESIGN_REVIEWER_EXEC_TIMEOUT" -lt 1 ] 2>/dev/null; then
+      DESIGN_REVIEWER_EXEC_TIMEOUT="300"
+    fi
+    ;;
+esac
+# プロンプトテンプレ override（空なら pr-design-reviewer.sh が内蔵 default =
+# design-review-prompt.tmpl を解決）。
+DESIGN_REVIEWER_PROMPT="${DESIGN_REVIEWER_PROMPT:-}"
+# 候補 head 判定 ERE。既存 `PR_ITERATION_DESIGN_HEAD_PATTERN` と既定値を共有することで、
+# 本 processor で判定された設計 PR は確実に process_pr_iteration の design 経路でも処理される
+# 対称性を担保する（Req 4.3 / design.md「env var 仕様」節）。本 env は独立 env のため、
+# 本 processor の env を変更しても `pi_*` は影響を受けない（Req 6.3 の env 名不変原則と整合）。
+DESIGN_REVIEWER_HEAD_PATTERN="${DESIGN_REVIEWER_HEAD_PATTERN:-^claude/issue-[0-9]+-design-}"
+# 1 サイクルあたり処理する設計 PR 数上限（コスト抑制）。非数値 / 0 以下は既定 5 に正規化
+# （既存 PR_REVIEWER_MAX_PRS / SECURITY_REVIEW_MAX_PRS 既定踏襲）。
+DESIGN_REVIEWER_MAX_PRS="${DESIGN_REVIEWER_MAX_PRS:-5}"
+case "$DESIGN_REVIEWER_MAX_PRS" in
+  ''|*[!0-9]*) DESIGN_REVIEWER_MAX_PRS="5" ;;
+  *)
+    if [ "$DESIGN_REVIEWER_MAX_PRS" -lt 1 ] 2>/dev/null; then
+      DESIGN_REVIEWER_MAX_PRS="5"
+    fi
+    ;;
+esac
+# 期待出力形式（`text` または `json`）。`text` / `json` 以外（未設定 / typo / 大文字違い等）は
+# 安全側で `text` に正規化（design.md「Data Models」節「parse 失敗時の fallback」と整合）。
+DESIGN_REVIEWER_OUTPUT_FORMAT="${DESIGN_REVIEWER_OUTPUT_FORMAT:-text}"
+case "$DESIGN_REVIEWER_OUTPUT_FORMAT" in
+  text|json) : ;;
+  *) DESIGN_REVIEWER_OUTPUT_FORMAT="text" ;;
+esac
+
 # ─── Security Review Processor 設定 (#279) ───
 # Claude Code 公式 `/security-review` skill を `claude` CLI headless 起動経由で呼び出し、
 # open PR の diff に対するセキュリティレビューを PR コメントとして投稿する。本 spec では
