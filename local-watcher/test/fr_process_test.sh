@@ -158,6 +158,7 @@ FETCH_PRS_TRACE=""
 RUN_ATTEMPT_TRACE=""
 TERMINATE_MAX_TRACE=""
 TERMINATE_NO_PROGRESS_TRACE=""
+TERMINATE_IMMEDIATE_TRACE=""
 LOAD_STATE_TRACE=""
 FR_WARN_TRACE=""
 FR_LOG_TRACE=""
@@ -183,6 +184,7 @@ reset_stub_state() {
   RUN_ATTEMPT_TRACE="$(mktemp)"
   TERMINATE_MAX_TRACE="$(mktemp)"
   TERMINATE_NO_PROGRESS_TRACE="$(mktemp)"
+  TERMINATE_IMMEDIATE_TRACE="$(mktemp)"
   LOAD_STATE_TRACE="$(mktemp)"
   FR_WARN_TRACE="$(mktemp)"
   FR_LOG_TRACE="$(mktemp)"
@@ -192,13 +194,13 @@ reset_stub_state() {
   FETCH_PRS_RESPONSE='[]'
   RUN_ATTEMPT_RC_QUEUE=()
   RUN_ATTEMPT_RC_INDEX=0
-  LOAD_STATE_RESPONSE='{"issue":0,"total_attempts":4,"last_failure_signature":"abc123def456"}'
+  LOAD_STATE_RESPONSE='{"issue":0,"total_attempts":4,"last_failure_signature":"abc123def456","immediate_failure_streak":3}'
 }
 
 cleanup_stub_state() {
   rm -f "$FETCH_ISSUES_TRACE" "$FETCH_PRS_TRACE" "$RUN_ATTEMPT_TRACE" \
-        "$TERMINATE_MAX_TRACE" "$TERMINATE_NO_PROGRESS_TRACE" "$LOAD_STATE_TRACE" \
-        "$FR_WARN_TRACE" "$FR_LOG_TRACE" "$IS_ENABLED_TRACE" 2>/dev/null || true
+        "$TERMINATE_MAX_TRACE" "$TERMINATE_NO_PROGRESS_TRACE" "$TERMINATE_IMMEDIATE_TRACE" \
+        "$LOAD_STATE_TRACE" "$FR_WARN_TRACE" "$FR_LOG_TRACE" "$IS_ENABLED_TRACE" 2>/dev/null || true
 }
 
 trap 'cleanup_stub_state' EXIT
@@ -244,6 +246,13 @@ fr_terminate_max_attempts() {
 # shellcheck disable=SC2317
 fr_terminate_no_progress() {
   echo "fr_terminate_no_progress $*" >> "$TERMINATE_NO_PROGRESS_TRACE"
+  return 0
+}
+
+# #411: fr_terminate_immediate_failure_streak stub
+# shellcheck disable=SC2317
+fr_terminate_immediate_failure_streak() {
+  echo "fr_terminate_immediate_failure_streak $*" >> "$TERMINATE_IMMEDIATE_TRACE"
   return 0
 }
 
@@ -589,6 +598,59 @@ set -e
 assert_rc "rc=99 → dispatch は rc=0" "0" "$rc"
 assert_eq "rc=99 で terminate 関数が一切呼ばれない" "0" "$(count_pattern "." "$TERMINATE_MAX_TRACE")"
 assert_eq "rc=99 で terminate_no_progress も呼ばれない" "0" "$(count_pattern "." "$TERMINATE_NO_PROGRESS_TRACE")"
+cleanup_stub_state
+
+# ============================================================
+# Section 11: #411 rc=4 → fr_terminate_immediate_failure_streak が呼ばれる
+# （Req 4.1〜4.5 / 既存 max-attempts / no-progress と独立した終端経路）
+# ============================================================
+echo ""
+echo "--- Section 11: #411 rc=4 → fr_terminate_immediate_failure_streak ---"
+
+# 11-A: rc=4 (immediate-failure-streak) → 専用の terminate 関数が呼ばれる
+reset_stub_state
+RUN_ATTEMPT_RC_QUEUE=(4)
+LOAD_STATE_RESPONSE='{"issue":800,"total_attempts":1,"last_failure_signature":"sigsig","immediate_failure_streak":3}'
+set +e
+_fr_dispatch_candidate "issue" "800"
+rc=$?
+set -e
+assert_rc "#411 Req 1.5: rc=4 → dispatch は rc=0（fail-continue）" "0" "$rc"
+assert_grep "#411 Req 4.1: rc=4 → fr_terminate_immediate_failure_streak が呼ばれる" \
+  "^fr_terminate_immediate_failure_streak issue 800 3$" "$TERMINATE_IMMEDIATE_TRACE"
+assert_eq "#411 rc=4 で fr_terminate_max_attempts が呼ばれない" "0" "$(count_pattern "." "$TERMINATE_MAX_TRACE")"
+assert_eq "#411 rc=4 で fr_terminate_no_progress が呼ばれない" "0" "$(count_pattern "." "$TERMINATE_NO_PROGRESS_TRACE")"
+assert_grep "#411 rc=4 経路で fr_load_state が呼ばれる" "^fr_load_state 800$" "$LOAD_STATE_TRACE"
+cleanup_stub_state
+
+# 11-B: rc=4 で PR 経路も対応
+reset_stub_state
+RUN_ATTEMPT_RC_QUEUE=(4)
+LOAD_STATE_RESPONSE='{"issue":900,"total_attempts":2,"last_failure_signature":"sigsig","immediate_failure_streak":5}'
+set +e
+_fr_dispatch_candidate "pr" "900"
+rc=$?
+set -e
+assert_rc "#411 Req 4.1: PR 経路でも rc=4 で dispatch は rc=0" "0" "$rc"
+assert_grep "#411 Req 4.1: PR 経路で fr_terminate_immediate_failure_streak が呼ばれる" \
+  "^fr_terminate_immediate_failure_streak pr 900 5$" "$TERMINATE_IMMEDIATE_TRACE"
+cleanup_stub_state
+
+# 11-C: rc=2/3 では fr_terminate_immediate_failure_streak は呼ばれない（既存経路を壊さない）
+reset_stub_state
+RUN_ATTEMPT_RC_QUEUE=(2)
+set +e
+_fr_dispatch_candidate "issue" "910"
+set -e
+assert_eq "#411 NFR 1.1: rc=2 では fr_terminate_immediate_failure_streak が呼ばれない" "0" "$(count_pattern "." "$TERMINATE_IMMEDIATE_TRACE")"
+cleanup_stub_state
+
+reset_stub_state
+RUN_ATTEMPT_RC_QUEUE=(3)
+set +e
+_fr_dispatch_candidate "issue" "911"
+set -e
+assert_eq "#411 NFR 1.1: rc=3 では fr_terminate_immediate_failure_streak が呼ばれない" "0" "$(count_pattern "." "$TERMINATE_IMMEDIATE_TRACE")"
 cleanup_stub_state
 
 # ============================================================

@@ -92,6 +92,17 @@ FAILED_RECOVERY_DEV_MODEL="claude-opus-4-7"
 FAILED_RECOVERY_MAX_TURNS=20
 # shellcheck disable=SC2034
 FAILED_RECOVERY_MAX_ATTEMPTS=4
+# #411: 即時失敗連続上限（テスト中はデフォルト 3 で OK / 既存 success path テストでは streak=0 のまま）
+# shellcheck disable=SC2034
+FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK=3
+# shellcheck disable=SC2034
+FAILED_RECOVERY_IMMEDIATE_FAIL_SECONDS=10
+# shellcheck disable=SC2034
+REPO_DIR="/tmp/fr-attempt-test-stub-repo"
+# shellcheck disable=SC2034
+BASE_BRANCH="main"
+# shellcheck disable=SC2034
+LOG_DIR="/tmp/fr-attempt-test-stub-logs"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -239,6 +250,7 @@ reset_stub_state() {
   LOAD_STATE_TRACE="$(mktemp)"
   INVOKE_CLAUDE_TRACE="$(mktemp)"
   FINALIZE_TRACE="$(mktemp)"
+  PREPARE_WORKTREE_TRACE="$(mktemp)"
   LOAD_STATE_RESPONSE='{}'
   INVOKE_CLAUDE_RC=0
   DETECT_NO_PROGRESS_RC=1
@@ -246,6 +258,9 @@ reset_stub_state() {
   COLLECT_PR_CI_CONTEXT_RESPONSE="dummy pr ci context"
   GH_PR_VIEW_HEAD_SHA="0123456789abcdef0123456789abcdef01234567"
   GH_RC=0
+  # #411: 作業ツリー stub を成功側に倒す（success path の既存テスト互換）
+  PREPARE_WORKTREE_RC=0
+  PREPARE_WORKTREE_OUTPUT="main"
   # FR_PROCESSED_THIS_CYCLE を section ごとに reset
   FR_PROCESSED_THIS_CYCLE=""
   export FR_PROCESSED_THIS_CYCLE
@@ -253,7 +268,8 @@ reset_stub_state() {
 
 cleanup_stub_state() {
   rm -f "$GH_CALL_LOG" "$CLAUDE_CALL_LOG" "$FR_WARN_TRACE" "$FR_LOG_TRACE" \
-        "$SAVE_STATE_TRACE" "$LOAD_STATE_TRACE" "$INVOKE_CLAUDE_TRACE" "$FINALIZE_TRACE" 2>/dev/null || true
+        "$SAVE_STATE_TRACE" "$LOAD_STATE_TRACE" "$INVOKE_CLAUDE_TRACE" "$FINALIZE_TRACE" \
+        "$PREPARE_WORKTREE_TRACE" 2>/dev/null || true
 }
 
 # ── 内部関数 stub 群 ──
@@ -338,12 +354,35 @@ fr_collect_pr_ci_context() {
 }
 
 # fr_invoke_claude stub: INVOKE_CLAUDE_TRACE に引数を記録し、INVOKE_CLAUDE_RC を返す
+# 第 3 引数は #411 で追加した dedicated_log_path（テストでは観測のみ）
 # shellcheck disable=SC2317
 fr_invoke_claude() {
-  echo "fr_invoke_claude prompt_len=${#1} stage=$2" >> "$INVOKE_CLAUDE_TRACE"
+  echo "fr_invoke_claude prompt_len=${#1} stage=$2 ded_log=$3" >> "$INVOKE_CLAUDE_TRACE"
   # claude 呼び出し記録の補助として CLAUDE_CALL_LOG にも記録
   echo "claude -p ... stage=$2" >> "$CLAUDE_CALL_LOG"
   return "$INVOKE_CLAUDE_RC"
+}
+
+# #411: fr_prepare_repo_worktree stub。テストでは常に成功（stdout に checkout 参照名）。
+# 観測用に PREPARE_WORKTREE_TRACE に記録する。
+PREPARE_WORKTREE_TRACE=""
+PREPARE_WORKTREE_RC=0
+PREPARE_WORKTREE_OUTPUT="main"
+# shellcheck disable=SC2317
+fr_prepare_repo_worktree() {
+  echo "fr_prepare_repo_worktree kind=$1 number=$2 pr_head=$3" >> "${PREPARE_WORKTREE_TRACE:-/dev/null}"
+  if [ "$PREPARE_WORKTREE_RC" != "0" ]; then
+    return "$PREPARE_WORKTREE_RC"
+  fi
+  printf '%s' "$PREPARE_WORKTREE_OUTPUT"
+  return 0
+}
+
+# #411: fr_resolve_dedicated_log_path stub。固定パスを返す。
+# shellcheck disable=SC2317
+fr_resolve_dedicated_log_path() {
+  printf '/tmp/fr-attempt-test-dedicated-%s-%s.log' "$1" "$2"
+  return 0
 }
 
 # ============================================================
@@ -397,14 +436,15 @@ assert_rc "observation: success path → rc=0" "0" "$rc"
 # 開始時 save が呼ばれること: total_attempts=3 (prev=2+1), last_status=in-progress
 assert_grep "観点 a: 開始時 fr_save_state(42, 3, in-progress, ...) が呼ばれる" "^fr_save_state 42 3 in-progress " "$SAVE_STATE_TRACE"
 
-# fr_save_state が in-progress 1 件 + finalize 経由 succeeded 1 件 = 計 2 件
+# #411: success path で fr_save_state が in-progress 1 件 + streak=0 reset 1 件 +
+# finalize 経由 succeeded 1 件 = 計 3 件
 save_count=$(wc -l < "$SAVE_STATE_TRACE" 2>/dev/null || echo "0")
 save_count="${save_count//[[:space:]]/}"
-if [ "$save_count" = "2" ]; then
-  echo "PASS: 観点 a: fr_save_state が 2 件呼ばれる (in-progress + succeeded)"
+if [ "$save_count" = "3" ]; then
+  echo "PASS: 観点 a: fr_save_state が 3 件呼ばれる (in-progress + streak-reset + succeeded)"
   PASS_COUNT=$((PASS_COUNT + 1))
 else
-  echo "FAIL: 観点 a: fr_save_state が 2 件呼ばれる (actual=$save_count)"
+  echo "FAIL: 観点 a: fr_save_state が 3 件呼ばれる (actual=$save_count)"
   cat "$SAVE_STATE_TRACE"
   FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
