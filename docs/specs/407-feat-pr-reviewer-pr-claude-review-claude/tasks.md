@@ -76,7 +76,7 @@
   - _Boundary: pr-design-reviewer.sh, issue-watcher.sh_
   - _Depends: 1, 2_
 
-- [ ] 4. invoke_reviewer / parse_verdict / validate_verdict と保守的 fallback の実装＋テスト
+- [x] 4. invoke_reviewer / parse_verdict / validate_verdict と保守的 fallback の実装＋テスト
   - `pr-design-reviewer.sh` に以下を追加: `pdr_invoke_reviewer`（Claude CLI 呼び出し /
     `--output-format` は `DESIGN_REVIEWER_OUTPUT_FORMAT` に従う / mktemp で prompt 一時ファイル
     / `DESIGN_REVIEWER_EXEC_TIMEOUT` で timeout）/ `pdr_parse_verdict`（text 形式は最終行
