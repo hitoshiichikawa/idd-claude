@@ -138,7 +138,7 @@
   - _Boundary: pr-design-reviewer.sh, issue-watcher.sh_
   - _Depends: 5_
 
-- [ ] 7. design-reviewer.md agent 定義の追加と root ↔ repo-template 同期
+- [x] 7. design-reviewer.md agent 定義の追加と root ↔ repo-template 同期
   - `.claude/agents/design-reviewer.md` を新規作成（frontmatter:
     `name: design-reviewer` /
     `description: 設計 PR (docs/specs/<N>-<slug>/) の AC カバレッジ / design⇄tasks 整合 /
