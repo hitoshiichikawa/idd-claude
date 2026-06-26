@@ -924,6 +924,37 @@ FAILED_RECOVERY_MAX_PRS="${FAILED_RECOVERY_MAX_PRS:-3}"
 # 状態ファイル（通算カウンタ + 直前試行情報の JSON）の配置先。既定 $HOME/.issue-watcher/
 # failed-recovery/$REPO_SLUG。LOG_DIR と同じ repo-slug 分離方針（NFR 2.2, NFR 2.3）。
 FAILED_RECOVERY_STATE_DIR="${FAILED_RECOVERY_STATE_DIR:-$HOME/.issue-watcher/failed-recovery/$REPO_SLUG}"
+# ─── Failed Recovery 即時失敗判定の閾値 (#411) ───
+# recovery claude session が「実質作業前に即時失敗した試行」を attempt budget から
+# 除外するための判定閾値（Req 1.2 / 1.3）。判定条件は:
+#   (a) claude exit code が非ゼロ かつ quota sentinel 99 ではない
+#   (b) stream-json 中に tool use イベントが 1 件も観測されていない
+#   (c) セッション継続時間（end - start 秒）が即時失敗閾値未満
+# 既定 10 秒は altpocket-server #119 で観測された ~2 秒 rc=1 を確実に拾える保守値。
+# 上書き可能（未設定 / 非整数 / 0 以下 / 負値は既定 10 に正規化、安全側 = リトライ過剰
+# 除外による無限ループにならない側 / NFR 1.2）。
+FAILED_RECOVERY_IMMEDIATE_FAIL_SECONDS="${FAILED_RECOVERY_IMMEDIATE_FAIL_SECONDS:-10}"
+case "$FAILED_RECOVERY_IMMEDIATE_FAIL_SECONDS" in
+  ''|*[!0-9]*) FAILED_RECOVERY_IMMEDIATE_FAIL_SECONDS=10 ;;
+  *)
+    if [ "$FAILED_RECOVERY_IMMEDIATE_FAIL_SECONDS" -le 0 ]; then
+      FAILED_RECOVERY_IMMEDIATE_FAIL_SECONDS=10
+    fi
+    ;;
+esac
+# 同一 Issue / PR の即時失敗連続上限（Req 1.5 / 1.6）。通算 attempt budget とは独立した
+# カウンタで、上限到達時は `claude-failed` を据え置いたまま `immediate-failure-streak`
+# 終端理由で 1 度だけ運用者にエスカレーションする（quota 燃焼上界保証 / 無限リトライ防止）。
+# 既定 3 = 「3 cycle 連続で claude が起動できなければ手動レビュー」運用前提。上書き可能。
+FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK="${FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK:-3}"
+case "$FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK" in
+  ''|*[!0-9]*) FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK=3 ;;
+  *)
+    if [ "$FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK" -le 0 ]; then
+      FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK=3
+    fi
+    ;;
+esac
 
 # ─── Stale Pickup Reaper 設定 (#379) ───
 # セッション喪失で `claude-picked-up` / `claude-claimed` ラベルが取り残された Issue を
