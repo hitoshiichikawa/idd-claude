@@ -553,3 +553,160 @@ pdr_validate_verdict() {
 
   return 0
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pdr_apply_label_decision: 判定結果に基づき needs-iteration ラベルを add/remove
+#   入力: $1 = pr_number, $2 = verdict (approve | reject)
+#   出力: なし（log のみ）
+#   戻り値: 0 = ok / 1 = ラベル操作失敗 / 2 = 入力検証失敗
+#
+#   Req: 4.1（reject → needs-iteration 付与）/ 4.2（approve → 解消）
+#
+#   挙動:
+#     - verdict=reject → `gh pr edit --add-label needs-iteration`（既付与で冪等 no-op）
+#     - verdict=approve → `gh pr edit --remove-label needs-iteration`（未付与で冪等 no-op）
+#     - gh の add/remove-label は既存ラベル / 不在ラベルに対しても idempotent。
+#       追加前 / 削除前の現状確認は行わず、`gh` の冪等性に委ねる
+#       （adj_apply_label_decision と同方針 / NFR 1.1 観測ログ規約の最小化）。
+#     - 既存ラベル名 `needs-iteration` を共有する（Req 6.4）。新規ラベルは追加しない。
+# ─────────────────────────────────────────────────────────────────────────────
+pdr_apply_label_decision() {
+  local pr_number="${1:-}"
+  local verdict="${2:-}"
+
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    pdr_warn "pdr_apply_label_decision: 無効な PR 番号 '${pr_number}'"
+    return 2
+  fi
+  case "$verdict" in
+    approve|reject) : ;;
+    *)
+      pdr_warn "pdr_apply_label_decision: 無効な verdict '${verdict}'"
+      return 2
+      ;;
+  esac
+
+  local label="${LABEL_NEEDS_ITERATION:-needs-iteration}"
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+
+  if [ "$verdict" = "reject" ]; then
+    if ! timeout "$timeout_s" \
+        gh pr edit "$pr_number" --repo "$REPO" --add-label "$label" >/dev/null 2>&1; then
+      pdr_warn "pdr_apply_label_decision: PR #${pr_number}: ${label} 付与失敗"
+      return 1
+    fi
+    pdr_log "PR #${pr_number}: ${label} を付与（verdict=reject / 既付与で冪等 no-op）"
+  else
+    if ! timeout "$timeout_s" \
+        gh pr edit "$pr_number" --repo "$REPO" --remove-label "$label" >/dev/null 2>&1; then
+      pdr_warn "pdr_apply_label_decision: PR #${pr_number}: ${label} 解消失敗"
+      return 1
+    fi
+    pdr_log "PR #${pr_number}: ${label} を解消（verdict=approve / 未付与で冪等 no-op）"
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pdr_apply_status_decision: 判定結果に基づき claude-review commit status を publish
+#   入力: $1 = pr_number, $2 = sha, $3 = verdict, $4 = pr_url
+#   出力: なし（log は pr_publish_claude_status / pr_publish_commit_status 側）
+#   戻り値: pr_publish_claude_status の戻り値（0/1/2/3/4）
+#
+#   Req: 3.1（approve → success）/ 3.2（reject → failure）/ 3.4（context 名統一）/
+#        3.5（OR 条件で awaiting-design-review と併存 = status のみ操作してラベル不干渉）/
+#        7.2（既存 pr-reviewer.sh の publish 経路は read-only で流用 / 経路独立）
+#
+#   挙動:
+#     - verdict=approve → `pr_publish_claude_status` を `result=approve` で呼ぶ → state=success
+#     - verdict=reject  → `pr_publish_claude_status` を `result=reject` で呼ぶ → state=failure
+#     - context 名は `claude-review`（既存 impl PR 経路と統一 / Req 3.4）
+#     - awaiting-design-review ラベルには触れない（Req 3.5 OR 条件併存）
+# ─────────────────────────────────────────────────────────────────────────────
+pdr_apply_status_decision() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local verdict="${3:-}"
+  local pr_url="${4:-}"
+
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    pdr_warn "pdr_apply_status_decision: 無効な PR 番号 '${pr_number}'"
+    return 2
+  fi
+  if ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+    pdr_warn "pdr_apply_status_decision: 無効な sha '${sha}'"
+    return 2
+  fi
+  case "$verdict" in
+    approve|reject) : ;;
+    *)
+      pdr_warn "pdr_apply_status_decision: 無効な verdict '${verdict}'"
+      return 2
+      ;;
+  esac
+
+  pdr_log "PR #${pr_number}: claude-review status publish (design Reviewer / verdict=${verdict} sha=${sha})"
+  pr_publish_claude_status "$pr_number" "$sha" "$verdict" "$pr_url"
+  return $?
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pdr_post_decision_comment: 判定結果サマリを PR コメントに投稿
+#   入力: $1 = pr_number, $2 = sha, $3 = verdict, $4 = ac_reason,
+#         $5 = dt_reason, $6 = tr_reason
+#   出力: なし（log のみ）
+#   戻り値: 0 = ok / 1 = 投稿失敗 / 2 = 入力検証失敗
+#
+#   Req: 5.1（PR コメント or ログで観測可能）/ 5.3（hidden marker prefix が
+#        pi self-filter `idd-claude:pr-iteration` と非衝突 / NFR 1.2）
+#
+#   挙動:
+#     - hidden marker `<!-- idd-claude:pr-design-reviewer sha=<sha> kind=decision -->` を
+#       本文末尾に付与
+#     - 本関数は重複判定を行わない（呼び出し元 pdr_run_review_for_pr が
+#       `pdr_already_processed` で per-sha dedup を済ませている前提）
+#     - 既存 needs-iteration ラベル / claude-review context との連携は本コメントには含めない
+#       （コメントは観測用 / status 操作は pdr_apply_status_decision の責務）
+# ─────────────────────────────────────────────────────────────────────────────
+pdr_post_decision_comment() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local verdict="${3:-}"
+  local ac_reason="${4:-}"
+  local dt_reason="${5:-}"
+  local tr_reason="${6:-}"
+
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    pdr_warn "pdr_post_decision_comment: 無効な PR 番号 '${pr_number}'"
+    return 2
+  fi
+  if ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+    pdr_warn "pdr_post_decision_comment: 無効な sha '${sha}'"
+    return 2
+  fi
+  case "$verdict" in
+    approve|reject) : ;;
+    *)
+      pdr_warn "pdr_post_decision_comment: 無効な verdict '${verdict}'"
+      return 2
+      ;;
+  esac
+
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+
+  # コメント本文の組み立て。reason 値は未信頼入力（Claude 応答由来）のため printf 経由で
+  # bash 展開させない（本文は gh CLI に --body で渡されるので shell metachar は問題ない
+  # が、本文中の `%` を printf format に解釈させないため `%%` ではなく fixed string `%s` で
+  # 流す）。
+  local body
+  body=$(printf '## 設計レビュー判定（自動）\n\n- **VERDICT**: %s\n\n### AC カバレッジ\n- %s\n\n### design⇄tasks 整合\n- %s\n\n### Traceability\n- %s\n\n<!-- idd-claude:pr-design-reviewer sha=%s kind=decision -->\n' \
+    "$verdict" "$ac_reason" "$dt_reason" "$tr_reason" "$sha")
+
+  if ! timeout "$timeout_s" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+    pdr_warn "PR #${pr_number}: 判定コメント投稿失敗（sha=${sha} verdict=${verdict}）"
+    return 1
+  fi
+  pdr_log "PR #${pr_number}: 判定コメント投稿（sha=${sha} verdict=${verdict}）"
+  return 0
+}
