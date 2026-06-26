@@ -115,7 +115,7 @@
   - _Boundary: pr-design-reviewer.sh_
   - _Depends: 4_
 
-- [ ] 6. process_pr_design_reviewer オーケストレーション + dispatcher 配線 + no-op テスト
+- [x] 6. process_pr_design_reviewer オーケストレーション + dispatcher 配線 + no-op テスト
   - `pr-design-reviewer.sh` に `pdr_run_review_for_pr`（入力: pr_json。head_ref / pr_number /
     sha / base_ref / pr_url を分解。gate OFF / dedup hit / pattern 不一致を早期処理し、
     `pdr_invoke_reviewer` → `pdr_parse_verdict` → `pdr_validate_verdict` →
