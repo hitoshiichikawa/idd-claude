@@ -27,7 +27,7 @@
   - _Requirements: 5.4, 6.1, 6.3, 6.5_
   - _Boundary: core_utils.sh, issue-watcher.sh_
 
-- [ ] 2. design-review-prompt.tmpl の作成と read-only 契約の明示
+- [x] 2. design-review-prompt.tmpl の作成と read-only 契約の明示
   - `local-watcher/bin/design-review-prompt.tmpl` を新規作成
   - プレースホルダ: `{PR}` / `{SHA}` / `{BASE}` / `{HEAD}` / `{ISSUE_NUMBER}` / `{SPEC_DIR}` /
     `{REQUIREMENTS_MD}` / `{DESIGN_MD}` / `{TASKS_MD}`（解決不能時は `(none)`）
