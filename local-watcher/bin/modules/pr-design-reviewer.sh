@@ -710,3 +710,205 @@ pdr_post_decision_comment() {
   pdr_log "PR #${pr_number}: 判定コメント投稿（sha=${sha} verdict=${verdict}）"
   return 0
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pdr_resolve_spec_dir_from_head_ref: head_ref から docs/specs/<N>-<slug>/ パスを解決
+#   入力: $1 = head_ref（例: claude/issue-407-design-foo）
+#   出力: stdout に相対パス（解決不能時は空文字列）
+#   戻り値: 0 固定（fail-safe）
+#
+#   - head_ref から Issue 番号を抽出（claude/issue-<N>-...）
+#   - `git ls-tree --name-only origin/<head_ref> -- docs/specs/` で <N>- 始まりの spec
+#     ディレクトリを解決（pr_publish_claude_status_from_branch / adj_resolve_spec_dir_from_head_ref
+#     と同方針 / read-only / 副作用なし）
+# ─────────────────────────────────────────────────────────────────────────────
+pdr_resolve_spec_dir_from_head_ref() {
+  local head_ref="${1:-}"
+  if [ -z "$head_ref" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  local issue_number=""
+  if [[ "$head_ref" =~ ^claude/issue-([0-9]+)- ]]; then
+    issue_number="${BASH_REMATCH[1]}"
+  fi
+  if [ -z "$issue_number" ]; then
+    printf '%s\n' ""
+    return 0
+  fi
+
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+  local tree_out spec_dir_rel=""
+  if ! tree_out=$(timeout "$timeout_s" \
+      git ls-tree --name-only "origin/${head_ref}" -- "docs/specs/" 2>/dev/null); then
+    printf '%s\n' ""
+    return 0
+  fi
+  spec_dir_rel=$(printf '%s\n' "$tree_out" \
+    | awk -v n="${issue_number}-" -F/ '$3 != "" && index($3, n) == 1 { print "docs/specs/" $3; exit }')
+  printf '%s\n' "$spec_dir_rel"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pdr_run_review_for_pr: 1 PR 分の判定をオーケストレートする
+#   入力: $1 = pr_json（pdr_fetch_design_prs の単一要素）
+#   出力: なし（log のみ）
+#   戻り値: 0 = ok / 1 = skip（pattern 不一致 / dedup hit）/ 2 = claude 失敗（pending 据え置き）
+#
+#   Req: 1.1 / 1.2 / 1.5 / 2.4 / 3.1 / 3.2 / 3.3 / 4.1 / 4.2 / 5.1 / 5.2 / 5.4 /
+#        NFR 1.1（観測ログ 10 行以内に収める） / NFR 4.1
+#
+#   フロー:
+#     1. pr_json から pr_number / head_ref / base_ref / sha / pr_url を抽出
+#     2. head pattern 不一致なら skip (rc=1)
+#     3. per-sha dedup hit なら skip (rc=1) — pdr_log で 1 行サマリ
+#     4. spec dir を head から解決（不在でも保守的 approve 経路に進める）
+#     5. claude を 1 回呼び出し（pdr_invoke_reviewer）
+#        - exec 失敗 / workspace-modified → publish せず pending 据え置き (rc=2 / Req 3.3)
+#     6. text/JSON を parse（pdr_parse_verdict）。失敗時は保守的 approve に倒す（Req 2.4）
+#     7. schema 検証（pdr_validate_verdict）。失敗時も保守的 approve に倒す（Req 2.4）
+#     8. ラベル add/remove + status publish + コメント投稿（pdr_apply_label_decision /
+#        pdr_apply_status_decision / pdr_post_decision_comment）
+#     9. 1 行サマリログを pdr_log で出す（NFR 1.1: PR あたり ON 時のログ行数は約
+#        サマリ 1 + 操作系 3〜4 = 5 行前後で 10 行以下を維持）
+# ─────────────────────────────────────────────────────────────────────────────
+pdr_run_review_for_pr() {
+  local pr_json="${1:-}"
+  if [ -z "$pr_json" ]; then
+    return 1
+  fi
+
+  local pr_number head_ref base_ref sha pr_url
+  pr_number=$(echo "$pr_json" | jq -r '.number // empty')
+  head_ref=$(echo "$pr_json"  | jq -r '.headRefName // empty')
+  base_ref=$(echo "$pr_json"  | jq -r '.baseRefName // empty')
+  sha=$(echo "$pr_json"       | jq -r '.headRefOid // empty')
+  pr_url=$(echo "$pr_json"    | jq -r '.url // empty')
+
+  if [ -z "$pr_number" ] || [ -z "$head_ref" ] || [ -z "$sha" ]; then
+    pdr_warn "pdr_run_review_for_pr: pr_json から必須フィールドが欠落 (pr='${pr_number}' head='${head_ref}' sha='${sha}')"
+    return 1
+  fi
+
+  # head pattern マッチング（Req 1.3, 7.4）
+  if ! pdr_classify_design_pr "$head_ref"; then
+    # 通常 process_pr_design_reviewer 側で既に filter されているが、防御的に確認
+    return 1
+  fi
+
+  # per-sha dedup（Req 1.4）
+  if pdr_already_processed "$pr_number" "$sha"; then
+    pdr_log "PR #${pr_number}: sha=${sha} は既に判定済み（marker 検出）→ skip"
+    return 1
+  fi
+
+  if [ -z "$base_ref" ] || [ "$base_ref" = "null" ]; then
+    base_ref="${BASE_BRANCH:-main}"
+  fi
+
+  # spec dir 解決（不在でも保守的 approve 経路に進めるため fail-safe）
+  local spec_dir_rel
+  spec_dir_rel=$(pdr_resolve_spec_dir_from_head_ref "$head_ref")
+
+  # claude 起動
+  local raw_body=""
+  local invoke_rc=0
+  raw_body=$(pdr_invoke_reviewer "$pr_number" "$sha" "$head_ref" "$base_ref" "$spec_dir_rel") || invoke_rc=$?
+
+  if [ "$invoke_rc" -ne 0 ]; then
+    # exec-failed / timeout / workspace-modified → publish せず pending 据え置き（Req 3.3）。
+    # marker / コメントも投稿しないため、次サイクルで自然に再試行される（Error Handling 共通動作）。
+    pdr_log "PR #${pr_number}: claude exec 失敗 (rc=${invoke_rc}) → claude-review pending 据え置き / 次サイクルで再試行"
+    return 2
+  fi
+
+  # text / JSON を parse
+  local out_fmt="${DESIGN_REVIEWER_OUTPUT_FORMAT:-text}"
+  local tsv=""
+  local parse_rc=0
+  tsv=$(printf '%s' "$raw_body" | pdr_parse_verdict "$out_fmt") || parse_rc=$?
+
+  local verdict="" ac_reason="" dt_reason="" tr_reason=""
+  if [ "$parse_rc" -eq 0 ] && [ -n "$tsv" ]; then
+    verdict=$(printf '%s' "$tsv" | awk -F'\t' '{print $1}')
+    ac_reason=$(printf '%s' "$tsv" | awk -F'\t' '{print $2}')
+    dt_reason=$(printf '%s' "$tsv" | awk -F'\t' '{print $3}')
+    tr_reason=$(printf '%s' "$tsv" | awk -F'\t' '{print $4}')
+  fi
+
+  # 保守的 approve fallback（Req 2.4）
+  if ! pdr_validate_verdict "$verdict" "$ac_reason" "$dt_reason" "$tr_reason"; then
+    pdr_warn "PR #${pr_number}: parse / validate 失敗 → 保守的に approve に倒す（false-reject 回避）"
+    verdict="approve"
+    [ -z "$ac_reason" ] && ac_reason="（自動判定不能のため保守的 approve / Req 2.4）"
+    [ -z "$dt_reason" ] && dt_reason="（自動判定不能のため保守的 approve / Req 2.4）"
+    [ -z "$tr_reason" ] && tr_reason="（自動判定不能のため保守的 approve / Req 2.4）"
+  fi
+
+  # ラベル / status / コメントの 3 系統を順に確定
+  pdr_apply_label_decision "$pr_number" "$verdict" || true
+  pdr_apply_status_decision "$pr_number" "$sha" "$verdict" "$pr_url" || true
+  pdr_post_decision_comment "$pr_number" "$sha" "$verdict" "$ac_reason" "$dt_reason" "$tr_reason" || true
+
+  # 1 行サマリ（NFR 1.1 / 5.2: サマリ集計を 1 行以上のログとして出力）
+  pdr_log "PR #${pr_number}: design Reviewer 判定完了 sha=${sha} verdict=${verdict} spec=${spec_dir_rel:-(none)}"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# process_pr_design_reviewer: dispatcher エントリ
+#   入力: なし
+#   出力: なし（log のみ）
+#   戻り値: 0 固定（後続 processor を阻害しない / dispatcher fail-continue 契約）
+#
+#   Req: 1.1 / 6.1 / 6.2 / NFR 1.1（gate OFF 時 log 行ゼロ）/ NFR 2.1
+#
+#   フロー:
+#     1. gate OFF → 即 return 0（外部副作用ゼロ・log 行ゼロ）
+#     2. 候補 PR を pdr_fetch_design_prs で取得
+#     3. DESIGN_REVIEWER_MAX_PRS で truncate
+#     4. 各 PR に対し pdr_run_review_for_pr を呼ぶ
+# ─────────────────────────────────────────────────────────────────────────────
+process_pr_design_reviewer() {
+  if ! pdr_gate_enabled; then
+    # gate OFF: 完全 no-op（log 行ゼロ / NFR 2.1）
+    return 0
+  fi
+
+  local candidates_json
+  candidates_json=$(pdr_fetch_design_prs) || true
+  if [ -z "$candidates_json" ] || [ "$candidates_json" = "[]" ]; then
+    pdr_log "対象設計 PR なし（候補ゼロ件 / sleep）"
+    return 0
+  fi
+
+  local max_prs="${DESIGN_REVIEWER_MAX_PRS:-5}"
+  local total
+  total=$(printf '%s' "$candidates_json" | jq -r 'length' 2>/dev/null || echo "0")
+  case "$total" in ''|*[!0-9]*) total=0 ;; esac
+
+  local target="$total"
+  if [ "$total" -gt "$max_prs" ] 2>/dev/null; then
+    target="$max_prs"
+    pdr_log "候補設計 PR 件数: total=${total} target=${target} overflow=$((total - max_prs))"
+  fi
+
+  if [ "$target" -le 0 ] 2>/dev/null; then
+    return 0
+  fi
+
+  # 各 PR を順に処理
+  local i=0
+  while [ "$i" -lt "$target" ]; do
+    local pr_json
+    pr_json=$(printf '%s' "$candidates_json" | jq -c ".[${i}]" 2>/dev/null || true)
+    if [ -n "$pr_json" ] && [ "$pr_json" != "null" ]; then
+      pdr_run_review_for_pr "$pr_json" || true
+    fi
+    i=$((i + 1))
+  done
+
+  return 0
+}
