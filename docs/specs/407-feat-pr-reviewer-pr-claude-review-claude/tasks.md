@@ -45,7 +45,7 @@
   - _Boundary: design-review-prompt.tmpl_
   - _Depends: 1_
 
-- [ ] 3. pr-design-reviewer.sh モジュール骨格と gate / pattern / dedup の実装＋テスト
+- [x] 3. pr-design-reviewer.sh モジュール骨格と gate / pattern / dedup の実装＋テスト
   - `local-watcher/bin/modules/pr-design-reviewer.sh` を新規作成（先頭コメントに用途 /
     配置先 / 依存 / 関数 prefix `pdr_` / トップレベル副作用なしを明記。既存 `adjudicator.sh`
     冒頭コメント構造を踏襲）
