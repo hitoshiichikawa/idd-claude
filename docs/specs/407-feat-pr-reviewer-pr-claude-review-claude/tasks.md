@@ -94,7 +94,7 @@
   - _Boundary: pr-design-reviewer.sh_
   - _Depends: 3_
 
-- [ ] 5. label / status publish 反映と decision comment 投稿の実装＋テスト
+- [x] 5. label / status publish 反映と decision comment 投稿の実装＋テスト
   - `pr-design-reviewer.sh` に以下を追加: `pdr_apply_label_decision`（`gh pr edit
     --add-label "$LABEL_NEEDS_ITERATION"` / `--remove-label` の冪等使用 / reject → 付与 /
     approve → 解消）/ `pdr_apply_status_decision`（既存 `pr_publish_claude_status` を **読み出し
