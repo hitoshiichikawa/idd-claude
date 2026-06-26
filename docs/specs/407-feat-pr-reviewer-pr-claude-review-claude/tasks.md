@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. logger 関数追加と env Config 拡張（前提整備）
+- [x] 1. logger 関数追加と env Config 拡張（前提整備）
   - `local-watcher/bin/modules/core_utils.sh` の既存 `adj_log` / `adj_warn` / `adj_error`
     と同形式で `pdr_log` / `pdr_warn` / `pdr_error` を **末尾追記**する（時刻 + `[$REPO]` +
     `pr-design-reviewer:` prefix。stderr / stdout 分離契約に整合）
@@ -27,7 +27,7 @@
   - _Requirements: 5.4, 6.1, 6.3, 6.5_
   - _Boundary: core_utils.sh, issue-watcher.sh_
 
-- [ ] 2. design-review-prompt.tmpl の作成と read-only 契約の明示
+- [x] 2. design-review-prompt.tmpl の作成と read-only 契約の明示
   - `local-watcher/bin/design-review-prompt.tmpl` を新規作成
   - プレースホルダ: `{PR}` / `{SHA}` / `{BASE}` / `{HEAD}` / `{ISSUE_NUMBER}` / `{SPEC_DIR}` /
     `{REQUIREMENTS_MD}` / `{DESIGN_MD}` / `{TASKS_MD}`（解決不能時は `(none)`）
@@ -45,7 +45,7 @@
   - _Boundary: design-review-prompt.tmpl_
   - _Depends: 1_
 
-- [ ] 3. pr-design-reviewer.sh モジュール骨格と gate / pattern / dedup の実装＋テスト
+- [x] 3. pr-design-reviewer.sh モジュール骨格と gate / pattern / dedup の実装＋テスト
   - `local-watcher/bin/modules/pr-design-reviewer.sh` を新規作成（先頭コメントに用途 /
     配置先 / 依存 / 関数 prefix `pdr_` / トップレベル副作用なしを明記。既存 `adjudicator.sh`
     冒頭コメント構造を踏襲）
@@ -76,7 +76,7 @@
   - _Boundary: pr-design-reviewer.sh, issue-watcher.sh_
   - _Depends: 1, 2_
 
-- [ ] 4. invoke_reviewer / parse_verdict / validate_verdict と保守的 fallback の実装＋テスト
+- [x] 4. invoke_reviewer / parse_verdict / validate_verdict と保守的 fallback の実装＋テスト
   - `pr-design-reviewer.sh` に以下を追加: `pdr_invoke_reviewer`（Claude CLI 呼び出し /
     `--output-format` は `DESIGN_REVIEWER_OUTPUT_FORMAT` に従う / mktemp で prompt 一時ファイル
     / `DESIGN_REVIEWER_EXEC_TIMEOUT` で timeout）/ `pdr_parse_verdict`（text 形式は最終行
@@ -94,7 +94,7 @@
   - _Boundary: pr-design-reviewer.sh_
   - _Depends: 3_
 
-- [ ] 5. label / status publish 反映と decision comment 投稿の実装＋テスト
+- [x] 5. label / status publish 反映と decision comment 投稿の実装＋テスト
   - `pr-design-reviewer.sh` に以下を追加: `pdr_apply_label_decision`（`gh pr edit
     --add-label "$LABEL_NEEDS_ITERATION"` / `--remove-label` の冪等使用 / reject → 付与 /
     approve → 解消）/ `pdr_apply_status_decision`（既存 `pr_publish_claude_status` を **読み出し
@@ -115,7 +115,7 @@
   - _Boundary: pr-design-reviewer.sh_
   - _Depends: 4_
 
-- [ ] 6. process_pr_design_reviewer オーケストレーション + dispatcher 配線 + no-op テスト
+- [x] 6. process_pr_design_reviewer オーケストレーション + dispatcher 配線 + no-op テスト
   - `pr-design-reviewer.sh` に `pdr_run_review_for_pr`（入力: pr_json。head_ref / pr_number /
     sha / base_ref / pr_url を分解。gate OFF / dedup hit / pattern 不一致を早期処理し、
     `pdr_invoke_reviewer` → `pdr_parse_verdict` → `pdr_validate_verdict` →
@@ -138,7 +138,7 @@
   - _Boundary: pr-design-reviewer.sh, issue-watcher.sh_
   - _Depends: 5_
 
-- [ ] 7. design-reviewer.md agent 定義の追加と root ↔ repo-template 同期
+- [x] 7. design-reviewer.md agent 定義の追加と root ↔ repo-template 同期
   - `.claude/agents/design-reviewer.md` を新規作成（frontmatter:
     `name: design-reviewer` /
     `description: 設計 PR (docs/specs/<N>-<slug>/) の AC カバレッジ / design⇄tasks 整合 /
@@ -163,7 +163,7 @@
   - _Boundary: .claude/agents/design-reviewer.md, repo-template/.claude/agents/design-reviewer.md_
   - _Depends: 2_
 
-- [ ] 8. README 反映とドキュメント要件
+- [x] 8. README 反映とドキュメント要件
   - `README.md` の「オプション機能一覧（opt-in、既定 OFF）」表に 1 行追加（gate 名
     `DESIGN_REVIEWER_ENABLED` / 既定 OFF / 詳細リンク / 関連 `#407`）
   - 新規 h2 節「Design PR Reviewer (#407)」を `## PR Reviewer Adjudicator (#404)` の **後**に
@@ -179,7 +179,7 @@
   - _Boundary: README.md_
   - _Depends: 7_
 
-- [ ] 9. 静的解析・既存テスト退行確認・E2E スモーク + 独立性検証
+- [x] 9. 静的解析・既存テスト退行確認・E2E スモーク + 独立性検証
   - `shellcheck local-watcher/bin/*.sh local-watcher/bin/modules/*.sh install.sh setup.sh
     .github/scripts/*.sh` 警告ゼロ確認
   - `actionlint .github/workflows/*.yml` クリーン確認

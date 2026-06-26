@@ -187,6 +187,22 @@ adj_error() {
   echo "[$(date '+%F %T')] [$REPO] adjudicator: ERROR: $*" >&2
 }
 
+# pr-design-reviewer 専用ロガー（識別用 prefix と timestamp 形式を Issue Watcher と揃える）
+# Issue #407 Req 5.4: 既存 `pr_log` / `adj_log` と同形式の
+# `[YYYY-MM-DD HH:MM:SS] [$REPO] pr-design-reviewer:` prefix を用いる。`pdr_warn` /
+# `pdr_error` は `>&2` に出力（NFR 1.1 観測ログ規約と整合 / 既存ログ stderr/stdout 分離
+# 契約を変更しない / Req 6.5）。関数本体は modules/pr-design-reviewer.sh 配置予定
+# （#407 task 3 以降で導入）。
+pdr_log() {
+  echo "[$(date '+%F %T')] [$REPO] pr-design-reviewer: $*"
+}
+pdr_warn() {
+  echo "[$(date '+%F %T')] [$REPO] pr-design-reviewer: WARN: $*" >&2
+}
+pdr_error() {
+  echo "[$(date '+%F %T')] [$REPO] pr-design-reviewer: ERROR: $*" >&2
+}
+
 # ─── Issue #259: Claude API 529 Overloaded detector ───
 #
 # Claude API の一時的な過負荷 (HTTP 529 Overloaded) は claude CLI の stream-json
