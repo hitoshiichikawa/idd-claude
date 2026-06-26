@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. logger 関数追加と env Config 拡張（前提整備）
+- [x] 1. logger 関数追加と env Config 拡張（前提整備）
   - `local-watcher/bin/modules/core_utils.sh` の既存 `adj_log` / `adj_warn` / `adj_error`
     と同形式で `pdr_log` / `pdr_warn` / `pdr_error` を **末尾追記**する（時刻 + `[$REPO]` +
     `pr-design-reviewer:` prefix。stderr / stdout 分離契約に整合）
