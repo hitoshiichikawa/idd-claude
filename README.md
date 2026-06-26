@@ -1736,7 +1736,8 @@ Phase A により `BASE_BRANCH` に merge された変更を System Test（ST）
 
 ### 目的
 
-- approved PR の `BASE_BRANCH` merge 後 → `staged-for-release` 自動付与
+- approved PR の `BASE_BRANCH` merge 後 → `staged-for-release` 自動付与 + `ready-for-review` 除去
+  （`BASE_BRANCH` が repo default branch かどうかに依存せず除去経路が発火 / #413）
 - `staged-for-release` 付き Issue の ST check-run を watcher サイクル内でポーリング
 - ST success → ラベル除去 + 昇格対象集合へ（`PROMOTE_MODE` に応じて昇格タイミング制御）
 - ST failure → `git revert -m 1` + Issue reopen + `st-failed` 付与（fail-continue 維持）
@@ -1805,10 +1806,12 @@ Phase B の判断・操作結果は `[$REPO] promote-pipeline:` prefix と以下
 |---|---|
 | `promote-pipeline: サマリ:` | サイクル終了時のサマリ行 |
 | `issue=#N action=label-add label=staged-for-release source=auto` | 自動付与（Req 2.1.1） |
+| `issue=#N action=label-remove label=ready-for-review source=auto` | merge 済 Issue からの ready-for-review 除去（#413 / base ブランチが default かどうかに依存しない） |
 | `issue=#N ST=success action=label-remove+promote-queued` | ST success による除去 |
 | `issue=#N ST=success mode=on-demand action=hold-label-await-human-trigger` | on-demand mode の hold |
 | `issue=#N ST=failure action=revert+label-add+label-remove+reopen+comment` | ST failure による revert |
 | `issue=#N ST=pending action=skip-next-cycle` | pending による次サイクル持ち越し |
+| `issue=#N ready-for-review 除去に失敗（後続 Issue は継続）` | merge 済 Issue からの ready-for-review 除去 API 失敗（WARN） |
 | `promote-success:` | fast-forward 昇格成功 |
 | `promote-failed:` | fast-forward 不可 / fetch / push 失敗 |
 

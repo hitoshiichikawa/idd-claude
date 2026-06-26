@@ -1083,6 +1083,59 @@ pp_issue_has_label() {
     '.labels // [] | map(.name) | index($l)' >/dev/null 2>&1
 }
 
+# pp_remove_ready_for_review_if_present: Issue から `ready-for-review` ラベルを
+# 除去する（#413）。`staged-for-release` 自動付与対象として確定した Issue 集合に
+# 対して `pp_collect_merged_issues` 内のループから呼ばれる。
+#
+# 設計判断:
+#   - 既に `ready-for-review` が付与されていない（人間が手動付与しなかった / 既に
+#     除去済み）Issue では `gh issue edit` を再送しない（NFR 2.1 / Req 1.3）。
+#     ラベル状態は `pp_issue_has_label` で事前確認する（`gh issue view --json labels`
+#     を 1 回呼ぶ）。
+#   - 数値 ID `^[0-9]+$` の再検証を行う（NFR 3.2 / 防御層）。jq capture 側で既に
+#     担保されているが、`gh issue edit` 引数や URL に展開する直前の最終ゲート。
+#   - 除去失敗（タイムアウト / non-zero exit / レート制限）時は WARN ログを 1 行
+#     残し、戻り値 0 を返して呼び出し側の per-Issue ループを継続させる（Req 1.5 /
+#     Req 4.3 / NFR 3.1 fail-continue）。
+#   - 既未付与時の INFO ログは出力しない（Req 4.2: 既存 staged-for-release 重複付与
+#     スキップ集計と区別可能な「個別 INFO ログを出さない」選択肢を採用）。
+#
+# 入力: $1 = Issue 番号
+# 副作用:
+#   - `ready-for-review` 付与済なら `gh issue edit --remove-label ready-for-review`
+#   - 成功時 `issue=#N action=label-remove label=ready-for-review source=auto` ログ
+#   - 失敗時 `issue=#N ready-for-review 除去に失敗（後続 Issue は継続）` WARN ログ
+# 戻り値: 常に 0（fail-continue）
+#
+# Requirements: 1.1, 1.2, 1.3, 1.5, 1.6, 3.3, 4.1, 4.2, 4.3, NFR 2.1, NFR 3.2
+pp_remove_ready_for_review_if_present() {
+  local issue_number="$1"
+  # NFR 3.2: `gh issue edit` 引数 / URL 展開直前の数値 ID 再検証。
+  # 不正値（capture 漏れ / 異常な closingIssuesReferences 値）はサイレントに skip。
+  if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  # NFR 2.1 / Req 1.3: 既未付与なら API 再送しない（pp_issue_has_label 内部で
+  # `gh issue view --json labels` を 1 回呼ぶのみ。NFR 2.2 の追加 gh issue list /
+  # gh pr list 抑制とは別軸で、per-Issue API 呼び出し回数を最小化する）。
+  if ! pp_issue_has_label "$issue_number" "$LABEL_READY"; then
+    return 0
+  fi
+  # Req 1.1 / 1.2: ready-for-review 除去。closingIssuesReferences 経路 / head ブランチ
+  # 名経路の和集合から渡された Issue に対して、base ブランチが default かどうかに
+  # 依存せず除去 API を発火させる。
+  if timeout "$PROMOTE_GIT_TIMEOUT" \
+      gh issue edit "$issue_number" --repo "$REPO" \
+        --remove-label "$LABEL_READY" >/dev/null 2>&1; then
+    # Req 4.1: 一意判別可能なログ形式。
+    pp_log "issue=#${issue_number} action=label-remove label=${LABEL_READY} source=auto"
+  else
+    # Req 1.5 / Req 4.3: WARN ログを 1 行残し、戻り値は 0 で後続 Issue 継続。
+    pp_warn "issue=#${issue_number} ready-for-review 除去に失敗（後続 Issue は継続）"
+  fi
+  return 0
+}
+
 # pp_extract_linked_issues: `gh pr list --json number,headRefName,headRepositoryOwner,
 # closingIssuesReferences` の JSON 出力を受け取り、`staged-for-release` 自動付与対象
 # Issue 番号集合を抽出する純関数ヘルパー（#389）。
@@ -1158,7 +1211,11 @@ pp_collect_merged_issues() {
   linked_issues=$(pp_extract_linked_issues "$recent_merged_prs_json" "$repo_owner")
 
   # 3. 各 Issue について `staged-for-release` ラベルの有無を確認し、
-  #    未付与なら自動付与する（重複付与は抑止 / Req 2.1.1, 2.1.3）
+  #    未付与なら自動付与する（重複付与は抑止 / Req 2.1.1, 2.1.3）。
+  #    #413: 同じ Issue 集合（closingIssuesReferences + head ブランチ名の和集合 /
+  #    Req 1.6）に対して `ready-for-review` 除去も併走させる。base ブランチが
+  #    default かどうかに依存せず除去経路が発火し、stale な ready-for-review が
+  #    Path Overlap Checker の holder 集合に誤って残り続ける現象を防ぐ。
   local added=0
   local skipped=0
   if [ -n "$linked_issues" ]; then
@@ -1171,6 +1228,11 @@ pp_collect_merged_issues() {
       if ! [[ "$issue_number" =~ ^[0-9]+$ ]]; then
         continue
       fi
+      # #413 Req 1.1 / 1.2 / 1.3 / 1.5: ready-for-review 除去（既付与時のみ API 発火、
+      # 失敗時は WARN ログのみで後続 Issue 継続）。staged-for-release の付与有無に
+      # 関わらず実行する（既に staged-for-release を持つ Issue でも、人間付与運用や
+      # 過去サイクルの取りこぼしで ready-for-review が残っているケースを救済する）。
+      pp_remove_ready_for_review_if_present "$issue_number"
       if pp_issue_has_label "$issue_number" "$LABEL_STAGED_FOR_RELEASE"; then
         # AC 2.1.3: 既付与なら API 再送しない
         skipped=$((skipped + 1))
