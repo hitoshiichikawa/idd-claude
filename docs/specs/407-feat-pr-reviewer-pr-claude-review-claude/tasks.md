@@ -163,7 +163,7 @@
   - _Boundary: .claude/agents/design-reviewer.md, repo-template/.claude/agents/design-reviewer.md_
   - _Depends: 2_
 
-- [ ] 8. README 反映とドキュメント要件
+- [x] 8. README 反映とドキュメント要件
   - `README.md` の「オプション機能一覧（opt-in、既定 OFF）」表に 1 行追加（gate 名
     `DESIGN_REVIEWER_ENABLED` / 既定 OFF / 詳細リンク / 関連 `#407`）
   - 新規 h2 節「Design PR Reviewer (#407)」を `## PR Reviewer Adjudicator (#404)` の **後**に
