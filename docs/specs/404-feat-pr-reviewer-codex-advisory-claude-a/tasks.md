@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. logger 関数追加と env Config 拡張（前提整備）
+- [x] 1. logger 関数追加と env Config 拡張（前提整備）
   - `local-watcher/bin/modules/core_utils.sh` の既存 `pr_log` / `pi_log` 等と同形式で `adj_log` /
     `adj_warn` / `adj_error` を末尾追記する（時刻 + `[$REPO]` + `adjudicator:` prefix）
   - `local-watcher/bin/issue-watcher.sh` の Config ブロックに `# ─── PR Reviewer Adjudicator
@@ -16,7 +16,7 @@
   - _Requirements: 5.1, 5.3, 5.5, 4.4_
   - _Boundary: core_utils.sh, issue-watcher.sh_
 
-- [ ] 2. adjudicator-prompt.tmpl の作成と read-only 契約の明示
+- [x] 2. adjudicator-prompt.tmpl の作成と read-only 契約の明示
   - `local-watcher/bin/adjudicator-prompt.tmpl` を新規作成
   - プレースホルダ: `{PR}` / `{SHA}` / `{BASE}` / `{HEAD}` / `{REVIEW_TEXT}` / `{SPEC_DIR}` /
     `{REQUIREMENTS_MD}`（解決不能時は `(none)`）
@@ -29,7 +29,7 @@
   - _Boundary: adjudicator-prompt.tmpl_
   - _Depends: 1_
 
-- [ ] 3. adjudicator.sh モジュール骨格と gate / findings parse の実装＋テスト
+- [x] 3. adjudicator.sh モジュール骨格と gate / findings parse の実装＋テスト
   - `local-watcher/bin/modules/adjudicator.sh` を新規作成（先頭コメントに用途 / 配置先 / 依存
     を明記、トップレベル副作用なし、関数 prefix `adj_`）
   - 実装関数: `adj_gate_enabled` / `adj_extract_findings`
@@ -48,7 +48,7 @@
   - _Boundary: adjudicator.sh, issue-watcher.sh_
   - _Depends: 1_
 
-- [ ] 4. classify / validate / fallback ロジックと近接テスト
+- [x] 4. classify / validate / fallback ロジックと近接テスト
   - `adjudicator.sh` に以下を追加: `adj_classify_findings`（Claude CLI 呼び出し / `--output-format
     json` / mktemp で prompt 一時ファイル）/ `adj_validate_decisions`（JSON schema 検証、不整合時
     は呼び出し元で全 legitimate に倒す sentinel を返す）
@@ -63,7 +63,7 @@
   - _Boundary: adjudicator.sh_
   - _Depends: 2, 3_
 
-- [ ] 5. label / status publish 反映と Reviewer 先行優先 + 近接テスト
+- [x] 5. label / status publish 反映と Reviewer 先行優先 + 近接テスト
   - `adjudicator.sh` に以下を追加: `adj_apply_label_decision`（`gh pr edit --add-label` /
     `--remove-label` 冪等使用）/ `adj_read_reviewer_verdict`（head_ref から `review-notes.md` を
     `git show <head>:docs/specs/<N>-<slug>/review-notes.md` で読み、最終行 `RESULT: approve|reject`
@@ -84,7 +84,7 @@
   - _Boundary: adjudicator.sh_
   - _Depends: 4_
 
-- [ ] 6. adj_run_for_pr オーケストレーション + pr-reviewer.sh hook + catch-up suppression + no-op テスト
+- [x] 6. adj_run_for_pr オーケストレーション + pr-reviewer.sh hook + catch-up suppression + no-op テスト
   - `adjudicator.sh` に `adj_run_for_pr` を追加（入力: pr_number / sha / review_text / pr_url /
     head_ref。gate OFF / review_text 空（codex 失敗）/ findings ゼロを早期処理し、
     `adj_extract_findings` → `adj_classify_findings` → `adj_validate_decisions` →
@@ -112,7 +112,7 @@
   - _Boundary: adjudicator.sh, pr-reviewer.sh_
   - _Depends: 5_
 
-- [ ] 7. pr-iteration.sh の excessive filter 拡張と近接テスト
+- [x] 7. pr-iteration.sh の excessive filter 拡張と近接テスト
   - `local-watcher/bin/modules/pr-iteration.sh` に `pi_general_filter_excessive` を新規追加
     （stdin: JSON 配列、stdout: フィルタ後。gate OFF 時は jq pass-through で no-op /
     NFR 1.1 既存件数挙動維持）
@@ -127,7 +127,7 @@
   - _Boundary: pr-iteration.sh_
   - _Depends: 6_
 
-- [ ] 8. README 反映とドキュメント要件（Req 6.x）
+- [x] 8. README 反映とドキュメント要件（Req 6.x）
   - README.md の「オプション機能一覧（opt-in、既定 OFF）」表に 1 行追加（gate 名 / 既定 OFF /
     詳細リンク / 関連 `#404`）
   - 新規 h2 節「PR Reviewer Adjudicator (#404)」を `## PR Reviewer Processor (#261)` の後に挿入。
@@ -141,7 +141,7 @@
   - _Boundary: README.md_
   - _Depends: 7_
 
-- [ ] 9. 静的解析・既存テスト退行確認・E2E スモーク
+- [x] 9. 静的解析・既存テスト退行確認・E2E スモーク
   - `shellcheck local-watcher/bin/*.sh local-watcher/bin/modules/*.sh install.sh setup.sh
     .github/scripts/*.sh` 警告ゼロ確認
   - `actionlint .github/workflows/*.yml` クリーン確認
