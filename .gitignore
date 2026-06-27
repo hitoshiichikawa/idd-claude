@@ -1,1 +1,4 @@
 .claude/settings.local.json
+
+# antigravity CLI のセッション固有ファイル（symlink）はコミットしない
+.antigravitycli/
