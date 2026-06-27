@@ -1894,3 +1894,283 @@ pr_catchup_should_defer_for_adjudicator() {
   fi
   return 1
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Issue #412: Merge Gate Visibility（mgv_*）
+#
+# `claude-review` を branch protection の required status に採用した repo で、
+# adjudicator も Reviewer catch-up も発火せず `claude-review` が publish されず、
+# merge gate を満たせないまま停滞している PR を検知して可視化する。
+#
+# 関数 prefix: `mgv_`（merge gate visibility）。
+# 配置: pr-reviewer.sh に同居（CLAUDE.md「機能追加ガイドライン §1」既存責務同居方針）。
+#
+# 要件 (#412 Req 4.1〜4.5):
+#   - While 監視対象 PR が `claude-review` を required status に持ち、当該 PR の head sha に
+#     対して adjudicator marker と Reviewer catch-up publish のいずれも記録されていない
+#     状態 → 停滞状態を運用者が事後に判別できる形でログに残す（Req 4.1）
+#   - ラベル付与 / コメント投稿 / commit status publish のいずれか 1 つ以上の可視化（Req 4.2）
+#   - 解消時（adjudicator 発火 / catch-up 発火 / required 設定変更）に冪等取り消し（Req 4.3）
+#   - adjudicator が exec 失敗等で marker 未投稿の場合は `FALLBACK_ON_FAIL` 経路を優先し、
+#     両経路とも publish に至らない場合のみ本可視化を発火（Req 4.4）
+#
+# 後方互換性（NFR 1.x）:
+#   - `claude-review` が required でない repo（branch protection 未設定 / 別 context のみ
+#     required）では `gh api` を 1 回呼ぶ以外の副作用ゼロ。即 return 0。
+#   - 不正な permission（branch protection の admin 権限不足）で API 失敗時は WARN + skip。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# mgv_log_prefix: 既存 pr_log / pr_warn を流用（独立ロガーを増やさない / 観測ログ粒度抑制）。
+
+# mgv_label_name: 停滞 PR に付与するラベル名。idd-claude-labels.sh と整合。
+MGV_LABEL_NEEDS_MERGE_GATE_ATTENTION="needs-merge-gate-attention"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mgv_claude_review_required: 指定 base branch の branch protection で `claude-review` が
+#   required status checks に含まれているかを判定する read-only ヘルパー。
+#   入力: $1 = base_branch_name
+#   出力: なし（stdout に副作用を出さない / `gh api` の結果は jq でフィルタ済み）
+#   戻り値: 0 = required である / 1 = required ではない / 2 = API 取得失敗（fail-safe）
+#
+#   - `gh api repos/{owner}/{repo}/branches/{branch}/protection` を timeout 付きで呼ぶ。
+#   - jq で `.required_status_checks.contexts[]` を列挙し `claude-review` の存在を確認。
+#   - 失敗時（404 = protection 未設定 / 権限不足 / network error）は rc=2 を返し、
+#     呼び出し元で fail-safe（required ではないとして扱う）に倒す。
+#   - base_branch_name は GitHub branch 名の正規表現 `^[A-Za-z0-9._/-]+$` で軽く検証
+#     してから URL path に展開する（CLAUDE.md §5 未信頼入力 / branch 名は半信頼）。
+# ─────────────────────────────────────────────────────────────────────────────
+mgv_claude_review_required() {
+  # ローカル変数名は `base_branch_arg` とし、グローバル `$BASE_BRANCH` との混同
+  # （shellcheck SC2153 info）を避ける。
+  local base_branch_arg="${1:-}"
+  if [ -z "$base_branch_arg" ]; then
+    return 1
+  fi
+  # branch 名は server から fetch する値だが、念のため URL 展開前に正規表現で検証する
+  # （オプション注入 / path traversal の予防 / CLAUDE.md §5）。
+  # 先頭 `-` の branch 名は `gh api` の引数解釈で option として解釈される恐れがあるため reject。
+  if ! [[ "$base_branch_arg" =~ ^[A-Za-z0-9._/][A-Za-z0-9._/-]*$ ]]; then
+    return 1
+  fi
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+  local contexts_json
+  if ! contexts_json=$(timeout "$timeout_s" \
+      gh api -X GET "repos/${REPO}/branches/${base_branch_arg}/protection" \
+      --jq '.required_status_checks.contexts // []' 2>/dev/null); then
+    # 404（protection 未設定）/ 403（権限不足）/ ネットワーク失敗 → fail-safe
+    return 2
+  fi
+  if [ -z "$contexts_json" ]; then
+    return 1
+  fi
+  # jq で `claude-review` が含まれているかを判定（--arg で安全に渡す / CLAUDE.md §5）。
+  local has_claude_review
+  has_claude_review=$(printf '%s\n' "$contexts_json" \
+    | jq -r --arg ctx "claude-review" 'map(select(. == $ctx)) | length' 2>/dev/null || echo "0")
+  if [ "$has_claude_review" = "0" ] || [ -z "$has_claude_review" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mgv_pr_has_claude_review_status: 当該 PR の head sha 上に `claude-review` commit status が
+#   既に publish されているかを判定する read-only ヘルパー。
+#   入力: $1 = sha
+#   戻り値: 0 = 既に publish 済（pending を除く確定 state がある）/ 1 = 未 publish / 2 = API 失敗
+#
+#   - GitHub Commit Status API の `state` は当該 sha について最新の publish を集約した
+#     combined state を返す。本ヘルパは「`claude-review` context に対する個別 publish」が
+#     1 件でもあるかを判定するため、`statuses` 配列を列挙して context 名で照合する。
+#   - 失敗時は rc=2 で呼び出し元に伝播し、安全側で「未確定（= 可視化発火を抑止）」に倒す。
+# ─────────────────────────────────────────────────────────────────────────────
+mgv_pr_has_claude_review_status() {
+  local sha="${1:-}"
+  if ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+    return 1
+  fi
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+  local statuses_json
+  if ! statuses_json=$(timeout "$timeout_s" \
+      gh api -X GET "repos/${REPO}/commits/${sha}/statuses" \
+      --jq '[.[] | .context] // []' 2>/dev/null); then
+    return 2
+  fi
+  if [ -z "$statuses_json" ]; then
+    return 1
+  fi
+  local has_status
+  has_status=$(printf '%s\n' "$statuses_json" \
+    | jq -r --arg ctx "claude-review" 'map(select(. == $ctx)) | length' 2>/dev/null || echo "0")
+  if [ "$has_status" = "0" ] || [ -z "$has_status" ]; then
+    return 1
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mgv_pr_has_adjudicator_marker: 当該 PR コメントに adjudicator marker が存在するかを判定。
+#   入力: $1 = pr_number, $2 = sha
+#   戻り値: 0 = marker あり / 1 = marker なし / 2 = API 失敗
+#
+#   pr_catchup_should_defer_for_adjudicator と同じ marker 形式
+#   `<!-- idd-claude:pr-adjudicator sha=<sha> -->` を grep する。
+#   gate ON / OFF に依存せず marker の有無のみで判定する点が
+#   pr_catchup_should_defer_for_adjudicator と異なる（本ヘルパは可視化判定用）。
+# ─────────────────────────────────────────────────────────────────────────────
+mgv_pr_has_adjudicator_marker() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  if ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+    return 1
+  fi
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+  local comments_body
+  if ! comments_body=$(timeout "$timeout_s" \
+      gh pr view "$pr_number" --repo "$REPO" --json comments \
+      --jq '.comments[].body' 2>/dev/null); then
+    return 2
+  fi
+  if [ -z "$comments_body" ]; then
+    return 1
+  fi
+  local needle="idd-claude:pr-adjudicator sha=${sha}"
+  if printf '%s\n' "$comments_body" | grep -F -q -- "$needle"; then
+    return 0
+  fi
+  return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mgv_add_attention_label / mgv_remove_attention_label: ラベル付与・解消（冪等）。
+# ─────────────────────────────────────────────────────────────────────────────
+mgv_add_attention_label() {
+  local pr_number="${1:-}"
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+  if ! timeout "$timeout_s" \
+      gh pr edit "$pr_number" --repo "$REPO" \
+      --add-label "$MGV_LABEL_NEEDS_MERGE_GATE_ATTENTION" >/dev/null 2>&1; then
+    pr_warn "merge-gate-visibility: PR #${pr_number}: ${MGV_LABEL_NEEDS_MERGE_GATE_ATTENTION} ラベルの付与に失敗"
+    return 1
+  fi
+  return 0
+}
+
+mgv_remove_attention_label() {
+  local pr_number="${1:-}"
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  local timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+  # 未付与でも gh pr edit --remove-label は冪等 no-op（404 にはならない）。失敗時のみ WARN。
+  if ! timeout "$timeout_s" \
+      gh pr edit "$pr_number" --repo "$REPO" \
+      --remove-label "$MGV_LABEL_NEEDS_MERGE_GATE_ATTENTION" >/dev/null 2>&1; then
+    pr_warn "merge-gate-visibility: PR #${pr_number}: ${MGV_LABEL_NEEDS_MERGE_GATE_ATTENTION} ラベルの解除に失敗"
+    return 1
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# process_claude_review_merge_gate_visibility (Issue #412 Req 4)
+#
+# `claude-review` を required status に持つ repo で、adjudicator も Reviewer catch-up も
+# 発火せず `claude-review` が publish されないまま停滞している PR を可視化する Processor。
+#
+# 起動条件:
+#   - 既存 `pr_fetch_candidate_prs` で取得した open / 非 draft / head pattern 一致の PR を対象。
+#   - 1 サイクル最初の PR について `mgv_claude_review_required` で `claude-review` が
+#     required status checks に含まれているかを判定。required でなければ即 return 0
+#     （`gh api` を 1 回呼ぶ以外の副作用ゼロ / NFR 1.1）。
+#
+# 可視化判定（PR 単位）:
+#   1. PR の head sha 上に `claude-review` commit status が既に publish 済 → 解消とみなして
+#      `needs-merge-gate-attention` を除去（Req 4.3 冪等取り消し）
+#   2. adjudicator marker（`<!-- idd-claude:pr-adjudicator sha=<sha> -->`）が当該 sha に対して
+#      投稿されている → 解消とみなして label 除去（Req 4.3）
+#   3. それ以外（publish なし + marker なし） → `needs-merge-gate-attention` を付与し
+#      `pr_log` で「停滞」を 1 行ログする（Req 4.1, 4.2）
+#
+# 配置順（issue-watcher.sh 側）:
+#   process_claude_review_status_catchup の **直後** に呼ぶ。catch-up が同サイクル内で publish に
+#   成功した場合は、次サイクル冒頭で当該 PR がケース 1 として解消され label が除去される
+#   （冪等取り消し / Req 4.3）。
+#
+# 戻り値: 常に 0（後続 processor を阻害しない / NFR 1.1）。
+# ─────────────────────────────────────────────────────────────────────────────
+process_claude_review_merge_gate_visibility() {
+  local prs_json total
+  prs_json=$(pr_fetch_candidate_prs)
+  total=$(echo "$prs_json" | jq 'length' 2>/dev/null || echo 0)
+  if [ "$total" -eq 0 ]; then
+    return 0
+  fi
+
+  # 1 サイクル冒頭で 1 回だけ branch protection を確認する。required でなければ全 PR を
+  # 一括 skip（gh API 呼び出し総数を抑制 / NFR 2.1 観測ログ粒度）。
+  # base branch は `BASE_BRANCH`（issue-watcher.sh で resolve 済み）。
+  local req_rc=0
+  mgv_claude_review_required "${BASE_BRANCH:-main}" || req_rc=$?
+  if [ "$req_rc" -ne 0 ]; then
+    # required ではない (rc=1) / API 失敗 (rc=2) はいずれも fail-safe で skip
+    # （API 失敗は noisy なログを避けるため pr_log は出さない / 4xx は GitHub 仕様で
+    # branch protection 未設定 repo では正常レスポンス）。
+    return 0
+  fi
+
+  pr_log "merge-gate-visibility: claude-review が ${BASE_BRANCH:-main} の required status に含まれる → 停滞 PR scan 開始（候補 ${total} 件）"
+
+  # 上限件数 (PR_REVIEWER_MAX_PRS) で truncate する点も process_claude_review_status_catchup と整合。
+  local target_count="$total" overflow=0
+  if [ -n "${PR_REVIEWER_MAX_PRS:-}" ] && [ "$total" -gt "$PR_REVIEWER_MAX_PRS" ]; then
+    target_count="$PR_REVIEWER_MAX_PRS"
+    overflow=$((total - PR_REVIEWER_MAX_PRS))
+  fi
+
+  local pr_iter
+  pr_iter=$(echo "$prs_json" | jq -c ".[0:${target_count}][]" 2>/dev/null || echo "")
+  if [ -z "$pr_iter" ]; then
+    return 0
+  fi
+
+  local stalled=0 cleared=0
+  while IFS= read -r pr_json; do
+    [ -z "$pr_json" ] && continue
+    local pr_number sha
+    pr_number=$(echo "$pr_json" | jq -r '.number')
+    sha=$(echo "$pr_json"       | jq -r '.headRefOid')
+
+    if ! [[ "$pr_number" =~ ^[0-9]+$ ]] || ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+      continue
+    fi
+
+    # ケース 1: `claude-review` が既に publish 済 → 冪等取り消し
+    if mgv_pr_has_claude_review_status "$sha"; then
+      mgv_remove_attention_label "$pr_number" >/dev/null 2>&1 || true
+      cleared=$((cleared + 1))
+      continue
+    fi
+
+    # ケース 2: adjudicator marker あり → adjudicator が当該 sha を管轄 → 冪等取り消し
+    if mgv_pr_has_adjudicator_marker "$pr_number" "$sha"; then
+      mgv_remove_attention_label "$pr_number" >/dev/null 2>&1 || true
+      cleared=$((cleared + 1))
+      continue
+    fi
+
+    # ケース 3: 停滞検知 → ラベル付与 + 観測ログ
+    mgv_add_attention_label "$pr_number" >/dev/null 2>&1 || true
+    pr_log "merge-gate-visibility: PR #${pr_number} sha=${sha} 停滞検知（required=claude-review / adjudicator marker 不在 / claude-review status 未 publish）"
+    stalled=$((stalled + 1))
+  done <<< "$pr_iter"
+
+  pr_log "merge-gate-visibility: サマリ stalled=${stalled} cleared=${cleared} overflow=${overflow}"
+  return 0
+}

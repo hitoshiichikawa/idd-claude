@@ -4,14 +4,18 @@
 #       安全側正規化挙動を検証するスモークテスト。
 #
 #       検証する受入基準（docs/specs/404-feat-pr-reviewer-codex-advisory-claude-a/requirements.md）:
-#         - Req 5.1 opt-in gate（既定 OFF / 安全側正規化）
+#         - Req 5.1 opt-in gate（Issue #412 で既定 OFF → 既定 ON / opt-out に反転後も
+#                  adj_gate_enabled の厳密 `=true` 判定契約は不変）
 #         - Req 5.5 既存 exit code・ログ stderr/stdout 契約の不変性（adj_gate_enabled は副作用なし）
 #
-#       前提: `PR_REVIEWER_ADJUDICATOR_ENABLED` は issue-watcher.sh:685-690 で既に
-#             `case true) ... *) false` 正規化済みである。本テストは正規化後の env を
-#             受け取った adj_gate_enabled が **厳密 `=true` 一致のみで ON** を返し、
-#             それ以外（typo / 空 / unset / 大文字違い / 既定 false）すべてで OFF を
-#             返すことを直接検証する（重複正規化はしない契約 / Req 5.1 安全側）。
+#       前提: `PR_REVIEWER_ADJUDICATOR_ENABLED` は issue-watcher.sh の Config ブロックで
+#             既に `case false) :;; *) true`（#412 で既定反転 / 既定 ON）+ 後段の
+#             「デフォルト有効化フラグの値正規化」ループにより `true` / `false` の 2 値に
+#             正規化済みである。本テストは正規化後の env を受け取った adj_gate_enabled が
+#             **厳密 `=true` 一致のみで ON** を返し、それ以外（typo / 空 / unset / 大文字違い /
+#             `false` 明示）すべてで OFF を返すことを直接検証する（重複正規化はしない契約 /
+#             正規化前の値での既定挙動（unset → ON）は別途
+#             `pr_reviewer_adjudicator_default_on_test.sh` で検証）。
 #
 # 配置先: local-watcher/test/adj_resolve_gate_test.sh
 # 依存:   bash 4+, awk
