@@ -3776,31 +3776,47 @@ EOF
 # per-task Reviewer に渡す diff range の開始 SHA / 終了 SHA を解決して
 # `<range_start_sha>\t<range_end_sha>` を stdout に出力。
 #
-# アルゴリズム（design.md「diff range 解決アルゴリズム」節 + Issue #164 拡張）:
+# アルゴリズム（design.md「diff range 解決アルゴリズム」節 + Issue #164 / #421 拡張）:
 #   1. `$BASE_BRANCH..HEAD` 範囲の `docs(tasks): mark ... as done` commit を SHA+subject の
 #      タブ区切り pair で時系列昇順に全列挙
 #   2. 当該 task_id の marker commit を以下の優先順で特定（range_end）:
-#      a. 単記 marker（subject が `docs(tasks): mark <task_id> as done` に完全一致）
-#         複数マッチ時は最後（最新）のマッチを採用（既存挙動を維持 / Req 3.1）
-#      b. 単記 marker が無ければ連記 marker（subject が `docs(tasks): mark <ids> as done` で
-#         <ids> を `/` / `,` / 空白で token 化したときに task_id と完全一致する token を含む）
-#         複数マッチ時は最後のマッチを採用（NFR 2.1: 連記経由解決時は stdout ログに
-#         `via=multi-id-marker` を残す）
+#      a. 単記 marker（subject が `docs(tasks): mark <task_id> as done` に完全一致、
+#         または canonical suffix 付き `docs(tasks): mark <task_id> as done (#<number>)`
+#         に一致 / Issue #421 Req 1）。複数マッチ時は最後（最新）のマッチを採用
+#         （既存挙動を維持 / Req 3.1）
+#      b. 単記 marker が無ければ連記 marker（subject が
+#         `docs(tasks): mark <ids> as done` または
+#         `docs(tasks): mark <ids> as done (#<number>)` で、<ids> を `/` / `,` /
+#         空白で token 化したときに task_id と完全一致する token を含む）。
+#         複数マッチ時は最後のマッチを採用（NFR 2.1: 連記経由解決時は stderr ログに
+#         `via=multi-id-marker` または `via=multi-id-marker-with-suffix` を残す）
 #   3. 全 mark commit 列の中で range_end の直前要素を range_start とする
 #   4. 直前要素が存在しない（初回 task）場合は range_start = `$BASE_BRANCH` の SHA
 #   5. 当該 task の marker commit が単記でも連記でも見つからない場合は return 1
 #
-# 後方互換性（Req 3.1 / NFR 1.1）:
-#   - 単記 marker のみで構成されるリポジトリ履歴では、単記 marker が常に優先採用されるため
-#     本変更前と完全に同一の SHA pair を返す
-#   - 連記 marker は単記 marker が無い場合の fallback として動作するため、既存ログ列の
-#     観測可能な副作用は発生しない
+# 後方互換性（Req 3.1, 3.2, 3.3 / NFR 1.1）:
+#   - suffix 無し単記 marker のみで構成されるリポジトリ履歴では、単記 marker が常に
+#     優先採用されるため本変更前と完全に同一の SHA pair を返す
+#   - suffix 無し連記 marker は単記 marker が無い場合の fallback として動作するため、
+#     既存ログタグ（`via=multi-id-marker`）の文字列形式と発火条件は変更しない
+#   - suffix 付き経由で解決した場合のみ、新タグ（`*-with-suffix`）を追加で出力する
 #
-# False positive 防止（Req 2.5）:
-#   - <ids> 部を `/` / `,` / 空白で正規化した後 word 単位で完全一致照合するため、task_id `1`
-#     が `1.1` や `11` に誤マッチしない
+# Suffix 許容境界（Issue #421 Req 4 / NFR 3.2）:
+#   - 許容: `docs(tasks): mark <id...> as done (#<digits>)`
+#     （`as done` と `(` の間に半角空白 1 つ、`#` 直後に 1 文字以上の連続 digit、
+#     閉じ括弧 `)` で行終端）
+#   - 拒否: 空白なし / 括弧なし / 閉じ括弧後の追加文字列 / `<number>` 部に非数字
+#   - 上記境界は単記パス / 連記パス双方に同一規則で適用する（Req 4.6）
 #
-# Requirements: 3.2, 4.5, 5.4, Issue #164 Req 2.1, 2.2, 2.3, 2.4, 2.5, 3.1, 3.2, NFR 2.1
+# False positive 防止（Issue #164 Req 2.5 / Issue #421 NFR 3.1）:
+#   - <ids> 部を `/` / `,` / 空白で正規化した後 word 単位で完全一致照合するため、
+#     task_id `1` が `1.1` や `11` に誤マッチしない
+#   - suffix 抽出に用いる正規表現の `<number>` 部は `[0-9]+` で有界化（NFR 3.2）。
+#     ReDoS リスクの無い線形時間照合
+#
+# Requirements (Issue #421): 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.3, 3.1, 3.2, 3.3,
+#   4.1, 4.2, 4.3, 4.4, 4.5, 4.6, 5.1, 5.2, NFR 1.1, NFR 2.1, NFR 2.2, NFR 3.1, NFR 3.2
+# 旧 Requirements (Issue #164 / #270 / #305): 3.2, 4.5, 5.4, #164 Req 2.1-2.5, 3.1, 3.2, NFR 2.1
 pt_resolve_diff_range() {
   local task_id="$1"
   local base="${BASE_BRANCH:-main}"
@@ -3812,24 +3828,59 @@ pt_resolve_diff_range() {
     return 1
   fi
 
-  # ─── (a) 単記 marker を優先検索（subject 完全一致 / Req 3.1 後方互換） ───
-  local current_mark="" via="" sha subject id_list tok found
+  # canonical suffix 付き 単記 subject の組み立て（task_id をリテラル文字列として扱い、
+  # 正規表現メタ文字回避のため bash =~ ではなく文字列等価比較で照合する）。
+  local single_canonical="docs(tasks): mark ${task_id} as done"
+
+  # ─── (a) 単記 marker を優先検索（suffix 無し → suffix 付きの順 / Req 1, 3.1） ───
+  # 同 task_id に対して suffix 無し / suffix 付き双方が混在する場合は「all_pairs を
+  # 時系列順に 1 回走査し、最後にマッチした方を採用」する。これにより：
+  # - 履歴上の最新 marker が採用される（Req 1.2 の「いずれか 1 つを一意に決定」）
+  # - 採用された marker の via タグが選択基準（suffix 有無）の観測手段になる（Req 1.5）
+  local current_mark="" via="" sha subject id_list tok found suffix_num
   while IFS=$'\t' read -r sha subject; do
     [ -n "$sha" ] || continue
-    if [ "$subject" = "docs(tasks): mark ${task_id} as done" ]; then
+    if [ "$subject" = "$single_canonical" ]; then
       current_mark="$sha"
       via="single-id-marker"
+    elif [[ "$subject" == "${single_canonical} (#"*")" ]]; then
+      # `<canonical> (#<n>)` の形に粗くマッチしたうえで、`<n>` 部が `^[0-9]+$` を
+      # 満たすかを厳密検証する（Req 1.3 / Req 4.5 / NFR 3.1）。閉じ括弧後の追加
+      # 文字列は上の glob `*)` 終端で既に排除されている（Req 4.4）。
+      # `${single_canonical} (#` の長さ分だけ prefix を剥がし、末尾 `)` を 1 文字
+      # 落として `<n>` 部を抽出する。
+      suffix_num="${subject#"${single_canonical}" (#}"
+      suffix_num="${suffix_num%)}"
+      if [[ "$suffix_num" =~ ^[0-9]+$ ]]; then
+        current_mark="$sha"
+        via="single-id-marker-with-suffix"
+      fi
     fi
   done <<<"$all_pairs"
 
-  # ─── (b) 単記 marker が無ければ連記 marker を fallback 検索（Req 2.2 / 2.5） ───
+  # ─── (b) 単記 marker が無ければ連記 marker を fallback 検索（Req 2 / #164 Req 2.2） ───
   if [ -z "$current_mark" ]; then
     while IFS=$'\t' read -r sha subject; do
       [ -n "$sha" ] || continue
-      # subject から <ids> 部を抽出（`docs(tasks): mark <ids> as done`）。
-      # 末尾アンカで「as done」以降にコメント等が付いた変則 subject は対象外とする。
-      id_list=$(printf '%s' "$subject" | sed -nE 's/^docs\(tasks\): mark (.+) as done$/\1/p')
+      # subject から <ids> 部を抽出（`docs(tasks): mark <ids> as done` または
+      # `docs(tasks): mark <ids> as done (#<n>)`）。
+      # - 末尾 ` (#<n>)` は optional（capture group 2 / Req 2.1）。<n> は `[0-9]+` で
+      #   有界化（NFR 3.2）。閉じ括弧後の追加文字列は末尾アンカ `$` で排除（Req 4.4）。
+      # - capture group 1（<ids> 部）が空白なし / 括弧なし / 非数字 suffix を含む
+      #   変則 subject にマッチしないことは末尾アンカ + 厳密な suffix 構造で担保される。
+      # - sed BRE には `?` 量指定子が無いため `-E` (ERE) を維持しつつ optional group
+      #   `(...)?` を使う。
+      id_list=$(printf '%s' "$subject" | sed -nE 's/^docs\(tasks\): mark (.+) as done( \(#[0-9]+\))?$/\1/p')
       [ -n "$id_list" ] || continue
+      # suffix 有無の判定（observability tag の選択用 / Req 2.3）。
+      # subject 末尾が ` (#<n>)` の形ならば suffix 付き、そうでなければ無し。
+      local _matched_with_suffix=0
+      if [[ "$subject" == *" (#"*")" ]]; then
+        # 抽出した id_list の後ろに ` (#<n>)` が続いて行終端していることを再確認する。
+        # （上の sed が match している時点で構造は保証されているが、observability
+        # タグ選択の判定として明示的に確認する）
+        _matched_with_suffix=1
+      fi
       # `/` / `,` を空白に正規化し、word 単位で task_id と完全一致する token を探す。
       # word splitting は IFS のデフォルト（空白）で行われ、任意連続空白に対応する。
       found=false
@@ -3841,7 +3892,11 @@ pt_resolve_diff_range() {
       done
       if [ "$found" = "true" ]; then
         current_mark="$sha"
-        via="multi-id-marker"
+        if [ "$_matched_with_suffix" -eq 1 ]; then
+          via="multi-id-marker-with-suffix"
+        else
+          via="multi-id-marker"
+        fi
       fi
     done <<<"$all_pairs"
   fi
@@ -3871,13 +3926,21 @@ pt_resolve_diff_range() {
     fi
   fi
 
-  # NFR 2.1: 連記経由で解決した場合は stdout ログに識別可能な印を残す（運用者が
-  # `grep via=multi-id-marker` で件数把握できる）。単記経由は出力しない（既存ログ量を
-  # 増やさない後方互換）。stdout に出すことで呼び出し側 `pt_log` 経由のログ書式と
-  # 揃える代わりに、関数の主出力（SHA pair）と区別するため独立行 + tag prefix で出す。
-  if [ "$via" = "multi-id-marker" ]; then
-    echo "[$(date '+%F %T')] per-task: diff-range resolved via=multi-id-marker task_id=${task_id} sha=${current_mark}" >&2
-  fi
+  # NFR 2.1 / Req 1.5 / Req 2.3: 解決経路を識別可能なタグを stderr に残す（運用者が
+  # `grep via=...` で件数把握できる）。suffix 無し単記経由は出力しない（既存ログ量を
+  # 増やさない後方互換 / Req 3.3）。stderr に出すことで関数の主出力（stdout の
+  # SHA pair）と分離する。
+  case "$via" in
+    multi-id-marker)
+      echo "[$(date '+%F %T')] per-task: diff-range resolved via=multi-id-marker task_id=${task_id} sha=${current_mark}" >&2
+      ;;
+    single-id-marker-with-suffix)
+      echo "[$(date '+%F %T')] per-task: diff-range resolved via=single-id-marker-with-suffix task_id=${task_id} sha=${current_mark}" >&2
+      ;;
+    multi-id-marker-with-suffix)
+      echo "[$(date '+%F %T')] per-task: diff-range resolved via=multi-id-marker-with-suffix task_id=${task_id} sha=${current_mark}" >&2
+      ;;
+  esac
 
   printf '%s\t%s\n' "$range_start" "$current_mark"
   return 0
