@@ -351,7 +351,7 @@ pdr_invoke_reviewer() {
   # claude CLI 起動
   local exec_rc=0
   local timeout_s="${DESIGN_REVIEWER_EXEC_TIMEOUT:-300}"
-  local model="${DESIGN_REVIEWER_MODEL:-claude-sonnet-4-5}"
+  local model="${DESIGN_REVIEWER_MODEL:-claude-sonnet-4-6}"
   local out_fmt="${DESIGN_REVIEWER_OUTPUT_FORMAT:-text}"
 
   timeout "$timeout_s" claude \

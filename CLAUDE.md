@@ -68,7 +68,7 @@ Reviewer / PjM）は、以下の方針で **内部思考言語と出力言語を
 - **スクリプト**: bash 4+ (Linux / macOS / WSL)
 - **依存 CLI**: `gh`, `jq`, `flock`（Linux 標準、macOS は `brew install util-linux`）, `git`
 - **GitHub Actions**: `actions/checkout`, `anthropics/claude-code-action` 等
-- **モデル**: Triage は Sonnet 4.6、本実装は Opus 4.7 (1M context) をデフォルト
+- **モデル**: Triage は Sonnet 4.6、本実装は Opus 4.8 (1M context) をデフォルト
 - **ランタイム追加なし**: Node.js / Python 等は依存しない
 
 ---
