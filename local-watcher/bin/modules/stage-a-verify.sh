@@ -409,9 +409,12 @@ _SAV_RESOLVED_SOURCE=""
 # ─── _SAV_LAST_OUTCOME（run サマリ用 outcome 露出 / #239 task 5） ───
 #
 # 直近の `stage_a_verify_run` がどの outcome で抜けたかを記録するモジュールスコープ変数。
-# 値域: success / skip / disabled / round1 / round2 / warn-skipped / 空（未実行）。
+# 値域: success / skip / disabled / round1 / round2 / warn-skipped / warn-tool-missing / 空（未実行）。
 # `warn-skipped` は #364 で追加（パス不在 `diff` 失敗を WARN 降格して Stage A 続行した outcome）で、
 # success と区別して run サマリ上で false-fail 救済の発生を観測可能にする（Req 4.4 / NFR 4.2）。
+# `warn-tool-missing` は #422 で追加（verify ツール（lint / build 等）の未インストール起因の
+# exit 127 を WARN 降格して Stage A 続行した outcome）で、`warn-skipped` と 1 対 1 区別される
+# （#422 Req 4.4）。両者ともに「real なコード品質失敗とは別軸の WARN 降格」として観測可能。
 # `stage_a_verify_run` は
 # call site（run_impl_pipeline）と同一プロセスで呼ばれる（command substitution ではない）
 # ため、ここに代入した値は call site から読める（_SAV_RESOLVED_SOURCE のサブシェル境界問題は
@@ -739,6 +742,121 @@ _sav_extract_missing_path() {
   printf '%s' "$matched" | sed -e 's|^diff: ||' -e 's|: No such file or directory$||'
 }
 
+# ─── _sav_is_tool_missing_failure ───
+#
+# verify コマンドの実行 exit code が「実行ファイル未検出（command not found / tool-missing）」
+# に該当するかを判定する純粋関数（#422 Req 1.1 / NFR 3.1 / NFR 3.2）。WARN 降格と real なコード
+# 品質失敗（exit=1 等）を区別するための defense-in-depth として、`stage_a_verify_run` の
+# Execute 後ブロックから呼ばれる。
+#
+# POSIX shell の慣習では「コマンドが見つからない」場合の exit code は **127** に固定されている
+# （`sh(1)` の "Exit Status" 規定）。本判定は当該 exit code のみを根拠とし、追加で stderr の
+# `command not found` 文字列照合は **必須としない**。理由:
+#   - bash -c 連結（`&&` / `||` / `;`）で全体 exit code が 127 となるケースはすべて先頭・途中・
+#     末尾いずれかの「未検出コマンド」起因に限られる（exit 1 等の real fail があれば短絡し最終 exit
+#     code は real fail のものになり、127 にはならない）。
+#   - bash の Builtin `exit 127` で偽装することは理論上可能だが、verify ブロックは tasks.md の
+#     構造化フェンスで人間レビューを経て確定する入力であり、意図的な偽装は運用前提に含めない。
+#   - `command not found` メッセージは locale（LANG=ja_JP.UTF-8 等）で日本語化される場合があり、
+#     文字列照合だけに依存すると環境差の取りこぼしが出る。
+#
+# Req 2.4（real fail と 127 の混在で最終 exit code が real fail のもの）と Req 2.5（exit=124
+# timeout）は呼び出し側 `case "$rc"` の分岐順序で担保される: timeout（124）は本判定より前に
+# 専用分岐へ抜け、real fail（127 以外の非 0）は本判定で 1 を返して既存 default 分岐へ戻る。
+#
+# 入力:
+#   $1 = 整数 rc（実行 exit code）
+#   $2 = stderr 全文（optional、本判定では使用しないが将来の併用判定に向けて受け入れる）
+# 戻り値: 0 = 「tool-missing による失敗」/ 1 = それ以外
+# 副作用: なし（純粋関数、NFR 3.1）
+_sav_is_tool_missing_failure() {
+  local rc="$1"
+  # 整数 rc を防御的に検証（非整数なら real fail として扱う / 安全側）
+  case "$rc" in
+    127) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ─── _sav_extract_tool_name_from_cmd ───
+#
+# verify コマンド断片と stderr から、未導入と推定されるツール名を抽出する純粋関数
+# （#422 Req 4.3 / NFR 3.1）。WARN ログに「どのツールが未導入か」の手がかりを 1 行で
+# 含めて、運用者が cron.log を grep して環境構築判断できるようにする。
+#
+# 抽出戦略（優先順）:
+#   1. stderr に bash の標準的な未検出エラーメッセージ
+#      `bash: line N: <tool>: command not found`（locale=C / en の場合）が含まれていれば
+#      その `<tool>` を抽出。連結コマンドのどの位置で 127 が出たかを stderr 経由で特定できる。
+#   2. 上記マッチがなければコマンド断片の **最初の token**（パイプ / 連結区切り前）を採用。
+#      これは「単一コマンドが 127 で落ちた」素直なケースで実用十分。
+#   3. いずれでも抽出不能なら空文字を返す（呼び出し側は `(unknown)` 等で記録する）。
+#
+# 抽出に失敗しても WARN 降格挙動自体は変わらない（Req 4.3 は `Where 情報源がある場合` の
+# 条件付き）。
+#
+# 入力:
+#   $1 = cmd      — bash -c に渡された verify コマンド文字列（複数行 / 連結も含む）
+#   $2 = stderr_text — 実行時 stderr 全文（optional）
+# stdout: 抽出したツール名 1 行 / 抽出不能時は空文字
+# 副作用: なし（純粋関数）
+_sav_extract_tool_name_from_cmd() {
+  local cmd="${1:-}"
+  local stderr_text="${2:-}"
+  # ── 戦略 1: stderr の `command not found` 行から抽出 ──
+  # 例: `bash: line 1: golangci-lint: command not found`
+  #     `bash: golangci-lint: command not found`（line N 抜けの bash variant 対策）
+  # locale 依存（LANG=ja_JP の `... コマンドが見つかりません` 等）は本戦略では拾えないが、
+  # 戦略 2 の cmd 先頭 token に fallback する設計で実用上問題ない。
+  local matched=""
+  matched=$(printf '%s' "$stderr_text" \
+    | grep -m1 -E '^[A-Za-z_0-9./-]+: (line [0-9]+: )?[^:]+: command not found$' \
+    || true)
+  if [ -n "$matched" ]; then
+    # `bash: line N: <tool>: command not found` または `bash: <tool>: command not found` から
+    # `<tool>` を抽出。sed で前後を剥がす。
+    local tool=""
+    tool=$(printf '%s' "$matched" \
+      | sed -E 's|^[A-Za-z_0-9./-]+: (line [0-9]+: )?([^:]+): command not found$|\2|')
+    if [ -n "$tool" ]; then
+      printf '%s\n' "$tool"
+      return 0
+    fi
+  fi
+
+  # ── 戦略 2: cmd 先頭 token を採用 ──
+  # 行頭の空白を剥がしてから awk で `&&` / `||` / `;` / `|` の前の最初の token を取る。
+  # `cd app && npm test` 等は `cd` が出るが、これは実態と乖離するため bash builtin
+  # （cd / export / set 等）は除外して次の token を試す簡易判定を入れる。
+  if [ -n "$cmd" ]; then
+    local first_token=""
+    # 1 行目のみを対象（複数行 cmd の場合の防御）
+    first_token=$(printf '%s' "$cmd" \
+      | head -n1 \
+      | awk '{
+          # 連結記号で区切る前の先頭トークンを取得
+          n = split($0, parts, /[ \t]+/)
+          for (i = 1; i <= n; i++) {
+            tok = parts[i]
+            if (tok == "") continue
+            # bash builtin / 既知の prefix は skip して次を採用
+            if (tok == "cd" || tok == "export" || tok == "set" || tok == "unset" \
+                || tok == "if" || tok == "then" || tok == "while" || tok == "for") {
+              continue
+            }
+            print tok
+            exit
+          }
+        }')
+    if [ -n "$first_token" ]; then
+      printf '%s\n' "$first_token"
+      return 0
+    fi
+  fi
+
+  return 0
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 以下は元 issue-watcher.sh では Region 2（mark_issue_failed 定義後の位置）に
 # 置かれていた失敗ハンドラ / 統合ランナー。#181 Part 3 で Region 1 と 1 モジュールへ
@@ -1032,6 +1150,41 @@ stage_a_verify_run() {
       _sav_handle_failure "timeout" "$_timeout" || _hf_rc=$?
       # _sav_handle_failure 戻り値（1=round1 差し戻し / 2=round2 escalate）を run サマリ
       # outcome へマップ（Req 4.3）。戻り値はそのまま伝搬し既存契約を変えない（NFR 1.2）。
+      case "$_hf_rc" in
+        1) _SAV_LAST_OUTCOME="round1" ;;
+        2) _SAV_LAST_OUTCOME="round2" ;;
+      esac
+      return "$_hf_rc"
+      ;;
+    127)
+      # #422: exit 127 は POSIX 規約で「実行ファイル未検出（command not found）」を意味する。
+      # watcher ホストに lint / build ツール（例: golangci-lint, node, go, gradle）が未インストール
+      # という環境要因に過ぎず、コード自体は verify-clean であるため、real verify 失敗（exit=1 等）
+      # と同列に round1 / round2 / `claude-failed` まで自動昇格させない（Req 1.1〜1.4）。
+      # path-missing #364 と同様の WARN 降格として扱い、round counter は触らず Stage A を続行する
+      # （戻り値 0 / 既存 SUCCESS / warn-skipped と同じ「Stage A 完全完了」契約）。
+      # 連結コマンド（`&&` / `||` / `;`）で全体 exit code が 127 となるケースもすべてここで処理
+      # する。real fail と 127 が混在し最終 exit code が real fail のもの（例: 1）となる場合は
+      # 本分岐に到達せず default `*` 分岐の既存 real fail 経路へ落ちる（Req 2.4）。
+      if _sav_is_tool_missing_failure "$rc"; then
+        local _tool_name
+        _tool_name=$(_sav_extract_tool_name_from_cmd "$cmd" "$_stderr_text")
+        # WARN ログには (1) 識別固定 prefix（grep '\[.*\] stage-a-verify: WARN' で抽出可能 /
+        # Req 4.1）、(2) reason=verify-tool-missing（path-missing と区別 / Req 4.2）、
+        # (3) 推定ツール名（情報源があれば / Req 4.3）、(4) exit=127 と cmd 断片（Req 4.5）の
+        # 4 要素を 1 行で記録する（NFR 4.2）。複数行に分けると grep 抽出時の脱漏や
+        # ペアリングミスを誘発するため 1 行にまとめる。
+        sav_warn "reason=verify-tool-missing tool=$(printf '%q' "${_tool_name:-(unknown)}") exit=$rc cmd=$(printf '%q' "$cmd")"
+        # round counter は触らない（Req 1.1）。Stage A は続行する（戻り値 0 / Req 1.2）。
+        # gh issue comment による差し戻しも行わない（Req 1.3）。
+        _SAV_LAST_OUTCOME="warn-tool-missing"
+        return 0
+      fi
+      # 防御的: _sav_is_tool_missing_failure が 0 を返さないケース（rc=127 だが将来の判定強化で
+      # 偽装等を除外したケース）は real fail 経路へ落とす。現実装では到達しない。
+      sav_warn "FAILED exit=$rc"
+      local _hf_rc=0
+      _sav_handle_failure "exit" "$rc" || _hf_rc=$?
       case "$_hf_rc" in
         1) _SAV_LAST_OUTCOME="round1" ;;
         2) _SAV_LAST_OUTCOME="round2" ;;
