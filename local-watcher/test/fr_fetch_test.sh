@@ -57,6 +57,30 @@ for fn in fr_fetch_failed_issues fr_fetch_failed_prs; do
   fi
 done
 
+# #417: fr_fetch_failed_issues / fr_fetch_failed_prs の末尾で
+# fr_filter_terminated_candidates を呼ぶようになった。本テストは fetch のみの
+# 動作を検証する性質なので、フィルタは pass-through stub（state を読まずに入力をそのまま
+# 返す）として隔離する。terminal 除外の挙動は fr_fetch_terminated_filter_test.sh で
+# 別途検証する。
+# shellcheck disable=SC2317
+fr_filter_terminated_candidates() {
+  # $1 = kind, $2 = candidates_json。入力 JSON 配列をそのまま stdout に返す。
+  printf '%s' "${2-[]}"
+}
+# shellcheck disable=SC2317
+fr_load_state() {
+  # 念のため stub（候補列挙では未終端扱いで pass-through する想定）。
+  printf '%s' "{}"
+}
+# shellcheck disable=SC2317
+fr_is_terminated() {
+  return 1
+}
+# shellcheck disable=SC2317
+fr_log() {
+  :
+}
+
 # ── グローバル env（遅延束縛で抽出関数本体から参照される） ──
 # shellcheck disable=SC2034
 REPO="owner/test-repo"
