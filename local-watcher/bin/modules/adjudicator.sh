@@ -12,9 +12,10 @@
 #   docs/specs/404-feat-pr-reviewer-codex-advisory-claude-a/design.md を参照。
 #
 #   - opt-in gate 判定: adj_gate_enabled
-#     既に正規化済みの `PR_REVIEWER_ADJUDICATOR_ENABLED`（issue-watcher.sh:685-690 で
-#     `case true) ... *) false` に正規化済み）を厳密 `=true` で評価する。重複正規化は
-#     行わない（既定値の責任は呼び出し側 / Req 5.1）。
+#     既に正規化済みの `PR_REVIEWER_ADJUDICATOR_ENABLED`（issue-watcher.sh で `case false) :;;
+#     *) true` + 後段の「デフォルト有効化フラグの値正規化」ループにより `true` / `false` の
+#     2 値に正規化済み。#412 で既定反転 = ON）を厳密 `=true` で評価する。重複正規化は行わない
+#     （既定値の責任は呼び出し側 / #404 Req 5.1 / #412 Req 1.x）。
 #   - codex 指摘 parse: adj_extract_findings
 #     codex stdout の `## 指摘事項` 配下 bullet 行を awk で抽出し、JSON 配列化する。
 #     reconciliation check 内蔵: `## 指摘事項` 配下の bullet 総数と parse 件数を突合し、
@@ -51,9 +52,11 @@
 #   出力: なし
 #   戻り値: 0 = ON / 1 = OFF
 #
-#   issue-watcher.sh:685-690 の Config ブロックで `PR_REVIEWER_ADJUDICATOR_ENABLED` は
-#   `case true) ... *) false` で正規化されているため、本関数は厳密 `=true` 判定のみ行う
-#   （既定 / 未設定 / typo / 大文字違い等はすべて OFF / Req 5.1 安全側 / 重複正規化はしない）。
+#   issue-watcher.sh の Config ブロックで `PR_REVIEWER_ADJUDICATOR_ENABLED` は
+#   `case false) :;; *) true`（#412 で既定反転）+ 後段の「デフォルト有効化フラグの値正規化」
+#   ループで `true` / `false` の 2 値に正規化されているため、本関数は厳密 `=true` 判定のみ行う
+#   （`=false` 明示のみ OFF、それ以外は ON / #404 Req 5.1 安全側 + #412 Req 1.x 既定反転 /
+#   重複正規化はしない）。
 # ─────────────────────────────────────────────────────────────────────────────
 adj_gate_enabled() {
   if [ "${PR_REVIEWER_ADJUDICATOR_ENABLED:-false}" = "true" ]; then
