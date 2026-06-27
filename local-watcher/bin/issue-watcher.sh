@@ -393,7 +393,7 @@ esac
 # NFR 3.2 保守的判定）。
 MECHANICAL_PATHS="${MECHANICAL_PATHS:-}"
 # Claude モデル ID。`PR_ITERATION_DEV_MODEL` と独立に上書き可能。
-AUTO_REBASE_MODEL="${AUTO_REBASE_MODEL:-claude-opus-4-7}"
+AUTO_REBASE_MODEL="${AUTO_REBASE_MODEL:-claude-opus-4-8}"
 # Claude `--max-turns` 値。
 AUTO_REBASE_MAX_TURNS="${AUTO_REBASE_MAX_TURNS:-30}"
 # Claude rebase 試行の外側 timeout（秒）。NFR 5.1。
@@ -493,7 +493,7 @@ AUTO_MERGE_DESIGN_HEAD_PATTERN="${AUTO_MERGE_DESIGN_HEAD_PATTERN:-^claude/issue-
 # PR_ITERATION_ENABLED=false を渡す。
 PR_ITERATION_ENABLED="${PR_ITERATION_ENABLED:-true}"
 # Iteration 専用モデル ID（既存 DEV_MODEL とは独立して上書き可能）。
-PR_ITERATION_DEV_MODEL="${PR_ITERATION_DEV_MODEL:-claude-opus-4-7}"
+PR_ITERATION_DEV_MODEL="${PR_ITERATION_DEV_MODEL:-claude-opus-4-8}"
 # 1 iteration あたりの Claude 実行 turn 数上限（NFR 1.1）。
 PR_ITERATION_MAX_TURNS="${PR_ITERATION_MAX_TURNS:-60}"
 # 1 サイクルで処理する PR 数の上限（残りは次回サイクルに持ち越し、AC 1.6 / NFR 1.2）。
@@ -700,9 +700,9 @@ case "$PR_REVIEWER_ADJUDICATOR_ENABLED" in
   *)     PR_REVIEWER_ADJUDICATOR_ENABLED="true" ;;
 esac
 # adjudicator 呼び出しモデル（既存 TRIAGE_MODEL 命名規約踏襲）。空文字なら既定。
-PR_REVIEWER_ADJUDICATOR_MODEL="${PR_REVIEWER_ADJUDICATOR_MODEL:-claude-sonnet-4-5}"
+PR_REVIEWER_ADJUDICATOR_MODEL="${PR_REVIEWER_ADJUDICATOR_MODEL:-claude-sonnet-4-6}"
 if [ -z "$PR_REVIEWER_ADJUDICATOR_MODEL" ]; then
-  PR_REVIEWER_ADJUDICATOR_MODEL="claude-sonnet-4-5"
+  PR_REVIEWER_ADJUDICATOR_MODEL="claude-sonnet-4-6"
 fi
 # claude 実行 timeout 秒。既存 PR_REVIEWER_EXEC_FAIL_LIMIT と同じ case パターンで非数値 /
 # 0 以下を既定 300 に正規化（Req 5.5 既存規約整合）。
@@ -764,9 +764,9 @@ case "$DESIGN_REVIEWER_ENABLED" in
 esac
 # 設計 Reviewer 呼び出しモデル（既存 PR_REVIEWER_ADJUDICATOR_MODEL 命名規約踏襲）。
 # 空文字なら既定にフォールバック。
-DESIGN_REVIEWER_MODEL="${DESIGN_REVIEWER_MODEL:-claude-sonnet-4-5}"
+DESIGN_REVIEWER_MODEL="${DESIGN_REVIEWER_MODEL:-claude-sonnet-4-6}"
 if [ -z "$DESIGN_REVIEWER_MODEL" ]; then
-  DESIGN_REVIEWER_MODEL="claude-sonnet-4-5"
+  DESIGN_REVIEWER_MODEL="claude-sonnet-4-6"
 fi
 # claude 実行 timeout 秒。既存 PR_REVIEWER_ADJUDICATOR_EXEC_TIMEOUT と同じ case パターン
 # で非数値 / 0 以下を既定 300 に正規化（NFR 4.1 既定 5 分以内）。
@@ -927,7 +927,7 @@ esac
 # 1 試行あたりの Claude 実行 turn 数上限（既存 PR_ITERATION_MAX_TURNS と同既定）。
 FAILED_RECOVERY_MAX_TURNS="${FAILED_RECOVERY_MAX_TURNS:-60}"
 # Failed Recovery 専用モデル ID（既存 DEV_MODEL 連鎖で fallback）。
-FAILED_RECOVERY_DEV_MODEL="${FAILED_RECOVERY_DEV_MODEL:-${DEV_MODEL:-claude-opus-4-7}}"
+FAILED_RECOVERY_DEV_MODEL="${FAILED_RECOVERY_DEV_MODEL:-${DEV_MODEL:-claude-opus-4-8}}"
 # gh / git 操作の個別タイムアウト（秒）。既存 AUTO_MERGE_GIT_TIMEOUT 等と同既定。
 FAILED_RECOVERY_GIT_TIMEOUT="${FAILED_RECOVERY_GIT_TIMEOUT:-60}"
 # 1 サイクルで処理する Issue / PR 数の上限（残りは次回サイクルに持ち越し）。
@@ -1239,12 +1239,12 @@ PATH_OVERLAP_VISIBILITY_LOCK_FILE="${PATH_OVERLAP_VISIBILITY_LOCK_FILE:-${LOG_DI
 
 # モデル設定
 TRIAGE_MODEL="${TRIAGE_MODEL:-claude-sonnet-4-6}"   # Triage は軽量モデルで十分
-DEV_MODEL="${DEV_MODEL:-claude-opus-4-7}"           # 本実装は Opus 4.7 + 1M context
+DEV_MODEL="${DEV_MODEL:-claude-opus-4-8}"           # 本実装は Opus 4.8 + 1M context
 TRIAGE_MAX_TURNS="${TRIAGE_MAX_TURNS:-15}"
 DEV_MAX_TURNS="${DEV_MAX_TURNS:-60}"
 # Stage C（PjM / 実装 PR 作成）専用モデル (#328)。PjM は review-notes の commit /
 # gh pr create / ラベル付け替えという機械的作業のみのため軽量モデルを既定とする。
-# #328 以前は DEV_MODEL が適用されていた（従来挙動に戻すには PJM_MODEL=claude-opus-4-7）。
+# #328 以前は DEV_MODEL が適用されていた（従来挙動に戻すには PJM_MODEL=claude-opus-4-8）。
 # design モード（PM → Architect → PjM の単一セッション）は対象外（DEV_MODEL のまま）。
 PJM_MODEL="${PJM_MODEL:-claude-sonnet-4-6}"
 
@@ -1259,7 +1259,7 @@ TRIAGE_BARE="${TRIAGE_BARE:-false}"
 # ─── Reviewer subagent 設定 (#20 Phase 1) ───
 # impl 系モード（impl / impl-resume）の Developer 完了後に独立 context で起動する
 # Reviewer サブエージェント用の env。既存の TRIAGE_* / DEV_* と独立に扱う。
-REVIEWER_MODEL="${REVIEWER_MODEL:-claude-opus-4-7}"
+REVIEWER_MODEL="${REVIEWER_MODEL:-claude-opus-4-8}"
 REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-30}"
 # Reviewer ステージの条件スキップ (#333, opt-in)。POSIX ERE。空（既定）で無効。
 # 全変更ファイルが本パターンに一致する場合のみ Stage B（独立 Reviewer）をスキップし、
@@ -1283,10 +1283,10 @@ REVIEWER_SKIP_PATTERN="${REVIEWER_SKIP_PATTERN:-}"
 # 詳細は docs/specs/22-phase-3-debugger-subagent-blocked-2-reje/design.md を参照。
 #
 # - DEBUGGER_ENABLED:    本機能の opt-in gate。`=true` 厳密一致のみ有効（既定 `false`）。
-# - DEBUGGER_MODEL:      Debugger CLI に渡すモデル ID（既定 `claude-opus-4-7`）。
+# - DEBUGGER_MODEL:      Debugger CLI に渡すモデル ID（既定 `claude-opus-4-8`）。
 # - DEBUGGER_MAX_TURNS:  Debugger CLI の `--max-turns` 値（既定 `40`、web search 含む）。
 DEBUGGER_ENABLED="${DEBUGGER_ENABLED:-false}"
-DEBUGGER_MODEL="${DEBUGGER_MODEL:-claude-opus-4-7}"
+DEBUGGER_MODEL="${DEBUGGER_MODEL:-claude-opus-4-8}"
 DEBUGGER_MAX_TURNS="${DEBUGGER_MAX_TURNS:-40}"
 
 # ─── PreToolUse Guard Hook 設定 (#294 / base 初版) ───
