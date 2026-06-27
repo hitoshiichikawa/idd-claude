@@ -252,6 +252,123 @@ fr_save_state() {
   return 0
 }
 
+# fr_is_terminated: state JSON の last_status から「max-attempts / no-progress 終端済み」
+# を判定する純粋関数（#417）。
+#
+# Args:
+#   $1 = state_json (string、`{}` または schema 準拠 JSON、空可)
+#
+# Stdout: 終端理由（"max-attempts" / "no-progress"）。未終端なら空文字。
+# Returns:
+#   0 = 終端済み（max-attempts または no-progress）
+#   1 = 未終端（state 不在 / 破損 / それ以外の status / status 不在 → fail-open）
+#
+# 設計判断（#417 仮案 C）:
+#   - state JSON の `last_status` 既存 enum をそのまま使う（新規フィールド追加せず NFR 1.1
+#     後方互換を維持する）
+#   - state 不在・破損は呼出元の `fr_load_state` で `{}` に正規化されるため、本関数は
+#     status を読み出せれば判定し、読み出せなければ未終端として扱う（fail-open / Req 5.1〜5.3）
+#   - jq parse 失敗時も同様に未終端扱いで rc=1 を返す
+#
+# 副作用なし（純粋関数）。
+fr_is_terminated() {
+  local state_json="${1-}"
+  if [ -z "$state_json" ]; then
+    return 1
+  fi
+  local status
+  if ! status=$(printf '%s' "$state_json" | jq -r '.last_status // ""' 2>/dev/null); then
+    return 1
+  fi
+  case "$status" in
+    max-attempts|no-progress)
+      printf '%s' "$status"
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+# fr_filter_terminated_candidates: 候補列挙の JSON 配列から terminal 状態（max-attempts /
+# no-progress）に永続化済みの番号を client-side filter で除外する（#417）。
+#
+# Args:
+#   $1 = kind ("issue" | "pr"、ログ識別用)
+#   $2 = candidates_json (JSON 配列文字列)
+#
+# Stdout: フィルタ後の JSON 配列（terminal 除外済み）
+# Returns: 0（常に。fail-continue）
+#
+# 設計判断（#417 Req 2.1〜2.6）:
+#   - state 不在 / 破損は fr_load_state が `{}` を返すため fr_is_terminated が rc=1
+#     （未終端）で fail-open（Req 5.1〜5.3）
+#   - 抑止時は NFR 2.1 の観点で 1 行ログを `failed-recovery: <kind>=#<n> terminated
+#     reason=<status> suppressed=enumeration` 形式で残し、運用者が `grep` で重複コメント
+#     spam の収束を確認可能にする（NFR 2.2）
+#   - number が非数値なら fail-open で残す（candidate_json の他のフィルタが処理する）
+#   - 入力が空 / JSON 配列でない場合は `[]` を返す
+fr_filter_terminated_candidates() {
+  local kind="$1"
+  local candidates_json="${2-}"
+
+  case "$kind" in
+    issue|pr) : ;;
+    *)
+      fr_warn "fr_filter_terminated_candidates: 不正な kind=$(printf '%s' "$kind" | tr -cd '[:alnum:]_-' | head -c 16)"
+      printf '%s' "[]"
+      return 0
+      ;;
+  esac
+
+  if [ -z "$candidates_json" ]; then
+    printf '%s' "[]"
+    return 0
+  fi
+  if ! printf '%s' "$candidates_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+    printf '%s' "[]"
+    return 0
+  fi
+
+  local count
+  count=$(printf '%s' "$candidates_json" | jq -r 'length' 2>/dev/null || echo "0")
+  if ! [[ "$count" =~ ^[0-9]+$ ]] || [ "$count" = "0" ]; then
+    printf '%s' "[]"
+    return 0
+  fi
+
+  local result="[]"
+  local idx=0
+  while [ "$idx" -lt "$count" ]; do
+    local item number state_json terminal_reason
+    item=$(printf '%s' "$candidates_json" | jq -c --argjson i "$idx" '.[$i]' 2>/dev/null || echo "")
+    if [ -z "$item" ]; then
+      idx=$((idx + 1))
+      continue
+    fi
+    number=$(printf '%s' "$item" | jq -r '.number // ""' 2>/dev/null || echo "")
+    if ! [[ "$number" =~ ^[0-9]+$ ]]; then
+      # 数値検証失敗は fail-open で残す（候補列挙側で再度 sanitize される）
+      result=$(printf '%s' "$result" | jq -c --argjson it "$item" '. + [$it]' 2>/dev/null || printf '%s' "$result")
+      idx=$((idx + 1))
+      continue
+    fi
+    state_json=$(fr_load_state "$number")
+    terminal_reason=""
+    if terminal_reason=$(fr_is_terminated "$state_json"); then
+      # 終端済み → 除外 + 抑止ログ（NFR 2.1 / 2.2）
+      fr_log "${kind}=#${number} terminated reason=${terminal_reason} suppressed=enumeration"
+    else
+      result=$(printf '%s' "$result" | jq -c --argjson it "$item" '. + [$it]' 2>/dev/null || printf '%s' "$result")
+    fi
+    idx=$((idx + 1))
+  done
+
+  printf '%s' "$result"
+  return 0
+}
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Candidate Selection Layer
 #
@@ -315,7 +432,11 @@ fr_fetch_failed_issues() {
     echo "[]"
     return 0
   fi
-  printf '%s' "$issues_json"
+  # #417: terminal 状態（max-attempts / no-progress）に永続化済みの番号を除外する。
+  # state 不在 / 破損は fr_load_state が `{}` を返すので fr_is_terminated が 1（未終端）
+  # で fail-open する（Req 5.1〜5.3）。各 issue ごとに状態を確認し、抑止時は NFR 2.1 の
+  # 観点で 1 行ログを残す。
+  printf '%s' "$(fr_filter_terminated_candidates "issue" "$issues_json")"
   return 0
 }
 
@@ -444,7 +565,9 @@ fr_fetch_failed_prs() {
     idx=$((idx + 1))
   done
 
-  printf '%s' "$result"
+  # #417: terminal 状態（max-attempts / no-progress）に永続化済みの PR 番号を除外する
+  # （Req 2.1〜2.6 / fail-open は fr_filter_terminated_candidates 内で担保 / Req 5.1〜5.3）
+  printf '%s' "$(fr_filter_terminated_candidates "pr" "$result")"
   return 0
 }
 
@@ -1559,6 +1682,19 @@ fr_terminate_max_attempts() {
     return 1
   fi
 
+  # #417 Req 1.1 / 1.3 / 2.3 / 2.6: cross-cycle のべき等ガード。state JSON の last_status
+  # が既に max-attempts / no-progress なら、終端コメント・rs_set_result・sn_notify の
+  # いずれも再発火させずに即 return 0（NFR 4.2 多重発火しない契約と整合）。
+  # state 不在 / 破損は fr_load_state が `{}` を返すため fr_is_terminated が 1（未終端）
+  # で fail-open（Req 5.1〜5.3）。
+  local _prev_state _prev_status
+  _prev_state=$(fr_load_state "$number")
+  if _prev_status=$(fr_is_terminated "$_prev_state"); then
+    # 抑止ログ（NFR 2.1 / 2.2 / Req 6.1：grep でコメント spam 収束を確認可能）
+    fr_log "${kind}=#${number} terminated reason=${_prev_status} suppressed=terminate-max-attempts"
+    return 0
+  fi
+
   # 終端理由コメント 1 件を投稿（Req 4.6）。本文に通算回数 + 上限値を含めて
   # 運用者が手動レビュー時に試行履歴を把握できるようにする。secrets は含めない
   # （NFR 3.2 / printf '%s' で値埋め込み）。
@@ -1576,6 +1712,27 @@ fr_terminate_max_attempts() {
   # fr_log は core_utils.sh で `[YYYY-MM-DD HH:MM:SS] [$REPO] failed-recovery: $*`
   # の 3 段 prefix を付与する。
   fr_log "${kind}=#${number} terminated reason=max-attempts total=${total_attempts} max=${FAILED_RECOVERY_MAX_ATTEMPTS}"
+
+  # #417 Req 1.5 / 3.1〜3.3: cross-cycle の終端済み判定情報源として state JSON に
+  # last_status="max-attempts" を永続化する。既存 schema の last_failure_signature /
+  # last_head_sha / immediate_failure_streak は前回値を継承する（NFR 1.1）。fr_save_state
+  # 失敗時は fr_warn で記録するが、コメント・rs_set_result は既に確定済みなので
+  # caller は落とさない（fail-continue）。
+  local _prev_sig _prev_head_sha _prev_streak
+  if ! _prev_sig=$(printf '%s' "$_prev_state" | jq -r '.last_failure_signature // ""' 2>/dev/null); then
+    _prev_sig=""
+  fi
+  if ! _prev_head_sha=$(printf '%s' "$_prev_state" | jq -r '.last_head_sha // ""' 2>/dev/null); then
+    _prev_head_sha=""
+  fi
+  if ! _prev_streak=$(printf '%s' "$_prev_state" | jq -r '.immediate_failure_streak // 0' 2>/dev/null); then
+    _prev_streak=0
+  fi
+  if ! [[ "$_prev_streak" =~ ^[0-9]+$ ]]; then
+    _prev_streak=0
+  fi
+  fr_save_state "$number" "$total_attempts" "max-attempts" "$_prev_sig" "$_prev_head_sha" "$_prev_streak" \
+    || fr_warn "fr_terminate_max_attempts: fr_save_state 失敗 ${kind}=#${number}（cross-cycle べき等性が失われる可能性）"
 
   # Issue #370 task 5: Slack 通知 emitter（fail-open / gate OFF 時は no-op）
   sn_notify failed-recovery "$number" "https://github.com/$REPO/${kind}s/$number" max-attempts "kind=${kind} attempts=${total_attempts} max=${FAILED_RECOVERY_MAX_ATTEMPTS}" || true
@@ -1621,6 +1778,17 @@ fr_terminate_no_progress() {
     return 1
   fi
 
+  # #417 Req 1.2 / 1.4 / 2.3 / 2.6: cross-cycle のべき等ガード。state JSON の last_status
+  # が既に max-attempts / no-progress なら、終端コメント・rs_set_result・sn_notify の
+  # いずれも再発火させずに即 return 0（NFR 4.2 多重発火しない契約と整合）。
+  # state 不在 / 破損は fail-open（Req 5.1〜5.3）。
+  local _prev_state _prev_status
+  _prev_state=$(fr_load_state "$number")
+  if _prev_status=$(fr_is_terminated "$_prev_state"); then
+    fr_log "${kind}=#${number} terminated reason=${_prev_status} suppressed=terminate-no-progress"
+    return 0
+  fi
+
   # 終端理由コメント 1 件を投稿（Req 5.3）。本文には「no-progress」「同原因再発」
   # 「無進捗」のキーワードを含めて運用者が手動レビュー時に検索可能にする。
   # signature の hex 値は運用者向け本文の可読性を優先して**含めない**（log には残す）。
@@ -1642,6 +1810,22 @@ fr_terminate_no_progress() {
     sig_prefix=" signature=$(printf '%s' "$signature" | cut -c1-8)"
   fi
   fr_log "${kind}=#${number} terminated reason=no-progress total=${total_attempts}${sig_prefix}"
+
+  # #417 Req 1.6 / 3.1〜3.3: cross-cycle の終端済み判定情報源として state JSON に
+  # last_status="no-progress" を永続化する。signature は引数のものを保持（既存 schema
+  # の last_failure_signature を上書き）、head_sha / streak は前回値を継承（NFR 1.1）。
+  local _prev_head_sha _prev_streak
+  if ! _prev_head_sha=$(printf '%s' "$_prev_state" | jq -r '.last_head_sha // ""' 2>/dev/null); then
+    _prev_head_sha=""
+  fi
+  if ! _prev_streak=$(printf '%s' "$_prev_state" | jq -r '.immediate_failure_streak // 0' 2>/dev/null); then
+    _prev_streak=0
+  fi
+  if ! [[ "$_prev_streak" =~ ^[0-9]+$ ]]; then
+    _prev_streak=0
+  fi
+  fr_save_state "$number" "$total_attempts" "no-progress" "$signature" "$_prev_head_sha" "$_prev_streak" \
+    || fr_warn "fr_terminate_no_progress: fr_save_state 失敗 ${kind}=#${number}（cross-cycle べき等性が失われる可能性）"
 
   # Issue #370 task 5: Slack 通知 emitter（fail-open / gate OFF 時は no-op）。
   # signature 値は detail に含めない（NFR 3.3 / fr_log 側で先頭 8 桁を維持）。
