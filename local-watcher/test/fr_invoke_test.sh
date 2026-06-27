@@ -51,7 +51,9 @@ extract_function() {
   ' "$script"
 }
 
-# 抽出: failed-recovery.sh から 3 関数 + quota-aware.sh から qa_detect_rate_limit
+# 抽出: failed-recovery.sh から 4 関数 + quota-aware.sh から qa_detect_rate_limit
+# #411: fr_invoke_claude が fr_classify_immediate_failure を呼ぶため、同 module から
+# 当該関数も抽出して同セッションに load する。
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$MODULE_SH" "fr_collect_issue_context")"
 # shellcheck disable=SC1090,SC2086
@@ -59,9 +61,11 @@ eval "$(extract_function "$MODULE_SH" "fr_collect_pr_ci_context")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$MODULE_SH" "fr_invoke_claude")"
 # shellcheck disable=SC1090,SC2086
+eval "$(extract_function "$MODULE_SH" "fr_classify_immediate_failure")"
+# shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$QUOTA_AWARE_SH" "qa_detect_rate_limit")"
 
-for fn in fr_collect_issue_context fr_collect_pr_ci_context fr_invoke_claude qa_detect_rate_limit; do
+for fn in fr_collect_issue_context fr_collect_pr_ci_context fr_invoke_claude fr_classify_immediate_failure qa_detect_rate_limit; do
   if ! declare -F "$fn" >/dev/null; then
     echo "ERROR: $fn not loaded" >&2
     exit 2
@@ -77,6 +81,9 @@ FAILED_RECOVERY_GIT_TIMEOUT=60
 FAILED_RECOVERY_DEV_MODEL="claude-opus-4-7"
 # shellcheck disable=SC2034
 FAILED_RECOVERY_MAX_TURNS=20
+# #411: 即時失敗閾値（テストでは短時間でテストするため小さめに / 既存テストは tool_use 観測あり）
+# shellcheck disable=SC2034
+FAILED_RECOVERY_IMMEDIATE_FAIL_SECONDS=10
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -483,23 +490,177 @@ fi
 cleanup_stub_state
 
 # ============================================================
-# Section 9: fr_invoke_claude — claude 非ゼロ exit（quota 以外）を透過
+# Section 9: fr_invoke_claude — claude 非ゼロ exit（quota 以外 / tool_use 観測あり）を透過
+# #411 で即時失敗判定が追加されたため、tool_use 観測ありの fixture を使うことで
+# 「実質作業着手済」扱いになり rc=7 が透過する（quota 以外 / 即時失敗以外の経路）。
 # ============================================================
 echo ""
-echo "--- Section 9: fr_invoke_claude claude 非ゼロ exit 透過 ---"
+echo "--- Section 9: fr_invoke_claude claude 非ゼロ exit 透過（tool_use 観測あり） ---"
 
 reset_stub_state
 
-CLAUDE_STREAM_FIXTURE='{"type":"result","is_error":true,"api_error_status":500}
+# tool_use イベントを 1 件含めることで即時失敗判定（rc=98）を回避する。
+CLAUDE_STREAM_FIXTURE='{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"/tmp/x"}}]}}
+{"type":"result","is_error":true,"api_error_status":500}
 '
 CLAUDE_RC=7
 
 rc=0
-( fr_invoke_claude "prompt" "test-stage-fail" ) || rc=$?
-# quota 検出（429）ではなく 500 + claude rc=7 なので rc=7 が透過する
-assert_rc "NFR 5.2: claude 非ゼロ exit（quota 以外）は透過（rc=7）" "7" "$rc"
+( fr_invoke_claude "prompt" "test-stage-fail" "" ) || rc=$?
+# tool_use 観測あり + 500 + claude rc=7 → 即時失敗ではないので rc=7 が透過する
+assert_rc "NFR 5.2: claude 非ゼロ exit（quota 以外 / tool_use 観測あり）は透過（rc=7）" "7" "$rc"
 
 cleanup_stub_state
+
+# ============================================================
+# Section 10: #411 即時失敗判定 — tool_use 無し + 短時間 + rc!=0 → rc=98
+# ============================================================
+echo ""
+echo "--- Section 10: #411 即時失敗判定 → rc=98 ---"
+
+reset_stub_state
+
+# tool_use を含まない result 行のみ。CLAUDE_RC=1（claude 即時失敗を模擬）
+CLAUDE_STREAM_FIXTURE='{"type":"system","subtype":"init"}
+{"type":"result","is_error":true}
+'
+CLAUDE_RC=1
+
+rc=0
+( fr_invoke_claude "prompt" "test-stage-immediate-fail" "" ) || rc=$?
+# tool_use 無し + rc=1 + 即座に終了（テスト fixture は数秒以内）→ rc=98
+assert_rc "#411 Req 1.1: 即時失敗 → rc=98 sentinel" "98" "$rc"
+
+# NFR 2.1: 一次運用ログに判定根拠が記録されること
+if grep -qE 'immediate-failure' "$FR_LOG_TRACE" 2>/dev/null; then
+  echo "PASS: #411 NFR 2.1: 一次運用ログに immediate-failure 識別子が記録される"
+  PASS_COUNT=$((PASS_COUNT + 1))
+else
+  echo "FAIL: #411 NFR 2.1: 一次運用ログに immediate-failure 識別子が記録される"
+  cat "$FR_LOG_TRACE"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+# rc / tool_use / elapsed の判定根拠が含まれていること（rc=1 / tool_use=0）
+if grep -qE 'rc=1' "$FR_LOG_TRACE" 2>/dev/null && \
+   grep -qE 'tool_use=0' "$FR_LOG_TRACE" 2>/dev/null; then
+  echo "PASS: #411 NFR 2.1: 判定根拠（rc / tool_use）がログに含まれる"
+  PASS_COUNT=$((PASS_COUNT + 1))
+else
+  echo "FAIL: #411 NFR 2.1: 判定根拠（rc / tool_use）がログに含まれる"
+  cat "$FR_LOG_TRACE"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+cleanup_stub_state
+
+# ============================================================
+# Section 11: #411 即時失敗判定 — tool_use 観測あり → rc=98 にならない（短時間でも）
+# ============================================================
+echo ""
+echo "--- Section 11: #411 tool_use 観測ありで即時失敗扱いにならない ---"
+
+reset_stub_state
+
+# tool_use を含む。CLAUDE_RC=2 で非ゼロだが実質作業着手済扱い
+CLAUDE_STREAM_FIXTURE='{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_2","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"result","is_error":true}
+'
+CLAUDE_RC=2
+
+rc=0
+( fr_invoke_claude "prompt" "test-stage-tooluse" "" ) || rc=$?
+# tool_use 観測ありなので rc=2 が透過（rc=98 にならない）
+assert_rc "#411 Req 1.7: tool_use 観測あり → rc=2 透過（即時失敗扱いにならない）" "2" "$rc"
+
+cleanup_stub_state
+
+# ============================================================
+# Section 12: #411 即時失敗判定 — claude rc=0（success）は適用しない
+# ============================================================
+echo ""
+echo "--- Section 12: #411 success path は即時失敗判定対象外 ---"
+
+reset_stub_state
+
+CLAUDE_STREAM_FIXTURE='{"type":"result","is_error":false}
+'
+CLAUDE_RC=0
+
+rc=0
+( fr_invoke_claude "prompt" "test-stage-success" "" ) || rc=$?
+assert_rc "#411 Req 1.2 (a): claude rc=0 → rc=0（即時失敗扱いではない）" "0" "$rc"
+
+cleanup_stub_state
+
+# ============================================================
+# Section 13: #411 即時失敗判定 — quota 検出時は適用しない（Req 1.8）
+# ============================================================
+echo ""
+echo "--- Section 13: #411 quota 検出は即時失敗扱いではない（Req 1.8） ---"
+
+reset_stub_state
+
+# quota fixture + tool_use 無し + 短時間 + claude_rc 非ゼロ。Req 1.8 で quota 経路は
+# 即時失敗判定を適用しないため rc=99 が返るべき。
+CLAUDE_STREAM_FIXTURE='{"type":"rate_limit_event","status":"exceeded","resetsAt":1750000000}
+{"type":"result","is_error":true}
+'
+CLAUDE_RC=1
+
+rc=0
+( fr_invoke_claude "prompt" "test-stage-quota-then-imm" "" ) || rc=$?
+assert_rc "#411 Req 1.8: quota 検出時は即時失敗判定を適用しない → rc=99" "99" "$rc"
+
+cleanup_stub_state
+
+# ============================================================
+# Section 14: #411 fr_classify_immediate_failure 純粋関数の境界値
+# ============================================================
+echo ""
+echo "--- Section 14: #411 fr_classify_immediate_failure 純粋関数 ---"
+
+# 14-A: quota 検出時は 1（通常扱い）
+set +e
+fr_classify_immediate_failure 1 1 0 1 10; rc=$?
+set -e
+assert_rc "#411 Req 1.8: quota 検出 → rc=1（通常扱い）" "1" "$rc"
+
+# 14-B: rc=0 は 1（通常扱い）
+set +e
+fr_classify_immediate_failure 0 0 0 1 10; rc=$?
+set -e
+assert_rc "#411 Req 1.2 (a): rc=0 → rc=1（通常扱い）" "1" "$rc"
+
+# 14-C: tool_use 観測あり → 1（通常扱い）
+set +e
+fr_classify_immediate_failure 1 0 1 1 10; rc=$?
+set -e
+assert_rc "#411 Req 1.7: tool_use 観測あり → rc=1（通常扱い）" "1" "$rc"
+
+# 14-D: elapsed >= threshold → 1（通常扱い）
+set +e
+fr_classify_immediate_failure 1 0 0 15 10; rc=$?
+set -e
+assert_rc "#411 Req 1.7: elapsed >= threshold → rc=1（通常扱い）" "1" "$rc"
+
+# 14-E: 即時失敗（rc!=0 + quota 無し + tool_use 無し + 短時間）→ 0
+set +e
+fr_classify_immediate_failure 1 0 0 2 10; rc=$?
+set -e
+assert_rc "#411 Req 1.2: 全条件満たす → rc=0（即時失敗）" "0" "$rc"
+
+# 14-F: 境界値 elapsed = threshold-1 → 0（即時失敗）
+set +e
+fr_classify_immediate_failure 1 0 0 9 10; rc=$?
+set -e
+assert_rc "#411 Req 1.3: 境界 elapsed=9 < threshold=10 → rc=0（即時失敗）" "0" "$rc"
+
+# 14-G: 境界値 elapsed = threshold → 1（通常扱い）
+set +e
+fr_classify_immediate_failure 1 0 0 10 10; rc=$?
+set -e
+assert_rc "#411 Req 1.3: 境界 elapsed=10 == threshold=10 → rc=1（通常扱い）" "1" "$rc"
 
 # ============================================================
 # Summary

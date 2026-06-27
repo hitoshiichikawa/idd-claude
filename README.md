@@ -4283,6 +4283,8 @@ sha1sum で hash 化したもの）が **完全一致**し、PR 経路では `he
 | quota 検出（claude rc=99） | 結果コメント 1 件投稿 + `claude-failed` ラベル **据え置き** + state `in-progress` 維持。次サイクル待ち |
 | 通算 attempt 上限到達 (`>= FAILED_RECOVERY_MAX_ATTEMPTS`) | 着手コメント投稿せず終端理由コメント 1 件投稿（通算回数 + 上限値含む）+ `claude-failed` **据え置き** + run-summary `claude-failed` 通知（Req 4.5, 4.6） |
 | no-progress 判定（同 signature 再発 + 無進捗） | 着手コメント投稿せず終端理由コメント 1 件投稿（no-progress 含む）+ `claude-failed` **据え置き** + run-summary `claude-failed` 通知（Req 5.3, 5.4） |
+| **#411 即時失敗（claude rc≠0,99 + tool_use 未観測 + セッション継続秒 < 閾値）** | attempt カウンタを **加算しない / ロールバックする**（quota 燃焼上界保証を壊さない）+ `immediate_failure_streak` を ++ + 結果コメント 1 件投稿（連続回数表示）+ `claude-failed` **据え置き** + 次サイクル再試行 |
+| **#411 即時失敗連続上限到達 (`>= FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK`)** | 着手コメント投稿せず終端理由コメント 1 件投稿（`immediate-failure-streak` 識別子 + 連続回数 + 上限値含む）+ `claude-failed` **据え置き** + run-summary `claude-failed` 通知。**`max-attempts` と区別可能**（運用者が手動レビュー時に「claude が試行した結果ダメだった」と「claude が動かなかった」を即座に切り分け可能） |
 
 **既存 `claude-failed` 手動運用との関係**:
 
@@ -4302,9 +4304,10 @@ sha1sum で hash 化したもの）が **完全一致**し、PR 経路では `he
 
 主なフィールド:
 - `total_attempts` — 通算 attempt カウンタ（cron サイクル跨ぎ・watcher 再起動でも継承）
-- `last_status` — `in-progress` / `succeeded` / `max-attempts` / `no-progress`
+- `last_status` — `in-progress` / `succeeded` / `max-attempts` / `no-progress` / `immediate-failure-streak` (#411)
 - `last_failure_signature` — 直前失敗 log の SHA-1 hex（no-progress 判定用）
 - `last_head_sha` — PR 経路の直前 head（Issue 経路は空文字）
+- `immediate_failure_streak` (#411) — 連続即時失敗回数。通算 attempt budget とは独立カウンタで、quota 燃焼上界保証として機能する。tool_use 観測時 / 通常失敗時 / 成功時に 0 にリセットされる。`FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK` 到達で `immediate-failure-streak` 終端理由を発火（#411 導入前の state ファイルは本フィールドを持たないが、`load` 時に `0` fallback して読むため後方互換は維持される）
 - `history` — 直近 8 件の試行履歴（hot-spot 防止）
 
 ### 環境変数
@@ -4319,6 +4322,8 @@ sha1sum で hash 化したもの）が **完全一致**し、PR 経路では `he
 | `FAILED_RECOVERY_GIT_TIMEOUT` | `60`（秒） | network 遅延が大きい環境は調整 | gh / git 呼び出しごとの timeout |
 | `FAILED_RECOVERY_MAX_PRS` | `3` | watcher 間隔と claude-failed 件数で調整 | 1 サイクルで処理する Issue / PR の上限件数 |
 | `FAILED_RECOVERY_STATE_DIR` | `$HOME/.issue-watcher/failed-recovery/<repo-slug>` | 通常変更不要 | state JSON の配置先 |
+| `FAILED_RECOVERY_IMMEDIATE_FAIL_SECONDS` (#411) | `10`（秒） | 通常変更不要 | 即時失敗判定の継続時間閾値。claude session が exit code 非ゼロ（quota sentinel 99 除く）+ stream-json 中に tool_use イベントなし + セッション継続時間が本値未満を満たした場合に「実質作業前の即時失敗」と判定し、attempt budget から除外する（非整数 / `<=0` は既定 10 にフォールバック） |
+| `FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK` (#411) | `3`（回） | 通常変更不要 | 同一 Issue / PR の **即時失敗連続上限**（通算 attempt budget とは独立カウンタ）。本上限到達時は `immediate-failure-streak` 終端理由で 1 度だけ運用者にエスカレーション。quota 燃焼上界保証（無限リトライ防止）として有限の正の整数値を必ず持つ（非整数 / `<=0` は既定 3 にフォールバック） |
 
 ### cron 例（opt-in する場合）
 
@@ -4358,6 +4363,36 @@ Failed Recovery Processor 導入による後方互換性は以下のとおり保
   優先される
 - **cron / launchd 登録文字列の書き換え必要**: 有効化する場合のみ `FULL_AUTO_ENABLED=true
   FAILED_RECOVERY_ENABLED=true` を cron 行に追記する（既存 watcher 起動行はそのまま）
+
+#### #411 即時失敗除外 / 専用ログ / worktree 起動 / 独立エスカレーション
+
+altpocket-server #119 で観測された「claude セッションが約 2 秒で rc=1 で即時失敗するケース」に
+対応するため、Failed Recovery Processor に以下の挙動が追加されました（後方互換あり / NFR 1.1）:
+
+- **即時失敗の attempt budget 除外**: claude exit code 非ゼロ（quota sentinel 99 除く）+
+  stream-json 中に tool use イベントなし + セッション継続時間が
+  `FAILED_RECOVERY_IMMEDIATE_FAIL_SECONDS`（既定 10 秒）未満を満たした試行は、通算 attempt
+  budget としてカウントせず（既に加算した値をロールバック）、別カウンタ `immediate_failure_streak`
+  のみ ++ する。決定論的に即死する状況で 4 attempts を空消費して premature に終端する事故を防ぐ
+- **専用ログ保存（discoverable）**: recovery claude session の stdout/stderr を
+  `$LOG_DIR/failed-recovery-<kind>-<number>-<TS>.log` に必ず保存（`LOG` 環境変数が未設定でも
+  `/dev/null` に逃さず自前で保存先を確定）。一次運用ログ（cron.log に転送される
+  `failed-recovery:` prefix 行）にも当該パスを記録するため、運用者は cron.log から該当ログを辿れる
+- **対象 repo 作業ツリーでの起動**: recovery claude を `REPO_DIR` 上で起動する（既存 impl 系プロセッサ
+  と同一起点）。PR の場合は head branch を、Issue の場合は既存 `claude/issue-<N>-*` branch または
+  `BASE_BRANCH` を checkout してから claude を起動。作業ツリー確保失敗時は「即時失敗」扱いに倒して
+  attempt budget から除外する（cwd 不在による rc=1 即死の主要候補を排除）
+- **独立エスカレーション識別子 `immediate-failure-streak`**: 即時失敗連続上限
+  （`FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK` / 既定 3）到達時に、既存 `max-attempts` /
+  `no-progress` とは **別の終端理由識別子**で 1 度だけエスカレーション。一次運用ログ
+  `failed-recovery: ... terminated reason=immediate-failure-streak` で grep 抽出可能。
+  `claude-failed` ラベルは据え置きで手動レビューへ
+- **既存 state JSON との後方互換**: `immediate_failure_streak` フィールドを持たない既存 state
+  ファイル（#411 導入前に書かれたもの）は `load` 時に `0` fallback として読まれ、次回 `save` で
+  `0` が永続化される。既存呼出側コード（fr_save_state の 5 引数版）も継続動作する
+- **既存環境変数は不変**: `FAILED_RECOVERY_ENABLED` / `FAILED_RECOVERY_MAX_ATTEMPTS` 等の名前・
+  意味・既定値は変更なし。新規追加の `FAILED_RECOVERY_IMMEDIATE_FAIL_SECONDS` /
+  `FAILED_RECOVERY_IMMEDIATE_FAIL_MAX_STREAK` は未設定時に既定値を採用
 
 ### ⚠️ merge 後の再配置が必要
 

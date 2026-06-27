@@ -386,6 +386,53 @@ assert_eq "Req 4.8: 正常値 100 はそのまま" "100" "$(normalize_max_attemp
 assert_eq "Req 4.8: 正常値 1 はそのまま" "1" "$(normalize_max_attempts '1')"
 
 # ============================================================
+# Section: #411 immediate_failure_streak フィールドの後方互換 + 読み書き
+# ============================================================
+echo ""
+echo "--- Section #411: immediate_failure_streak フィールド ---"
+
+FAILED_RECOVERY_STATE_DIR=$(new_state_dir)
+
+# 1) 6 番目引数（streak）を明示指定で保存できる
+assert_rc "#411 Req 1.4: streak を明示指定で save 成功" 0 \
+  fr_save_state 411 1 "in-progress" "sigsig" "" "2"
+loaded=$(fr_load_state 411)
+streak=$(printf '%s' "$loaded" | jq -r '.immediate_failure_streak // "absent"')
+assert_eq "#411 Req 1.4: schema.immediate_failure_streak = 2" "2" "$streak"
+
+# 2) 6 番目引数を省略すると既存 state から streak を継承（NFR 1.1 後方互換）
+assert_rc "#411 NFR 1.1: 6 番目引数省略で save 成功" 0 \
+  fr_save_state 411 2 "in-progress" "sigsig" ""
+loaded=$(fr_load_state 411)
+streak=$(printf '%s' "$loaded" | jq -r '.immediate_failure_streak // "absent"')
+assert_eq "#411 NFR 1.1: streak が前回値 2 から継承される" "2" "$streak"
+
+# 3) 既存 state が streak field を持たない場合（#411 導入前の state）でも load して 0 fallback
+FAILED_RECOVERY_STATE_DIR=$(new_state_dir)
+legacy_path=$(fr_state_path 411)
+mkdir -p "$(dirname "$legacy_path")"
+# 既存 schema（streak フィールド無し）の JSON を直接書き込む
+printf '%s\n' '{"issue":411,"total_attempts":1,"last_status":"in-progress","last_failure_signature":"","last_head_sha":"","last_attempt_at":"2026-06-25T00:00:00Z","history":[]}' > "$legacy_path"
+
+loaded=$(fr_load_state 411)
+streak=$(printf '%s' "$loaded" | jq -r '.immediate_failure_streak // 0')
+assert_eq "#411 NFR 1.1: 既存 state (streak field 不在) を load → 0 fallback" "0" "$streak"
+
+# 4) 既存 state を 6 番目引数省略で save すると streak は 0 で永続化される
+assert_rc "#411 NFR 1.1: 既存 state を save 成功（6 番目引数省略）" 0 \
+  fr_save_state 411 2 "in-progress" "newsig" ""
+loaded=$(fr_load_state 411)
+streak=$(printf '%s' "$loaded" | jq -r '.immediate_failure_streak // "absent"')
+assert_eq "#411 NFR 1.1: 既存 state（streak 不在）→ save で 0 が永続化される" "0" "$streak"
+
+# 5) 不正値（非数値）を渡すと 0 に正規化される
+assert_rc "#411 NFR 3.1: 不正値 streak=abc で save 成功（0 正規化）" 0 \
+  fr_save_state 411 3 "in-progress" "sig3" "" "abc"
+loaded=$(fr_load_state 411)
+streak=$(printf '%s' "$loaded" | jq -r '.immediate_failure_streak')
+assert_eq "#411 NFR 3.1: 不正値 streak=abc → 0 に正規化" "0" "$streak"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""
