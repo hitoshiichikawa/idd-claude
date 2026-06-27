@@ -49,9 +49,82 @@
 #   設計参照: docs/specs/66-feat-watcher-claude-max-quota-rate-limit/design.md
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# stdin の stream-json（1 行 1 JSON）を fold し、quota 枯渇イベントを検出して
+# 平文セッション上限メッセージから `resets <time>` を抽出し、TZ を尊重した「直近の
+# 該当時刻」UNIX epoch を stdout に返す純粋関数（Req 2.1, 2.3, 2.4 / Issue #416）。
+#
+# 入力:
+#   $1 = 1 行の平文メッセージ（例: "You've hit your session limit · resets 7:40pm (Asia/Tokyo)"）
+#
+# 出力:
+#   stdout: UNIX epoch (integer) on success / 空文字列 on failure
+#   return: 0 = epoch 取得成功 / 1 = 失敗（reset 欠落 fallback / Req 2.5）
+#
+# 解決ロジック:
+#   1. 入力から `resets <HH:MM[am|pm]?>` 部の時刻表記と任意の `(<TZ>)` を抽出する
+#   2. TZ が含まれる場合は `TZ=<tz>` 付き GNU `date -d` で「当日同時刻」の epoch を解決
+#   3. TZ が含まれない場合は呼び出し時の TZ で「当日同時刻」の epoch を解決
+#   4. 解決された epoch が「現在時刻より過去」なら +86400 して翌日同時刻を採用
+#      （Open Question 確定: 解決時刻が過去なら翌日扱い、未来ならそのまま）
+#   5. 失敗 / 抽出不能時は return 1（呼び出し側で reset 欠落 fallback / Req 2.5）
+#
+# 後方互換: GNU date 専用（macOS BSD date は本パス未対応 / 失敗で fallback）。
+# 既存 watcher は GNU coreutils 前提のため本制約は新規 regression を引き起こさない。
+qa_parse_session_limit_reset() {
+  local line="$1"
+  local time_str=""
+  local tz=""
+  local now_epoch reset_epoch out
+
+  # `resets <time> (<tz>)` または `resets <time>` を抽出。
+  # 時刻表記は 12h `7:40pm` / `7:40 PM` / 24h `19:40` / `7pm` 等の揺れを許容。
+  # bash の `[[ =~ ]]` 内では `\(` がパースエラーになるため正規表現を変数で渡す
+  # （rationale: shellcheck SC1072 / bash 3.2+ ベストプラクティス）。
+  local re_with_tz='resets[[:space:]]+([0-9]{1,2}(:[0-9]{2})?[[:space:]]*([aApP][mM])?)[[:space:]]*\(([^)]+)\)'
+  local re_no_tz='resets[[:space:]]+([0-9]{1,2}(:[0-9]{2})?[[:space:]]*([aApP][mM])?)'
+  if [[ "$line" =~ $re_with_tz ]]; then
+    time_str="${BASH_REMATCH[1]}"
+    tz="${BASH_REMATCH[4]}"
+  elif [[ "$line" =~ $re_no_tz ]]; then
+    time_str="${BASH_REMATCH[1]}"
+    tz=""
+  else
+    return 1
+  fi
+
+  # 余計な空白を圧縮（`7:40 PM` → `7:40PM`。GNU date は両方受理する）。
+  time_str=$(printf '%s' "$time_str" | tr -d '[:space:]')
+  if [ -z "$time_str" ]; then
+    return 1
+  fi
+
+  # 解決の TZ context を決める（TZ 不明時は呼び出し時 TZ で解決）。
+  if [ -n "$tz" ]; then
+    out=$(TZ="$tz" date -d "$time_str" +%s 2>/dev/null)
+    now_epoch=$(TZ="$tz" date +%s 2>/dev/null)
+  else
+    out=$(date -d "$time_str" +%s 2>/dev/null)
+    now_epoch=$(date +%s 2>/dev/null)
+  fi
+
+  # epoch 取得失敗（GNU date 不在 / 解析失敗）→ reset 欠落 fallback へ
+  if ! [[ "$out" =~ ^[0-9]+$ ]] || ! [[ "$now_epoch" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  reset_epoch="$out"
+
+  # 直近の該当時刻決定（Open Question 確定）:
+  # 解決 epoch が現在より過去なら翌日 +86400、未来ならそのまま採用。
+  if [ "$reset_epoch" -lt "$now_epoch" ]; then
+    reset_epoch=$((reset_epoch + 86400))
+  fi
+  printf '%s' "$reset_epoch"
+  return 0
+}
+
+# stdin の claude CLI 出力 stream を fold し、quota 枯渇イベントを検出して
 # `<detection_path>\t<reset_epoch>` 形式の TSV を 1 検出 1 行で stdout に出力する
-# （Req 1.1〜1.4, 2.1〜2.2, 3.1〜3.4, 5.1〜5.4 / Issue #66 Req 2.x との後方互換）。
+# （Req 1.1〜1.4, 2.1〜2.2, 3.1〜3.4, 5.1〜5.4 / Issue #66 Req 2.x との後方互換 /
+# Issue #416 で平文セッション上限経路を追加）。
 #
 # 検出経路（detection_path フィールド値）:
 #   - `rate_limit_event_v2`  : 現行 Claude CLI スキーマ
@@ -65,6 +138,14 @@
 #                              `type==result` かつ `is_error == true` かつ
 #                              `api_error_status == 429`
 #                              （Issue #104 Bug 2 / Req 3.1）
+#   - `session_limit_plain_v1` : セッション上限到達時に claude CLI が stream-json を
+#                              出さず平文 1 行で early-exit するケース。
+#                              `You've hit your session limit` を含む行に
+#                              substring match する（Issue #416 Req 1.1 / 1.5）。
+#                              マッチ粒度は `You've hit your session limit` のみで
+#                              判定（バージョン差を吸収するための緩いマッチを採用 /
+#                              Open Question 確定）。reset 時刻は
+#                              `qa_parse_session_limit_reset` で解決する。
 #
 # Reset 時刻フィールド探索順（現行 / 旧スキーマ揺れと synthetic 429 同居を許容）:
 #   1) .rate_limit_info.resetsAt / .resets_at / .reset_at  （現行スキーマ ネスト位置 / Req 1.3）
@@ -73,17 +154,27 @@
 #   いずれも取得できなければ空（呼び出し側で reset 欠落 fallback / Req 1.4, 3.2）。
 #
 # 出力契約:
-#   - 1 検出 1 行: `<detection_path>\t<epoch_or_empty>`
+#   - 1 検出 1 行: `<detection_path>\t<epoch_or_empty>`（出力形式は #416 で不変）
 #   - 解析失敗（非 JSON / schema 違い）の行は無視して継続（Req 2.5 / Issue #66）
 #   - allowed のみ / 通常 result（is_error:false）は無視（Req 3.4）
 #   - 同一 stream に複数検出があっても全件出力（呼び出し側で `tail -1` 等を選択）
+#   - 同一 stream 内に JSON 検出と平文検出が混在しても両方出力し、呼び出し側で
+#     epoch を持つ最終検出を優先する（Issue #416 Req 1.4: 二重 escalation 抑止）
 #
 # 実装メモ: jq は default だと stdin を "concatenated JSON" として一括 parse する
 # ため、無効な 1 行があると stream 全体が fatal で止まる。stream を停止させない
 # 要件（Req 2.5）を満たすため、`-R`（raw input）で 1 行ずつ受け取り、各行を
-# `try fromjson catch null` で個別 parse する。
+# `try fromjson catch null` で個別 parse する。平文経路は jq 内では bash 関数を
+# 呼べないため、stdin を一時バッファに保持して 2 pass（JSON pass + 平文 pass）で
+# 走査する（Issue #416）。
 qa_detect_rate_limit() {
-  jq -R -r '
+  # stdin を 1 度だけ全行読み出して buffer に保持する。jq pass と平文 pass の
+  # 2 系統に同じ入力を流すため。buffer は in-memory（小規模 stream-json 前提）。
+  local buf
+  buf=$(cat)
+
+  # ── Pass 1: 既存 JSON 検出経路（rate_limit_event_v2 / v1 / synthetic_429_result）──
+  printf '%s' "$buf" | jq -R -r '
     # 入力 1 行を JSON object に折りたたむ。fromjson 失敗 / 非 object は捨てる。
     . as $line
     | (try ($line | fromjson) catch null)
@@ -132,6 +223,24 @@ qa_detect_rate_limit() {
     # 出力: <detection_path>\t<epoch_or_empty>
     | "\($path)\t\($epoch_str)"
   ' 2>/dev/null
+
+  # ── Pass 2: 平文セッション上限メッセージ検出（Issue #416 / Req 1.1, 1.5, 2.1, 2.6）──
+  # 行をまたいで判定し、`You've hit your session limit` を含む行を 1 行ずつ走査する
+  # （Req 2.6: 複数行分割でも単一行を検出した時点で AC を満たす）。
+  # `--` で grep のオプション解釈を打ち切り、quote / fixed-string で fragile な
+  # メタ文字解釈を回避する（未信頼入力の取り扱い / CLAUDE.md §5）。
+  local plain_line
+  while IFS= read -r plain_line; do
+    [ -z "$plain_line" ] && continue
+    local epoch=""
+    if epoch=$(qa_parse_session_limit_reset "$plain_line"); then
+      printf 'session_limit_plain_v1\t%s\n' "$epoch"
+    else
+      # reset 抽出失敗時は epoch 空で出力（Req 2.5: 平文検出は維持し、reset 欠落
+      # fallback を呼び出し側に委ねる）。
+      printf 'session_limit_plain_v1\t\n'
+    fi
+  done < <(printf '%s' "$buf" | grep -F -- "You've hit your session limit" 2>/dev/null || true)
 }
 
 # 既存 6 stage の claude 呼び出しを横断ラップする Stage Wrapper（Req 1.1, 1.2,
