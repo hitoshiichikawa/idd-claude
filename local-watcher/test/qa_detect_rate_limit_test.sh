@@ -54,11 +54,20 @@ extract_function() {
   ' "$script" "$QUOTA_AWARE_SH"
 }
 
+# Issue #416: qa_detect_rate_limit は内部で qa_parse_session_limit_reset を呼ぶため、
+# 当該ヘルパーも extract して同 shell に読み込む（extract_function イディオムの依存関数
+# 追従 / CLAUDE.md「7. テストの近接配置」）。
+# shellcheck disable=SC1090,SC2086
+eval "$(extract_function "$WATCHER_SH" "qa_parse_session_limit_reset")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$WATCHER_SH" "qa_detect_rate_limit")"
 
 if ! declare -F qa_detect_rate_limit >/dev/null; then
   echo "ERROR: qa_detect_rate_limit not loaded" >&2
+  exit 2
+fi
+if ! declare -F qa_parse_session_limit_reset >/dev/null; then
+  echo "ERROR: qa_parse_session_limit_reset not loaded" >&2
   exit 2
 fi
 
@@ -157,6 +166,141 @@ out=$(detect_last_line "v2-rate-limit-malformed-line.jsonl")
 assert_eq "v2-rate-limit-malformed-line (Req 5.4 / NFR resilience)" \
   "$(printf 'rate_limit_event_v2\t1778821200')" \
   "$out"
+
+# ─── Issue #416: 平文セッション上限メッセージ検出経路 ───
+echo ""
+echo "--- session_limit_plain_v1 cases (Issue #416) ---"
+
+# 検出経路文字列を取り出す補助（path 部分のみ assert したいとき用）。
+detect_path() {
+  local fx="$1"
+  local out
+  out=$(detect_last_line "$fx")
+  printf '%s' "${out%%$'\t'*}"
+}
+
+# 検出 epoch 部分のみを取り出す補助。
+detect_epoch() {
+  local fx="$1"
+  local out
+  out=$(detect_last_line "$fx")
+  printf '%s' "${out#*$'\t'}"
+}
+
+# Req 1.1 (#416), 2.3: 平文単独 + TZ Asia/Tokyo 12h pm 表記
+# → path=session_limit_plain_v1 / epoch は numeric integer
+out=$(detect_path "session-limit-plain-tokyo-pm.txt")
+assert_eq "session-limit-plain-tokyo-pm path (#416 Req 1.1, 2.3)" \
+  "session_limit_plain_v1" "$out"
+epoch=$(detect_epoch "session-limit-plain-tokyo-pm.txt")
+if [[ "$epoch" =~ ^[0-9]+$ ]]; then
+  echo "PASS: session-limit-plain-tokyo-pm epoch is numeric (#416 Req 2.1)"
+  PASS_COUNT=$((PASS_COUNT + 1))
+else
+  echo "FAIL: session-limit-plain-tokyo-pm epoch must be numeric (got '$epoch')"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+# Req 2.4 (#416): 24h 表記 (`19:40`) は 12h `7:40pm` と同一 epoch を解決する
+epoch_pm=$(detect_epoch "session-limit-plain-tokyo-pm.txt")
+epoch_24=$(detect_epoch "session-limit-plain-tokyo-24h.txt")
+assert_eq "session-limit-plain 12h/24h equal epoch (#416 Req 2.4)" \
+  "$epoch_pm" "$epoch_24"
+
+# Req 2.3 (#416): TZ=UTC で `10:40am` を指定すると Asia/Tokyo `7:40pm` と同一 epoch
+# （19:40 JST = 10:40 UTC）
+epoch_utc=$(detect_epoch "session-limit-plain-utc.txt")
+assert_eq "session-limit-plain Asia/Tokyo == UTC equiv epoch (#416 Req 2.3)" \
+  "$epoch_pm" "$epoch_utc"
+
+# Req 2.6 (#416): 複数行のうち 1 行に session limit があれば検出する
+out=$(detect_path "session-limit-plain-multiline.txt")
+assert_eq "session-limit-plain-multiline path (#416 Req 2.6)" \
+  "session_limit_plain_v1" "$out"
+
+# Req 1.4 (#416): JSON 検出と平文検出が混在 → 両方検出されるが detect_all で両 path が出る
+all=$(detect_all_lines "session-limit-plain-mixed-with-json.txt" | tr '\n' ';')
+# 期待: 1 行目は rate_limit_event_v2 (JSON / epoch あり), 2 行目は session_limit_plain_v1
+# （epoch は現在時刻依存のため numeric 部分は別途検証）
+case "$all" in
+  *"rate_limit_event_v2"*"session_limit_plain_v1"*)
+    echo "PASS: mixed JSON+plain both paths emitted (#416 Req 1.4)"
+    PASS_COUNT=$((PASS_COUNT + 1))
+    ;;
+  *)
+    echo "FAIL: mixed JSON+plain should emit both rate_limit_event_v2 and session_limit_plain_v1"
+    echo "  actual: $all"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    ;;
+esac
+
+# Req 2.5 (#416): 平文検出はされたが reset 時刻表記が無い → path のみ、epoch 空
+out=$(detect_last_line "session-limit-plain-no-reset.txt")
+assert_eq "session-limit-plain-no-reset (#416 Req 2.5)" \
+  "$(printf 'session_limit_plain_v1\t')" \
+  "$out"
+
+# Req 3.5 (#416): 平文セッション上限メッセージが無い既存 normal-success では本経路は発火しない
+all=$(detect_all_lines "normal-success.jsonl")
+case "$all" in
+  *session_limit_plain_v1*)
+    echo "FAIL: normal-success should not trigger session_limit_plain_v1"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    ;;
+  *)
+    echo "PASS: normal-success does not trigger session_limit_plain_v1 (#416 Req 3.5, NFR 2.1)"
+    PASS_COUNT=$((PASS_COUNT + 1))
+    ;;
+esac
+
+# ─── Issue #416: qa_parse_session_limit_reset 純粋関数の単体テスト ───
+echo ""
+echo "--- qa_parse_session_limit_reset unit cases (Issue #416) ---"
+
+# TZ 指定あり: Asia/Tokyo / pm 12h → 数値 epoch を返し return 0
+if epoch=$(qa_parse_session_limit_reset "You've hit your session limit · resets 7:40pm (Asia/Tokyo)"); then
+  if [[ "$epoch" =~ ^[0-9]+$ ]]; then
+    echo "PASS: parse Asia/Tokyo 7:40pm → numeric epoch (#416 Req 2.1, 2.3)"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    echo "FAIL: parse Asia/Tokyo 7:40pm returned non-numeric epoch: '$epoch'"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+else
+  echo "FAIL: parse Asia/Tokyo 7:40pm should succeed but returned rc != 0"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+# 直近の該当時刻ロジック: 解決 epoch >= 現在 epoch であること（過去なら +86400 されている）
+now=$(date +%s)
+if epoch=$(qa_parse_session_limit_reset "You've hit your session limit · resets 7:40pm (Asia/Tokyo)"); then
+  if [ "$epoch" -ge "$now" ]; then
+    echo "PASS: resolved epoch is >= now (直近の該当時刻 / #416 Req 2.1)"
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    echo "FAIL: resolved epoch should be >= now (got epoch=$epoch now=$now)"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+  fi
+fi
+
+# 12h と 24h 表記揺れが同一 epoch を返すこと
+e_pm=$(qa_parse_session_limit_reset "You've hit your session limit · resets 7:40pm (Asia/Tokyo)")
+e_24=$(qa_parse_session_limit_reset "You've hit your session limit · resets 19:40 (Asia/Tokyo)")
+assert_eq "parse 12h/24h same epoch (#416 Req 2.4)" "$e_pm" "$e_24"
+
+# TZ 等価性: Asia/Tokyo 7:40pm == UTC 10:40am
+e_tokyo=$(qa_parse_session_limit_reset "You've hit your session limit · resets 7:40pm (Asia/Tokyo)")
+e_utc=$(qa_parse_session_limit_reset "You've hit your session limit · resets 10:40am (UTC)")
+assert_eq "parse Asia/Tokyo == UTC equiv (#416 Req 2.3)" "$e_tokyo" "$e_utc"
+
+# reset 表記が無い → return 1
+if qa_parse_session_limit_reset "You've hit your session limit · please try again later" >/dev/null 2>&1; then
+  echo "FAIL: parse without 'resets' should return rc != 0"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+else
+  echo "PASS: parse without 'resets' returns rc != 0 (#416 Req 2.5)"
+  PASS_COUNT=$((PASS_COUNT + 1))
+fi
 
 echo ""
 echo "==========================================="
