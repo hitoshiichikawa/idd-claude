@@ -41,7 +41,7 @@
   - _Boundary: design-principles.md_
   - _Depends: 1_
 
-- [ ] 5. README「Auto Rebase Processor (Phase D)」節へ新 env gate / 分類表 / migration note 追記
+- [x] 5. README「Auto Rebase Processor (Phase D)」節へ新 env gate / 分類表 / migration note 追記
   - 環境変数表（L1896 付近）に `AUTO_REBASE_ADDITIVE`（既定 `off`）/ `AUTO_REBASE_ADDITIVE_PATHS`（既定空）を追加し、既定 no-op と安全側正規化を migration note として明記（NFR4.1）
   - 動作フロー表（L1888 付近）に「加算的 mechanical 昇格」行（条件: gate ON + bootstrap allowlist 閉 + 全 hunk 追加のみ / 副作用: 既存 mechanical と同一）を追記（Req 3.1）
   - 加算的判定の構文的限定（追加のみ・削除/変更なし・取得失敗時は semantic）と merge-queue scope 外を 1〜2 文で補足
