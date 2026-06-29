@@ -44,9 +44,12 @@
 
 ## 判定対象ファイル
 
-以下の 3 ファイルが入力です（spec dir 不在 / ファイル不在の場合は対応プレースホルダに
-`(none)` が埋め込まれます。`(none)` を検出した場合は本プロンプト末尾「保守的判定」原則を
-適用し、`VERDICT: approve` を返してください）。
+以下の 3 ファイルが入力です。spec 本文は head ブランチの git ref から取得され、**少なくとも
+1 ファイルは実本文が供給されている前提**です（spec 本文を 1 つも取得できない / spec dir を
+解決できない場合は、watcher 側が本プロンプトを起動せず `claude-review` を `pending` に据え置く
+fail-closed 経路に入るため、本プロンプトには到達しません / Issue #433 Req 2）。3 ファイルのうち
+一部のみ `(none)` の場合（残りは実本文が供給されている）は、供給された実本文を用いて 3 観点を
+判定してください（`(none)` の観点は判定材料不足として後述「保守的判定」を適用）。
 
 ### requirements.md（{SPEC_DIR}/requirements.md）
 
@@ -118,8 +121,17 @@
 ## 保守的判定（Issue #407 Req 2.4 / 最重要）
 
 判定に **確信が持てない** 場合（requirements.md の文意が曖昧で AC カバレッジを判定できない /
-spec dir 不在 / 3 ファイルいずれか不在 / 文書間の表記揺れで integrity が確認できない 等）は、
-**保守的に `approve` に倒してください**。理由:
+3 ファイルのうち一部のみ `(none)`（残りは実本文供給）で当該観点の整合が確認できない /
+文書間の表記揺れで integrity が確認できない 等）は、**保守的に `approve` に倒してください**。
+
+> NOTE（Issue #433）: spec 本文を **1 つも取得できない** / spec dir 自体を解決できない場合は、
+> watcher 側で本プロンプトを起動せず `claude-review` を `pending` に据え置く fail-closed 経路に
+> 入るため、本プロンプトには到達しません。したがって「spec 本文が全く読めない → 保守的 approve」
+> という判断は **本プロンプトの責務ではありません**（本プロンプトには少なくとも 1 ファイルの
+> 実本文が供給されている前提）。本節の保守的 approve は「実本文は供給されたが判定に確信が
+> 持てない」ケースに限定されます。
+
+理由:
 
 - false-reject によって設計 PR が **永久 BLOCKED** になることを回避する
 - 設計 PR の合否は人間運用の `awaiting-design-review` ラベルゲートと **OR 条件で併存**
@@ -132,7 +144,9 @@ spec dir 不在 / 3 ファイルいずれか不在 / 文書間の表記揺れで
   `_Requirements: 2.3_` が参照している → traceability 違反 `reject`
 - **解釈の余地あり**: 例: design.md の Component 名が tasks.md `_Boundary:_` で完全一致では
   ないが、明らかに同義の表記 → `approve`（typo / 表記揺れは reject 対象外）
-- **判断材料不足**: 例: spec dir が `(none)` でファイルが読めない → `approve`（保守的）
+- **判断材料不足（部分）**: 例: tasks.md は実本文が供給されているが design.md が `(none)`
+  で design⇄tasks 整合を確認できない → 当該観点は `approve`（保守的）。なお spec 本文が
+  全く読めないケースは fail-closed で本プロンプトに到達しない（Issue #433）。
 
 ## read-only 制約（Issue #407 Req 1.5）
 
