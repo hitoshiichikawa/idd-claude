@@ -1275,6 +1275,44 @@ pr_publish_claude_status() {
       ;;
   esac
 
+  # Issue #434 Defect B / Req 3, 4: terminal ラベル付き PR への claude-review=success を
+  # fail-closed する。terminal ラベル（claude-failed / needs-decisions）確定後に in-flight
+  # だった Reviewer が success を publish すると merge gate が「失敗確定済み PR」に対して緑に
+  # 戻り、auto-merge が誤発火する。これを防ぐため、success（result=approve）の publish 直前に
+  # 当該 PR の現在ラベルを再取得し、terminal ラベルがあれば success を publish せず skip する
+  # （required check が pending のまま残り auto-merge は発火しない / fail-closed）。
+  #
+  # 本ガードを唯一の publisher である本関数 1 箇所に集約することで、adjudicator 経路
+  # （adj_apply_status_decision → pr_publish_claude_status）と catch-up 経路
+  # （pr_publish_claude_status_from_branch → pr_publish_claude_status）も自動的に
+  # fail-closed 化される（Req 3.1〜3.4）。reject（failure）は gate を閉じる方向なので
+  # terminal でもそのまま publish する（ガードは success 経路のみ / Req 3.5）。
+  if [ "$state" = "success" ]; then
+    # Req 4.1: 現在のラベル集合を再取得して terminal 判定する。
+    local cur_labels_json gh_rc=0
+    cur_labels_json=$(timeout "${PR_REVIEWER_GIT_TIMEOUT:-120}" \
+      gh pr view "$pr_number" --repo "$REPO" --json labels 2>/dev/null) || gh_rc=$?
+    if [ "$gh_rc" -ne 0 ] || [ -z "$cur_labels_json" ]; then
+      # Req 4.2 / 4.3: ラベル再取得失敗時は従来どおり publish を継続（fail-open / 可用性優先）。
+      # silent fail させず WARN を 1 行残す。
+      pr_warn "claude-review status publish: terminal ラベル再取得に失敗（fail-open で publish 継続 / pr=#${pr_number} sha=${sha} rc=${gh_rc}）"
+    else
+      # Req 3.1, 3.2: claude-failed / needs-decisions のいずれかを持つなら success を publish しない。
+      local terminal_label=""
+      if echo "$cur_labels_json" | jq -e --arg l "$LABEL_FAILED" \
+          '.labels // [] | map(.name) | index($l)' >/dev/null 2>&1; then
+        terminal_label="$LABEL_FAILED"
+      elif echo "$cur_labels_json" | jq -e --arg l "$LABEL_NEEDS_DECISIONS" \
+          '.labels // [] | map(.name) | index($l)' >/dev/null 2>&1; then
+        terminal_label="$LABEL_NEEDS_DECISIONS"
+      fi
+      if [ -n "$terminal_label" ]; then
+        pr_warn "claude-review status publish: terminal label '${terminal_label}' present, skip claude-review=success (fail-closed / pr=#${pr_number} sha=${sha})"
+        return 0
+      fi
+    fi
+  fi
+
   pr_publish_commit_status "$pr_number" "$sha" "claude-review" "$state" "$description" "$target_url"
   return $?
 }

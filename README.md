@@ -2599,8 +2599,11 @@ suppression ログに委ねて重複させません（Req 7.3）。
   本機能導入前と完全に等価です（gh API 呼び出しゼロ / Req 1.5, 6.1, NFR 1.1）
 - 不具合発生時は `AUTO_MERGE_ENABLED=false` を明示するか `FULL_AUTO_ENABLED=false`
   を倒すことで全 full-auto 系挙動を即時 no-op にできます（#348 AND ゲート）
-- 既に auto-merge が enable された PR を後から取り消す機能は本 processor のスコープ外です
-  （Out of Scope）。必要なら GitHub UI / `gh pr merge --disable-auto` で個別に解除してください
+- 既に auto-merge が enable（arm）された PR が `claude-failed` / `needs-decisions` といった
+  terminal ラベルへ遷移した場合、[Auto-Merge Disarm Processor (#434)](#auto-merge-disarm-processor-434)
+  が毎サイクル自動で `gh pr merge --disable-auto` を実行して arm を取り消します（#434 で実装）。
+  arm 時点判定（#352 本 processor）は arm 後の遷移を追えないため、disarm は専用 processor が
+  GitHub 直接クエリで補います
 
 ---
 
@@ -2740,12 +2743,72 @@ suppression ログに委ねて重複させません（[#352](#auto-merge-process
   を倒すことで全 full-auto 系挙動を即時 no-op にできます（[#348 AND ゲート](#full-auto-kill-switch)）
 - 実装 PR 用 [`AUTO_MERGE_ENABLED`](#auto-merge-processor-352) と独立に制御できるため、設計
   PR 経路だけ一時停止することも可能です
-- 既に auto-merge が enable された PR を後から取り消す機能は本 processor のスコープ外です
-  （Out of Scope）。必要なら GitHub UI / `gh pr merge --disable-auto` で個別に解除してください
+- 設計 PR でも、arm 済みの PR が `claude-failed` / `needs-decisions` といった terminal ラベルへ
+  遷移した場合は [Auto-Merge Disarm Processor (#434)](#auto-merge-disarm-processor-434) が毎サイクル
+  自動で `gh pr merge --disable-auto` を実行して arm を取り消します（#434 で実装。impl / design
+  双方の arm 源を共通の disarm processor が補います）
 
 ### ⚠️ merge 後の再配置が必要
 
 本機能は新規モジュール `modules/auto-merge-design.sh` を追加します。既存 watcher を使っている
+場合は merge 後に以下を再実行して `$HOME/bin/modules/` を更新してください（未配置だと
+`REQUIRED_MODULES` のローダが起動時にエラーで停止します）:
+
+```bash
+cd ~/.idd-claude && git pull && ./install.sh --local
+```
+
+---
+
+## Auto-Merge Disarm Processor (#434)
+
+local watcher は [Auto-Merge Processor (#352)](#auto-merge-processor-352) /
+[Design Auto-Merge Processor (#354)](#design-auto-merge-processor-354) の **直後**で、
+**`FULL_AUTO_ENABLED=true` AND (`AUTO_MERGE_ENABLED=true` OR `AUTO_MERGE_DESIGN_ENABLED=true`)**
+が成立するときのみ起動する Auto-Merge Disarm Processor を実行します。これは、**arm 済み**
+（GitHub ネイティブ auto-merge が有効化済み = `autoMergeRequest != null`）の open PR が、その後
+`claude-failed` / `needs-decisions` といった **terminal ラベル**へ遷移した場合に、`gh pr merge
+--disable-auto` で **arm を取り消す（disarm）** processor です。
+
+### 解決する不具合（#434）
+
+arm 時点判定（[#352](#auto-merge-processor-352) の `am_should_enable_for_pr`）は `claude-failed` /
+`needs-decisions` を除外しますが、これは **arm 時点のワンショット**です。arm 後に PR が terminal
+ラベルへ遷移しても arm はそのまま残るため、必須 status checks が全 green に到達した瞬間に
+「失敗確定済み PR」が GitHub の auto-merge state machine によって誤って merge されてしまいます。
+本 processor は毎サイクル GitHub を **直接クエリ**し、「arm 済み かつ terminal ラベル付き かつ
+open」な PR を列挙して disarm することでこの不具合を解消します。
+
+加えて、in-flight だった Reviewer が terminal ラベル確定後に `claude-review=success` を publish
+して merge gate を緑へ戻すのを防ぐため、claude-review status publisher
+（`pr_publish_claude_status`）に **fail-closed ガード**を追加しています。success（approve）の
+publish 直前に対象 PR の現在ラベルを再取得し、terminal ラベルがあれば success を publish せず
+skip します（required check が pending のまま残り auto-merge は発火しません）。reject（failure）
+は gate を閉じる方向のため terminal でもそのまま publish します。ラベル再取得に失敗した場合は
+従来どおり publish を継続（fail-open / 可用性優先）し WARN を 1 行残します。
+
+### 設定 env
+
+| env | 既定 | 説明 |
+|---|---|---|
+| （gate 専用 env なし） | — | opt-in gate は arm 源に相乗りです。`FULL_AUTO_ENABLED=true` AND (`AUTO_MERGE_ENABLED=true` OR `AUTO_MERGE_DESIGN_ENABLED=true`) のときのみ動作します。新規 gate env は追加しません |
+| `AUTO_MERGE_DISARM_MAX_PRS` | `10` | 1 サイクルで disarm する PR 数の上限（残りは次回サイクルに持ち越し）。`=数値` 以外は既定 `10` に正規化 |
+
+timeout は既存 `AUTO_MERGE_GIT_TIMEOUT`（既定 `60`）を流用します（新規 timeout env は追加しません）。
+
+### 後方互換 / 不具合時の停止
+
+- gate を arm 源（`AUTO_MERGE_ENABLED` / `AUTO_MERGE_DESIGN_ENABLED`）に相乗りさせているため、
+  arm が起きない環境（両 arm 源 OFF / `FULL_AUTO_ENABLED=false`）では disarm も **完全 no-op**
+  （gh API 呼び出しゼロ）で本不具合修正導入前と等価です
+- claude-review status の fail-closed ガードは既存の claude-review publish opt-in gate
+  （`PR_REVIEWER_STATUS_CHECK_ENABLED` 系）の内側で動作し、新たな外部サービス呼び出し用 gate を
+  追加しません
+- disarm 対象が 0 件のサイクルはサマリ 1 行のみに留め、過剰なログを出しません
+
+### ⚠️ merge 後の再配置が必要
+
+本機能は新規モジュール `modules/auto-merge-disarm.sh` を追加します。既存 watcher を使っている
 場合は merge 後に以下を再実行して `$HOME/bin/modules/` を更新してください（未配置だと
 `REQUIRED_MODULES` のローダが起動時にエラーで停止します）:
 
