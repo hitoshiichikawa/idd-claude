@@ -32,7 +32,7 @@
   - _Boundary: ar_classify_diff, ar_classify_additive_
   - _Depends: 2_
 
-- [ ] 4. self-register 指針を design-principles.md に追記（root + repo-template byte 一致）
+- [x] 4. self-register 指針を design-principles.md に追記（root + repo-template byte 一致）
   - `.claude/rules/design-principles.md` の「File Structure Plan の書き方」節と「参考」節の間に新節 `## bootstrap 一極集中の回避（self-register パターン）` を追加（canonical）
   - 内容: bootstrap 一極集中の merge conflict ホットスポット課題（Req 4.1）/ self-register（registry）回避指針の提示（Req 4.1, 4.2）/ 複数ドメインが加算的追記を検討する場合の評価対象提示（Req 4.2）/ 強制レベルは **推奨**で誤読されない明示（Req 4.3、冒頭 1 文で宣言）。コードテンプレートは置かない（Out of Scope）
   - `repo-template/.claude/rules/design-principles.md` に同一内容を byte 一致反映（Req 5.1）
