@@ -282,6 +282,91 @@ assert_eq "Req 2.4: 理由 diff-failed" "diff-failed" "$LINE2"
 assert_eq "Req 2.4 (NFR2.1): unified diff 失敗で return 1" "1" "$LAST_RC"
 
 # ============================================================
+# Section 2: ar_classify_diff への二次判定フック（結線）
+#   gate OFF 従来 semantic / MECHANICAL_PATHS 全一致 mechanical /
+#   gate ON 加算的成立 mechanical 昇格
+# ============================================================
+echo ""
+echo "--- Section 2: ar_classify_diff の二次判定フック（結線） ---"
+
+run_classify() {
+  local out rc=0
+  out=$(ar_classify_diff "$@") || rc=$?
+  LAST_RC="$rc"
+  LINE1=$(printf '%s\n' "$out" | sed -n '1p')
+  LINE2=$(printf '%s\n' "$out" | sed -n '2p')
+}
+
+# 2.1: gate OFF + path 逸脱 → 従来 semantic（NFR1.1, NFR1.3）
+reset_git_stub
+# shellcheck disable=SC2034
+MECHANICAL_PATHS="package-lock.json"
+# shellcheck disable=SC2034
+AUTO_REBASE_ADDITIVE="off"
+# shellcheck disable=SC2034
+AUTO_REBASE_ADDITIVE_PATHS="cmd/api/main.go"
+GIT_NAMES_FIXTURE="$FIXTURE_DIR/names-add-only.txt"
+GIT_DIFF_FIXTURE="$FIXTURE_DIR/diff-add-only.txt"
+run_classify 200 "main" "claude/feat-x"
+assert_eq "NFR1.1: gate OFF + path 逸脱で従来 semantic" "semantic" "$LINE1"
+assert_eq "NFR1.3: gate OFF で unmatched path を 2 行目に出す" "cmd/api/main.go" "$LINE2"
+
+# 2.2: gate ON でも MECHANICAL_PATHS 全一致なら従来 mechanical（NFR1.3）
+reset_git_stub
+# shellcheck disable=SC2034
+MECHANICAL_PATHS="cmd/api/main.go"
+# shellcheck disable=SC2034
+AUTO_REBASE_ADDITIVE="claude"
+# shellcheck disable=SC2034
+AUTO_REBASE_ADDITIVE_PATHS="cmd/api/main.go"
+GIT_NAMES_FIXTURE="$FIXTURE_DIR/names-add-only.txt"
+GIT_DIFF_FIXTURE="$FIXTURE_DIR/diff-add-only.txt"
+run_classify 201 "main" "claude/feat-x"
+assert_eq "NFR1.3: MECHANICAL_PATHS 全一致で従来 mechanical（二次判定経由せず）" "mechanical" "$LINE1"
+assert_eq "NFR1.3: MECHANICAL_PATHS 全一致で 2 行目なし" "" "$LINE2"
+
+# 2.3: gate ON + MECHANICAL_PATHS 逸脱 + 加算的成立 → mechanical 昇格（Req 1.2, 2.1）
+reset_git_stub
+# shellcheck disable=SC2034
+MECHANICAL_PATHS="package-lock.json"
+# shellcheck disable=SC2034
+AUTO_REBASE_ADDITIVE="claude"
+# shellcheck disable=SC2034
+AUTO_REBASE_ADDITIVE_PATHS="cmd/api/main.go"
+GIT_NAMES_FIXTURE="$FIXTURE_DIR/names-add-only.txt"
+GIT_DIFF_FIXTURE="$FIXTURE_DIR/diff-add-only.txt"
+run_classify 202 "main" "claude/feat-x"
+assert_eq "Req 1.2 / 2.1: gate ON 加算的成立で mechanical 昇格" "mechanical" "$LINE1"
+assert_eq "Req 2.1: 加算的昇格時 2 行目なし（mechanical stdout 契約）" "" "$LINE2"
+
+# 2.4: gate ON + MECHANICAL_PATHS 逸脱 + 削除行含み → semantic 維持（Req 2.2）
+reset_git_stub
+# shellcheck disable=SC2034
+MECHANICAL_PATHS="package-lock.json"
+# shellcheck disable=SC2034
+AUTO_REBASE_ADDITIVE="claude"
+# shellcheck disable=SC2034
+AUTO_REBASE_ADDITIVE_PATHS="cmd/api/main.go"
+GIT_NAMES_FIXTURE="$FIXTURE_DIR/names-add-only.txt"
+GIT_DIFF_FIXTURE="$FIXTURE_DIR/diff-with-deletion.txt"
+run_classify 203 "main" "claude/feat-x"
+assert_eq "Req 2.2: gate ON でも削除行含みは semantic 維持" "semantic" "$LINE1"
+assert_eq "Req 2.2: semantic 維持時 unmatched path を 2 行目に出す" "cmd/api/main.go" "$LINE2"
+
+# 2.5: gate ON + MECHANICAL_PATHS 逸脱 + bootstrap allowlist 外 path → semantic（Req 2.3）
+reset_git_stub
+# shellcheck disable=SC2034
+MECHANICAL_PATHS="package-lock.json"
+# shellcheck disable=SC2034
+AUTO_REBASE_ADDITIVE="claude"
+# shellcheck disable=SC2034
+AUTO_REBASE_ADDITIVE_PATHS="cmd/api/main.go"
+GIT_NAMES_FIXTURE="$FIXTURE_DIR/names-path-out.txt"
+GIT_DIFF_FIXTURE="$FIXTURE_DIR/diff-add-only.txt"
+run_classify 204 "main" "claude/feat-x"
+assert_eq "Req 2.3: bootstrap allowlist 外 path で semantic 維持" "semantic" "$LINE1"
+
+# ============================================================
 # Summary
 # ============================================================
 echo ""

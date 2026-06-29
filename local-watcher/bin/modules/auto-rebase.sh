@@ -499,6 +499,22 @@ ar_classify_diff() {
   done <<< "$changed_paths"
 
   if [ -n "$first_unmatched" ]; then
+    # #438: MECHANICAL_PATHS 照合で semantic 確定する手前に、gate ON 時のみ加算的
+    # 二次判定をフックする。gate OFF（既定）では ar_classify_additive を一切呼ばず、
+    # stdout / ログとも導入前と完全に同一（Req 1.1, NFR1.1）。
+    if [ "$AUTO_REBASE_ADDITIVE" = "claude" ]; then
+      local additive_output additive_verdict
+      additive_output=$(ar_classify_additive "$pr_number" "$base_ref" "$head_ref") || true
+      additive_verdict=$(printf '%s\n' "$additive_output" | sed -n '1p')
+      if [ "$additive_verdict" = "additive" ]; then
+        # 加算的成立 → mechanical 昇格。既存 mechanical の stdout 契約（1 行目のみ）に
+        # 合わせ 2 行目は出さない。根拠ログを記録（Req 1.2, 2.5）。
+        ar_log "PR #${pr_number}: classification=mechanical reason=additive unmatch=${first_unmatched}"
+        echo "mechanical"
+        return 0
+      fi
+    fi
+
     # Req 5.5: 判定結果と最初の unmatched path をログに含める
     ar_log "PR #${pr_number}: classification=semantic unmatch=${first_unmatched}"
     echo "semantic"
