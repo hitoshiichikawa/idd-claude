@@ -8,7 +8,7 @@
   - `bash -n` / `shellcheck` クリーンを確認
   - _Requirements: 1.1, 1.2, 1.3, 1.4, NFR1.2_
 
-- [ ] 2. 加算的判定の純粋関数 ar_classify_additive を新設（auto-rebase.sh）
+- [x] 2. 加算的判定の純粋関数 ar_classify_additive を新設（auto-rebase.sh）
   - `ar_classify_additive`（純粋・トップレベル副作用なし・`ar_` prefix）を追加。env は遅延束縛参照で `extract_function` 抽出可能に保つ
   - gate OFF → `not-additive`/`gate-off`、paths 空 → `not-additive`/`paths-empty` を返す（Req 1.1, 1.4）
   - `git diff --name-only base..head` で全 path が `AUTO_REBASE_ADDITIVE_PATHS` glob に閉じるか照合、逸脱 → `not-additive`/`path-out`（Req 2.3）
