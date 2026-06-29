@@ -1286,7 +1286,7 @@ process_auto_rebase() {
   if ar_semantic_enabled; then
     _semantic_resolved_state="claude"
   fi
-  ar_log "サイクル開始 (mode=${AUTO_REBASE_MODE}, paths=${MECHANICAL_PATHS:-(empty)}, max_prs=${AUTO_REBASE_MAX_PRS}, model=${AUTO_REBASE_MODEL}, max_turns=${AUTO_REBASE_MAX_TURNS}, timeout=${AUTO_REBASE_MAX_TURNS_SEC}s, semantic=${AUTO_REBASE_SEMANTIC}, semantic-resolved=${_semantic_resolved_state}, semantic-max-attempts=${AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS})"
+  ar_log "サイクル開始 (mode=${AUTO_REBASE_MODE}, paths=${MECHANICAL_PATHS:-(empty)}, max_prs=${AUTO_REBASE_MAX_PRS}, model=${AUTO_REBASE_MODEL}, max_turns=${AUTO_REBASE_MAX_TURNS}, timeout=${AUTO_REBASE_MAX_TURNS_SEC}s, semantic=${AUTO_REBASE_SEMANTIC}, semantic-resolved=${_semantic_resolved_state}, semantic-max-attempts=${AUTO_REBASE_SEMANTIC_MAX_ATTEMPTS}, additive=${AUTO_REBASE_ADDITIVE}, additive-paths=${AUTO_REBASE_ADDITIVE_PATHS:-(empty)})"
 
   # Req 2.1〜2.5 / Req 8.4: 候補 PR 取得（API エラー時は空配列を扱う）
   local prs_json
