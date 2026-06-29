@@ -1161,6 +1161,66 @@ pi_classify_round_outcome() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_round_commit_pushed: round 開始時 HEAD と round 終了時 HEAD の SHA 比較で
+#   「新規 commit が push されたか（= 進捗ありか）」を判定する純粋関数
+#   入力: $1=before_sha (round 開始時の HEAD SHA)
+#         $2=after_sha  (round 終了時の HEAD SHA。auto-recovery commit 後の値を含む)
+#   出力: stdout に "true"（HEAD が変化 = 進捗あり）/ "false"（変化なし = 進捗なし）
+#   返り値: 0 固定
+#
+#   設計判断 (Issue #122 Req 3.1 / 3.2 / Issue #435 Req 2):
+#     - before_sha と after_sha が両方とも非空 かつ 相異なるときのみ "true"。
+#     - after_sha は pi_auto_commit_and_push（auto-recovery）の後に採取されるため、
+#       Developer 自身の commit と auto-recovery commit のどちらで HEAD が進んでも
+#       "true" になる（Issue #435 Req 2.3 の不変条件を 1 か所に固定する）。
+#     - いずれかの SHA が空（取得失敗）の場合は "false"（進捗なし＝安全側）に倒し、
+#       SHA が取れないことを進捗ありと誤判定して finalize へ倒さない。
+#     - 純粋関数（副作用なし / グローバル参照なし）として pi_run_iteration から呼び出し、
+#       テストで隔離検証可能にする。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_round_commit_pushed() {
+  local before_sha="${1-}"
+  local after_sha="${2-}"
+  if [ -n "$before_sha" ] && [ -n "$after_sha" ] && [ "$before_sha" != "$after_sha" ]; then
+    echo "true"
+  else
+    echo "false"
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_next_no_progress_streak: no-progress 連続カウンタの次値を求める純粋関数
+#   入力: $1=commit_pushed ("true" | "false")
+#         $2=prev_streak   (非負整数。前サイクルまでの no-progress 連続カウンタ値)
+#   出力: stdout に次の streak 値
+#           commit_pushed=true  → "0"（進捗ありでリセット）
+#           commit_pushed=false → prev_streak + 1（進捗なしで加算）
+#   返り値: 0 固定
+#
+#   設計判断 (Issue #122 Req 3.1 / 3.2 / Issue #435 Req 2):
+#     - commit_pushed が "true" のときのみ 0 にリセット。auto-recovery 経由でも
+#       pi_round_commit_pushed が "true" を返すため streak は 0 にリセットされる
+#       （Issue #435 Req 2.3）。
+#     - prev_streak が非数値（取得失敗）の場合は 0 起点として +1 し、誤って大きな値で
+#       escalate に倒さない安全側挙動とする。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_next_no_progress_streak() {
+  local commit_pushed="${1-}"
+  local prev_streak="${2-}"
+  if [ "$commit_pushed" = "true" ]; then
+    echo "0"
+    return 0
+  fi
+  if [[ "$prev_streak" =~ ^[0-9]+$ ]]; then
+    echo "$((prev_streak + 1))"
+  else
+    echo "1"
+  fi
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_run_iteration: 1 PR 分の iteration を実行（fresh context Claude 起動）
 #   入力: $1=pr_json
 #   戻り値: 0=success(commit+push or reply-only), 1=failure, 2=escalated(round上限到達),
@@ -1484,20 +1544,17 @@ pi_run_iteration() {
   esac
 
   if [ $rc -eq 0 ]; then
-    # Issue #122 Req 3.1 / 3.2: SHA 比較で「新規 commit が push されたか」判定。
-    # before_sha と after_sha が異なれば新規 commit あり（claude 自身による commit+push、
+    # Issue #122 Req 3.1 / 3.2 / Issue #435 Req 2: SHA 比較で「新規 commit が push されたか」
+    # 判定。before_sha と after_sha が異なれば新規 commit あり（claude 自身による commit+push、
     # または pi_auto_commit_and_push 経由の auto-commit、いずれもカバー）。
-    local commit_pushed=false
-    if [ -n "$before_sha" ] && [ -n "$after_sha" ] && [ "$before_sha" != "$after_sha" ]; then
-      commit_pushed=true
-    fi
-    # Issue #122 Req 3.1 / 3.2: no-progress 連続カウンタの更新
+    # 判定ロジックは pi_round_commit_pushed に純粋関数として切り出し、回帰テストで不変条件
+    # （HEAD 変化 → 進捗あり / auto-recovery 経由でも進捗あり）を固定する。
+    local commit_pushed
+    commit_pushed=$(pi_round_commit_pushed "$before_sha" "$after_sha")
+    # Issue #122 Req 3.1 / 3.2 / Issue #435 Req 2: no-progress 連続カウンタの更新。
+    # commit_pushed=true（auto-recovery 経由を含む）でリセット、false で +1（pi_next_no_progress_streak）。
     local new_streak
-    if [ "$commit_pushed" = "true" ]; then
-      new_streak=0
-    else
-      new_streak=$((prev_streak + 1))
-    fi
+    new_streak=$(pi_next_no_progress_streak "$commit_pushed" "$prev_streak")
 
     # Issue #122 Req 6.2: round 終了時点で no-progress 連続カウンタが加算されたら
     # PR 番号 / kind / 加算後の連続カウンタ / 上限値を 1 行ログに記録
