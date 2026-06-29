@@ -88,6 +88,83 @@ adj_oos_enabled() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# adj_oos_prompt_block: out-of-scope（第 3 判定）gate ON 時に prompt へ注入する分類規約 (#437)
+#   入力: なし
+#   出力: stdout に注入用 markdown ブロック（末尾改行なし）
+#   返り値: 0 固定
+#   Req: 1.2 / 1.4 / 1.5 / 4.2
+#
+#   adj_classify_findings が adjudicator-prompt.tmpl の {OOS_INSTRUCTIONS} placeholder へ
+#   gate ON のとき本文字列を代入する。OFF では placeholder 行ごと除去する（byte 等価）。
+#   本ブロックは adjudicator に legitimate-out-of-scope を**生成**させる指示:
+#     (a) いつ legitimate-out-of-scope と分類するか（Req 1.2）
+#     (b) 判定根拠（どの確定事項と矛盾し、なぜ当該 PR で是正不能か）を reason に含める（Req 1.4）
+#     (c) 「迷ったら legitimate」原則の再強調（Req 1.5 / NFR 2.1 安全側）
+#     (d) summary.legitimate_out_of_scope 出力契約（Req 4.2 / 出力 schema との整合）
+# ─────────────────────────────────────────────────────────────────────────────
+adj_oos_prompt_block() {
+  cat <<'OOS_BLOCK'
+
+## out-of-scope（第 3 判定 / legitimate-out-of-scope）の分類規約（本機能が有効です）
+
+本起動では out-of-scope 第 3 判定が有効化されています。各指摘は
+`legitimate` / `excessive` に加えて **`legitimate-out-of-scope`** の 3 値のいずれか 1 つに
+分類してください。
+
+### legitimate-out-of-scope と分類する条件
+
+指摘内容が **requirements.md / design.md / tasks.md の確定事項と矛盾し、かつ当該 impl PR の
+権限では是正できない**とき、`legitimate-out-of-scope` と分類します。典型例:
+
+- 確定済みの AC / Components and Interfaces をより強くする「強化要件」で、満たすには
+  requirements.md / design.md / tasks.md の改訂が必要なもの（impl PR は規約上これらを
+  書き換えられない）
+- spec が古く（spec-stale）、現行 impl は確定 spec を正しく満たしているが、指摘は spec 改訂を
+  前提にしているもの
+
+これらは「正当な指摘ではあるが当該 impl PR のスコープ外（設計フェーズ / 別 Issue で扱うべき）」
+であり、impl iteration の round を消費させない分類です。
+
+### 判定根拠の出力（必須）
+
+`legitimate-out-of-scope` と分類した指摘の `reason` には、**どの確定事項（どの AC / どの
+Component / どの spec ファイル）と矛盾し、なぜ当該 PR で是正不能か**を 200 文字以内で
+明記してください。
+
+### 「迷ったら legitimate」原則（最優先 / 安全側）
+
+out-of-scope か否か確信が持てない場合は、`legitimate-out-of-scope` ではなく **`legitimate`**
+を選んでください。out-of-scope への誤分類は「実害指摘を round 消費対象から外す」最悪シナリオに
+つながるため、確信が持てなければ通常の `legitimate` に倒します（実害を握り潰さない）。
+
+### 出力契約の拡張（本機能有効時）
+
+上記「出力契約」セクションの `verdict` 列挙に **`"legitimate-out-of-scope"`** を加え、
+`summary` に **`legitimate_out_of_scope`**（整数）フィールドを追加してください:
+
+```json
+{
+  "decisions": [
+    { "id": 1, "severity": "high|medium|low", "file": "path", "line": 42,
+      "verdict": "legitimate" | "excessive" | "legitimate-out-of-scope",
+      "reason": "<日本語 200 文字以内>" }
+  ],
+  "summary": {
+    "total": <整数>,
+    "legitimate": <整数>,
+    "excessive": <整数>,
+    "legitimate_out_of_scope": <整数>
+  }
+}
+```
+
+不変条件は `legitimate + excessive + legitimate_out_of_scope == total` です。
+`summary.legitimate_out_of_scope` は `verdict == "legitimate-out-of-scope"` の件数と一致させて
+ください。
+OOS_BLOCK
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # adj_extract_findings: codex stdout から `## 指摘事項` 配下の bullet 行を抽出し JSON 配列化
 #   入力: $1 = review_text（codex stdout の全文）
 #   出力: stdout に [{"severity":"high|medium|low","file":"...","line":N,"message":"..."}, ...]
@@ -394,6 +471,20 @@ adj_classify_findings() {
   rendered="${rendered//\{REVIEW_TEXT\}/$review_text_body}"
   rendered="${rendered//\{SPEC_DIR\}/$spec_dir_val}"
   rendered="${rendered//\{REQUIREMENTS_MD\}/$requirements_md_val}"
+
+  # #437 Req 1.2 / 1.4 / 1.5 / 4.2: out-of-scope（第 3 判定）gate ON のときだけ、
+  # adjudicator に legitimate-out-of-scope を**生成**させる分類規約を {OOS_INSTRUCTIONS}
+  # placeholder へ注入する。gate OFF（既定）では placeholder 行（`{OOS_INSTRUCTIONS}\n`）を
+  # 行ごと除去し、既存 prompt と byte 等価にする（NFR 1.1〜1.3 後方互換 no-op）。
+  if adj_oos_enabled; then
+    local oos_instructions
+    oos_instructions=$(adj_oos_prompt_block)
+    # placeholder（行末改行は残す）を規約ブロックで置換。後続の空行 + 見出しはそのまま続く。
+    rendered="${rendered//\{OOS_INSTRUCTIONS\}/$oos_instructions}"
+  else
+    # placeholder 行を改行ごと除去（gate OFF で既存 prompt とバイト等価を維持）。
+    rendered="${rendered//\{OOS_INSTRUCTIONS\}$'\n'/}"
+  fi
 
   # mktemp で prompt 一時ファイル / 出力 tempfile を作成し、trap で削除（security-review.sh pattern）
   local prompt_file out_file err_file
