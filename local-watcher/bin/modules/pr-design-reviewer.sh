@@ -4,7 +4,8 @@
 #
 # 用途:
 #   設計 PR (`claude/issue-<N>-design-<slug>`) に対する独立 Claude 設計レビュアの本体。
-#   `DESIGN_REVIEWER_ENABLED=true` のとき open / non-draft の設計 PR を検出し、
+#   `DESIGN_REVIEWER_ENABLED`（#432 で既定 ON / `=false` 厳密一致のみ OFF）が有効なとき
+#   open / non-draft の設計 PR を検出し、
 #   `docs/specs/<N>-<slug>/{requirements.md, design.md, tasks.md}` の 3 観点
 #   （AC カバレッジ / design⇄tasks 整合 / Traceability）で `approve` / `reject` を判定する。
 #   判定結果は `claude-review` commit status の publish と `needs-iteration` ラベルの
@@ -13,10 +14,14 @@
 #
 #   設計の詳細は docs/specs/407-feat-pr-reviewer-pr-claude-review-claude/design.md を参照。
 #
-#   - opt-in gate 判定: pdr_gate_enabled
+#   - opt-out gate 判定: pdr_gate_enabled（#432 で既定 ON 化）
 #     既に正規化済みの `DESIGN_REVIEWER_ENABLED`（issue-watcher.sh の Config で
-#     `case true) ... *) false` に正規化済み）を厳密 `=true` で評価する。重複正規化は
-#     行わない（既定値の責任は呼び出し側 / Req 6.1）。
+#     `case false) ... *) true` に正規化済み = `=false` 厳密一致のみ OFF・それ以外は ON）を
+#     厳密 `=true` で評価する。重複正規化は行わない（既定値の責任は呼び出し側 / Req 1.1〜1.5）。
+#   - runtime 資産不在時の graceful no-op: pdr_prompt_asset_resolvable（#432 Req 2）
+#     既定 ON 化に伴い installer 未再実行の repo がプロンプトテンプレ不在経路に乗りやすくなる
+#     ため、dispatcher entry（process_pr_design_reviewer 冒頭 / gate 通過後・候補取得前）で
+#     必須プロンプト資産の解決可否を 1 回検査し、解決不能なら WARN 1 行 + return 0（no-op）。
 #   - head pattern マッチング: pdr_classify_design_pr
 #     `DESIGN_REVIEWER_HEAD_PATTERN`（既定 `^claude/issue-[0-9]+-design-`）と head_ref を
 #     ERE で照合し、design / 非 design の 2 値判定を返す（Req 1.3, 7.4）。
@@ -61,17 +66,52 @@
 #   - README「Design PR Reviewer (#407)」節（task 8 で追加予定）
 
 # ─────────────────────────────────────────────────────────────────────────────
-# pdr_gate_enabled: opt-in gate 評価（既に正規化済みの env を厳密一致で判定）
+# pdr_gate_enabled: opt-out gate 評価（既に正規化済みの env を厳密一致で判定 / #432 既定 ON）
 #   入力: なし（env のみ参照）
 #   出力: なし
 #   戻り値: 0 = ON / 1 = OFF
 #
 #   issue-watcher.sh の Config ブロックで `DESIGN_REVIEWER_ENABLED` は
-#   `case true) ... *) false` で正規化されているため、本関数は厳密 `=true` 判定のみ行う
-#   （既定 / 未設定 / typo / 大文字違い等はすべて OFF / Req 6.1 安全側 / 重複正規化はしない）。
+#   `case false) ... *) true` で正規化されている（#432 で既定 ON / `=false` 厳密一致のみ OFF・
+#   未設定 / typo / 大文字違い等はすべて ON）。本関数は正規化済み値を厳密 `=true` 判定のみ
+#   行う（重複正規化はしない）。Config が常に先に正規化するため、防御的 default も
+#   既定 ON 意味論に揃えて `:-true` とする（挙動には影響しない / コメントとの一貫性 / Req 1.1）。
 # ─────────────────────────────────────────────────────────────────────────────
 pdr_gate_enabled() {
-  if [ "${DESIGN_REVIEWER_ENABLED:-false}" = "true" ]; then
+  if [ "${DESIGN_REVIEWER_ENABLED:-true}" = "true" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pdr_prompt_asset_resolvable: 設計 Reviewer の必須プロンプト資産が解決できるかを検査
+#   入力: なし（env のみ参照）
+#   出力: なし
+#   戻り値: 0 = 解決可能 / 1 = 解決不能（呼び出し元で WARN 1 行 + no-op return）
+#
+#   Req: 2.1 / 2.2 / 2.3 / 2.4（runtime 資産不在時の graceful no-op / fail-closed で永久
+#        BLOCKED を作らない）
+#
+#   解決順序は pdr_invoke_reviewer の prompt 解決ロジックと一致させる:
+#     (a) `DESIGN_REVIEWER_PROMPT` env が非空 → その値を本文として使うため解決可能 (rc=0)
+#     (b) 空なら `$HOME/bin/design-review-prompt.tmpl` が読めるファイルとして存在するか検査
+#         - HOME 解決不能 / テンプレ不在 / 読めない → 解決不能 (rc=1)
+#   - 副作用なし（read-only / claude / gh / git 不起動）。
+#   - 既定 ON 化（#432）後、installer 未再実行の repo はテンプレ不在経路に乗りやすいため、
+#     per-PR WARN（claude 失敗扱いで pending 据え置き）の連発を避け、processor 全体を 1 回の
+#     WARN で no-op return させる安全弁の判定本体。
+# ─────────────────────────────────────────────────────────────────────────────
+pdr_prompt_asset_resolvable() {
+  if [ -n "${DESIGN_REVIEWER_PROMPT:-}" ]; then
+    return 0
+  fi
+  local home_dir="${HOME:-}"
+  if [ -z "$home_dir" ]; then
+    return 1
+  fi
+  local tmpl_path="${home_dir}/bin/design-review-prompt.tmpl"
+  if [ -f "$tmpl_path" ] && [ -r "$tmpl_path" ]; then
     return 0
   fi
   return 1
@@ -863,17 +903,30 @@ pdr_run_review_for_pr() {
 #   出力: なし（log のみ）
 #   戻り値: 0 固定（後続 processor を阻害しない / dispatcher fail-continue 契約）
 #
-#   Req: 1.1 / 6.1 / 6.2 / NFR 1.1（gate OFF 時 log 行ゼロ）/ NFR 2.1
+#   Req: 1.1 / 2.1 / 2.2 / 2.4 / 6.1 / 6.2 / NFR 1.1（gate OFF 時 log 行ゼロ）/ NFR 2.1
 #
 #   フロー:
-#     1. gate OFF → 即 return 0（外部副作用ゼロ・log 行ゼロ）
-#     2. 候補 PR を pdr_fetch_design_prs で取得
-#     3. DESIGN_REVIEWER_MAX_PRS で truncate
-#     4. 各 PR に対し pdr_run_review_for_pr を呼ぶ
+#     1. gate OFF（`DESIGN_REVIEWER_ENABLED=false`）→ 即 return 0（外部副作用ゼロ・log 行ゼロ）
+#     2. 必須プロンプト資産が解決不能（installer 未再実行等）→ WARN 1 行 + return 0（no-op）。
+#        claude / gh / git を起動せず、claude-review=failure を publish せず needs-iteration も
+#        付けない（#432 Req 2 / false-reject による永久 BLOCKED 回避 / 冪等再試行）。
+#     3. 候補 PR を pdr_fetch_design_prs で取得
+#     4. DESIGN_REVIEWER_MAX_PRS で truncate
+#     5. 各 PR に対し pdr_run_review_for_pr を呼ぶ
 # ─────────────────────────────────────────────────────────────────────────────
 process_pr_design_reviewer() {
   if ! pdr_gate_enabled; then
     # gate OFF: 完全 no-op（log 行ゼロ / NFR 2.1）
+    return 0
+  fi
+
+  # 必須プロンプト資産（DESIGN_REVIEWER_PROMPT or design-review-prompt.tmpl）が解決できない
+  # 場合は、候補取得・claude 起動の前に processor 全体を no-op return する（#432 Req 2.1, 2.2,
+  # 2.4）。per-PR で claude を起動して失敗させる経路に乗せず、gate レベルで 1 行 WARN に集約。
+  # claude-review status / needs-iteration ラベル / 判定コメントは一切操作しないため、後続
+  # サイクルで資産が配布されれば未処理 head sha に対して冪等に再試行される（Req 2.3）。
+  if ! pdr_prompt_asset_resolvable; then
+    pdr_warn "プロンプトテンプレート未解決のため Design PR Reviewer を skip（DESIGN_REVIEWER_PROMPT 未設定かつ \$HOME/bin/design-review-prompt.tmpl 不在 / installer 再実行で配布されると次サイクルで再試行 / claude 不起動・status 据え置き）"
     return 0
   fi
 

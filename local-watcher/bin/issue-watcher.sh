@@ -759,10 +759,15 @@ esac
 # `claude-review` commit status を publish する Processor。impl PR 用 Reviewer / #404
 # adjudicator とは別コンポーネント（Req 7.1〜7.4）。
 #
-# **完全な opt-in（既定 OFF / Req 6.1, 6.2 / NFR 1.1, 2.1）**: `DESIGN_REVIEWER_ENABLED=true`
-# 厳密一致以外は process_pr_design_reviewer が早期 return し、未設定環境では本機能導入前と
-# 完全に等価な挙動を保つ。gate OFF 時は claude / gh / git の呼び出しゼロで状態ファイル不生成
-# （NFR 2.1 観測ログ diff ゼロ）。
+# **opt-out / 既定 ON（#432 で既定反転 / Req 1.1〜1.5, 4.5 / NFR 1.1, 2.1）**: 既定値を `true`
+# とし、`DESIGN_REVIEWER_ENABLED=false` 厳密一致のみ無効化する。それ以外（未設定 / 空文字 /
+# `True` / `TRUE` / `1` / `0` / `on` / typo 等）はすべて安全側＝有効に正規化する。`=false` を
+# 明示した既存 cron / launchd 環境は本変更前の opt-in 既定 OFF と完全に等価な挙動を保ち、
+# gate OFF 時は claude / gh / git の呼び出しゼロで状態ファイル不生成（NFR 2.1 観測ログ diff ゼロ）。
+#
+# 既定反転の背景（#432）: codex の PR Reviewer Processor が設計 PR をスキップするため、本機能が
+# OFF だと設計 PR のレビュー担い手が不在になり、`claude-review` を必須 status check に採用済の
+# repo で設計 PR が永久 BLOCKED 化する（レビュー空白）。既定 ON でこの空白を解消する。
 #
 # `claude-review` は本機能導入後、impl 系（adjudicator #404 + catch-up #374）と design 系
 # （本機能）の独立した publisher を持つが、catch-up は `review-notes.md` 不在の設計 PR で
@@ -770,13 +775,14 @@ esac
 # 構造的に分離される（design.md「`claude-review` publisher contention」節）。
 #
 # 関数本体は modules/pr-design-reviewer.sh、ロガー pdr_log / pdr_warn / pdr_error は
-# core_utils.sh 配置済み。REQUIRED_MODULES への pr-design-reviewer.sh 追加と dispatcher
-# 配線は task 3 / task 6 で実施する。
-DESIGN_REVIEWER_ENABLED="${DESIGN_REVIEWER_ENABLED:-false}"
-# 値正規化: `true` 厳密一致のみ通し、それ以外はすべて `false` に固定する（Req 6.1 安全側）。
+# core_utils.sh 配置済み。最終正規化は後段の「デフォルト有効化フラグの値正規化」ループでも
+# 同様に適用される（#412 PR_REVIEWER_ADJUDICATOR_ENABLED と同型）。
+DESIGN_REVIEWER_ENABLED="${DESIGN_REVIEWER_ENABLED:-true}"
+# 値正規化: `false` 厳密一致のみ OFF とし、それ以外（未設定 / 空 / `True` / `TRUE` / `1` /
+# typo 等）はすべて `true` に固定する（#432 Req 1.1〜1.5 安全側）。
 case "$DESIGN_REVIEWER_ENABLED" in
-  true) : ;;
-  *)    DESIGN_REVIEWER_ENABLED="false" ;;
+  false) : ;;
+  *)     DESIGN_REVIEWER_ENABLED="true" ;;
 esac
 # 設計 Reviewer 呼び出しモデル（既存 PR_REVIEWER_ADJUDICATOR_MODEL 命名規約踏襲）。
 # 空文字なら既定にフォールバック。
@@ -1379,6 +1385,8 @@ IMPL_RESUME_PROGRESS_TRACKING="${IMPL_RESUME_PROGRESS_TRACKING:-true}"
 # jq の `$design_enabled == "true"` 等の比較を変更せず正規化で吸収するため、
 # 値を厳密な "true" / "false" の 2 値に正規化する。
 # #412: `PR_REVIEWER_ADJUDICATOR_ENABLED` を本ループに追加（既定 ON / `=false` で opt-out）。
+# #432: `DESIGN_REVIEWER_ENABLED` を本ループに追加（既定 ON / `=false` で opt-out）。Config
+#       ブロックの `case false) :;; *) true` で既に正規化済みだが、2 段正規化の整合のため列挙。
 for _idd_flag in \
     MERGE_QUEUE_ENABLED \
     MERGE_QUEUE_RECHECK_ENABLED \
@@ -1389,7 +1397,8 @@ for _idd_flag in \
     QUOTA_AWARE_ENABLED \
     IMPL_RESUME_PRESERVE_COMMITS \
     IMPL_RESUME_PROGRESS_TRACKING \
-    PR_REVIEWER_ADJUDICATOR_ENABLED; do
+    PR_REVIEWER_ADJUDICATOR_ENABLED \
+    DESIGN_REVIEWER_ENABLED; do
   if [ "${!_idd_flag}" = "false" ]; then
     printf -v "$_idd_flag" '%s' "false"
   else
@@ -1542,11 +1551,17 @@ mkdir -p "$LOG_DIR"
 # Issue #412: cycle startup ログに `pr-reviewer-adjudicator=` の解決値も含める（Req 1.6 / NFR 2.2）。
 # 運用者は `grep pr-reviewer-adjudicator=` で adjudicator 経路の有効 / 無効状態を事後に判別できる。
 # 既定反転（OFF → ON）後、`=false` を明示した opt-out 環境を grep で識別する目的を兼ねる。
+# Issue #432: cycle startup ログに `design-reviewer=` の解決値も含める（Req 1.6 / NFR 2.1）。
+# 運用者は `grep design-reviewer=` で Design PR Reviewer 経路の有効 / 無効状態を事後に判別できる。
+# 既定反転（OFF → ON）後、`=false` を明示した opt-out 環境を grep で識別する目的を兼ねる。共有
+# 起動 config echo に `design-reviewer=` トークンが載ることは #412 の `pr-reviewer-adjudicator=`
+# と同じ扱いであり、Req 1.4 / NFR 2.1 の「観測ログ行ゼロ」invariant（= processor 自身の
+# `[pr-design-reviewer]` 専用ログ行がゼロ）には抵触しない。
 _idd_sn_resolved="off"
 if [ "${SLACK_NOTIFY_ENABLED:-false}" = "true" ]; then
   _idd_sn_resolved="on"
 fi
-echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-rebase-semantic=${AUTO_REBASE_SEMANTIC} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED} needs-decisions-mode=${NEEDS_DECISIONS_MODE} slack-notify=${_idd_sn_resolved} pr-reviewer-adjudicator=${PR_REVIEWER_ADJUDICATOR_ENABLED}"
+echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-rebase-semantic=${AUTO_REBASE_SEMANTIC} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED} needs-decisions-mode=${NEEDS_DECISIONS_MODE} slack-notify=${_idd_sn_resolved} pr-reviewer-adjudicator=${PR_REVIEWER_ADJUDICATOR_ENABLED} design-reviewer=${DESIGN_REVIEWER_ENABLED}"
 unset _idd_sn_resolved
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2010,8 +2025,9 @@ process_claude_review_merge_gate_visibility || pr_warn "process_claude_review_me
 
 # Issue #407: Design PR Reviewer Processor。設計 PR (`claude/issue-<N>-design-<slug>`) 専用の
 # 独立 Claude レビュアを起動し、claude-review status と needs-iteration ラベルを確定する。
-# `DESIGN_REVIEWER_ENABLED!=true` なら即 return 0 で本機能導入前と完全に等価
-# （NFR 1.1, 2.1 / 観測ログ diff ゼロ）。
+# #432 で既定 ON（opt-out）化: 既定では本 processor が起動し設計 PR を判定する。
+# `DESIGN_REVIEWER_ENABLED=false` を明示した場合のみ即 return 0 で本変更前の opt-in 既定 OFF と
+# 完全に等価（claude / gh / git 追加呼び出しゼロ / 観測ログ diff ゼロ / NFR 1.1, 2.1）。
 # 配置順: impl 経路（process_pr_reviewer + process_claude_review_status_catchup）が一巡してから
 # 本 design 経路に入ることで、設計 PR が万一 impl 経路から claude-review を書かれても
 # 本 processor が後発で確定する（design.md「claude-review publisher contention」節）。
