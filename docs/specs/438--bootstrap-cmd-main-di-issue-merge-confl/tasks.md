@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. 新 env gate の config 追加と起動時正規化（issue-watcher.sh）
+- [x] 1. 新 env gate の config 追加と起動時正規化（issue-watcher.sh）
   - Phase D 設定ブロック（`issue-watcher.sh` L374〜407 付近）に `AUTO_REBASE_ADDITIVE`（既定 `off`、`case` で `claude` 以外/不正値を `off` 正規化）を追加
   - `AUTO_REBASE_ADDITIVE_PATHS`（既定空、カンマ区切り bash glob、`MECHANICAL_PATHS` と同構文）を追加
   - `process_auto_rebase` のサイクル開始ログ（L1289 付近）に `additive=` 解決値を併記（NFR3.1 可観測性の起点）
