@@ -20,7 +20,7 @@
   - _Requirements: 1.1, 1.4, 2.1, 2.2, 2.3, 2.4, 2.5, NFR2.1, NFR2.2, NFR3.1_
   - _Boundary: ar_classify_additive_
 
-- [ ] 3. ar_classify_diff への二次判定フック挿入（auto-rebase.sh）
+- [x] 3. ar_classify_diff への二次判定フック挿入（auto-rebase.sh）
   - `ar_classify_diff` の `first_unmatched` 検出後 `echo "semantic"` する手前（L350 付近）に gate ON 判定を挟む
   - gate ON 時のみ `ar_classify_additive` を呼び、`additive` なら `echo "mechanical"` + 根拠ログ、それ以外は従来 `semantic`（Req 1.2, 2.5）
   - gate OFF（既定）では二次判定を一切呼ばず stdout/ログとも導入前と同一（Req 1.1, NFR1.1）
