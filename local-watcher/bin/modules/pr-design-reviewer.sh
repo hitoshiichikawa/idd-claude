@@ -4,7 +4,8 @@
 #
 # 用途:
 #   設計 PR (`claude/issue-<N>-design-<slug>`) に対する独立 Claude 設計レビュアの本体。
-#   `DESIGN_REVIEWER_ENABLED=true` のとき open / non-draft の設計 PR を検出し、
+#   `DESIGN_REVIEWER_ENABLED`（#432 で既定 ON / `=false` 厳密一致のみ OFF）が有効なとき
+#   open / non-draft の設計 PR を検出し、
 #   `docs/specs/<N>-<slug>/{requirements.md, design.md, tasks.md}` の 3 観点
 #   （AC カバレッジ / design⇄tasks 整合 / Traceability）で `approve` / `reject` を判定する。
 #   判定結果は `claude-review` commit status の publish と `needs-iteration` ラベルの
@@ -13,10 +14,14 @@
 #
 #   設計の詳細は docs/specs/407-feat-pr-reviewer-pr-claude-review-claude/design.md を参照。
 #
-#   - opt-in gate 判定: pdr_gate_enabled
+#   - opt-out gate 判定: pdr_gate_enabled（#432 で既定 ON 化）
 #     既に正規化済みの `DESIGN_REVIEWER_ENABLED`（issue-watcher.sh の Config で
-#     `case true) ... *) false` に正規化済み）を厳密 `=true` で評価する。重複正規化は
-#     行わない（既定値の責任は呼び出し側 / Req 6.1）。
+#     `case false) ... *) true` に正規化済み = `=false` 厳密一致のみ OFF・それ以外は ON）を
+#     厳密 `=true` で評価する。重複正規化は行わない（既定値の責任は呼び出し側 / Req 1.1〜1.5）。
+#   - runtime 資産不在時の graceful no-op: pdr_prompt_asset_resolvable（#432 Req 2）
+#     既定 ON 化に伴い installer 未再実行の repo がプロンプトテンプレ不在経路に乗りやすくなる
+#     ため、dispatcher entry（process_pr_design_reviewer 冒頭 / gate 通過後・候補取得前）で
+#     必須プロンプト資産の解決可否を 1 回検査し、解決不能なら WARN 1 行 + return 0（no-op）。
 #   - head pattern マッチング: pdr_classify_design_pr
 #     `DESIGN_REVIEWER_HEAD_PATTERN`（既定 `^claude/issue-[0-9]+-design-`）と head_ref を
 #     ERE で照合し、design / 非 design の 2 値判定を返す（Req 1.3, 7.4）。
@@ -61,17 +66,52 @@
 #   - README「Design PR Reviewer (#407)」節（task 8 で追加予定）
 
 # ─────────────────────────────────────────────────────────────────────────────
-# pdr_gate_enabled: opt-in gate 評価（既に正規化済みの env を厳密一致で判定）
+# pdr_gate_enabled: opt-out gate 評価（既に正規化済みの env を厳密一致で判定 / #432 既定 ON）
 #   入力: なし（env のみ参照）
 #   出力: なし
 #   戻り値: 0 = ON / 1 = OFF
 #
 #   issue-watcher.sh の Config ブロックで `DESIGN_REVIEWER_ENABLED` は
-#   `case true) ... *) false` で正規化されているため、本関数は厳密 `=true` 判定のみ行う
-#   （既定 / 未設定 / typo / 大文字違い等はすべて OFF / Req 6.1 安全側 / 重複正規化はしない）。
+#   `case false) ... *) true` で正規化されている（#432 で既定 ON / `=false` 厳密一致のみ OFF・
+#   未設定 / typo / 大文字違い等はすべて ON）。本関数は正規化済み値を厳密 `=true` 判定のみ
+#   行う（重複正規化はしない）。Config が常に先に正規化するため、防御的 default も
+#   既定 ON 意味論に揃えて `:-true` とする（挙動には影響しない / コメントとの一貫性 / Req 1.1）。
 # ─────────────────────────────────────────────────────────────────────────────
 pdr_gate_enabled() {
-  if [ "${DESIGN_REVIEWER_ENABLED:-false}" = "true" ]; then
+  if [ "${DESIGN_REVIEWER_ENABLED:-true}" = "true" ]; then
+    return 0
+  fi
+  return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pdr_prompt_asset_resolvable: 設計 Reviewer の必須プロンプト資産が解決できるかを検査
+#   入力: なし（env のみ参照）
+#   出力: なし
+#   戻り値: 0 = 解決可能 / 1 = 解決不能（呼び出し元で WARN 1 行 + no-op return）
+#
+#   Req: 2.1 / 2.2 / 2.3 / 2.4（runtime 資産不在時の graceful no-op / fail-closed で永久
+#        BLOCKED を作らない）
+#
+#   解決順序は pdr_invoke_reviewer の prompt 解決ロジックと一致させる:
+#     (a) `DESIGN_REVIEWER_PROMPT` env が非空 → その値を本文として使うため解決可能 (rc=0)
+#     (b) 空なら `$HOME/bin/design-review-prompt.tmpl` が読めるファイルとして存在するか検査
+#         - HOME 解決不能 / テンプレ不在 / 読めない → 解決不能 (rc=1)
+#   - 副作用なし（read-only / claude / gh / git 不起動）。
+#   - 既定 ON 化（#432）後、installer 未再実行の repo はテンプレ不在経路に乗りやすいため、
+#     per-PR WARN（claude 失敗扱いで pending 据え置き）の連発を避け、processor 全体を 1 回の
+#     WARN で no-op return させる安全弁の判定本体。
+# ─────────────────────────────────────────────────────────────────────────────
+pdr_prompt_asset_resolvable() {
+  if [ -n "${DESIGN_REVIEWER_PROMPT:-}" ]; then
+    return 0
+  fi
+  local home_dir="${HOME:-}"
+  if [ -z "$home_dir" ]; then
+    return 1
+  fi
+  local tmpl_path="${home_dir}/bin/design-review-prompt.tmpl"
+  if [ -f "$tmpl_path" ] && [ -r "$tmpl_path" ]; then
     return 0
   fi
   return 1
@@ -200,8 +240,10 @@ pdr_already_processed() {
 #   出力: stdout に Claude の生応答本文（text または JSON envelope の `.result`）
 #   戻り値: 0 = ok / 1 = claude exec 失敗（rc != 0 / timeout / prompt 解決失敗）
 #           2 = workspace-modified 検出（read-only invariant 違反）
+#           3 = spec 本文取得不能（fail-closed / claude 未起動 / Issue #433 Req 2.5）
 #
 #   Req: 1.2 / 1.5 / 3.3 / 5.4 / 6.5 / NFR 4.1
+#        + Issue #433 Req 1.1〜1.5 / 2.1〜2.5 / 3.1 / 3.2 / 4.3
 #
 #   挙動:
 #     1. PR 番号 / SHA / base_ref / head_ref の入力検証（pr_substitute_placeholders 流）
@@ -215,7 +257,18 @@ pdr_already_processed() {
 #     3. 9 プレースホルダ置換（bash パラメータ展開 / 既存 adj_classify_findings 流）:
 #        {PR} / {SHA} / {BASE} / {HEAD} / {ISSUE_NUMBER} / {SPEC_DIR} /
 #        {REQUIREMENTS_MD} / {DESIGN_MD} / {TASKS_MD}
-#        - 解決不能なファイル / dir はすべて `(none)` に倒す
+#        - spec 本文は **head ブランチの git ref（`origin/<head_ref>`）** から取得する
+#          （`git cat-file -e ... && git show ...` / adjudicator.sh L693-704 と同方式 /
+#          Issue #433 Req 1.1〜1.5）。watcher 作業ツリーは base にチェックアウト中で新規
+#          設計 PR の spec dir は存在しないため、作業ツリーの `[ -d ]`+`cat` では `(none)`
+#          に倒れていた（#433 のバグ）。head ref から取得することで未マージの spec も読める。
+#        - 取得できないファイルのみ `(none)` に倒す（取得できたものは実本文 / Req 1.5）
+#     3'. fail-closed 判定（claude 起動 **前**に評価 / Issue #433 Req 2）:
+#        - spec_dir_rel が空（head から解決不能）→ rc=3 で打ち切り（Req 2.2）
+#        - 3 ファイルすべて取得不能（1 つも取得できない）→ rc=3 で打ち切り（Req 2.1, 2.3）
+#          かつ spec_dir_rel は解決済みなら WARN を 1 行出す（Req 3.1）
+#        - rc=3 は呼び出し元 pdr_run_review_for_pr が既存 pending 据え置き（rc=2 相当）へ
+#          写像する。claude 判定リクエストは発行しない（Req 2.5）
 #     4. mktemp で prompt 一時ファイル + stdout / stderr tempfile を作成、trap で削除
 #     5. claude 起動:
 #          timeout "$DESIGN_REVIEWER_EXEC_TIMEOUT" \
@@ -289,24 +342,53 @@ pdr_invoke_reviewer() {
   fi
 
   # {SPEC_DIR} / {REQUIREMENTS_MD} / {DESIGN_MD} / {TASKS_MD} 解決
+  # spec 本文は **head ブランチの git ref**（`origin/<head_ref>`）から取得する。watcher の
+  # 作業ツリーは base にチェックアウト中で新規設計 PR の spec dir は存在しないため、作業
+  # ツリーの `[ -d ]`+`cat` では全部 `(none)` に倒れて空虚 approve になっていた（#433）。
+  # adjudicator.sh `adj_read_reviewer_verdict`（L693-704）の確立済みパターン
+  # （`git cat-file -e "origin/<ref>:<path>"` で存在確認 → `git show ...` で本文取得）を踏襲。
   local spec_dir_val="(none)"
   local requirements_md_val="(none)"
   local design_md_val="(none)"
   local tasks_md_val="(none)"
-  if [ -n "$spec_dir_rel" ] && [ -d "$spec_dir_rel" ]; then
+  local fetched_count=0
+  local git_timeout_s="${PR_REVIEWER_GIT_TIMEOUT:-120}"
+  if [ -n "$spec_dir_rel" ]; then
     spec_dir_val="$spec_dir_rel"
-    local req_path="${spec_dir_rel}/requirements.md"
-    local design_path="${spec_dir_rel}/design.md"
-    local tasks_path="${spec_dir_rel}/tasks.md"
-    if [ -f "$req_path" ]; then
-      requirements_md_val=$(cat "$req_path" 2>/dev/null) || requirements_md_val="(none)"
-    fi
-    if [ -f "$design_path" ]; then
-      design_md_val=$(cat "$design_path" 2>/dev/null) || design_md_val="(none)"
-    fi
-    if [ -f "$tasks_path" ]; then
-      tasks_md_val=$(cat "$tasks_path" 2>/dev/null) || tasks_md_val="(none)"
-    fi
+    # head_ref はここまでで shell metacharacter 検査済み。spec_dir_rel も同検査済みのため
+    # `origin/<head_ref>:<path>` git revision に安全に埋め込める（Issue #318 / `--` でも
+    # オプション解釈を打ち切る）。
+    local _file _path _body
+    for _file in requirements design tasks; do
+      _path="${spec_dir_rel}/${_file}.md"
+      if timeout "$git_timeout_s" git cat-file -e "origin/${head_ref}:${_path}" 2>/dev/null; then
+        if _body=$(timeout "$git_timeout_s" git show "origin/${head_ref}:${_path}" 2>/dev/null) \
+            && [ -n "$_body" ]; then
+          case "$_file" in
+            requirements) requirements_md_val="$_body" ;;
+            design)       design_md_val="$_body" ;;
+            tasks)        tasks_md_val="$_body" ;;
+          esac
+          fetched_count=$((fetched_count + 1))
+        fi
+      fi
+    done
+  fi
+
+  # fail-closed 判定（claude 起動 **前**に評価 / Issue #433 Req 2）。
+  # spec dir 解決不能（Req 2.2）または 3 ファイルすべて取得不能（Req 2.1, 2.3）の場合は、
+  # LLM 判定リクエストを発行せず rc=3 で打ち切る（Req 2.5）。呼び出し元が既存 pending 据え
+  # 置き（rc=2 相当）へ写像する。
+  if [ -z "$spec_dir_rel" ]; then
+    pdr_warn "pdr_invoke_reviewer: PR #${pr_number}: spec dir が head ブランチ（origin/${head_ref}）から解決不能 → fail-closed（approve を publish しない / Req 2.2）"
+    return 3
+  fi
+  if [ "$fetched_count" -eq 0 ]; then
+    # spec dir は解決済みなのに本文が 1 つも取れない = ログが健全に見えたまま空虚 approve に
+    # なる罠。解決済みパスと取得不能の事実を併記して WARN を 1 行出す（Req 3.1）。verdict=approve
+    # 形の完了ログはこの経路では出さない（Req 3.2 / 呼び出し元 rc=3 写像で担保）。
+    pdr_warn "pdr_invoke_reviewer: PR #${pr_number}: spec dir 解決済み（${spec_dir_rel}）だが origin/${head_ref} から spec 本文を 1 つも取得できず → fail-closed（approve を publish しない / Req 2.3 / 3.1）"
+    return 3
   fi
 
   # base / head の `(none)` 既定値
@@ -767,7 +849,10 @@ pdr_resolve_spec_dir_from_head_ref() {
 #     4. spec dir を head から解決（不在でも保守的 approve 経路に進める）
 #     5. claude を 1 回呼び出し（pdr_invoke_reviewer）
 #        - exec 失敗 / workspace-modified → publish せず pending 据え置き (rc=2 / Req 3.3)
+#        - spec 本文取得不能（fail-closed / rc=3 / Issue #433 Req 2）→ claude 未起動で
+#          publish せず pending 据え置き（rc=2 に写像 / NFR 1.4 で exit code 意味不変）
 #     6. text/JSON を parse（pdr_parse_verdict）。失敗時は保守的 approve に倒す（Req 2.4）
+#        （※ fail-closed は spec 本文取得成功時には適用しない / Issue #433 Req 4.3）
 #     7. schema 検証（pdr_validate_verdict）。失敗時も保守的 approve に倒す（Req 2.4）
 #     8. ラベル add/remove + status publish + コメント投稿（pdr_apply_label_decision /
 #        pdr_apply_status_decision / pdr_post_decision_comment）
@@ -818,9 +903,17 @@ pdr_run_review_for_pr() {
   raw_body=$(pdr_invoke_reviewer "$pr_number" "$sha" "$head_ref" "$base_ref" "$spec_dir_rel") || invoke_rc=$?
 
   if [ "$invoke_rc" -ne 0 ]; then
-    # exec-failed / timeout / workspace-modified → publish せず pending 据え置き（Req 3.3）。
+    # rc=3（spec 本文取得不能 / fail-closed / Issue #433 Req 2）と
+    # rc=1/2（exec-failed / timeout / workspace-modified）は、いずれも publish せず pending
+    # 据え置き（Req 2.4 = 既存 exec 失敗時 rc=2 経路と同一の status / ラベル契約）に集約する。
     # marker / コメントも投稿しないため、次サイクルで自然に再試行される（Error Handling 共通動作）。
-    pdr_log "PR #${pr_number}: claude exec 失敗 (rc=${invoke_rc}) → claude-review pending 据え置き / 次サイクルで再試行"
+    # NFR 1.4: pdr_run_review_for_pr の exit code 意味（0/1/2）は変えず、fail-closed も rc=2 に写像。
+    if [ "$invoke_rc" -eq 3 ]; then
+      # Issue #433 NFR 3.1: fail-closed で pending 据え置きとなった旨を 1 行で観測可能にする。
+      pdr_log "PR #${pr_number}: spec 本文取得不能で fail-closed → claude-review pending 据え置き / 次サイクルで再試行（Issue #433 Req 2 / NFR 3.1）"
+    else
+      pdr_log "PR #${pr_number}: claude exec 失敗 (rc=${invoke_rc}) → claude-review pending 据え置き / 次サイクルで再試行"
+    fi
     return 2
   fi
 
@@ -863,17 +956,30 @@ pdr_run_review_for_pr() {
 #   出力: なし（log のみ）
 #   戻り値: 0 固定（後続 processor を阻害しない / dispatcher fail-continue 契約）
 #
-#   Req: 1.1 / 6.1 / 6.2 / NFR 1.1（gate OFF 時 log 行ゼロ）/ NFR 2.1
+#   Req: 1.1 / 2.1 / 2.2 / 2.4 / 6.1 / 6.2 / NFR 1.1（gate OFF 時 log 行ゼロ）/ NFR 2.1
 #
 #   フロー:
-#     1. gate OFF → 即 return 0（外部副作用ゼロ・log 行ゼロ）
-#     2. 候補 PR を pdr_fetch_design_prs で取得
-#     3. DESIGN_REVIEWER_MAX_PRS で truncate
-#     4. 各 PR に対し pdr_run_review_for_pr を呼ぶ
+#     1. gate OFF（`DESIGN_REVIEWER_ENABLED=false`）→ 即 return 0（外部副作用ゼロ・log 行ゼロ）
+#     2. 必須プロンプト資産が解決不能（installer 未再実行等）→ WARN 1 行 + return 0（no-op）。
+#        claude / gh / git を起動せず、claude-review=failure を publish せず needs-iteration も
+#        付けない（#432 Req 2 / false-reject による永久 BLOCKED 回避 / 冪等再試行）。
+#     3. 候補 PR を pdr_fetch_design_prs で取得
+#     4. DESIGN_REVIEWER_MAX_PRS で truncate
+#     5. 各 PR に対し pdr_run_review_for_pr を呼ぶ
 # ─────────────────────────────────────────────────────────────────────────────
 process_pr_design_reviewer() {
   if ! pdr_gate_enabled; then
     # gate OFF: 完全 no-op（log 行ゼロ / NFR 2.1）
+    return 0
+  fi
+
+  # 必須プロンプト資産（DESIGN_REVIEWER_PROMPT or design-review-prompt.tmpl）が解決できない
+  # 場合は、候補取得・claude 起動の前に processor 全体を no-op return する（#432 Req 2.1, 2.2,
+  # 2.4）。per-PR で claude を起動して失敗させる経路に乗せず、gate レベルで 1 行 WARN に集約。
+  # claude-review status / needs-iteration ラベル / 判定コメントは一切操作しないため、後続
+  # サイクルで資産が配布されれば未処理 head sha に対して冪等に再試行される（Req 2.3）。
+  if ! pdr_prompt_asset_resolvable; then
+    pdr_warn "プロンプトテンプレート未解決のため Design PR Reviewer を skip（DESIGN_REVIEWER_PROMPT 未設定かつ \$HOME/bin/design-review-prompt.tmpl 不在 / installer 再実行で配布されると次サイクルで再試行 / claude 不起動・status 据え置き）"
     return 0
   fi
 
