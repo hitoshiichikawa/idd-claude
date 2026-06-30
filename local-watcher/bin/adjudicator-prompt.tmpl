@@ -22,9 +22,9 @@
 #   {SPEC_DIR}        docs/specs/<N>-<slug>/ パス。解決不能時は `(none)` を埋める
 #   {REQUIREMENTS_MD} 上記 SPEC_DIR 配下 requirements.md の本文。解決不能時は `(none)`
 #   {OOS_INSTRUCTIONS} out-of-scope（第 3 判定）機能 gate ON 時に注入される分類規約ブロック
-#                     （#437）。adj_oos_enabled が ON のとき legitimate-out-of-scope の
+#                     （#437）。adj_oos_enabled が ON のとき `out-of-scope` verdict の
 #                     分類条件・判定根拠出力・「迷ったら legitimate」原則・
-#                     summary.legitimate_out_of_scope 出力契約を含む文字列を埋める。
+#                     summary.out_of_scope 出力契約を含む文字列を埋める。
 #                     gate OFF（既定）のときは placeholder 行ごと除去して既存 prompt と
 #                     byte 等価にする（NFR 1.1〜1.3）。
 #
