@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. opt-in gate の Config ブロック追加と値正規化
+- [x] 1. opt-in gate の Config ブロック追加と値正規化
   - `local-watcher/bin/issue-watcher.sh` の Config ブロックに 3 env を追加する
   - `PR_ITERATION_OOS_ENABLED`（既定 `false`、`case true) :;; *) false` で厳密 `=true` のみ ON / 安全側 OFF）
   - `PR_ITERATION_OOS_ROUTE`（既定 `needs-decisions`、`needs-decisions|design-reflow|spawn-issue` 以外は `needs-decisions` に正規化）
