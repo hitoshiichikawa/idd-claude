@@ -754,54 +754,61 @@ case "$PR_REVIEWER_ADJUDICATOR_MAX_FINDINGS" in
     ;;
 esac
 
-# ─── PR Reviewer out-of-scope（第 3 判定）設定 (#437) ───
+# ─── PR Iteration out-of-scope（第 3 判定）設定 (#437) ───
 # adjudicator が「正当だが当該 impl PR スコープ外（design.md / requirements.md / tasks.md の
 # 確定事項変更を要し、impl PR は規約上それらを書き換えられない）」という第 3 の指摘類型を
-# `legitimate-out-of-scope` として独立分類し、round を消費させる legitimate 件数から除外して
-# `needs-decisions` へ還流させ、内容ベースの早期打ち切りで max_rounds 到達前に停止する機能。
-# ae-mdm PR #51 で観測された「head SHA が毎 round 変化して no-progress-streak がリセットされ
-# 続け、収束しないまま max_rounds を消尽して claude-failed に倒れる」事象を解消する。
+# `out-of-scope` として独立分類し、round を消費させる legitimate 件数から除外して
+# `needs-decisions` へ還流させ、Developer 構造化マーカー検出と内容ベースの早期打ち切りで
+# max_rounds 到達前に停止する機能。ae-mdm PR #51 で観測された「head SHA が毎 round 変化して
+# no-progress-streak がリセットされ続け、収束しないまま max_rounds を消尽して claude-failed に
+# 倒れる」事象を解消する。
 #
-# **完全な opt-in（既定 OFF / #437 NFR 1.1, 1.2 / Req 1.x, 5.x）**: `PR_REVIEWER_OOS_ENABLED=true`
+# **完全な opt-in（既定 OFF / #437 NFR 1.1, 1.2 / Req 1.x, 4.x, 5.x）**: `PR_ITERATION_OOS_ENABLED=true`
 # 厳密一致以外（未設定 / 空 / `True` / `TRUE` / `1` / `0` / typo 等）はすべて安全側＝無効として
 # `false` に正規化し、本機能導入前と完全に等価な挙動を保つ。gate OFF 時、adjudicator は
-# `legitimate-out-of-scope` を一切出さず受け取らず（既存 2 値 schema と
-# `legitimate + excessive == total` 不変条件を完全保持）、pr-iteration の内容ベース早期打ち切りは
-# 発火せず（既存 SHA ベース streak のみ）、prompt template の out-of-scope 指示は注入されない。
-# 既存 `PR_REVIEWER_ADJUDICATOR_ENABLED`（#412 で既定 ON）には相乗りせず**新規 env を新設**して
-# no-op 既定を保証する（相乗りは ON 既定のため no-op を保証できない）。
+# `out-of-scope` を一切出さず受け取らず（既存 2 値 schema と `legitimate + excessive == total`
+# 不変条件を完全保持）、pr-iteration の oos フィルタ / Developer marker 検出 / 内容ベース早期
+# 打ち切りは発火せず（既存 SHA ベース streak のみ）、prompt template の out-of-scope 指示は
+# 注入されない。既存 `PR_REVIEWER_ADJUDICATOR_ENABLED`（#412 で既定 ON）/ `PR_ITERATION_ENABLED`
+# （#112 で既定 ON）には相乗りせず**新規 env を新設**して no-op 既定を保証する（相乗りは ON
+# 既定のため no-op を保証できない）。本 gate は既存 gate を override しない（後方互換優先 /
+# design.md「確認事項 1」）。
 #
-# 後方互換性（#437 NFR 1.4）:
+# 後方互換性（#437 NFR 1.3, 1.4）:
 #   - 既存 env var 名 / ラベル名（`needs-decisions` 再利用 = 新ラベル新設なし）/ exit code /
 #     cron 文字列 / ログ書式 / 既存 marker フォーマットの round / last-run / no-progress-streak
-#     キーは不変。本機能は新 env / 新 marker キー（`oos-streak`）の追加のみ。
+#     キーは不変。本機能は新 env / 新 marker キー（`oos-no-progress-streak` / `oos-fingerprint`）の
+#     追加のみ。
 #
 # 関数本体は modules/adjudicator.sh（adj_ prefix）/ modules/pr-iteration.sh（pi_ prefix）。
-PR_REVIEWER_OOS_ENABLED="${PR_REVIEWER_OOS_ENABLED:-false}"
+PR_ITERATION_OOS_ENABLED="${PR_ITERATION_OOS_ENABLED:-false}"
 # 値正規化: `true` 厳密一致のみ通し、それ以外はすべて `false` に固定する（NFR 1.2 安全側）。
 # 既定 OFF の opt-in 制のため、上記「デフォルト有効化フラグの値正規化」ループには加えない。
-case "$PR_REVIEWER_OOS_ENABLED" in
+case "$PR_ITERATION_OOS_ENABLED" in
   true) : ;;
-  *)    PR_REVIEWER_OOS_ENABLED="false" ;;
+  *)    PR_ITERATION_OOS_ENABLED="false" ;;
+esac
+# out-of-scope 還流ルート（#437 Req 3.1, 3.2）。許容値は `needs-decisions`（推奨既定）/
+# `design-reflow` / `spawn-issue` の 3 値。本 spec では `design-reflow` / `spawn-issue` も
+# 実処理は `needs-decisions` に丸める（env 値だけ予約 / design.md「確認事項 2」/ Non-Goal）。
+# 未知値 / 空 / typo は安全側として `needs-decisions` に正規化する（NFR 1.2）。
+PR_ITERATION_OOS_ROUTE="${PR_ITERATION_OOS_ROUTE:-needs-decisions}"
+case "$PR_ITERATION_OOS_ROUTE" in
+  needs-decisions|design-reflow|spawn-issue) : ;;
+  *) PR_ITERATION_OOS_ROUTE="needs-decisions" ;;
 esac
 # 内容ベース早期打ち切りの上限 N（#437 Req 5.2）。out-of-scope は確定的に収束不能なため、
 # 既存 SHA ベース no-progress 上限（既定 3）とは別軸で既定 2 と短く設定する。非数値 / 0 以下は
 # 安全側として既定 2 に正規化する。gate OFF 時は本値を参照しない（早期打ち切り自体が no-op）。
-PR_REVIEWER_OOS_NO_PROGRESS_LIMIT="${PR_REVIEWER_OOS_NO_PROGRESS_LIMIT:-2}"
-case "$PR_REVIEWER_OOS_NO_PROGRESS_LIMIT" in
-  ''|*[!0-9]*) PR_REVIEWER_OOS_NO_PROGRESS_LIMIT="2" ;;
+PR_ITERATION_OOS_NO_PROGRESS_LIMIT="${PR_ITERATION_OOS_NO_PROGRESS_LIMIT:-2}"
+case "$PR_ITERATION_OOS_NO_PROGRESS_LIMIT" in
+  ''|*[!0-9]*) PR_ITERATION_OOS_NO_PROGRESS_LIMIT="2" ;;
   *)
-    if [ "$PR_REVIEWER_OOS_NO_PROGRESS_LIMIT" -lt 1 ] 2>/dev/null; then
-      PR_REVIEWER_OOS_NO_PROGRESS_LIMIT="2"
+    if [ "$PR_ITERATION_OOS_NO_PROGRESS_LIMIT" -lt 1 ] 2>/dev/null; then
+      PR_ITERATION_OOS_NO_PROGRESS_LIMIT="2"
     fi
     ;;
 esac
-# out-of-scope 還流先ラベル（#437 Req 2.3）。既定は既存 `needs-decisions` を再利用する
-# （新ラベル新設なし = labels script 変更なし / migration リスクなし）。env で override 可能。
-PR_REVIEWER_OOS_ROUTE_LABEL="${PR_REVIEWER_OOS_ROUTE_LABEL:-needs-decisions}"
-if [ -z "$PR_REVIEWER_OOS_ROUTE_LABEL" ]; then
-  PR_REVIEWER_OOS_ROUTE_LABEL="needs-decisions"
-fi
 
 # ─── Design PR Reviewer 設定 (#407) ───
 # 設計 PR (`claude/issue-<N>-design-<slug>`) に対する独立 Claude 設計レビュアを起動し、
@@ -1610,7 +1617,7 @@ _idd_sn_resolved="off"
 if [ "${SLACK_NOTIFY_ENABLED:-false}" = "true" ]; then
   _idd_sn_resolved="on"
 fi
-echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-rebase-semantic=${AUTO_REBASE_SEMANTIC} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED} needs-decisions-mode=${NEEDS_DECISIONS_MODE} slack-notify=${_idd_sn_resolved} pr-reviewer-adjudicator=${PR_REVIEWER_ADJUDICATOR_ENABLED} design-reviewer=${DESIGN_REVIEWER_ENABLED}"
+echo "[$(date '+%F %T')] base-branch=${BASE_BRANCH} merge-queue-base=${MERGE_QUEUE_BASE_BRANCH} auto-rebase=${AUTO_REBASE_MODE} auto-rebase-semantic=${AUTO_REBASE_SEMANTIC} auto-merge=${AUTO_MERGE_ENABLED} auto-merge-design=${AUTO_MERGE_DESIGN_ENABLED} full-auto=${FULL_AUTO_ENABLED} needs-decisions-mode=${NEEDS_DECISIONS_MODE} slack-notify=${_idd_sn_resolved} pr-reviewer-adjudicator=${PR_REVIEWER_ADJUDICATOR_ENABLED} design-reviewer=${DESIGN_REVIEWER_ENABLED} oos-enabled=${PR_ITERATION_OOS_ENABLED}"
 unset _idd_sn_resolved
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
