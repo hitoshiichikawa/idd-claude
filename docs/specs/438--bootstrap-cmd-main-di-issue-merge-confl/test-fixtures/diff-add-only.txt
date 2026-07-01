@@ -1,0 +1,18 @@
+diff --git a/cmd/api/main.go b/cmd/api/main.go
+index 1111111..2222222 100644
+--- a/cmd/api/main.go
++++ b/cmd/api/main.go
+@@ -10,6 +10,8 @@ import (
+ 	"example.com/app/internal/user"
+ 	"example.com/app/internal/order"
++	"example.com/app/internal/billing"
++	"example.com/app/internal/notify"
+ )
+
+ func main() {
+@@ -30,4 +32,6 @@ func main() {
+ 	user.Mount(router)
+ 	order.Mount(router)
++	billing.Mount(router)
++	notify.Mount(router)
+ }
