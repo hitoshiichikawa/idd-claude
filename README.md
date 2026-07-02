@@ -85,7 +85,7 @@ idd-claude/
     │   │   ├── per-task-loop.sh     #   Per-task TDD Loop（#461-462）
     │   │   ├── impl-pipeline.sh     #   Reviewer Gate / impl stage pipeline（#463-464）
     │   │   ├── dependency-resolver.sh  #   Dependency Resolver / Auto-Unblock Sweep（#465）
-    │   │   └── slot-worker.sh       #   Phase C Slot Runner ヘルパー（#466。_slot_run_issue 本体は次 issue #467）
+    │   │   └── slot-worker.sh       #   Phase C Slot Runner（ヘルパー #466 + _slot_run_issue 本体 #467）
     │   └── triage-prompt.tmpl       # Triage フェーズ用プロンプト
     └── LaunchAgents/
         └── com.local.issue-watcher.plist   # macOS launchd 設定

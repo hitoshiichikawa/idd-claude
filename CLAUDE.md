@@ -240,9 +240,9 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
   | `dbg_` | debugger-gate（非 prefix 関数 detect_blocked_marker 等はモジュール冒頭ヘッダで列挙 / #458） |
   | `sc_` / `stage_checkpoint_` / `_spec_` | stage-checkpoint（Slot Runner 内の類似名 `_stage_checkpoint_assert_slug_match` / `_stage_checkpoint_has_resumable_state` は本 module に非同居。#466 で slot-worker.sh へ移動済み） |
   | `pt_` / `build_per_task_*` / `run_per_task_*` | per-task-loop（前半 pt_ ヘルパー + prompt builder #461 / 後半 runner + escalation #462。呼び出し元 run_impl_pipeline は impl-pipeline.sh 側 = #464） |
-  | `build_dev_prompt_*` / `build_reviewer_prompt`（非 prefix。他 `run_reviewer_stage` / `verify_*` / `mark_issue_*` / `run_impl_pipeline` 等はモジュール冒頭ヘッダで列挙） | impl-pipeline（前半 Stage A/B/C prompt builder #463 / 後半 stage runner + escalation #464 で移動完了。呼び出し元 = Slot Runner `_slot_run_issue` / design 分岐 / 各 gate は本体残置） |
+  | `build_dev_prompt_*` / `build_reviewer_prompt`（非 prefix。他 `run_reviewer_stage` / `verify_*` / `mark_issue_*` / `run_impl_pipeline` 等はモジュール冒頭ヘッダで列挙） | impl-pipeline（前半 Stage A/B/C prompt builder #463 / 後半 stage runner + escalation #464 で移動完了。呼び出し元 Slot Runner `_slot_run_issue` / design 分岐 は #467 で slot-worker.sh へ移動済み、各 gate は本体・各 module 残置） |
   | `dr_` | dependency-resolver（#465） |
-  | `dispatcher_` / `pclp_` / `slot_` / `_resume_*` / `_normalize_slug` / `_slug_mismatch_escalate` / `_stage_checkpoint_assert_slug_match` / `_stage_checkpoint_has_resumable_state` / `publish_claude_review_status`（非 prefix 統一。詳細はモジュール冒頭ヘッダで列挙） | slot-worker（Phase C Slot Runner ヘルパー #466。`_slot_run_issue` 本体は次 issue #467 で移動完了予定、それまで本体残置） |
+  | `dispatcher_` / `pclp_` / `slot_` / `_resume_*` / `_normalize_slug` / `_slug_mismatch_escalate` / `_stage_checkpoint_assert_slug_match` / `_stage_checkpoint_has_resumable_state` / `publish_claude_review_status` / `_slot_run_issue`（非 prefix 統一。詳細はモジュール冒頭ヘッダで列挙） | slot-worker（Phase C Slot Runner: ヘルパー #466 + 本体 `_slot_run_issue` #467 で移動完了。呼び出し元 Dispatcher は本体最終盤に残置） |
 
 - env var 名・ラベル名・コマンド名・ファイルパスは **英語固定**（言語方針に従う）。
 
