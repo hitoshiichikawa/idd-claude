@@ -404,6 +404,21 @@ AUTO_REBASE_GIT_TIMEOUT="${AUTO_REBASE_GIT_TIMEOUT:-60}"
 AUTO_REBASE_MAX_PRS="${AUTO_REBASE_MAX_PRS:-3}"
 # Prompt template の配置先（install.sh が `*.tmpl` glob で自動配置）。
 AUTO_REBASE_TEMPLATE="${AUTO_REBASE_TEMPLATE:-$HOME/bin/auto-rebase-prompt.tmpl}"
+# 加算的衝突緩和の opt-in gate (#438)。bootstrap path（`cmd/api/main.go` の DI 配線 /
+# Mount スロット等）に閉じた「両 side 追加のみ・削除/変更なし」の衝突を、`MECHANICAL_PATHS`
+# allowlist 照合で semantic に落ちる手前で二次判定し mechanical へ昇格させる。`claude` で
+# 有効化、それ以外（未設定 / 空 / `on` / `true` / `CLAUDE` / typo 等）はすべて `off` に
+# 正規化する（既定 OFF の opt-in / Req 1.1, 1.3, NFR 1.1）。
+AUTO_REBASE_ADDITIVE="${AUTO_REBASE_ADDITIVE:-off}"
+case "$AUTO_REBASE_ADDITIVE" in
+  claude) : ;;
+  *)      AUTO_REBASE_ADDITIVE="off" ;;
+esac
+# 加算的判定を許す bootstrap path allowlist。カンマ区切り bash glob（`MECHANICAL_PATHS` と
+# 同構文）。空 / 未設定なら二次判定を一切起動せず従来判定へフォールバックする（Req 1.4）。
+# `MECHANICAL_PATHS`（中身不問の無条件 mechanical）とは意味が異なる（こちらは「追加のみ」
+# という条件付き）ため専用 env として分離する。
+AUTO_REBASE_ADDITIVE_PATHS="${AUTO_REBASE_ADDITIVE_PATHS:-}"
 
 # ─── Phase D-12: Claude Semantic Resolution 設定 (#366) ───
 # Phase D の semantic 経路（変更ファイルが `MECHANICAL_PATHS` allowlist 外を含む rebase）に
