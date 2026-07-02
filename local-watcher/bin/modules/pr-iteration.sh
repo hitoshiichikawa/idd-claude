@@ -299,6 +299,38 @@ pi_general_filter_excessive() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_general_filter_oos: adjudicator が out-of-scope と判定した指摘コメントを除外
+#   入力: stdin に一般コメント JSON 配列
+#   出力: stdout にフィルタ後の JSON 配列
+#   Issue #437 Req 2.1 / NFR 1.1 / NFR 3.1
+#
+#   判定: gate ON (PR_ITERATION_OOS_ENABLED=true) のときのみ、comment.body 中に
+#         `idd-claude:pr-adjudicator-out-of-scope` を含む HTML hidden marker を持つ
+#         コメントを除外する。gate OFF / 未設定 / 不正値 / typo はすべて jq '.' で
+#         pass-through（既存件数挙動を維持 / NFR 1.1）。env 値判定は厳密 `=true` 一致のみで
+#         ON とする（issue-watcher.sh:787- が `case true) ... *) false` 正規化済みの env を
+#         渡す前提に整合 / pi_general_filter_excessive と同方針）。
+#
+#   設計判断（design.md Components and Interfaces / pi_general_filter_oos 節）:
+#     - gate 判定を本関数内で完結させ、呼び出し元（pi_collect_general_comments）からは
+#       無条件で chain に挿入する形に倒す。これにより gate OFF 時の filter chain も
+#       `self → resolved → excessive → out-of-scope → event_style → truncate` の同一 6 段
+#       構成となり、サマリ 1 行ログに `filtered_oos=0` が常時記録される（観測可能性 / NFR 4.1）
+#     - prefix `pr-adjudicator-out-of-scope` は既存 `pr-adjudicator-excessive` /
+#       `pr-iteration` のいずれとも前方一致しないため self-filter / excessive-filter と
+#       衝突しない（Data Models / NFR 1.3）。adjudicator summary marker
+#       `idd-claude:pr-adjudicator sha=...` も `pr-adjudicator-out-of-scope` を substring に
+#       持たないため本関数を素通りする（summary は iteration agent への情報として keep）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_general_filter_oos() {
+  if [ "${PR_ITERATION_OOS_ENABLED:-false}" = "true" ]; then
+    jq '[.[] | select((.body // "") | contains("idd-claude:pr-adjudicator-out-of-scope") | not)]'
+  else
+    jq '.'
+  fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_general_filter_event_style: GitHub system 由来の event-style コメントを除外
 #   入力: stdin に一般コメント JSON 配列
 #   出力: stdout にフィルタ後の JSON 配列
@@ -387,11 +419,15 @@ pi_collect_general_comments() {
   last_run=$(pi_read_last_run "$pr_body")
 
   # 4. フィルタを順次適用しながら各段の length を測定
-  #    順序: self → resolved → excessive → event_style → truncate
+  #    順序: self → resolved → excessive → out-of-scope → event_style → truncate
   #    Issue #404 task 7: adjudicator が excessive と判定した指摘コメントを除外する
   #    excessive 段を resolved の直後 / event_style の前に挿入。gate OFF 時は内部で
   #    pass-through するため既存件数挙動には影響しない（NFR 1.1）。
-  local after_self after_resolved after_excessive after_event final
+  #    Issue #437 task 4: adjudicator が out-of-scope と判定した指摘コメントを除外する
+  #    out-of-scope 段を excessive の直後 / event_style の前に挿入。gate
+  #    (PR_ITERATION_OOS_ENABLED) OFF 時は内部で pass-through するため既存件数挙動に
+  #    影響しない（NFR 1.1）。
+  local after_self after_resolved after_excessive after_oos after_event final
   local filter_event_input
 
   # event_style filter は射影段で残した _meta_user_type を user.type の代理として使う
@@ -421,8 +457,17 @@ pi_collect_general_comments() {
   local count_excessive
   count_excessive=$(echo "$after_excessive" | jq 'length' 2>/dev/null || echo "0")
 
+  # Issue #437 task 4: out-of-scope フィルタ（gate ON 時のみ marker 除外、OFF 時 pass-through）
+  if ! after_oos=$(echo "$after_excessive" | pi_general_filter_oos 2>/dev/null); then
+    pi_warn "PR #${pr_number}: out-of-scope フィルタに失敗、空配列で続行"
+    echo "[]"
+    return 0
+  fi
+  local count_oos
+  count_oos=$(echo "$after_oos" | jq 'length' 2>/dev/null || echo "0")
+
   # event_style フィルタは _meta_user_type を user.type 相当に詰め直してから判定する
-  filter_event_input=$(echo "$after_excessive" | jq '[.[] | . + {user: {type: ._meta_user_type, login: (.user)}}]' 2>/dev/null || echo "[]")
+  filter_event_input=$(echo "$after_oos" | jq '[.[] | . + {user: {type: ._meta_user_type, login: (.user)}}]' 2>/dev/null || echo "[]")
   if ! after_event=$(echo "$filter_event_input" | pi_general_filter_event_style 2>/dev/null); then
     pi_warn "PR #${pr_number}: event-style フィルタに失敗、空配列で続行"
     echo "[]"
@@ -445,19 +490,23 @@ pi_collect_general_comments() {
   # Issue #404 task 7: filtered_excessive を filtered_resolved と filtered_event の間に追加。
   # gate OFF 時は pi_general_filter_excessive が pass-through するため filtered_excessive=0 と
   # なり、観測者が「gate が無効か機能してないか」をログ 1 行で確認できる（Req 4.4 観測可能性）。
-  local filtered_self filtered_resolved filtered_excessive filtered_event truncated
+  # Issue #437 task 4: filtered_oos を filtered_excessive と filtered_event の間に追加。
+  # gate (PR_ITERATION_OOS_ENABLED) OFF 時は pi_general_filter_oos が pass-through するため
+  # filtered_oos=0 となる（NFR 4.1 観測可能性 / NFR 1.1 既存件数挙動不変）。
+  local filtered_self filtered_resolved filtered_excessive filtered_oos filtered_event truncated
   filtered_self=$((fetched - count_self))
   filtered_resolved=$((count_self - count_resolved))
   filtered_excessive=$((count_resolved - count_excessive))
-  filtered_event=$((count_excessive - count_event))
+  filtered_oos=$((count_excessive - count_oos))
+  filtered_event=$((count_oos - count_event))
   truncated=$((count_event - count_final))
 
   # サマリは stderr に出力する（本関数の stdout は JSON 配列に予約されているため）。
   # pi_warn は元々 stderr 直行、pi_log は stdout のため明示的に >&2 で逃がす。
   if [ "$truncated" -gt 0 ]; then
-    pi_warn "PR #${pr_number} general comments: fetched=${fetched}, filtered_self=${filtered_self}, filtered_resolved=${filtered_resolved}, filtered_excessive=${filtered_excessive}, filtered_event=${filtered_event}, truncated=${truncated} (limit=${limit}), final=${count_final}"
+    pi_warn "PR #${pr_number} general comments: fetched=${fetched}, filtered_self=${filtered_self}, filtered_resolved=${filtered_resolved}, filtered_excessive=${filtered_excessive}, filtered_oos=${filtered_oos}, filtered_event=${filtered_event}, truncated=${truncated} (limit=${limit}), final=${count_final}"
   else
-    pi_log "PR #${pr_number} general comments: fetched=${fetched}, filtered_self=${filtered_self}, filtered_resolved=${filtered_resolved}, filtered_excessive=${filtered_excessive}, filtered_event=${filtered_event}, truncated=0, final=${count_final}" >&2
+    pi_log "PR #${pr_number} general comments: fetched=${fetched}, filtered_self=${filtered_self}, filtered_resolved=${filtered_resolved}, filtered_excessive=${filtered_excessive}, filtered_oos=${filtered_oos}, filtered_event=${filtered_event}, truncated=0, final=${count_final}" >&2
   fi
 
   echo "$final"
@@ -474,6 +523,7 @@ pi_collect_general_comments() {
 # pi_write_marker: PR body の hidden marker を round + last-run + no-progress-streak
 #   の 3 フィールド形式で書き換える（Issue #122 Req 4.1 / 4.3 / 4.5）。
 #   入力: $1=pr_number, $2=round, $3=no_progress_streak
+#         $4=oos_no_progress_streak（省略可 / #437 Req 5）, $5=oos_fingerprint（省略可 / #437 Req 5）
 #   戻り値: 0=成功, 1=失敗（呼び出し元で WARN + 据え置き、Req 5.4）
 #
 #   設計判断:
@@ -482,11 +532,18 @@ pi_collect_general_comments() {
 #     - 既存 marker の置換 sed は `last-run=[^>]*` で末尾 `-->` 直前まで全部食うため、
 #       旧フォーマット（no-progress-streak 無し）も同じ正規表現で吸収できる（Req 4.4）。
 #     - 副作用なし（PR body 書き込み 1 回のみ。コメント投稿は呼び出し元で別途実施）。
+#     - Issue #437 Req 5 / NFR 1.3: gate ON（PR_ITERATION_OOS_ENABLED=true）かつ第 4/5 引数が
+#       渡されたときのみ、marker 末尾に `oos-no-progress-streak=J oos-fingerprint=<H>` を追記する。
+#       gate OFF（既定）/ 引数未指定では 3 フィールドのまま既存 marker と byte 互換（NFR 1.3）。
+#       既存 sed `[^>]*` は oos フィールド有無の旧 marker も吸収するため後方互換（旧フォーマット
+#       吸収）。
 # ─────────────────────────────────────────────────────────────────────────────
 pi_write_marker() {
   local pr_number="$1"
   local round="$2"
   local streak="$3"
+  local oos_streak="${4-}"
+  local oos_fingerprint="${5-}"
   local now
   now=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
@@ -497,7 +554,13 @@ pi_write_marker() {
     return 1
   fi
 
-  local marker="<!-- idd-claude:pr-iteration round=${round} last-run=${now} no-progress-streak=${streak} -->"
+  # gate ON かつ oos フィールドが渡されたときのみ 5 フィールド形式に拡張する。
+  # gate OFF / 引数未指定では既存 3 フィールド形式で byte 互換（NFR 1.3）。
+  local oos_suffix=""
+  if [ "${PR_ITERATION_OOS_ENABLED:-false}" = "true" ] && [ -n "$oos_streak" ]; then
+    oos_suffix=" oos-no-progress-streak=${oos_streak} oos-fingerprint=${oos_fingerprint}"
+  fi
+  local marker="<!-- idd-claude:pr-iteration round=${round} last-run=${now} no-progress-streak=${streak}${oos_suffix} -->"
   local new_body
   if echo "$body" | grep -qE 'idd-claude:pr-iteration round=[0-9]+'; then
     # 既存 marker を最新 marker で置換（複数あった場合も全部 1 つに集約）。
@@ -1221,6 +1284,290 @@ pi_next_no_progress_streak() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_route_out_of_scope_escalate: out-of-scope 指摘を既定経路へ還流する共通ヘルパ
+#   入力: $1=pr_number, $2=sha, $3=decisions_json（adjudicator 由来 / 空文字列許容）,
+#         $4=source_kind（"adjudicator" | "developer-marker" | "no-progress" 等の観測ラベル）,
+#         $5=out_of_scope_count（観測ログ用 / 空なら "?" 表示）
+#   出力: なし（pi_log / pi_warn のみ）
+#   戻り値: 0=ok（ルーティング実施 / 冪等 skip 含む）/ 2=入力検証失敗
+#   Issue #437 Req 3.1 / 3.2 / 3.3 / 3.4 / 3.5 / 5.2 / NFR 3.3 / NFR 4.1
+#
+#   設計判断（design.md Components and Interfaces / pi_route_out_of_scope_escalate 節）:
+#     - adjudicator 経路（adj_route_out_of_scope）と Developer marker / 内容ベース no-progress
+#       経路（pi_run_iteration）の 2 経路から共通呼び出しされる単一ルーティング実体。
+#     - ルート解決: PR_ITERATION_OOS_ROUTE が `needs-decisions`（既定）→ `needs-iteration`
+#       除去 + `needs-decisions` 付与 + 追跡コメント投稿。`design-reflow` / `spawn-issue` は
+#       本 spec では未実装で `needs-decisions` に正規化する（issue-watcher.sh:795- の env 正規化と
+#       二重防御。env 値だけ将来予約 / design.md 確認事項 2 / Non-Goal）。
+#     - 冪等性（Req 3.5）: 投稿コメントに hidden marker
+#       `<!-- idd-claude:pr-iteration-oos-routed sha=<sha> -->` を付与し、同一 PR・同一 SHA で
+#       既存 marker 検出時は再ルーティングを skip する。
+#     - 失敗時（ラベル付与 / コメント投稿）は WARN 1 行を残し silent fail しない（Req 3.4）。
+#       既存の needs-iteration 据え置き挙動を壊さないよう rc=0 で返す（安全側）。
+#     - 観測ログ（NFR 4.1）: `reason=out-of-scope route=<route>` を含む 1 行を機械抽出可能形式で出力。
+#     - 未信頼値（reason / file / message）は jq --arg / @tsv でリテラル抽出してから printf へ渡す
+#       （filter inline 展開禁止 / CLAUDE.md §5）。gh へは `--` を付与しオプション注入を防ぐ（NFR 3.3）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_route_out_of_scope_escalate() {
+  local pr_number="${1:-}"
+  local sha="${2:-}"
+  local decisions_json="${3:-}"
+  local source_kind="${4:-unknown}"
+  local out_of_scope_count="${5:-?}"
+
+  # gate OFF（既定）→ 即 return 0（防御的二重確認 / NFR 1.1。呼び出し元も gate 判定済み）
+  if [ "${PR_ITERATION_OOS_ENABLED:-false}" != "true" ]; then
+    return 0
+  fi
+
+  # 入力検証（NFR 3.3）: PR 番号 / SHA を path / git revision / URL に使う前に厳密検証する。
+  if ! [[ "$pr_number" =~ ^[0-9]+$ ]]; then
+    pi_warn "pi_route_out_of_scope_escalate: 無効な PR 番号 '${pr_number}'"
+    return 2
+  fi
+  if ! [[ "$sha" =~ ^[0-9a-f]{7,40}$ ]]; then
+    pi_warn "PR #${pr_number}: pi_route_out_of_scope_escalate: 無効な SHA '${sha}'"
+    return 2
+  fi
+
+  # ルート解決: 本 spec では `needs-decisions` のみ実装。未知値は安全側で needs-decisions に丸める。
+  local route="${PR_ITERATION_OOS_ROUTE:-needs-decisions}"
+  case "$route" in
+    needs-decisions) : ;;
+    design-reflow|spawn-issue|*) route="needs-decisions" ;;
+  esac
+  local label="${LABEL_NEEDS_DECISIONS:-needs-decisions}"
+  local iteration_label="${LABEL_NEEDS_ITERATION:-needs-iteration}"
+  local timeout_s="${PR_ITERATION_GIT_TIMEOUT:-120}"
+
+  # 冪等性（Req 3.5）: 同一 PR・同一 SHA で既ルーティング済みなら skip する。
+  local routed_marker="<!-- idd-claude:pr-iteration-oos-routed sha=${sha} -->"
+  local body
+  body=$(timeout "$timeout_s" \
+    gh pr view "$pr_number" --repo "$REPO" --json body --jq '.body // ""' 2>/dev/null || echo "")
+  # コメント側 marker も走査する（gh pr view body だけでは過去ルーティングコメントを拾えないため）。
+  local existing_comment_markers=""
+  existing_comment_markers=$(timeout "$timeout_s" \
+    gh api "/repos/${REPO}/issues/${pr_number}/comments" --jq '.[].body' 2>/dev/null \
+    | grep -F -- "idd-claude:pr-iteration-oos-routed sha=${sha}" 2>/dev/null || true)
+  case "${body}${existing_comment_markers}" in
+    *"idd-claude:pr-iteration-oos-routed sha=${sha}"*)
+      pi_log "PR #${pr_number}: reason=out-of-scope route=${route} action=skip-already-routed sha=${sha} (Req 3.5 冪等)"
+      return 0
+      ;;
+  esac
+
+  # out-of-scope 指摘の判定根拠（Req 1.4 / 3.3）を TSV 化して追跡コメント本文に並べる。
+  # 未信頼値（reason / file）は jq @tsv でリテラル抽出してから printf へ渡す（filter inline 展開禁止）。
+  local detail_lines=""
+  if [ -n "$decisions_json" ]; then
+    local oos_rows
+    oos_rows=$(printf '%s' "$decisions_json" | jq -r '
+      .decisions // []
+      | map(select(.verdict == "out-of-scope"))
+      | .[]
+      | [ (.id | tostring), (.file // ""), ((.line // 0) | tostring), (.reason // "") ]
+      | @tsv
+    ' 2>/dev/null) || oos_rows=""
+    if [ -n "$oos_rows" ]; then
+      while IFS=$'\t' read -r oid ofile oline oreason; do
+        [ -z "$oid" ] && continue
+        detail_lines="${detail_lines}- id: ${oid} / ${ofile}:${oline} — ${oreason}
+"
+      done <<<"$oos_rows"
+    fi
+  fi
+
+  # 1. `needs-iteration` 除去（round 候補プールから外す / Req 2.1）。失敗は WARN + 続行（安全側）。
+  if ! timeout "$timeout_s" \
+      gh pr edit "$pr_number" --repo "$REPO" --remove-label "$iteration_label" >/dev/null 2>&1; then
+    pi_warn "PR #${pr_number}: out-of-scope 還流で '${iteration_label}' 除去に失敗（既存挙動据え置きで安全側）"
+  fi
+
+  # 2. 還流ラベル付与（既定 needs-decisions / Req 3.1 / 3.2）。失敗は WARN（silent fail 禁止 / Req 3.4）。
+  if ! timeout "$timeout_s" \
+      gh pr edit "$pr_number" --repo "$REPO" --add-label "$label" >/dev/null 2>&1; then
+    pi_warn "PR #${pr_number}: out-of-scope 還流ラベル '${label}' 付与失敗（silent fail せず WARN / Req 3.4）"
+  fi
+
+  # 3. 追跡コメント投稿 + 冪等 marker（Req 3.3 / 3.5）。失敗は WARN（silent fail 禁止 / Req 3.4）。
+  local route_body
+  route_body=$(printf '## 自動裁定: out-of-scope へ還流（人間判断要求）\n\nround を消費させる legitimate 指摘が残っていない一方、当該 PR の権限では requirements.md / design.md / tasks.md の確定事項を変更できない out-of-scope 指摘が残存しています。本 PR を自動 iteration から外し、%s ラベルで人間判断へ還流します（source=%s / Req 3.1 / 3.2）。\n\n### out-of-scope 指摘の還流候補\n\n%s\n%s\n' \
+    "$label" "$source_kind" "$detail_lines" "$routed_marker")
+  if ! timeout "$timeout_s" \
+      gh pr comment "$pr_number" --repo "$REPO" --body "$route_body" >/dev/null 2>&1; then
+    pi_warn "PR #${pr_number}: out-of-scope 還流コメント投稿失敗（sha=${sha} / ラベルは付与済みで追跡可能 / Req 3.4）"
+  fi
+
+  # 4. 観測ログ（NFR 4.1）: PR 番号 / source / round 相当の打ち切り理由 / route を 1 行で機械抽出可能に。
+  pi_log "PR #${pr_number}: source=${source_kind} out_of_scope=${out_of_scope_count} reason=out-of-scope route=${route} sha=${sha} action=escalated-to-${label}"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_detect_developer_oos_marker: Developer 応答ログから out-of-scope 構造化マーカーを検出
+#   入力: $1=log_file（Developer iteration 応答ログのファイルパス）
+#   出力: stdout に検出したマーカー種別（"design" | "spec-stale"）。不在 / 不能 / 語彙外は空。
+#   戻り値: 0 固定（fail-safe）
+#   Issue #437 Req 4.2 / 4.5 / NFR 3.1 / NFR 3.2
+#
+#   判定: 厳密書式 `^OUT-OF-SCOPE:[[:space:]]+(design|spec-stale)[[:space:]]*$` を grep -E で
+#         検出する（行頭一致 / 許容語彙集合 {design, spec-stale} のみ / 前後空白許容）。
+#         許容語彙集合外（例: `OUT-OF-SCOPE: foo`）・マーカー不在は空返し（安全側 = 従来 round
+#         進行 / Req 4.5）。最初に一致した行の種別を返す。
+#   セキュリティ（NFR 3.1 / 3.2）: 未信頼入力（Developer 応答ログ本文）は変数 quote +
+#         `grep -E --` でオプション解釈を打ち切る（`-` 始まり等のフラグ注入を防ぐ）。read-only。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_detect_developer_oos_marker() {
+  local log_file="${1:-}"
+  # fail-safe: ログ不在 / 読み取り不能は空返し（誤った打ち切りを防ぐ安全側）。
+  if [ -z "$log_file" ] || [ ! -r "$log_file" ]; then
+    echo ""
+    return 0
+  fi
+  local matched
+  matched=$(grep -E -- '^OUT-OF-SCOPE:[[:space:]]+(design|spec-stale)[[:space:]]*$' "$log_file" 2>/dev/null | head -1 || true)
+  if [ -z "$matched" ]; then
+    echo ""
+    return 0
+  fi
+  # 種別語彙のみを抽出（前後の `OUT-OF-SCOPE:` / 空白を剥がす）。
+  local kind
+  kind=$(printf '%s' "$matched" | sed -E 's|^OUT-OF-SCOPE:[[:space:]]+||; s|[[:space:]]*$||')
+  case "$kind" in
+    design|spec-stale) echo "$kind" ;;
+    *) echo "" ;;
+  esac
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_oos_fingerprint: out-of-scope 指摘内容の同一性判定キー（fingerprint）を算出する純粋関数
+#   入力: $1=decisions_json（out-of-scope finding を含む JSON / 空許容）
+#   出力: stdout に fingerprint 文字列（16 進ハッシュ。入力に out-of-scope が無ければ
+#         空入力相当の安定ハッシュ）
+#   戻り値: 0 固定
+#   Issue #437 Req 5.1 / 5.3 / 5.5 / NFR 3.1
+#
+#   設計判断（design.md Components and Interfaces / pi_oos_fingerprint 節）:
+#     - out-of-scope finding 群の severity / file / message（message 不在時は reason）を
+#       正規化連結し sha256（不能環境は cksum）で fingerprint を生成する。
+#     - 「同じ design-level 矛盾を指している限り同一」を意図（requirements Open Question）。
+#       head commit SHA には依存しない（Req 5.3）。内容が実質変化すれば fingerprint も変わる
+#       （Req 5.5）。順序非依存にするため severity/file/message タプルを sort してから連結する。
+#     - 純粋関数（副作用なし / グローバル参照なし）→ extract_function テストで隔離検証可能。
+#     - 未信頼値は jq @tsv でリテラル抽出（filter inline 展開禁止 / NFR 3.1）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_oos_fingerprint() {
+  local decisions_json="${1:-}"
+  local material=""
+  if [ -n "$decisions_json" ]; then
+    material=$(printf '%s' "$decisions_json" | jq -r '
+      [ (.decisions // [])
+        | .[]
+        | select(.verdict == "out-of-scope")
+        | [ (.severity // ""), (.file // ""), (.message // .reason // "") ]
+        | @tsv
+      ]
+      | sort
+      | .[]
+    ' 2>/dev/null) || material=""
+  fi
+  # sha256sum を優先し、不能環境（無い / 失敗）は cksum にフォールバックする。
+  local hash
+  if command -v sha256sum >/dev/null 2>&1; then
+    hash=$(printf '%s' "$material" | sha256sum 2>/dev/null | awk '{print $1}')
+  fi
+  if [ -z "${hash:-}" ]; then
+    hash=$(printf '%s' "$material" | cksum 2>/dev/null | awk '{print $1}')
+  fi
+  echo "${hash:-0}"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_read_oos_no_progress_streak: PR body marker から内容ベース no-progress 連続カウンタを取得
+#   入力: $1=pr_body（gh pr view --json body --jq '.body // ""' で取得済みの文字列）
+#   出力: stdout に整数（key 不在 / marker 不在なら "0"）
+#   戻り値: 0 固定
+#   Issue #437 Req 5.1 / 5.3 / 5.5
+#
+#   marker 形式: <!-- idd-claude:pr-iteration round=N last-run=... no-progress-streak=K
+#                oos-no-progress-streak=J oos-fingerprint=<H> -->
+#   既存 marker（oos-no-progress-streak キー無し）の場合は "0" を返す（後方互換 / NFR 1.3）。
+#   既存 pi_read_no_progress_streak（SHA ベース）とは独立した別カウンタ（Non-Goal: 既存不変）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_read_oos_no_progress_streak() {
+  local pr_body="${1-}"
+  if [ -z "$pr_body" ]; then
+    echo "0"
+    return 0
+  fi
+  local streak
+  streak=$(echo "$pr_body" \
+    | grep -oE 'idd-claude:pr-iteration [^>]*oos-no-progress-streak=[0-9]+' \
+    | grep -oE 'oos-no-progress-streak=[0-9]+' \
+    | grep -oE '[0-9]+$' \
+    | tail -1)
+  echo "${streak:-0}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_read_oos_fingerprint: PR body marker から直前 round の out-of-scope fingerprint を取得
+#   入力: $1=pr_body
+#   出力: stdout に fingerprint 文字列（key 不在 / marker 不在なら空文字列）
+#   戻り値: 0 固定
+#   Issue #437 Req 5.3 / 5.5
+# ─────────────────────────────────────────────────────────────────────────────
+pi_read_oos_fingerprint() {
+  local pr_body="${1-}"
+  if [ -z "$pr_body" ]; then
+    echo ""
+    return 0
+  fi
+  local fp
+  fp=$(echo "$pr_body" \
+    | grep -oE 'idd-claude:pr-iteration [^>]*oos-fingerprint=[0-9a-zA-Z]+' \
+    | grep -oE 'oos-fingerprint=[0-9a-zA-Z]+' \
+    | sed -E 's|oos-fingerprint=||' \
+    | tail -1)
+  echo "${fp:-}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pi_next_oos_no_progress_streak: 内容ベース no-progress 連続カウンタの次値を求める純粋関数
+#   入力: $1=prev_fingerprint（直前 round の fingerprint / 空許容）
+#         $2=current_fingerprint（今 round の fingerprint）
+#         $3=prev_streak（前サイクルまでの内容ベース no-progress 連続カウンタ値）
+#   出力: stdout に次の streak 値
+#           fingerprint 同一（かつ非空）→ prev_streak + 1（内容が変わらず堂々巡り / Req 5.1）
+#           fingerprint 変化 / 空 → "0"（内容が実質変化 = リセット / Req 5.5）
+#   戻り値: 0 固定
+#
+#   設計判断（design.md / Req 5.3）:
+#     - SHA（head commit）には依存せず fingerprint（内容ハッシュ）の同一性のみで加算する。
+#       head SHA が毎 round 変化しても fingerprint 同一なら streak は加算される（Req 5.3）。
+#     - prev_fingerprint / current_fingerprint のいずれかが空のときは加算しない（初回 round /
+#       取得失敗時に誤って escalate に倒さない安全側 = 0 リセット）。
+#     - 純粋関数（副作用なし）→ extract_function テストで隔離検証可能。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_next_oos_no_progress_streak() {
+  local prev_fingerprint="${1-}"
+  local current_fingerprint="${2-}"
+  local prev_streak="${3-}"
+  if [ -n "$prev_fingerprint" ] && [ -n "$current_fingerprint" ] && [ "$prev_fingerprint" = "$current_fingerprint" ]; then
+    if [[ "$prev_streak" =~ ^[0-9]+$ ]]; then
+      echo "$((prev_streak + 1))"
+    else
+      echo "1"
+    fi
+    return 0
+  fi
+  echo "0"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_run_iteration: 1 PR 分の iteration を実行（fresh context Claude 起動）
 #   入力: $1=pr_json
 #   戻り値: 0=success(commit+push or reply-only), 1=failure, 2=escalated(round上限到達),
@@ -1289,6 +1636,19 @@ pi_run_iteration() {
   local prev_streak
   prev_streak=$(pi_read_no_progress_streak "$pr_body_for_marker")
 
+  # Issue #437 Req 5: gate ON のとき内容ベース no-progress 連続カウンタ + 直前 fingerprint を
+  # 同じ pr_body から抽出する（既存 SHA ベース streak とは独立 / Non-Goal: 既存不変）。
+  # gate OFF では本変数を参照しない（早期打ち切り自体が no-op / NFR 1.1）。
+  local prev_oos_streak="0" prev_oos_fingerprint=""
+  if [ "${PR_ITERATION_OOS_ENABLED:-false}" = "true" ]; then
+    prev_oos_streak=$(pi_read_oos_no_progress_streak "$pr_body_for_marker")
+    prev_oos_fingerprint=$(pi_read_oos_fingerprint "$pr_body_for_marker")
+  fi
+  # Issue #437 Req 5: 閾値未満で round が継続するとき marker へ永続化する内容ベース
+  # no-progress streak / fingerprint。gate OFF / out-of-scope 経路を通らなかった場合は空のまま
+  # （pi_write_marker は空引数を受けて従来 3 フィールド marker を書く / NFR 1.3）。
+  local _pi_oos_marker_streak="" _pi_oos_marker_fingerprint=""
+
   # Issue #122 Req 2.1 / 2.3: max_rounds=0 は「round 数超過のみによる escalate を行わない」
   # （AC 2.1: design / AC 2.3: impl）。max_rounds>0 のときは round >= max で escalate。
   if [ "$max_rounds" != "0" ] && [ "$round" -ge "$max_rounds" ]; then
@@ -1315,13 +1675,17 @@ pi_run_iteration() {
   #                                `none:` （回復不要 / dirty なし）
   # Issue #122 Req 3: subshell <-> 親 で SHA 比較用に before/after の 2 行も tmpfile に書き出す。
   #   - $pi_sha_file : 1 行目=before_sha, 2 行目=after_sha
-  local pi_soft_fail_file pi_recover_file pi_sha_file
+  # Issue #437 Req 4.2 / 4.3: subshell <-> 親 で Developer 構造化マーカーの検出種別を渡すための
+  #   tmpfile（1 行: "design" | "spec-stale" | ""）。gate OFF では書かない（空のまま）。
+  local pi_soft_fail_file pi_recover_file pi_sha_file pi_oos_marker_file
   pi_soft_fail_file=$(mktemp -t "pi-softfail-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
   pi_recover_file=$(mktemp -t "pi-recover-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
   pi_sha_file=$(mktemp -t "pi-sha-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
+  pi_oos_marker_file=$(mktemp -t "pi-oosmark-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
   : > "$pi_soft_fail_file"
   : > "$pi_recover_file"
   : > "$pi_sha_file"
+  : > "$pi_oos_marker_file"
 
   # サブシェル + trap で必ず base branch に戻す（AC 8.3）
   local rc=0
@@ -1420,6 +1784,16 @@ pi_run_iteration() {
       pi_log "PR #${pr_number}: kind=${kind} Claude 実行完了 (log: ${pi_log_file})"
     fi
 
+    # Issue #437 Req 4.2: gate ON のとき Developer 応答ログから out-of-scope 構造化マーカーを
+    # 検出し、種別（design / spec-stale / 不在は空）を tmpfile 経由で親へ渡す。検出は読み取り
+    # 専用・fail-safe（pi_detect_developer_oos_marker はログ不在でも空返し）。gate OFF では
+    # 本ブロックを skip し空のまま（既存フロー byte 互換 / NFR 1.1）。
+    if [ "${PR_ITERATION_OOS_ENABLED:-false}" = "true" ]; then
+      local _pi_dev_oos_marker
+      _pi_dev_oos_marker=$(pi_detect_developer_oos_marker "$pi_log_file")
+      printf '%s' "$_pi_dev_oos_marker" > "$pi_oos_marker_file"
+    fi
+
     # #118 Req 1.2 / 2.1 / 2.2: round 終了時点の dirty 判定と自動回復。
     # 設計判断:
     #   - 「soft-fail を検出 かつ 差分あり」「soft-fail なし かつ 差分あり」「差分なし」の 3 系統。
@@ -1506,7 +1880,12 @@ pi_run_iteration() {
     before_sha=$(sed -n '1p' "$pi_sha_file")
     after_sha=$(sed -n '2p' "$pi_sha_file")
   fi
-  rm -f "$pi_soft_fail_file" "$pi_recover_file" "$pi_sha_file"
+  # Issue #437 Req 4.2: Developer 構造化マーカー検出種別（gate OFF / 不在は空）を読み取る。
+  local dev_oos_marker=""
+  if [ -s "$pi_oos_marker_file" ]; then
+    dev_oos_marker=$(cat "$pi_oos_marker_file")
+  fi
+  rm -f "$pi_soft_fail_file" "$pi_recover_file" "$pi_sha_file" "$pi_oos_marker_file"
 
   # Issue #122 Req 5: 失敗扱い（quota soft-fail / claude crash / post-round-commit fail）の
   # round では marker を据え置く（round counter / no-progress streak いずれも増減させない）。
@@ -1544,6 +1923,64 @@ pi_run_iteration() {
   esac
 
   if [ $rc -eq 0 ]; then
+    # Issue #437 Req 4.3 / 5.2 / 5.4: gate ON のとき、通常 finalize / no-progress 判定の前に
+    # out-of-scope 経路を評価する。gate OFF（既定）では本ブロックを完全 skip し既存フローへ進む
+    # （byte 互換 / NFR 1.1）。
+    if [ "${PR_ITERATION_OOS_ENABLED:-false}" = "true" ]; then
+      # adjudicator が投稿した out-of-scope marker コメントを収集し、内容ベース fingerprint を
+      # 算出するための decisions-like JSON を組み立てる（severity / file / message を保持）。
+      # marker `<!-- idd-claude:pr-adjudicator-out-of-scope id=<N> sha=<sha> -->` を持つコメント
+      # 本文から id / severity / file / line / reason を抽出する。取得失敗は空 JSON（fail-safe）。
+      local oos_decisions_json="{}"
+      local _pi_oos_comments
+      _pi_oos_comments=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
+        gh api "/repos/${REPO}/issues/${pr_number}/comments" 2>/dev/null \
+        | jq -c '[.[] | select((.body // "") | contains("idd-claude:pr-adjudicator-out-of-scope")) | {body}]' 2>/dev/null) \
+        || _pi_oos_comments="[]"
+      if [ -n "$_pi_oos_comments" ] && [ "$_pi_oos_comments" != "[]" ]; then
+        # コメント本文から `- id:` / `- severity:` / `- file:` / `- 理由（...）:` の行を拾って
+        # decisions[] を再構成する（adj_post_decision_comment の投稿書式に対応）。未信頼値は
+        # jq --arg でリテラル処理する。fingerprint は severity/file/message のみ使用するため
+        # message には理由行を充てる。
+        oos_decisions_json=$(printf '%s' "$_pi_oos_comments" | jq -c '
+          { decisions: [ .[]
+            | .body as $b
+            | { verdict: "out-of-scope",
+                severity: (($b | capture("(?m)^- severity: (?<v>.*)$").v) // ""),
+                file:     (($b | capture("(?m)^- file: (?<v>.*)$").v) // ""),
+                message:  (($b | capture("(?m)^- 理由（[^）]*）: (?<v>.*)$").v) // "") }
+          ] }
+        ' 2>/dev/null) || oos_decisions_json="{}"
+      fi
+
+      local current_oos_fingerprint
+      current_oos_fingerprint=$(pi_oos_fingerprint "$oos_decisions_json")
+
+      # (a) Req 4.3: Developer が out-of-scope 構造化マーカーを宣言した round は finalize せず
+      #     即ルーティングへ引き渡す（in-scope 実害が残っていない前提を Developer 判断で確定）。
+      if [ -n "$dev_oos_marker" ]; then
+        pi_log "PR #${pr_number}: kind=${kind} round=${next_round} reason=developer-oos-marker marker=${dev_oos_marker} action=route-out-of-scope"
+        pi_route_out_of_scope_escalate "$pr_number" "$after_sha" "$oos_decisions_json" "developer-marker:${dev_oos_marker}" "?" || true
+        return 2
+      fi
+
+      # (b) Req 5.1 / 5.2 / 5.3 / 5.4 / 5.5: 内容ベース no-progress 早期打ち切り。
+      #     fingerprint 同一（SHA 変化に依存しない）で連続したら streak を加算し、閾値到達で
+      #     max_rounds 到達前に打ち切ってルーティングする。fingerprint 変化でリセット（Req 5.5）。
+      local next_oos_streak
+      next_oos_streak=$(pi_next_oos_no_progress_streak "$prev_oos_fingerprint" "$current_oos_fingerprint" "$prev_oos_streak")
+      if [[ "$next_oos_streak" =~ ^[0-9]+$ ]] && [ "$next_oos_streak" -ge "$PR_ITERATION_OOS_NO_PROGRESS_LIMIT" ]; then
+        pi_log "PR #${pr_number}: kind=${kind} round=${next_round} reason=oos-content-no-progress oos-no-progress-streak=${next_oos_streak} limit=${PR_ITERATION_OOS_NO_PROGRESS_LIMIT} action=route-out-of-scope"
+        pi_route_out_of_scope_escalate "$pr_number" "$after_sha" "$oos_decisions_json" "content-no-progress" "?" || true
+        return 2
+      fi
+      # 閾値未満: oos streak / fingerprint を marker に永続化して次 round で比較する。
+      # 通常 SHA ベース streak と round counter の更新は下流の pi_write_marker に委ねるため、
+      # ここでは値だけ控えて pi_write_marker 呼び出し時に渡す（下記 _pi_oos_marker_* で受け渡し）。
+      _pi_oos_marker_streak="$next_oos_streak"
+      _pi_oos_marker_fingerprint="$current_oos_fingerprint"
+    fi
+
     # Issue #122 Req 3.1 / 3.2 / Issue #435 Req 2: SHA 比較で「新規 commit が push されたか」
     # 判定。before_sha と after_sha が異なれば新規 commit あり（claude 自身による commit+push、
     # または pi_auto_commit_and_push 経由の auto-commit、いずれもカバー）。
@@ -1564,7 +2001,10 @@ pi_run_iteration() {
     fi
 
     # Issue #122 Req 5.4 / Req 4.1: marker 書き込み。失敗は Req 5.4 の通り ERROR + 据え置き
-    if ! pi_write_marker "$pr_number" "$next_round" "$new_streak"; then
+    # Issue #437 Req 5: gate ON で out-of-scope 経路を通過した round は oos streak / fingerprint も
+    # 併せて永続化する（第 4/5 引数）。gate OFF / 経路未通過では空のまま渡し、pi_write_marker が
+    # 従来 3 フィールド marker を書く（NFR 1.3 byte 互換）。
+    if ! pi_write_marker "$pr_number" "$next_round" "$new_streak" "$_pi_oos_marker_streak" "$_pi_oos_marker_fingerprint"; then
       pi_error "PR #${pr_number}: kind=${kind} round=${next_round} marker 書き込みに失敗 (needs-iteration を残置)"
       return 1
     fi
