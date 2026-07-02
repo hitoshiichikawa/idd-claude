@@ -77,7 +77,8 @@ idd-claude/
     │   │   ├── promote-pipeline.sh  #   Promote Pipeline ＋ Path Overlap プロセッサ（#181 Part 3）
     │   │   ├── pr-iteration.sh      #   PR Iteration プロセッサ（#181 Part 3）
     │   │   ├── stage-a-verify.sh    #   Stage A Verify ゲート（#181 Part 3）
-    │   │   └── design-review-release.sh  #   Design Review Release プロセッサ（#456）
+    │   │   ├── design-review-release.sh  #   Design Review Release プロセッサ（#456）
+    │   │   └── tasks-count-gate.sh  #   Tasks Count Gate（#457）
     │   └── triage-prompt.tmpl       # Triage フェーズ用プロンプト
     └── LaunchAgents/
         └── com.local.issue-watcher.plist   # macOS launchd 設定
