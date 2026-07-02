@@ -238,7 +238,8 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
   | `drr_` | design-review-release（ロガー `drr_log` 等は core_utils に同居 / #456） |
   | `tc_` | tasks-count-gate（#457） |
   | `dbg_` | debugger-gate（非 prefix 関数 detect_blocked_marker 等はモジュール冒頭ヘッダで列挙 / #458） |
-  | `pt_` / `sc_` / `dr_` | issue-watcher 本体内（per-task / stage checkpoint / dependency-resolver） |
+  | `sc_` / `stage_checkpoint_` / `_spec_` | stage-checkpoint（Slot Runner 内の類似名 `_stage_checkpoint_assert_slug_match` / `_stage_checkpoint_has_resumable_state` は対象外で本体残置 / #459） |
+  | `pt_` / `dr_` | issue-watcher 本体内（per-task / dependency-resolver） |
 
 - env var 名・ラベル名・コマンド名・ファイルパスは **英語固定**（言語方針に従う）。
 
