@@ -20,10 +20,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
-# #181 Part 3 で PR Iteration Processor の関数群（pi_resolve_max_rounds /
-# pi_read_no_progress_streak ほか）は modules/pr-iteration.sh へ切り出された。
-# 抽出元を本体から pr-iteration.sh へ repoint する。
+# #181 Part 3 で PR Iteration Processor の関数群は modules/pr-iteration.sh へ切り出され、
+# #469 の family 分割で pi_resolve_max_rounds は orchestrator（pr-iteration.sh）に残置、
+# pi_read_* 系（round_counter / no_progress_streak / last_run）は pr-iteration-state.sh へ
+# 移動した。関数ごとに抽出元 family を使い分ける。
 PR_ITERATION_SH="$SCRIPT_DIR/../bin/modules/pr-iteration.sh"
+PR_ITERATION_STATE_SH="$SCRIPT_DIR/../bin/modules/pr-iteration-state.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
@@ -31,6 +33,10 @@ if [ ! -f "$WATCHER_SH" ]; then
 fi
 if [ ! -f "$PR_ITERATION_SH" ]; then
   echo "ERROR: cannot find pr-iteration.sh at $PR_ITERATION_SH" >&2
+  exit 2
+fi
+if [ ! -f "$PR_ITERATION_STATE_SH" ]; then
+  echo "ERROR: cannot find pr-iteration-state.sh at $PR_ITERATION_STATE_SH" >&2
   exit 2
 fi
 
@@ -55,7 +61,7 @@ pi_error() { echo "ERR: $*" >&2; }
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PR_ITERATION_SH" "pi_resolve_max_rounds")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PR_ITERATION_SH" "pi_read_no_progress_streak")"
+eval "$(extract_function "$PR_ITERATION_STATE_SH" "pi_read_no_progress_streak")"
 
 if ! declare -F pi_resolve_max_rounds >/dev/null; then
   echo "ERROR: pi_resolve_max_rounds not loaded" >&2
@@ -234,7 +240,7 @@ echo ""
 # round counter 読み出しが no-progress-streak 拡張で壊れていないことを確認
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PR_ITERATION_SH" "pi_read_round_counter")"
+eval "$(extract_function "$PR_ITERATION_STATE_SH" "pi_read_round_counter")"
 
 if ! declare -F pi_read_round_counter >/dev/null; then
   echo "ERROR: pi_read_round_counter not loaded" >&2
@@ -289,7 +295,7 @@ assert_eq "Req 4.4: 新 marker → 新 marker の更新も同 regex で動作" \
 
 # 既存 pi_read_last_run の regex は streak 付き marker でも last-run 値のみ拾う
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PR_ITERATION_SH" "pi_read_last_run")"
+eval "$(extract_function "$PR_ITERATION_STATE_SH" "pi_read_last_run")"
 
 if ! declare -F pi_read_last_run >/dev/null; then
   echo "ERROR: pi_read_last_run not loaded" >&2

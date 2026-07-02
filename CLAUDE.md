@@ -220,6 +220,14 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
 
 - 各 module は 2〜4 文字の **関数 prefix** を 1 つ持ち、その module の全関数を prefix で
   namespace する。新 module は**新しい未使用の prefix** を割り当て、ファイル冒頭コメントに明記する。
+- **family 例外（大型 module の分割 / #469）**: 単一 module が肥大化して 1,200 行の上限に迫る
+  場合は、責務単位で `<name>.sh`（orchestrator）+ `<name>-<sub>.sh` の **module family** に
+  分割してよい。family 全体で **1 prefix を共有**する（sub ごとに新 prefix を割り当てない）。
+  各ファイル冒頭コメントに family 宣言（例: `family: pr-iteration / prefix: pi_`）を書き、
+  orchestrator のヘッダに「どの関数がどのファイルにあるか」の分割マニフェストを置く。
+  `REQUIRED_MODULES` には sub → orchestrator の順で登録する（bash の遅延束縛により source 順は
+  機能上不問だが、可読性のため規約で固定）。install.sh は `modules/*.sh` を glob 配布するため
+  family ファイル追加で installer 変更は不要。
 
   | prefix | module / 領域 |
   |---|---|
@@ -228,7 +236,7 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
   | `ar_` | auto-rebase |
   | `pp_` / `po_` | promote-pipeline（pp=Promote / po=Path Overlap） |
   | `pr_` | pr-reviewer |
-  | `pi_` | pr-iteration |
+  | `pi_` | pr-iteration（#469 で family 分割 / 全ファイル `pi_` 共有）: orchestrator `pr-iteration.sh`（エントリ / 候補取得 / kind・round 解決 / round driver / 成功ラベル確定）+ sub `pr-iteration-comments.sh`（一般コメント収集 + filter chain）/ `pr-iteration-state.sh`（PR body marker read/write + round outcome / SHA ベース streak）/ `pr-iteration-oos.sh`（#437 out-of-scope 還流 / 検出 / 内容ベース streak）/ `pr-iteration-exec.sh`（1 round 実行ヘルパー: prompt 構築 / escalation / quota 検出 / auto-commit）。非 prefix `build_recovery_hint` は exec に同居し impl-pipeline / slot-worker からも遅延束縛で呼ばれる共有ヘルパー（#65） |
   | `sec_` | security-review |
   | `cm_` | context-map |
   | `gh_` | guard-hook |
