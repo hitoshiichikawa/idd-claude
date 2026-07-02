@@ -81,7 +81,8 @@ idd-claude/
     │   │   ├── design-review-release.sh  #   Design Review Release プロセッサ（#456）
     │   │   ├── tasks-count-gate.sh  #   Tasks Count Gate（#457）
     │   │   ├── debugger-gate.sh     #   Debugger Gate ヘルパー（#458）
-    │   │   └── stage-checkpoint.sh  #   Stage Checkpoint（#459）
+    │   │   ├── stage-checkpoint.sh  #   Stage Checkpoint（#459）
+    │   │   └── per-task-loop.sh     #   Per-task TDD Loop（#461-462）
     │   └── triage-prompt.tmpl       # Triage フェーズ用プロンプト
     └── LaunchAgents/
         └── com.local.issue-watcher.plist   # macOS launchd 設定
