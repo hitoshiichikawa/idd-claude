@@ -240,6 +240,31 @@ commit に commit を肩代わりさせて運用しないこと。本節は前�
 > watcher の判定挙動を変えるものではなく、commit 履歴の可読性を保つための Developer 側の
 > 運用規律である。
 
+## out-of-scope 構造化マーカー宣言規約（Issue #437）
+
+PR Iteration の 1 round 内でレビュー指摘に対応するとき、指摘が**正当ではあるが当該 impl PR の
+権限では是正できない**（requirements.md / design.md / tasks.md の確定事項の変更が必要／spec が
+古い）と判断した場合、Developer は返信本文にその旨を明記するだけでなく、watcher が機械検出できる
+**構造化マーカー**を出力してよい。これにより「同じ設計レベル指摘が毎 round 堂々巡りして
+`max_rounds` を消尽し `claude-failed` になる」構造的失敗を避け、指摘を設計フェーズ／人間判断へ
+還流できる（`PR_ITERATION_OOS_ENABLED=true` の opt-in 環境でのみ watcher が反応する。未設定環境
+では無害な本文注記として扱われる）。
+
+- **厳密書式**: 返信本文の**行頭・単独行**に次のいずれか 1 つを出力する（許容語彙は
+  `design` / `spec-stale` の 2 つのみ。語彙外・行中言及は watcher に検出されない）:
+  - `OUT-OF-SCOPE: design` — 確定済みの requirements.md / design.md / tasks.md と矛盾し、
+    それらの改訂が必要な強化要件（impl PR では書き換え不可）
+  - `OUT-OF-SCOPE: spec-stale` — 現行実装は確定 spec を正しく満たしているが、指摘は spec 改訂を
+    前提にしている（spec が古い）
+- **判定根拠の併記（必須）**: マーカーを出力するときは、**どの確定事項（どの AC / どの Component /
+  どの spec ファイル / どの境界）と矛盾し、なぜ当該 PR で是正不能か**を同じ返信本文に必ず併記する
+- **「迷ったら出力しない」（安全側）**: out-of-scope か否か確信が持てない場合はマーカーを出力せず、
+  通常どおり本文で提起するに留める。誤ってマーカーを出すと「実害のある指摘を round 対象から外す」
+  最悪シナリオにつながるため、確信が持てなければ通常の legitimate 指摘として扱う
+- **設計 PR との差異**: 設計 PR（`iteration-prompt-design.tmpl` 経路）では `{{SPEC_DIR}}` 配下の
+  spec を編集できるため多くの矛盾は round 内で解消できる。マーカーは「別 Issue / 上位設計の改訂が
+  必要で当該設計 PR でも是正不能」なときに限って使う
+
 ## TaskCreate / TaskUpdate の使用制限（Issue #134 以降適用）
 
 本節は、Developer エージェントが内部 TODO トラッキング機能（一般に `TaskCreate` /

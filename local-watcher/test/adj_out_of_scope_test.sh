@@ -9,15 +9,14 @@
 #         - adj_validate_decisions        (gate-aware schema 検証 / 2 値 ⇔ 3 値)
 #         - adj_extract_legitimate_count  (round 駆動 legitimate 件数 = out-of-scope 除外)
 #         - adj_extract_out_of_scope_count(out-of-scope 件数算出)
-#         - adj_route_out_of_scope        (needs-decisions 還流 + 追跡コメント)
+#         - adj_route_out_of_scope        (共通ヘルパ pi_route_out_of_scope_escalate への委譲判定)
 #
 #       検証する受入基準（docs/specs/437-pr-iteration-pr-design-spec-max-rounds/requirements.md）:
-#         - Req 1.1 gate ON で verdict 3 値 (legitimate|excessive|legitimate-out-of-scope) を許容
+#         - Req 1.1 gate ON で verdict 3 値 (legitimate|excessive|out-of-scope) を許容
 #         - Req 1.3 out-of-scope を round 駆動 legitimate 件数から除外
-#         - Req 2.1 legitimate=0 かつ out-of-scope≥1 で還流ラベル付与
-#         - Req 2.2 out-of-scope 裁定を追跡可能な PR コメントに記録
-#         - Req 2.4 legitimate≥1 残存時は還流せず iteration 継続（ラベル付与しない）
-#         - Req 2.5 ラベル付与失敗でも silent fail せず WARN + rc=0（安全側）
+#         - Req 3.1 legitimate=0 かつ out-of-scope≥1 で共通ヘルパへ委譲（還流ルーティング）
+#         - Req 2.4 legitimate≥1 残存時は委譲せず iteration 継続（route=continue ログ）
+#         - NFR 3.3 無効な PR 番号 / sha は WARN + rc=2（入力検証）
 #         - NFR 1.1 gate OFF（既定）で 3 値 decisions を schema 違反として弾く（2 値厳格維持）
 #         - NFR 1.3 gate OFF で legitimate+excessive==total 不変条件を維持
 #
@@ -28,7 +27,7 @@
 set -euo pipefail
 
 # 抽出関数経由（遅延束縛）で参照される env / state 変数が shellcheck から未使用に見える対策。
-# PR_REVIEWER_OOS_ENABLED / PR_REVIEWER_OOS_ROUTE_LABEL / REPO 等は抽出関数本体から参照される。
+# PR_ITERATION_OOS_ENABLED / PR_REVIEWER_OOS_ROUTE_LABEL / REPO 等は抽出関数本体から参照される。
 # shellcheck disable=SC2034
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADJ_SH="$SCRIPT_DIR/../bin/modules/adjudicator.sh"
@@ -117,15 +116,18 @@ assert_not_contains() {
 }
 
 # ── stub state（routing 用）──
+# #437 refactor（commit 986f1ec）以降、adj_route_out_of_scope は gh を直接叩かず、
+# ルーティング副作用（ラベル付与 / コメント / 冪等 marker）は共通ヘルパ
+# pi_route_out_of_scope_escalate に集約された（design.md Components and Interfaces）。
+# 本テストは adj 層の「委譲判定」（委譲する / continue する / no-op する）を検証し、
+# 副作用本体（gh 呼び出し / WARN）は pr_iteration_oos_routing_test.sh 側で検証する。
 reset_stub_state() {
-  GH_CALL_LOG="$(mktemp)"
   LOG_LOG="$(mktemp)"
   WARN_LOG="$(mktemp)"
-  GH_EDIT_RC=0
-  GH_COMMENT_RC=0
+  PI_CALL_LOG="$(mktemp)"
 }
 cleanup_stub_state() {
-  rm -f "$GH_CALL_LOG" "$LOG_LOG" "$WARN_LOG" 2>/dev/null || true
+  rm -f "$LOG_LOG" "$WARN_LOG" "$PI_CALL_LOG" 2>/dev/null || true
 }
 
 # adj_log / adj_warn stub。LOG_LOG / WARN_LOG が未初期化（純粋関数テスト時 = reset_stub_state
@@ -135,33 +137,26 @@ adj_log()  { echo "$*" >>"${LOG_LOG:-/dev/null}"; }
 # shellcheck disable=SC2317
 adj_warn() { echo "$*" >>"${WARN_LOG:-/dev/null}"; }
 
-# timeout stub: 秒数を捨てて残りを実行
+# pi_route_out_of_scope_escalate stub: 委譲されたか（＝呼び出し引数）を記録するだけ。
+# 実体（副作用）は pr-iteration.sh 側にあり、本テストの対象外。
 # shellcheck disable=SC2317
-timeout() { shift; "$@"; }
-
-# gh stub: 痕跡を記録し edit/comment の rc をシナリオ別に切替
-# shellcheck disable=SC2317
-gh() {
-  echo "gh $*" >>"$GH_CALL_LOG"
-  case "$2" in
-    edit)    return "$GH_EDIT_RC" ;;
-    comment) return "$GH_COMMENT_RC" ;;
-  esac
+pi_route_out_of_scope_escalate() {
+  echo "pi_route $*" >>"${PI_CALL_LOG:-/dev/null}"
   return 0
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # A. adj_oos_enabled gate 評価（既定 OFF / opt-in）
 # ─────────────────────────────────────────────────────────────────────────────
-PR_REVIEWER_OOS_ENABLED="false"
+PR_ITERATION_OOS_ENABLED="false"
 if adj_oos_enabled; then r="on"; else r="off"; fi
 assert_eq "A.1 gate=false で OFF" "off" "$r"
 
-unset PR_REVIEWER_OOS_ENABLED
+unset PR_ITERATION_OOS_ENABLED
 if adj_oos_enabled; then r="on"; else r="off"; fi
 assert_eq "A.2 gate 未設定で OFF（安全側既定）" "off" "$r"
 
-PR_REVIEWER_OOS_ENABLED="true"
+PR_ITERATION_OOS_ENABLED="true"
 if adj_oos_enabled; then r="on"; else r="off"; fi
 assert_eq "A.3 gate=true で ON" "on" "$r"
 
@@ -170,20 +165,20 @@ assert_eq "A.3 gate=true で ON" "on" "$r"
 # ─────────────────────────────────────────────────────────────────────────────
 FINDINGS_3='[{"severity":"high","file":"a.sh","line":1,"message":"x"},{"severity":"low","file":"b.sh","line":2,"message":"y"},{"severity":"medium","file":"c.sh","line":3,"message":"z"}]'
 
-# 3 値 decisions（legitimate / excessive / legitimate-out-of-scope 各 1 件）
+# 3 値 decisions（legitimate / excessive / out-of-scope 各 1 件）
 DEC_3VAL='{"decisions":[
   {"id":1,"severity":"high","file":"a.sh","line":1,"verdict":"legitimate","reason":"r1"},
   {"id":2,"severity":"low","file":"b.sh","line":2,"verdict":"excessive","reason":"r2"},
-  {"id":3,"severity":"medium","file":"c.sh","line":3,"verdict":"legitimate-out-of-scope","reason":"design 確定事項と矛盾"}
-],"summary":{"total":3,"legitimate":1,"excessive":1,"legitimate_out_of_scope":1}}'
+  {"id":3,"severity":"medium","file":"c.sh","line":3,"verdict":"out-of-scope","reason":"design 確定事項と矛盾"}
+],"summary":{"total":3,"legitimate":1,"excessive":1,"out_of_scope":1}}'
 
 # gate OFF（既定）: 3 値 decisions は schema 違反で reject（NFR 1.1 / 2 値厳格維持）
-PR_REVIEWER_OOS_ENABLED="false"
+PR_ITERATION_OOS_ENABLED="false"
 if adj_validate_decisions "$FINDINGS_3" "$DEC_3VAL" 2>/dev/null; then rc=0; else rc=1; fi
 assert_eq "B.1 gate OFF で 3 値 decisions を reject（NFR 1.1）" "1" "$rc"
 
 # gate ON: 3 値 decisions は valid
-PR_REVIEWER_OOS_ENABLED="true"
+PR_ITERATION_OOS_ENABLED="true"
 if adj_validate_decisions "$FINDINGS_3" "$DEC_3VAL" 2>/dev/null; then rc=0; else rc=1; fi
 assert_eq "B.2 gate ON で 3 値 decisions を許容（Req 1.1）" "0" "$rc"
 
@@ -191,9 +186,9 @@ assert_eq "B.2 gate ON で 3 値 decisions を許容（Req 1.1）" "0" "$rc"
 DEC_BAD_SUM='{"decisions":[
   {"id":1,"severity":"high","file":"a.sh","line":1,"verdict":"legitimate","reason":"r1"},
   {"id":2,"severity":"low","file":"b.sh","line":2,"verdict":"excessive","reason":"r2"},
-  {"id":3,"severity":"medium","file":"c.sh","line":3,"verdict":"legitimate-out-of-scope","reason":"r3"}
-],"summary":{"total":3,"legitimate":2,"excessive":1,"legitimate_out_of_scope":1}}'
-PR_REVIEWER_OOS_ENABLED="true"
+  {"id":3,"severity":"medium","file":"c.sh","line":3,"verdict":"out-of-scope","reason":"r3"}
+],"summary":{"total":3,"legitimate":2,"excessive":1,"out_of_scope":1}}'
+PR_ITERATION_OOS_ENABLED="true"
 if adj_validate_decisions "$FINDINGS_3" "$DEC_BAD_SUM" 2>/dev/null; then rc=0; else rc=1; fi
 assert_eq "B.3 gate ON で 3 値不変条件破壊を reject（集計整合性）" "1" "$rc"
 
@@ -203,12 +198,12 @@ DEC_2VAL='{"decisions":[
   {"id":1,"severity":"high","file":"a.sh","line":1,"verdict":"legitimate","reason":"r1"},
   {"id":2,"severity":"low","file":"b.sh","line":2,"verdict":"excessive","reason":"r2"}
 ],"summary":{"total":2,"legitimate":1,"excessive":1}}'
-PR_REVIEWER_OOS_ENABLED="false"
+PR_ITERATION_OOS_ENABLED="false"
 if adj_validate_decisions "$FINDINGS_2" "$DEC_2VAL" 2>/dev/null; then rc=0; else rc=1; fi
 assert_eq "B.4 gate OFF で 2 値 decisions を許容（NFR 1.3）" "0" "$rc"
 
 # gate ON でも 2 値 decisions（out-of-scope フィールド不在 = 0）は valid（後方互換）
-PR_REVIEWER_OOS_ENABLED="true"
+PR_ITERATION_OOS_ENABLED="true"
 if adj_validate_decisions "$FINDINGS_2" "$DEC_2VAL" 2>/dev/null; then rc=0; else rc=1; fi
 assert_eq "B.5 gate ON でも 2 値 decisions（oos フィールド不在）を許容" "0" "$rc"
 
@@ -224,54 +219,55 @@ oos2=$(adj_extract_out_of_scope_count "$DEC_2VAL")
 assert_eq "C.3 2 値 decisions で out-of-scope=0" "0" "$oos2"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# D. adj_route_out_of_scope（needs-decisions 還流 / iteration 継続 / 失敗安全側）
+# D. adj_route_out_of_scope（委譲判定 / iteration 継続 / no-op / 入力検証）
+#    refactor 後は共通ヘルパ pi_route_out_of_scope_escalate への委譲判定のみを担う。
+#    副作用本体（ラベル付与 / コメント / 失敗時 WARN）は pr_iteration_oos_routing_test.sh で検証。
 # ─────────────────────────────────────────────────────────────────────────────
-PR_REVIEWER_OOS_ENABLED="true"
+PR_ITERATION_OOS_ENABLED="true"
 SHA="0123456789abcdef0123456789abcdef01234567"
 
-# D.1 legitimate=0 かつ out-of-scope=1 → 還流ラベル付与 + 追跡コメント（Req 2.1 / 2.2 / 2.3）
+# D.1 legitimate=0 かつ out-of-scope=1 → 共通ヘルパへ委譲（Req 3.1）
 reset_stub_state
 adj_route_out_of_scope "42" "$SHA" "0" "1" "$DEC_3VAL" || true
-gh_calls="$(cat "$GH_CALL_LOG")"
-log_calls="$(cat "$LOG_LOG")"
-assert_contains "D.1a 還流ラベル付与（gh pr edit --add-label needs-decisions / Req 2.1）" "$gh_calls" "--add-label needs-decisions"
-assert_contains "D.1b 追跡コメント投稿（gh pr comment / Req 2.2）" "$gh_calls" "comment"
-assert_contains "D.1c 還流ログ（route=needs-decisions / NFR 3.1）" "$log_calls" "route=needs-decisions"
+pi_calls="$(cat "$PI_CALL_LOG")"
+assert_contains "D.1a 共通ヘルパへ委譲（pi_route_out_of_scope_escalate / Req 3.1）" "$pi_calls" "pi_route 42 $SHA"
+assert_contains "D.1b 委譲時に source=adjudicator を渡す" "$pi_calls" "adjudicator"
 cleanup_stub_state
 
-# D.2 legitimate>=1 残存 → 還流ラベルを付与せず追跡コメントのみ（Req 2.4）
+# D.2 legitimate>=1 残存 → 委譲せず route=continue ログ（Req 2.4）
 reset_stub_state
 adj_route_out_of_scope "42" "$SHA" "2" "1" "$DEC_3VAL" || true
-gh_calls="$(cat "$GH_CALL_LOG")"
+pi_calls="$(cat "$PI_CALL_LOG")"
 log_calls="$(cat "$LOG_LOG")"
-assert_not_contains "D.2a in-scope 残存で還流ラベル付与しない（Req 2.4）" "$gh_calls" "--add-label needs-decisions"
-assert_contains "D.2b 追跡コメントは投稿する（Req 2.2）" "$gh_calls" "comment"
-assert_contains "D.2c continue ログ（route=continue / Req 2.4）" "$log_calls" "route=continue"
+assert_eq "D.2a in-scope 残存で委譲しない（Req 2.4）" "" "$pi_calls"
+assert_contains "D.2b continue ログ（route=continue / Req 2.4）" "$log_calls" "route=continue"
 cleanup_stub_state
 
-# D.3 out-of-scope=0 → 何もしない（通常経路）
+# D.3 out-of-scope=0 → 何もしない（通常経路 / 委譲なし）
 reset_stub_state
 adj_route_out_of_scope "42" "$SHA" "1" "0" "$DEC_2VAL" || true
-gh_calls="$(cat "$GH_CALL_LOG")"
-assert_eq "D.3 out-of-scope=0 で gh 呼び出しゼロ（通常経路）" "" "$gh_calls"
+pi_calls="$(cat "$PI_CALL_LOG")"
+assert_eq "D.3 out-of-scope=0 で委譲ゼロ（通常経路）" "" "$pi_calls"
 cleanup_stub_state
 
-# D.4 ラベル付与失敗 → silent fail せず WARN + rc=0（Req 2.5 / NFR 2.3）
+# D.4 無効な PR 番号 / sha → silent fail せず WARN + rc=2（NFR 3.3 入力検証）
 reset_stub_state
-GH_EDIT_RC=1
-adj_route_out_of_scope "42" "$SHA" "0" "1" "$DEC_3VAL"; route_rc=$?
+route_rc=0
+adj_route_out_of_scope "not-a-number" "$SHA" "0" "1" "$DEC_3VAL" || route_rc=$?
 warn_calls="$(cat "$WARN_LOG")"
-assert_eq "D.4a ラベル付与失敗でも rc=0（安全側 / Req 2.5）" "0" "$route_rc"
-assert_contains "D.4b 失敗を WARN で記録（NFR 2.3 silent fail 禁止）" "$warn_calls" "付与失敗"
+pi_calls="$(cat "$PI_CALL_LOG")"
+assert_eq "D.4a 無効 PR 番号で rc=2（入力検証 / NFR 3.3）" "2" "$route_rc"
+assert_contains "D.4b 無効 PR 番号を WARN で記録（silent fail 禁止）" "$warn_calls" "無効な PR 番号"
+assert_eq "D.4c 検証失敗時は委譲しない" "" "$pi_calls"
 cleanup_stub_state
 
-# D.5 gate OFF → 早期 return（防御的二重確認 / NFR 1.1）
+# D.5 gate OFF → 早期 return（防御的二重確認 / NFR 1.1 / 委譲なし）
 reset_stub_state
 # shellcheck disable=SC2034  # 抽出関数 adj_route_out_of_scope 経由（遅延束縛）で参照される
-PR_REVIEWER_OOS_ENABLED="false"
+PR_ITERATION_OOS_ENABLED="false"
 adj_route_out_of_scope "42" "$SHA" "0" "1" "$DEC_3VAL" || true
-gh_calls="$(cat "$GH_CALL_LOG")"
-assert_eq "D.5 gate OFF で gh 呼び出しゼロ（NFR 1.1 no-op）" "" "$gh_calls"
+pi_calls="$(cat "$PI_CALL_LOG")"
+assert_eq "D.5 gate OFF で委譲ゼロ（NFR 1.1 no-op）" "" "$pi_calls"
 cleanup_stub_state
 
 echo ""

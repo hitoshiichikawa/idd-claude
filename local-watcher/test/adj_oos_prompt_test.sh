@@ -22,7 +22,7 @@
 # 依存:   bash 4+, awk
 # 実行:   bash local-watcher/test/adj_oos_prompt_test.sh
 
-# PR_REVIEWER_OOS_ENABLED は source した adj_oos_enabled が間接参照する gate 変数。
+# PR_ITERATION_OOS_ENABLED は source した adj_oos_enabled が間接参照する gate 変数。
 # source 先を追わない静的解析からは未使用に見えるが、テスト全体で gate 切り替えのために
 # 繰り返し代入する。SC2034 をファイル全体で抑止する（adj_out_of_scope_test.sh と同方針 /
 # 間接参照の false-positive）。本ディレクティブはファイル先頭（最初のコマンドの前）に置く。
@@ -124,9 +124,9 @@ echo ""
 echo "--- adj_oos_prompt_block の規約内容 (Req 1.2 / 1.4 / 1.5 / 4.2) ---"
 BLOCK=$(adj_oos_prompt_block)
 
-# Req 1.2: 矛盾時に legitimate-out-of-scope へ分類する条件
-assert_contains "Req 1.2: legitimate-out-of-scope の語が含まれる" \
-  "legitimate-out-of-scope" "$BLOCK"
+# Req 1.2: 矛盾時に out-of-scope へ分類する条件
+assert_contains "Req 1.2: out-of-scope の語が含まれる" \
+  "out-of-scope" "$BLOCK"
 assert_contains "Req 1.2: 確定事項と矛盾 + 是正できない旨が含まれる" \
   "権限では是正できない" "$BLOCK"
 
@@ -140,18 +140,18 @@ assert_contains "Req 1.4: なぜ当該 PR で是正不能か を出力させる"
 assert_contains "Req 1.5: 迷ったら legitimate 原則が含まれる" \
   "迷ったら legitimate" "$BLOCK"
 
-# Req 4.2: summary.legitimate_out_of_scope 出力契約
-assert_contains "Req 4.2: summary.legitimate_out_of_scope 出力契約が含まれる" \
-  "legitimate_out_of_scope" "$BLOCK"
-assert_contains "Req 4.2: 不変条件 legitimate + excessive + legitimate_out_of_scope == total" \
-  "legitimate + excessive + legitimate_out_of_scope == total" "$BLOCK"
+# Req 4.2: summary.out_of_scope 出力契約
+assert_contains "Req 4.2: summary.out_of_scope 出力契約が含まれる" \
+  "out_of_scope" "$BLOCK"
+assert_contains "Req 4.2: 不変条件 legitimate + excessive + out_of_scope == total" \
+  "legitimate + excessive + out_of_scope == total" "$BLOCK"
 echo ""
 
 # OOS 規約ブロック本文だけに現れる一意な見出し（ヘッダコメントには現れない）。
-# ヘッダコメントにも `{OOS_INSTRUCTIONS}` / `legitimate-out-of-scope` の語が出現するため、
+# ヘッダコメントにも `{OOS_INSTRUCTIONS}` / `out-of-scope` の語が出現するため、
 # 「注入されたか」の検証は body 限定の一意見出しで行う（comment との混同を避ける）。
-OOS_SECTION_HEADING="## out-of-scope（第 3 判定 / legitimate-out-of-scope）の分類規約（本機能が有効です）"
-OOS_DOUBT_PHRASE="out-of-scope か否か確信が持てない場合"
+OOS_SECTION_HEADING="## out-of-scope（第 3 判定）の分類規約（本機能が有効です）"
+OOS_DOUBT_PHRASE="out-of-scope か legitimate か確信が持てない場合"
 
 # placeholder 行（単独行 `{OOS_INSTRUCTIONS}`）が rendered に残っていないことを行単位で検査。
 assert_placeholder_line_absent() {
@@ -167,21 +167,21 @@ assert_placeholder_line_absent() {
 
 # ─── gate ON: placeholder が OOS 規約に置換される（Req 1.2 / 1.4 / 1.5 / 4.2） ──
 echo "--- gate ON: {OOS_INSTRUCTIONS} が OOS 規約に置換される ---"
-PR_REVIEWER_OOS_ENABLED="true"
+PR_ITERATION_OOS_ENABLED="true"
 RENDERED_ON=$(render_oos_placeholder "$TMPL_BODY")
 assert_placeholder_line_absent "gate ON: 置換後 placeholder 行は残らない" "$RENDERED_ON"
 assert_contains "gate ON: OOS 規約見出しが prompt body に入る" \
   "$OOS_SECTION_HEADING" "$RENDERED_ON"
 assert_contains "gate ON: 迷ったら legitimate（OOS 版）の追加文が入る" \
   "$OOS_DOUBT_PHRASE" "$RENDERED_ON"
-assert_contains "gate ON: summary.legitimate_out_of_scope 出力契約が入る" \
-  "legitimate + excessive + legitimate_out_of_scope == total" "$RENDERED_ON"
-unset PR_REVIEWER_OOS_ENABLED
+assert_contains "gate ON: summary.out_of_scope 出力契約が入る" \
+  "legitimate + excessive + out_of_scope == total" "$RENDERED_ON"
+unset PR_ITERATION_OOS_ENABLED
 echo ""
 
 # ─── gate OFF: placeholder 行ごと除去 + 既存 prompt と byte 等価（NFR 1.1） ─────
 echo "--- gate OFF: {OOS_INSTRUCTIONS} 行ごと除去 / 既存 prompt と byte 等価 (NFR 1.1) ---"
-PR_REVIEWER_OOS_ENABLED="false"
+PR_ITERATION_OOS_ENABLED="false"
 RENDERED_OFF=$(render_oos_placeholder "$TMPL_BODY")
 assert_placeholder_line_absent "gate OFF: placeholder 行は残らない" "$RENDERED_OFF"
 assert_not_contains "gate OFF: OOS 規約見出しは prompt body に入らない" \
@@ -194,12 +194,12 @@ assert_not_contains "gate OFF: 迷ったら legitimate（OOS 版）の追加文�
 EXPECTED_OFF=$(awk '$0 != "{OOS_INSTRUCTIONS}"' "$TMPL")
 assert_eq "gate OFF: placeholder 行除去後の prompt と byte 等価" \
   "$EXPECTED_OFF" "$RENDERED_OFF"
-unset PR_REVIEWER_OOS_ENABLED
+unset PR_ITERATION_OOS_ENABLED
 echo ""
 
 # ─── gate 未設定（既定）も OFF と同一挙動（NFR 1.1） ──────────────────────────
 echo "--- gate 未設定（既定）: OFF と同一（OOS 指示なし / NFR 1.1） ---"
-unset PR_REVIEWER_OOS_ENABLED 2>/dev/null || true
+unset PR_ITERATION_OOS_ENABLED 2>/dev/null || true
 RENDERED_DEFAULT=$(render_oos_placeholder "$TMPL_BODY")
 assert_not_contains "gate 未設定: OOS 規約見出しは prompt body に入らない" \
   "$OOS_SECTION_HEADING" "$RENDERED_DEFAULT"
