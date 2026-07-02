@@ -1287,7 +1287,14 @@ pr_publish_claude_status() {
   # （pr_publish_claude_status_from_branch → pr_publish_claude_status）も自動的に
   # fail-closed 化される（Req 3.1〜3.4）。reject（failure）は gate を閉じる方向なので
   # terminal でもそのまま publish する（ガードは success 経路のみ / Req 3.5）。
-  if [ "$state" = "success" ]; then
+  #
+  # Issue #482 / #349 Req 6.1: status-check gate（PR_REVIEWER_STATUS_CHECK_ENABLED AND
+  # FULL_AUTO_ENABLED）OFF 時は、本 #434 ガードの `gh pr view` も含め外部呼び出しをゼロに保つ。
+  # gate OFF なら後段 pr_publish_commit_status が publish 自体を抑止（return 1）するため、
+  # publish を前提とする terminal ラベル再取得はそもそも不要。gate ON 時のみ本ガードを実行する
+  # ことで、#434 の fail-closed 安全性（success を publish する直前の terminal 判定）は publish が
+  # 実際に走る gate ON 経路で完全に保たれる。
+  if [ "$state" = "success" ] && pr_status_check_enabled; then
     # Req 4.1: 現在のラベル集合を再取得して terminal 判定する。
     local cur_labels_json gh_rc=0
     cur_labels_json=$(timeout "${PR_REVIEWER_GIT_TIMEOUT:-120}" \
