@@ -133,6 +133,12 @@ gh() {
   return 0
 }
 
+# Issue #482: #434 terminal ラベルガードは publish 有効時（status-check gate ON）のみ発火する。
+# 本テストは gate ON 前提でガード挙動を検証するため、gate 判定を enabled 固定に stub する
+# （gate OFF 時の inert 挙動は pr_publish_commit_status_test.sh Req 6.1 側で検証）。
+# shellcheck disable=SC2317
+pr_status_check_enabled() { return 0; }
+
 # pr_publish_commit_status stub: 呼び出しと引数を記録（実 publish が走ったかの観測）
 # shellcheck disable=SC2317
 pr_publish_commit_status() {
