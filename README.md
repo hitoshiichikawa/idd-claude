@@ -82,7 +82,8 @@ idd-claude/
     │   │   ├── tasks-count-gate.sh  #   Tasks Count Gate（#457）
     │   │   ├── debugger-gate.sh     #   Debugger Gate ヘルパー（#458）
     │   │   ├── stage-checkpoint.sh  #   Stage Checkpoint（#459）
-    │   │   └── per-task-loop.sh     #   Per-task TDD Loop（#461-462）
+    │   │   ├── per-task-loop.sh     #   Per-task TDD Loop（#461-462）
+    │   │   └── impl-pipeline.sh     #   Reviewer Gate / impl stage pipeline（#463-464）
     │   └── triage-prompt.tmpl       # Triage フェーズ用プロンプト
     └── LaunchAgents/
         └── com.local.issue-watcher.plist   # macOS launchd 設定

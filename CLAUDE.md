@@ -240,6 +240,7 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
   | `dbg_` | debugger-gate（非 prefix 関数 detect_blocked_marker 等はモジュール冒頭ヘッダで列挙 / #458） |
   | `sc_` / `stage_checkpoint_` / `_spec_` | stage-checkpoint（Slot Runner 内の類似名 `_stage_checkpoint_assert_slug_match` / `_stage_checkpoint_has_resumable_state` は対象外で本体残置 / #459） |
   | `pt_` / `build_per_task_*` / `run_per_task_*` | per-task-loop（前半 pt_ ヘルパー + prompt builder #461 / 後半 runner + escalation #462。呼び出し元 run_impl_pipeline は本体残置） |
+  | `build_dev_prompt_*` / `build_reviewer_prompt` | impl-pipeline（前半 Stage A/B/C prompt builder #463 / 後半 stage runner + escalation は #464 で完了予定。`_assert_base_branch_resolved` 等ヘルパー・呼び出し元は本体残置） |
   | `dr_` | issue-watcher 本体内（dependency-resolver） |
 
 - env var 名・ラベル名・コマンド名・ファイルパスは **英語固定**（言語方針に従う）。
