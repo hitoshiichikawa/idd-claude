@@ -17,9 +17,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #464 で impl pipeline 後半関数は modules/impl-pipeline.sh へ分離された。
+IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$IMPL_PIPELINE_SH" ]; then
+  echo "ERROR: cannot find impl-pipeline.sh at $IMPL_PIPELINE_SH" >&2
   exit 2
 fi
 
@@ -35,7 +41,7 @@ extract_function() {
 
 # 検証対象本体を抽出
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "run_reviewer_stage")"
+eval "$(extract_function "$IMPL_PIPELINE_SH" "run_reviewer_stage")"
 if ! declare -F run_reviewer_stage >/dev/null; then
   echo "ERROR: run_reviewer_stage not loaded" >&2
   exit 2

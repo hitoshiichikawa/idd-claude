@@ -31,6 +31,9 @@ WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #177 Part 1 で低レベル共通ユーティリティ（qa_log 等のロガーを含む）は
 # modules/core_utils.sh へ分離された。関数抽出の探索元に core_utils.sh も含める。
 CORE_UTILS_SH="$SCRIPT_DIR/../bin/modules/core_utils.sh"
+# #464 で verify_pushed_or_retry と各 stage-id 呼出（run_impl_pipeline 内）は
+# modules/impl-pipeline.sh へ分離された。
+IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
@@ -38,6 +41,10 @@ if [ ! -f "$WATCHER_SH" ]; then
 fi
 if [ ! -f "$CORE_UTILS_SH" ]; then
   echo "ERROR: cannot find core_utils.sh at $CORE_UTILS_SH" >&2
+  exit 2
+fi
+if [ ! -f "$IMPL_PIPELINE_SH" ]; then
+  echo "ERROR: cannot find impl-pipeline.sh at $IMPL_PIPELINE_SH" >&2
   exit 2
 fi
 
@@ -61,7 +68,7 @@ eval "$(extract_function "$WATCHER_SH" "qa_warn")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$WATCHER_SH" "qa_error")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "verify_pushed_or_retry")"
+eval "$(extract_function "$IMPL_PIPELINE_SH" "verify_pushed_or_retry")"
 
 for fn in qa_log qa_warn qa_error verify_pushed_or_retry; do
   if ! declare -F "$fn" >/dev/null; then
@@ -72,15 +79,15 @@ done
 
 # サニティ: 実装側の verify_pushed_or_retry が想定通り 3 系統の stage 識別子を文字列
 # として保有していること（実装が divergent していないか）を grep でチェック。
-if ! grep -q "stageA-push-missing" "$WATCHER_SH"; then
+if ! grep -q "stageA-push-missing" "$IMPL_PIPELINE_SH"; then
   echo "ERROR: issue-watcher.sh に stageA-push-missing 呼出が無い" >&2
   exit 2
 fi
-if ! grep -q "stageA-prime-push-missing" "$WATCHER_SH"; then
+if ! grep -q "stageA-prime-push-missing" "$IMPL_PIPELINE_SH"; then
   echo "ERROR: issue-watcher.sh に stageA-prime-push-missing 呼出が無い" >&2
   exit 2
 fi
-if ! grep -q "stageB-push-missing" "$WATCHER_SH"; then
+if ! grep -q "stageB-push-missing" "$IMPL_PIPELINE_SH"; then
   echo "ERROR: issue-watcher.sh に stageB-push-missing 呼出が無い" >&2
   exit 2
 fi
