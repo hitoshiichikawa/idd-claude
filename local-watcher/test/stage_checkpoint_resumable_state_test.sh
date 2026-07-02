@@ -24,9 +24,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #466 で _stage_checkpoint_has_resumable_state は modules/slot-worker.sh へ分離された。
+SLOT_WORKER_SH="$SCRIPT_DIR/../bin/modules/slot-worker.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$SLOT_WORKER_SH" ]; then
+  echo "ERROR: cannot find slot-worker.sh at $SLOT_WORKER_SH" >&2
   exit 2
 fi
 
@@ -41,7 +47,7 @@ extract_function() {
 
 # ─── 対象関数の load ───
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "_stage_checkpoint_has_resumable_state")"
+eval "$(extract_function "$SLOT_WORKER_SH" "_stage_checkpoint_has_resumable_state")"
 
 if ! declare -F _stage_checkpoint_has_resumable_state >/dev/null; then
   echo "ERROR: _stage_checkpoint_has_resumable_state not loaded" >&2
