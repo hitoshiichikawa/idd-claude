@@ -76,7 +76,8 @@ idd-claude/
     │   │   ├── auto-rebase.sh       #   自動 Rebase プロセッサ（#180 Part 2）
     │   │   ├── promote-pipeline.sh  #   Promote Pipeline ＋ Path Overlap プロセッサ（#181 Part 3）
     │   │   ├── pr-iteration.sh      #   PR Iteration プロセッサ（#181 Part 3）
-    │   │   └── stage-a-verify.sh    #   Stage A Verify ゲート（#181 Part 3）
+    │   │   ├── stage-a-verify.sh    #   Stage A Verify ゲート（#181 Part 3）
+    │   │   └── design-review-release.sh  #   Design Review Release プロセッサ（#456）
     │   └── triage-prompt.tmpl       # Triage フェーズ用プロンプト
     └── LaunchAgents/
         └── com.local.issue-watcher.plist   # macOS launchd 設定

@@ -235,6 +235,7 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
   | `stage_a_verify_` / `sav_` | stage-a-verify |
   | `rs_` | run-summary |
   | `sr_` | stale-pickup-reaper |
+  | `drr_` | design-review-release（ロガー `drr_log` 等は core_utils に同居 / #456） |
   | `pt_` / `sc_` / `tc_` / `dr_` | issue-watcher 本体内（per-task / stage checkpoint / tasks-count / dependency-resolver） |
 
 - env var 名・ラベル名・コマンド名・ファイルパスは **英語固定**（言語方針に従う）。
