@@ -40,9 +40,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #465 で dr_log / dr_warn / dr_error / dr_resolve_one は modules/dependency-resolver.sh へ分離された。
+DR_SH="$SCRIPT_DIR/../bin/modules/dependency-resolver.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$DR_SH" ]; then
+  echo "ERROR: cannot find dependency-resolver.sh at $DR_SH" >&2
   exit 2
 fi
 
@@ -58,17 +64,17 @@ extract_function() {
   ' "$script"
 }
 
-# 対象関数群を読み込む。dr_resolve_one が dr_gh_graphql_closed_by / dr_log /
-# dr_warn を呼ぶため、実体を抽出して読み込む（本 Issue の根因は dr_log 実体の
-# stdout echo であり、stub に置き換えると見逃すため）。
+# 対象関数群を読み込む（#465 より modules/dependency-resolver.sh から）。dr_resolve_one が
+# dr_gh_graphql_closed_by / dr_log / dr_warn を呼ぶため、実体を抽出して読み込む（本 Issue の
+# 根因は dr_log 実体の stdout echo であり、stub に置き換えると見逃すため）。
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_log")"
+eval "$(extract_function "$DR_SH" "dr_log")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_warn")"
+eval "$(extract_function "$DR_SH" "dr_warn")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_error")"
+eval "$(extract_function "$DR_SH" "dr_error")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_resolve_one")"
+eval "$(extract_function "$DR_SH" "dr_resolve_one")"
 
 # dr_gh_graphql_closed_by は stub で置き換える（実 GraphQL は叩かない）。
 # このため本来の関数は読み込まず、後段でテスト stub として再定義する。

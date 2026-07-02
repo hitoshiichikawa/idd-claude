@@ -31,9 +31,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #465 で dr_unblock_gate_enabled / dr_unblock_sweep は modules/dependency-resolver.sh へ分離された。
+DR_SH="$SCRIPT_DIR/../bin/modules/dependency-resolver.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$DR_SH" ]; then
+  echo "ERROR: cannot find dependency-resolver.sh at $DR_SH" >&2
   exit 2
 fi
 
@@ -54,9 +60,9 @@ extract_function() {
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$WATCHER_SH" "full_auto_enabled")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_unblock_gate_enabled")"
+eval "$(extract_function "$DR_SH" "dr_unblock_gate_enabled")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_unblock_sweep")"
+eval "$(extract_function "$DR_SH" "dr_unblock_sweep")"
 
 for fn in full_auto_enabled dr_unblock_gate_enabled dr_unblock_sweep; do
   if ! declare -F "$fn" >/dev/null; then
