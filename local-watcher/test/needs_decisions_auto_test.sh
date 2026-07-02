@@ -40,6 +40,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NDA_MOD="$SCRIPT_DIR/../bin/modules/needs-decisions-auto.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #460: NEEDS_DECISIONS_MODE の正規化ブロックは Config 分離で watcher-config.sh へ移動した。
+# full_auto_enabled は本体残置のため WATCHER_SH のまま。
+CONFIG_SH="$SCRIPT_DIR/../bin/watcher-config.sh"
 
 if [ ! -f "$NDA_MOD" ]; then
   echo "ERROR: cannot find needs-decisions-auto.sh at $NDA_MOD" >&2
@@ -47,6 +50,10 @@ if [ ! -f "$NDA_MOD" ]; then
 fi
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$CONFIG_SH" ]; then
+  echo "ERROR: cannot find watcher-config.sh at $CONFIG_SH" >&2
   exit 2
 fi
 
@@ -105,14 +112,15 @@ sn_notify() {
   return 0
 }
 
-# 本体 Config block の NEEDS_DECISIONS_MODE 正規化部分を awk で抽出（Section 2 で使用）。
+# Config block の NEEDS_DECISIONS_MODE 正規化部分を awk で抽出（Section 2 で使用）。
 # `^NEEDS_DECISIONS_MODE=` 開始から `^esac$` 終了までを 1 ブロック分だけ取り出す。
+# #460: Config 分離により当該ブロックは watcher-config.sh 側にある。
 extract_needs_decisions_mode_block() {
   awk '
     /^NEEDS_DECISIONS_MODE=/ { in_block = 1 }
     in_block { print }
     in_block && /^esac$/ { in_block = 0; exit }
-  ' "$WATCHER_SH"
+  ' "$CONFIG_SH"
 }
 
 NDM_BLOCK="$(extract_needs_decisions_mode_block)"

@@ -17,10 +17,18 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #460: Config ブロックが watcher-config.sh へ分離され、reviewer_normalize_extended_max_turns /
+# reviewer_is_error_max_turns の定義も config 側（source 時に config 行から呼ばれるため同伴）へ
+# 移動した。両関数の抽出元は watcher-config.sh になる。
+CONFIG_SH="$SCRIPT_DIR/../bin/watcher-config.sh"
 TU_SH="$SCRIPT_DIR/../bin/modules/token-usage.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$CONFIG_SH" ]; then
+  echo "ERROR: cannot find watcher-config.sh at $CONFIG_SH" >&2
   exit 2
 fi
 if [ ! -f "$TU_SH" ]; then
@@ -42,9 +50,9 @@ extract_function() {
 # reviewer_is_error_max_turns は tu_extract_last_result_json に依存するため、その依存関数も
 # token-usage.sh から抽出して同一プロセスに source する（隔離抽出の依存追随規約）。
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "reviewer_normalize_extended_max_turns")"
+eval "$(extract_function "$CONFIG_SH" "reviewer_normalize_extended_max_turns")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "reviewer_is_error_max_turns")"
+eval "$(extract_function "$CONFIG_SH" "reviewer_is_error_max_turns")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$TU_SH" "tu_extract_last_result_json")"
 
@@ -175,7 +183,8 @@ ISOLATED_RC=0
 bash -c '
   set -euo pipefail
   SCRIPT_DIR="'"$SCRIPT_DIR"'"
-  WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+  # #460: reviewer_is_error_max_turns は watcher-config.sh へ移動済み。
+  CONFIG_SH="$SCRIPT_DIR/../bin/watcher-config.sh"
   extract_function() {
     awk -v fn="$2() {" '\''
       $0 == fn { in_fn = 1 }
@@ -183,7 +192,7 @@ bash -c '
       in_fn && $0 == "}" { in_fn = 0 }
     '\'' "$1"
   }
-  eval "$(extract_function "$WATCHER_SH" "reviewer_is_error_max_turns")"
+  eval "$(extract_function "$CONFIG_SH" "reviewer_is_error_max_turns")"
   LOG="$(mktemp)"
   printf "%s\n" "{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true}" > "$LOG"
   # tu_extract_last_result_json は未 source。declare -F ガードで非検出(rc=1)に倒れるはず

@@ -69,6 +69,7 @@ idd-claude/
 └── local-watcher/                   # ローカル PC に配置するファイル
     ├── bin/
     │   ├── issue-watcher.sh         # Issue 監視＋Claude Code 起動シェル（本体）
+    │   ├── watcher-config.sh        # 本体が起動時に source する Config ブロック（env var 定義・正規化 / #460）
     │   ├── modules/                 # issue-watcher.sh が起動時に source するモジュール群
     │   │   ├── core_utils.sh        #   低レベル共通ユーティリティ・ロガー（#177 Part 1）
     │   │   ├── quota-aware.sh       #   クォータ待機制御プロセッサ（#180 Part 2）
@@ -93,6 +94,15 @@ idd-claude/
 > `modules/` 配下を `source` する。`install.sh` が `local-watcher/bin/modules/*.sh` を
 > `$HOME/bin/modules/` へ冪等配置する。必須モジュールが欠落していると本体は起動時に
 > 欠落名を stderr に出して `exit 1` で安全停止する（silent fail させない）。
+>
+> **Config ブロックの分離（#460）**: 本体冒頭の Config ブロック（`REPO` / `REPO_DIR` /
+> ラベル名 / `*_ENABLED` フラグ / `TRIAGE_MODEL` 等のモデル指定 / 各種プロンプト・タイムアウトの
+> 定義と正規化）は、同階層の `watcher-config.sh` へ切り出した。本体は `set -euo pipefail` 下・
+> module loader / `--doctor` dispatch より前の冒頭位置で `BASH_SOURCE` 基準に `source` する
+> （挙動は分離前と完全に等価）。`install.sh` は `local-watcher/bin/*.sh` の glob 配布で
+> `issue-watcher.sh` と同経路で `$HOME/bin/watcher-config.sh` へ配置する。**config の書き換え
+> 運用（モデル ID 変更等）の編集対象は `watcher-config.sh`** になる。`watcher-config.sh` が
+> 欠落していると本体は起動時に復旧手順を添えて `exit 1` で安全停止する。
 > 環境変数名・exit code・ログ書式・ラベル遷移・cron 登録文字列は分割前と完全に同一の
 > 差分等価リファクタリングであり、運用者の cron / launchd 設定変更は不要。
 
@@ -558,6 +568,9 @@ gh api -X PUT repos/owner/repo/branches/main/protection \
 # 手動の場合
 mkdir -p ~/bin ~/bin/modules ~/.issue-watcher/logs
 cp ~/.idd-claude/local-watcher/bin/issue-watcher.sh  ~/bin/
+# Config ブロック（#460）: issue-watcher.sh は同階層 watcher-config.sh を起動時に source する。
+# 欠落すると起動時に exit 1 で停止するため必ずコピーする。
+cp ~/.idd-claude/local-watcher/bin/watcher-config.sh ~/bin/
 cp ~/.idd-claude/local-watcher/bin/triage-prompt.tmpl ~/bin/
 # モジュール（#177 Part 1 以降）: issue-watcher.sh は同階層 modules/ から
 # core_utils.sh 等を source する。欠落すると起動時に exit 1 で停止するため必ずコピーする。
@@ -567,8 +580,9 @@ chmod +x ~/bin/issue-watcher.sh
 
 スクリプト自体は編集不要。`REPO` / `REPO_DIR` は **環境変数で上書きできる** ため、
 cron / launchd 側でリポジトリを指定する運用にします（単一 repo でも複数 repo でも同じ手順）。
-必要に応じて `$EDITOR ~/bin/issue-watcher.sh` で `TRIAGE_MODEL` / `DEV_MODEL` / `PJM_MODEL` /
-`MAX_TURNS` のデフォルトを調整してください。
+必要に応じて `$EDITOR ~/bin/watcher-config.sh` で `TRIAGE_MODEL` / `DEV_MODEL` / `PJM_MODEL` /
+`MAX_TURNS` のデフォルトを調整してください（#460 で Config ブロックを `watcher-config.sh` へ分離。
+本体 `issue-watcher.sh` の編集は不要）。
 
 ステージ別モデルの既定値:
 
@@ -1723,11 +1737,13 @@ Phase A 導入による後方互換性は以下のとおり保証されます:
 `$HOME/bin/issue-watcher.sh` は古いまま**です。反映するには以下のどちらかを実施してください:
 
 ```bash
-# 方法1: install.sh の --local を再実行（推奨、triage-prompt.tmpl も同期される）
+# 方法1: install.sh の --local を再実行（推奨、triage-prompt.tmpl / watcher-config.sh / modules も同期される）
 cd ~/.idd-claude && git pull && ./install.sh --local
 
 # 方法2: 手動コピー（idd-claude clone がある場合）
-cp /path/to/idd-claude/local-watcher/bin/issue-watcher.sh $HOME/bin/issue-watcher.sh
+# #460 以降: 本体は同階層 watcher-config.sh を source するため必ず両方コピーする。
+cp /path/to/idd-claude/local-watcher/bin/issue-watcher.sh  $HOME/bin/issue-watcher.sh
+cp /path/to/idd-claude/local-watcher/bin/watcher-config.sh $HOME/bin/watcher-config.sh
 ```
 
 この手順は **Phase A に限らず watcher を変更するすべての PR 共通**です。

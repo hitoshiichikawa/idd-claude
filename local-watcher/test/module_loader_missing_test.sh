@@ -29,10 +29,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$SCRIPT_DIR/../bin"
 WATCHER_SH="$BIN_DIR/issue-watcher.sh"
+# #460: issue-watcher.sh は module loader より前に同階層 watcher-config.sh を source する。
+# 一時 fixture にも同梱しないと config source 段階で exit し module loader へ到達しない。
+CONFIG_SH="$BIN_DIR/watcher-config.sh"
 MODULES_DIR="$BIN_DIR/modules"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$CONFIG_SH" ]; then
+  echo "ERROR: cannot find watcher-config.sh at $CONFIG_SH" >&2
   exit 2
 fi
 if [ ! -d "$MODULES_DIR" ]; then
@@ -86,6 +93,8 @@ assert_not_contains() {
 TMPROOT=$(mktemp -d)
 trap 'rm -rf "$TMPROOT"' EXIT
 cp "$WATCHER_SH" "$TMPROOT/issue-watcher.sh"
+# #460: 本体は module loader より前に同階層 watcher-config.sh を source するため同梱する。
+cp "$CONFIG_SH" "$TMPROOT/watcher-config.sh"
 mkdir -p "$TMPROOT/modules"
 cp "$MODULES_DIR"/*.sh "$TMPROOT/modules/"
 
