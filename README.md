@@ -39,7 +39,8 @@ idd-claude/
 ├── README.md                        # 本ファイル（包括的リファレンス）
 ├── QUICK-HOWTO.md                   # 既存 repo 導入の最短手順（約 15 分）
 ├── setup.sh                         # `curl | bash` 対応の bootstrap インストーラ
-├── install.sh                       # セットアップ支援スクリプト（clone 後に使う）
+├── install.sh                       # セットアップ支援スクリプト（clone 後に使う。main フローのみ / #473）
+├── install-lib.sh                   # install.sh が source する関数群（配置ヘルパー/ラベル/履歴検出 / #473）
 ├── .gitignore
 │
 ├── repo-template/                   # 開発対象リポジトリに配置するファイル
