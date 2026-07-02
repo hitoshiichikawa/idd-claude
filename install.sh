@@ -1407,7 +1407,7 @@ LAUNCHD_HINT
 
   ✅ 配置完了。次の手順:
 
-     1. ~/bin/issue-watcher.sh の先頭 Config（TRIAGE_MODEL 等）を必要に応じて編集
+     1. ~/bin/watcher-config.sh の Config（TRIAGE_MODEL 等）を必要に応じて編集（#460 で本体から分離）
         ※ REPO / REPO_DIR は cron 側で env var として渡すのでファイル編集は不要
 
      2. cron に登録（**ユーザー crontab**、sudo 不要）

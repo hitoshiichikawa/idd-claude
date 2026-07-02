@@ -361,5 +361,6 @@ Issue 本文に実値が含まれた場合、PM エージェントは実装を�
 - サブエージェント定義: `.claude/agents/*.md`
 - Triage プロンプト: `local-watcher/bin/triage-prompt.tmpl`（配置先: `~/bin/triage-prompt.tmpl`）
 - Watcher 実装: `local-watcher/bin/issue-watcher.sh`（配置先: `~/bin/issue-watcher.sh`）
+- Watcher Config: `local-watcher/bin/watcher-config.sh`（配置先: `~/bin/watcher-config.sh` / 本体が起動時に source する env var 定義・正規化ブロック / #460）
 - ワークフロー全体像・セットアップ手順: `README.md`
 - パイプライン全体設計: Issue #13（フェーズ別実装: #14〜#18）
