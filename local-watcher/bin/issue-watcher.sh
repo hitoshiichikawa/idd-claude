@@ -1278,11 +1278,87 @@ PJM_MODEL="${PJM_MODEL:-claude-sonnet-4-6}"
 # しうるため --bare を見送り WARN を出す（call site 参照 / 安全側）。
 TRIAGE_BARE="${TRIAGE_BARE:-false}"
 
+# ─── Issue #442: Reviewer turn 切れ拡張リトライ用の純粋ヘルパー ───
+#
+# 以下 2 関数は他 module に依存しない純粋関数で、Config ブロック（REVIEWER_MAX_TURNS_EXTENDED
+# 正規化）より前方参照されるため、ここ（REQUIRED_MODULES ローダより前 / Reviewer Config 直前）
+# に定義する。近接テスト（extract_function 隔離抽出）で単体検証する。
+
+# ─── reviewer_normalize_extended_max_turns <base_max_turns> <raw_extended> ───
+#
+# 拡張 turn 予算（REVIEWER_MAX_TURNS_EXTENDED）を決定的に正規化して stdout に出力する
+# （Req 4.1〜4.4）。
+#   - $2 が未設定 / 空 / 数値非解釈（非 `^[0-9]+$`）: base の 2 倍にフォールバック（Req 4.2, 4.3）
+#   - $2 が正常な整数だが base 未満: base に引き上げ（Req 4.4。拡張予算は通常予算以上に正規化）
+#   - $2 が base 以上の整数: そのまま採用
+# base 自体が数値非解釈の場合は安全側に 50（Reviewer 既定）へ丸めてから 2 倍する。
+# Stdout: 正規化済み整数 / Return: 0 always
+reviewer_normalize_extended_max_turns() {
+  local base="${1:-}"
+  local raw="${2:-}"
+  # base の健全性チェック（通常は REVIEWER_MAX_TURNS = 整数。防御的に丸める）
+  case "$base" in
+    ''|*[!0-9]*) base=50 ;;
+  esac
+  # base=0 は意味を成さないため安全側に既定 50 へ
+  [ "$base" -gt 0 ] 2>/dev/null || base=50
+  local default_ext=$((base * 2))
+  # raw が数値非解釈なら既定（2 倍）にフォールバック
+  case "$raw" in
+    ''|*[!0-9]*)
+      echo "$default_ext"
+      return 0
+      ;;
+  esac
+  # raw は整数。base 未満なら base に引き上げ（Req 4.4）
+  if [ "$raw" -lt "$base" ]; then
+    echo "$base"
+  else
+    echo "$raw"
+  fi
+  return 0
+}
+
+# ─── reviewer_is_error_max_turns <logfile> [offset] ───
+#
+# claude の stream-json 出力（$LOG に tee 済み）の offset 以降の最後の result イベントが
+# `error_max_turns`（turn 上限到達）か判定する（Req 2.4）。turn 切れ起因の非ゼロ exit と、
+# それ以外（claude crash 等）を区別するための純粋判定関数。
+#   - 最後の result イベントの `.subtype` が `error_max_turns` → return 0（= turn 切れ）
+#   - それ以外（success / 別 subtype / result 行なし / 抽出失敗） → return 1（= 非該当）
+# token-usage.sh の `tu_extract_last_result_json` を再利用するが、未ロード環境（隔離抽出
+# テスト / token-usage.sh 不在）でも完走するよう `declare -F` でガードし、未ロード時は
+# 安全側（非検出 = 従来どおり即 error）に倒す。
+# Return: 0 = error_max_turns 検出 / 1 = 非該当
+reviewer_is_error_max_turns() {
+  local logfile="${1:-}"
+  local offset="${2:-0}"
+  [ -n "$logfile" ] && [ -f "$logfile" ] || return 1
+  declare -F tu_extract_last_result_json >/dev/null 2>&1 || return 1
+  local result_json subtype
+  result_json=$(tu_extract_last_result_json "$logfile" "$offset")
+  [ -n "$result_json" ] || return 1
+  subtype=$(printf '%s' "$result_json" | jq -r '.subtype // empty' 2>/dev/null || true)
+  [ "$subtype" = "error_max_turns" ]
+}
+
 # ─── Reviewer subagent 設定 (#20 Phase 1) ───
 # impl 系モード（impl / impl-resume）の Developer 完了後に独立 context で起動する
 # Reviewer サブエージェント用の env。既存の TRIAGE_* / DEV_* と独立に扱う。
 REVIEWER_MODEL="${REVIEWER_MODEL:-claude-opus-4-8}"
-REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-30}"
+# Issue #442 OQ2: Reviewer 1 起動あたりの claude turn 上限の既定を 30→50 に引き上げる。
+# max-turns は上限（ceiling）であり固定消費ではないため、小規模 spec は早期終了し
+# common case の実コストはほぼ不変。大規模 spec での verdict 未到達（turn 切れ即
+# claude-failed）の root cause を直接緩和する。既存ユーザの明示 override は壊さない
+# （env default のみ変更）。migration note は README「オプション機能一覧」参照（NFR 1.3）。
+REVIEWER_MAX_TURNS="${REVIEWER_MAX_TURNS:-50}"
+# Issue #442 Req 4: turn 切れ（error_max_turns）起因の拡張リトライで使う「拡張 turn 予算」。
+# 既定（未設定）は `REVIEWER_MAX_TURNS` の 2 倍（Req 4.1, 4.2）。数値非解釈の不正値は
+# 既定（2 倍）にフォールバック（Req 4.3）。明示値が `REVIEWER_MAX_TURNS` 未満なら
+# `REVIEWER_MAX_TURNS` に引き上げて正規化する（Req 4.4）。正規化は純粋ヘルパー
+# `reviewer_normalize_extended_max_turns` に集約し、起動時にここで丸める（AUTO_REBASE_MODE
+# の起動時正規化イディオムに倣う / 安全側へ）。値は operator 設定であり未信頼入力ではない。
+REVIEWER_MAX_TURNS_EXTENDED="$(reviewer_normalize_extended_max_turns "$REVIEWER_MAX_TURNS" "${REVIEWER_MAX_TURNS_EXTENDED:-}")"
 # Reviewer ステージの条件スキップ (#333, opt-in)。POSIX ERE。空（既定）で無効。
 # 全変更ファイルが本パターンに一致する場合のみ Stage B（独立 Reviewer）をスキップし、
 # 自動 approve の review-notes.md（hidden marker 付き）を生成する。1 ファイルでも不一致 /
@@ -5194,9 +5270,15 @@ run_per_task_reviewer() {
 
   # Issue #296 Req 2.4 / NFR 3.1 / Req 4.2: per-task 経路でもファイル不在起因の再起動は
   # 同一 round 内で最大 1 回まで（単発経路 run_reviewer_stage と対称）。
+  # Issue #442 Req 1: 上記 missing-file リトライ（for attempt in 1 2）とは直交する形で、
+  # turn 切れ（error_max_turns）起因の拡張リトライを同一 round 内で最大 1 回だけ追加する。
+  # `_current_max_turns`（初期 REVIEWER_MAX_TURNS）を可変化し、`_max_turns_retry_used` で
+  # 1 回限定を担保する（Req 1.3）。turn 切れ以外の非ゼロ exit は従来どおり即 return 2（Req 2.1）。
   local attempt
   local parsed=""
   local parse_rc
+  local _current_max_turns="$REVIEWER_MAX_TURNS"
+  local _max_turns_retry_used="false"
   for attempt in 1 2; do
     if [ "$attempt" = "2" ]; then
       pt_log "task=$task_id reviewer round=$round attempt=2 retry reason=missing-file" >> "$LOG"
@@ -5205,20 +5287,47 @@ run_per_task_reviewer() {
       echo "--- per-task Reviewer 実行 (task=$task_id, round=$round) ---" >> "$LOG"
     fi
 
-    local _qa_reset_file _qa_rc=0 _qa_ts _qa_stage_label
-    _qa_ts=$(date +%Y%m%d-%H%M%S)
-    _qa_reset_file="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-pt-rev-${task_id}-r${round}-a${attempt}-${_qa_ts}"
-    _qa_stage_label="PerTask-Rev-${task_id}-r${round}-a${attempt}"
-    qa_run_claude_stage "$_qa_stage_label" "$_qa_reset_file" -- \
-      claude \
-        --print "$prompt" \
-        --model "$REVIEWER_MODEL" \
-        --permission-mode bypassPermissions \
-        --max-turns "$REVIEWER_MAX_TURNS" \
-        --output-format stream-json \
-        --verbose \
-        "${CLAUDE_HOOK_ARGS[@]}" \
-        >> "$LOG" 2>&1 || _qa_rc=$?
+    # Issue #442: 同一 attempt 内で turn 切れ拡張リトライを最大 1 回まで回す内側ループ。
+    # 反復上限を 2（初回 + 拡張リトライ 1 回）に固定し無限ループを防ぐ（Req 1.3）。
+    local _qa_rc=0 _mt_inner
+    for _mt_inner in 1 2; do
+      local _qa_reset_file _qa_ts _qa_stage_label _rev_log_offset
+      _qa_ts=$(date +%Y%m%d-%H%M%S)
+      _qa_reset_file="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-pt-rev-${task_id}-r${round}-a${attempt}-m${_mt_inner}-${_qa_ts}"
+      _qa_stage_label="PerTask-Rev-${task_id}-r${round}-a${attempt}-m${_mt_inner}"
+      # claude 実行前の $LOG 行数を記録（直前 stage の result 行誤検出を避ける / Req 2.4）。
+      # token-usage.sh 未ロード時は 0（reviewer_is_error_max_turns 側で安全側に倒れる）。
+      if declare -F tu_mark_log_offset >/dev/null 2>&1; then
+        _rev_log_offset=$(tu_mark_log_offset)
+      else
+        _rev_log_offset=0
+      fi
+      _qa_rc=0
+      qa_run_claude_stage "$_qa_stage_label" "$_qa_reset_file" -- \
+        claude \
+          --print "$prompt" \
+          --model "$REVIEWER_MODEL" \
+          --permission-mode bypassPermissions \
+          --max-turns "$_current_max_turns" \
+          --output-format stream-json \
+          --verbose \
+          "${CLAUDE_HOOK_ARGS[@]}" \
+          >> "$LOG" 2>&1 || _qa_rc=$?
+
+      # turn 切れ起因の非ゼロ exit のみ、同一 round 内で 1 回だけ拡張 turn 予算で再実行する。
+      if [ "$_qa_rc" != "0" ] && [ "$_qa_rc" != "99" ] \
+         && [ "$_max_turns_retry_used" = "false" ] \
+         && reviewer_is_error_max_turns "$LOG" "$_rev_log_offset"; then
+        rm -f "$_qa_reset_file"
+        _max_turns_retry_used="true"
+        _current_max_turns="$REVIEWER_MAX_TURNS_EXTENDED"
+        # NFR 2.1 / Req 4.6: round / attempt / 拡張 turn 予算 / reason を 1 行で記録
+        pt_log "task=$task_id reviewer round=$round attempt=$attempt retry reason=max-turns-extended extended-max-turns=$_current_max_turns" >> "$LOG"
+        echo "--- per-task Reviewer 実行 (task=$task_id, round=$round, retry / max-turns-extended=$_current_max_turns) ---" >> "$LOG"
+        continue
+      fi
+      break
+    done
 
     case "$_qa_rc" in
       0)
@@ -5234,6 +5343,13 @@ run_per_task_reviewer() {
         ;;
       *)
         rm -f "$_qa_reset_file"
+        # Issue #442 Req 3.1, 3.4: 拡張リトライ後も turn 切れ枯渇なら区別された return code 6
+        # （per-task-reviewer-max-turns-exhausted）で escalation。それ以外の非ゼロ exit は
+        # 従来どおり即 return 2（claude crash / parse 失敗と同じ扱い / Req 2.1）。
+        if [ "$_max_turns_retry_used" = "true" ] && reviewer_is_error_max_turns "$LOG" "$_rev_log_offset"; then
+          pt_log "task=$task_id reviewer end round=$round attempt=$attempt result=error reason=max-turns-exhausted extended-max-turns=$_current_max_turns" >> "$LOG"
+          return 6
+        fi
         pt_log "task=$task_id reviewer end round=$round attempt=$attempt result=error reason=claude-exit-nonzero rc=$_qa_rc" >> "$LOG"
         return 2
         ;;
@@ -6097,6 +6213,14 @@ run_per_task_loop() {
                   echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) marker 後の未レビュー commit を検出 → claude-failed (per-task-post-marker-commits-detected)" | tee -a "$LOG"
                   return 1
                   ;;
+                6)
+                  # Issue #442 Req 3.1, 3.2, 3.4, 3.5: 拡張リトライ後も turn 切れ枯渇 →
+                  # `per-task-reviewer-max-turns-exhausted` カテゴリで `claude-failed`（Debugger 経由 round=3）。
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=max-turns-exhausted" >> "$LOG"
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) turn 切れ枯渇（拡張リトライ後も未到達）→ claude-failed (per-task-reviewer-max-turns-exhausted)" | tee -a "$LOG"
+                  publish_terminal_failure_artifacts "per-task-reviewer-max-turns-exhausted" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) が turn 上限到達（\`error_max_turns\`）で終了し、拡張 turn 予算（\`REVIEWER_MAX_TURNS_EXTENDED\`=${REVIEWER_MAX_TURNS_EXTENDED}）での 1 回再実行後もなお turn 切れで verdict（\`RESULT:\` 行）に到達できませんでした（Issue #442）。claude crash / ファイル不在 / code reject とは異なり、turn 不足が原因です。大規模 spec / diff の場合は \`REVIEWER_MAX_TURNS\` / \`REVIEWER_MAX_TURNS_EXTENDED\` の引き上げを検討してください。\`$LOG\` を確認してください。"
+                  return 1
+                  ;;
                 *)
                   dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=error" >> "$LOG"
                   echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) 異常終了 → claude-failed" | tee -a "$LOG"
@@ -6148,6 +6272,13 @@ run_per_task_loop() {
             echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) marker 後の未レビュー commit を検出 → claude-failed (per-task-post-marker-commits-detected)" | tee -a "$LOG"
             return 1
             ;;
+          6)
+            # Issue #442 Req 3.1, 3.2, 3.4, 3.5: 拡張リトライ後も turn 切れ枯渇 →
+            # `per-task-reviewer-max-turns-exhausted` カテゴリで `claude-failed`（round=2）。
+            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) turn 切れ枯渇（拡張リトライ後も未到達）→ claude-failed (per-task-reviewer-max-turns-exhausted)" | tee -a "$LOG"
+            publish_terminal_failure_artifacts "per-task-reviewer-max-turns-exhausted" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が turn 上限到達（\`error_max_turns\`）で終了し、拡張 turn 予算（\`REVIEWER_MAX_TURNS_EXTENDED\`=${REVIEWER_MAX_TURNS_EXTENDED}）での 1 回再実行後もなお turn 切れで verdict（\`RESULT:\` 行）に到達できませんでした（Issue #442）。claude crash / ファイル不在 / code reject とは異なり、turn 不足が原因です。大規模 spec / diff の場合は \`REVIEWER_MAX_TURNS\` / \`REVIEWER_MAX_TURNS_EXTENDED\` の引き上げを検討してください。\`$LOG\` を確認してください。"
+            return 1
+            ;;
           *)
             echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) 異常終了 → claude-failed" | tee -a "$LOG"
             publish_terminal_failure_artifacts "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
@@ -6174,6 +6305,16 @@ run_per_task_loop() {
         # `run_per_task_reviewer` 内で `pt_mark_post_marker_commits_detected` 済みのため、
         # ここでは追加の Issue コメント投稿は行わず、stdout / log 出力のみで停止する。
         echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) marker 後の未レビュー commit を検出 → claude-failed (per-task-post-marker-commits-detected)" | tee -a "$LOG"
+        return 1
+        ;;
+      6)
+        # Issue #442 Req 3.1, 3.2, 3.4, 3.5: 拡張リトライ後も turn 切れ枯渇 → 区別された
+        # `per-task-reviewer-max-turns-exhausted` カテゴリで `claude-failed`（round=1）。
+        # per-task-reviewer-error（claude crash）/ per-task-reviewer-missing-file（ファイル不在）/
+        # code reject のいずれとも grep 区別可能。run-summary degraded は呼び出し側 Stage A の
+        # rs_scan_degraded_log で反映される（単発経路と非対称だが既存実装に合わせる）。
+        echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) turn 切れ枯渇（拡張リトライ後も未到達）→ claude-failed (per-task-reviewer-max-turns-exhausted)" | tee -a "$LOG"
+        publish_terminal_failure_artifacts "per-task-reviewer-max-turns-exhausted" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が turn 上限到達（\`error_max_turns\`）で終了し、拡張 turn 予算（\`REVIEWER_MAX_TURNS_EXTENDED\`=${REVIEWER_MAX_TURNS_EXTENDED}）での 1 回再実行後もなお turn 切れで verdict（\`RESULT:\` 行）に到達できませんでした（Issue #442）。claude crash / ファイル不在 / code reject とは異なり、turn 不足が原因です。大規模 spec / diff の場合は \`REVIEWER_MAX_TURNS\` / \`REVIEWER_MAX_TURNS_EXTENDED\` の引き上げを検討してください。\`$LOG\` を確認してください。"
         return 1
         ;;
       *)
@@ -7220,9 +7361,15 @@ run_reviewer_stage() {
 
   # Issue #296 Req 2.4 / NFR 3.1: ファイル不在起因の再起動は同一 round 内で最大 1 回まで。
   # ループ展開はせず attempt=1（初回）/ attempt=2（リトライ）の 2 段固定で実装する。
+  # Issue #442 Req 1: 上記 missing-file リトライとは直交する形で、turn 切れ（error_max_turns）
+  # 起因の拡張リトライを同一 round 内で最大 1 回だけ追加する。`_current_max_turns_rv`（初期
+  # REVIEWER_MAX_TURNS）を可変化し、`_max_turns_retry_used_rv` で 1 回限定を担保する（Req 1.3）。
+  # turn 切れ以外の非ゼロ exit は従来どおり即 return 2（Req 2.1）。
   local attempt
   local parsed=""
   local parse_rc
+  local _current_max_turns_rv="$REVIEWER_MAX_TURNS"
+  local _max_turns_retry_used_rv="false"
   for attempt in 1 2; do
     if [ "$attempt" = "2" ]; then
       # 再起動前のログ（NFR 2.1: 単発経路でのファイル不在起因リトライを観測可能にする）
@@ -7234,24 +7381,49 @@ run_reviewer_stage() {
 
     # Issue #66: Quota-Aware Watcher 経由で claude を起動。99 を受領した場合は
     # quota 超過検出として呼び出し側（run_impl_pipeline）に伝搬する。
-    local _qa_reset_file_rv _qa_rc_rv=0 _qa_ts_rv _qa_stage_label_rv
-    _qa_ts_rv=$(date +%Y%m%d-%H%M%S)
-    _qa_reset_file_rv="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-reviewer-r${round}-a${attempt}-${_qa_ts_rv}"
-    _qa_stage_label_rv="Reviewer-r${round}-a${attempt}"
-    # #329: --agent reviewer で agent 定義をトップレベル実行（オーケストレーター層なし）。
-    # agent 解決失敗時は claude が非ゼロ exit → 既存の reviewer-error 遷移 + run-summary の
-    # degraded パターン（"Agent type .* not found"）で外形検知される。
-    qa_run_claude_stage "$_qa_stage_label_rv" "$_qa_reset_file_rv" -- \
-      claude \
-        --agent reviewer \
-        --print "$prompt" \
-        --model "$REVIEWER_MODEL" \
-        --permission-mode bypassPermissions \
-        --max-turns "$REVIEWER_MAX_TURNS" \
-        --output-format stream-json \
-        --verbose \
-        "${CLAUDE_HOOK_ARGS[@]}" \
-        >> "$LOG" 2>&1 || _qa_rc_rv=$?
+    # Issue #442: 同一 attempt 内で turn 切れ拡張リトライを最大 1 回まで回す内側ループ。
+    # 反復上限を 2（初回 + 拡張リトライ 1 回）に固定し無限ループを防ぐ（Req 1.3）。
+    local _qa_reset_file_rv _qa_rc_rv=0 _qa_ts_rv _qa_stage_label_rv _rev_log_offset_rv _mt_inner_rv
+    for _mt_inner_rv in 1 2; do
+      _qa_ts_rv=$(date +%Y%m%d-%H%M%S)
+      _qa_reset_file_rv="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-reviewer-r${round}-a${attempt}-m${_mt_inner_rv}-${_qa_ts_rv}"
+      _qa_stage_label_rv="Reviewer-r${round}-a${attempt}-m${_mt_inner_rv}"
+      # claude 実行前の $LOG 行数を記録（直前 stage の result 行誤検出を避ける / Req 2.4）。
+      if declare -F tu_mark_log_offset >/dev/null 2>&1; then
+        _rev_log_offset_rv=$(tu_mark_log_offset)
+      else
+        _rev_log_offset_rv=0
+      fi
+      _qa_rc_rv=0
+      # #329: --agent reviewer で agent 定義をトップレベル実行（オーケストレーター層なし）。
+      # agent 解決失敗時は claude が非ゼロ exit → 既存の reviewer-error 遷移 + run-summary の
+      # degraded パターン（"Agent type .* not found"）で外形検知される。
+      qa_run_claude_stage "$_qa_stage_label_rv" "$_qa_reset_file_rv" -- \
+        claude \
+          --agent reviewer \
+          --print "$prompt" \
+          --model "$REVIEWER_MODEL" \
+          --permission-mode bypassPermissions \
+          --max-turns "$_current_max_turns_rv" \
+          --output-format stream-json \
+          --verbose \
+          "${CLAUDE_HOOK_ARGS[@]}" \
+          >> "$LOG" 2>&1 || _qa_rc_rv=$?
+
+      # turn 切れ起因の非ゼロ exit のみ、同一 round 内で 1 回だけ拡張 turn 予算で再実行する。
+      if [ "$_qa_rc_rv" != "0" ] && [ "$_qa_rc_rv" != "99" ] \
+         && [ "$_max_turns_retry_used_rv" = "false" ] \
+         && reviewer_is_error_max_turns "$LOG" "$_rev_log_offset_rv"; then
+        rm -f "$_qa_reset_file_rv"
+        _max_turns_retry_used_rv="true"
+        _current_max_turns_rv="$REVIEWER_MAX_TURNS_EXTENDED"
+        # NFR 2.1 / Req 4.6: round / attempt / 拡張 turn 予算 / reason を 1 行で記録
+        rv_log "round=$round attempt=$attempt retry reason=max-turns-extended extended-max-turns=$_current_max_turns_rv" >> "$LOG"
+        echo "--- Reviewer 実行 (round=$round, retry / max-turns-extended=$_current_max_turns_rv) ---" >> "$LOG"
+        continue
+      fi
+      break
+    done
     case "$_qa_rc_rv" in
       0)
         rm -f "$_qa_reset_file_rv"
@@ -7268,6 +7440,15 @@ run_reviewer_stage() {
         ;;
       *)
         rm -f "$_qa_reset_file_rv"
+        # Issue #442 Req 3.1, 3.3, 3.4: 拡張リトライ後も turn 切れ枯渇なら区別された
+        # return code 6（reviewer-max-turns-exhausted）で escalation。run-summary は
+        # degraded で記録（reviewer-error / missing-file と同じ degraded 系 / Req 3.3）。
+        # それ以外の非ゼロ exit は従来どおり即 return 2（claude crash / Req 2.1）。
+        if [ "$_max_turns_retry_used_rv" = "true" ] && reviewer_is_error_max_turns "$LOG" "$_rev_log_offset_rv"; then
+          rv_log "round=$round attempt=$attempt result=error reason=max-turns-exhausted extended-max-turns=$_current_max_turns_rv" >> "$LOG"
+          rs_record_reviewer degraded "" "$round"
+          return 6
+        fi
         rv_log "round=$round attempt=$attempt result=error reason=claude-exit-nonzero" >> "$LOG"
         # run サマリ: Reviewer degraded（claude 異常終了で verdict 取得不能 / Req 3.4）
         rs_record_reviewer degraded "" "$round"
@@ -8845,6 +9026,14 @@ run_impl_pipeline() {
                     mark_issue_failed "reviewer-missing-file" "Debugger 経由の Reviewer round=3 が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
                     return 1
                     ;;
+                  6)
+                    # Issue #442 Req 3.1, 3.2, 3.4: 拡張リトライ後も turn 切れ枯渇 → `reviewer-max-turns-exhausted`
+                    # カテゴリで `claude-failed`（Debugger 経由 round=3）。run-summary degraded は記録済み。
+                    dbg_log "trigger=round2-reject issue=#${NUMBER} task=none round3 result=max-turns-exhausted" >> "$LOG"
+                    echo "❌ #$NUMBER: Reviewer round=3 turn 切れ枯渇（拡張リトライ後も未到達）→ claude-failed (reviewer-max-turns-exhausted)" | tee -a "$LOG"
+                    mark_issue_failed "reviewer-max-turns-exhausted" "Debugger 経由の Reviewer round=3 が turn 上限到達（\`error_max_turns\`）で終了し、拡張 turn 予算（\`REVIEWER_MAX_TURNS_EXTENDED\`=${REVIEWER_MAX_TURNS_EXTENDED}）での 1 回再実行後もなお turn 切れで verdict（\`RESULT:\` 行）に到達できませんでした（Issue #442）。claude crash / ファイル不在 / code reject とは異なり、turn 不足が原因です。大規模 spec / diff の場合は \`REVIEWER_MAX_TURNS\` / \`REVIEWER_MAX_TURNS_EXTENDED\` の引き上げを検討してください。\`$LOG\` を確認してください。"
+                    return 1
+                    ;;
                   *)
                     dbg_log "trigger=round2-reject issue=#${NUMBER} task=none round3 result=error" >> "$LOG"
                     echo "❌ #$NUMBER: Reviewer round=3 異常終了 → claude-failed" | tee -a "$LOG"
@@ -8892,6 +9081,13 @@ run_impl_pipeline() {
               mark_issue_failed "reviewer-missing-file" "Reviewer round=2 が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
               return 1
               ;;
+            6)
+              # Issue #442 Req 3.1, 3.2, 3.4: 拡張リトライ後も turn 切れ枯渇 → `reviewer-max-turns-exhausted`
+              # カテゴリで `claude-failed`（round=2）。run-summary degraded は run_reviewer_stage 内で記録済み。
+              echo "❌ #$NUMBER: Reviewer round=2 turn 切れ枯渇（拡張リトライ後も未到達）→ claude-failed (reviewer-max-turns-exhausted)" | tee -a "$LOG"
+              mark_issue_failed "reviewer-max-turns-exhausted" "Reviewer round=2 が turn 上限到達（\`error_max_turns\`）で終了し、拡張 turn 予算（\`REVIEWER_MAX_TURNS_EXTENDED\`=${REVIEWER_MAX_TURNS_EXTENDED}）での 1 回再実行後もなお turn 切れで verdict（\`RESULT:\` 行）に到達できませんでした（Issue #442）。claude crash / ファイル不在 / code reject とは異なり、turn 不足が原因です。大規模 spec / diff の場合は \`REVIEWER_MAX_TURNS\` / \`REVIEWER_MAX_TURNS_EXTENDED\` の引き上げを検討してください。\`$LOG\` を確認してください。"
+              return 1
+              ;;
             *)
               # round=2 reviewer error
               echo "❌ #$NUMBER: Reviewer round=2 異常終了 → claude-failed" | tee -a "$LOG"
@@ -8905,6 +9101,16 @@ run_impl_pipeline() {
           # → `reviewer-missing-file` カテゴリで `claude-failed`（round=1）。
           echo "❌ #$NUMBER: Reviewer round=1 ファイル不在（リトライ後も未生成）→ claude-failed (reviewer-missing-file)" | tee -a "$LOG"
           mark_issue_failed "reviewer-missing-file" "Reviewer round=1 が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+          return 1
+          ;;
+        6)
+          # Issue #442 Req 3.1, 3.2, 3.4: 拡張リトライ後も turn 切れ枯渇（error_max_turns）で
+          # verdict 未到達 → `reviewer-max-turns-exhausted` カテゴリで `claude-failed`（round=1）。
+          # reviewer-error（claude crash）/ reviewer-missing-file（ファイル不在）/ code reject の
+          # いずれとも grep 区別可能な reason を発行する。run-summary degraded は run_reviewer_stage
+          # 内で記録済み（Req 3.3）。
+          echo "❌ #$NUMBER: Reviewer round=1 turn 切れ枯渇（拡張リトライ後も未到達）→ claude-failed (reviewer-max-turns-exhausted)" | tee -a "$LOG"
+          mark_issue_failed "reviewer-max-turns-exhausted" "Reviewer round=1 が turn 上限到達（\`error_max_turns\`）で終了し、拡張 turn 予算（\`REVIEWER_MAX_TURNS_EXTENDED\`=${REVIEWER_MAX_TURNS_EXTENDED}）での 1 回再実行後もなお turn 切れで verdict（\`RESULT:\` 行）に到達できませんでした（Issue #442）。claude crash / ファイル不在 / code reject とは異なり、turn 不足が原因です。大規模 spec / diff の場合は \`REVIEWER_MAX_TURNS\` / \`REVIEWER_MAX_TURNS_EXTENDED\` の引き上げを検討してください。\`$LOG\` を確認してください。"
           return 1
           ;;
         *)
