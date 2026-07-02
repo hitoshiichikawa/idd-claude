@@ -899,21 +899,6 @@ case "$DESIGN_REVIEWER_OUTPUT_FORMAT" in
   *) DESIGN_REVIEWER_OUTPUT_FORMAT="text" ;;
 esac
 
-# ─── 設計ルート fail-closed 検証設定 (#446) ───
-# design モード（PM → Architect → PjM）の Claude 実行が rc=0 で終了しても、orchestrator が
-# サブエージェントを `run_in_background` で起動して end_turn した場合、設計 PR が作られず Issue が
-# `claude-claimed` のまま無検出でゾンビ化する（#446 実地観測: ae-mdm #39/#40）。これを防ぐため、
-# design rc=0 直後に「設計 PR が実際に作成されたか（または `awaiting-design-review` へラベル遷移
-# したか）」を検証し、いずれも満たさなければ silent success ではなく `claude-failed` へ倒す
-# （fail-closed）。**opt-out**（既定 ON）: `=false` 厳密一致のみ無効化。それ以外（未設定 / 空 /
-# `True` / `1` / typo）はすべて ON に正規化（安全側 = 検証する）。gate OFF 時は本検証を skip し
-# 導入前と同一（rc=0 で即 return 0）に倒れる。
-DESIGN_PR_VERIFY_ENABLED="${DESIGN_PR_VERIFY_ENABLED:-true}"
-case "$DESIGN_PR_VERIFY_ENABLED" in
-  false) : ;;
-  *) DESIGN_PR_VERIFY_ENABLED="true" ;;
-esac
-
 # ─── Security Review Processor 設定 (#279) ───
 # Claude Code 公式 `/security-review` skill を `claude` CLI headless 起動経由で呼び出し、
 # open PR の diff に対するセキュリティレビューを PR コメントとして投稿する。本 spec では
@@ -11248,64 +11233,6 @@ dr_unblock_sweep() {
 #   - サブシェル内で NUMBER / TITLE / BODY / URL / LABELS / TS / LOG / SLUG /
 #     SPEC_DIR_REL / MODE / BRANCH などのグローバル変数を設定（親には伝播しない）
 #   - $WT に cd（サブシェル内）
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 設計ルート fail-closed 検証 (#446)
-#
-# design モードの Claude 実行が rc=0 で終了した直後に「設計 PR が実際に作成されたか」を検証する。
-# orchestrator がサブエージェントを background 起動して end_turn した場合、rc=0 でも設計 PR が
-# 作られず Issue が claude-claimed のまま放置される（#446）。本関数はその silent success を検出する。
-#
-# 判定（いずれか 1 つでも真なら「設計成果物あり」= 成功）:
-#   1. head=<branch> の open PR が存在する（PjM が設計 PR を作成した）
-#   2. Issue のラベルが `awaiting-design-review` へ遷移済み（PjM がラベル付け替えを完了した）
-# どちらも満たさなければ rc=1（設計成果物なし = fail-closed 対象）。
-#
-# Args: $1 = branch, $2 = issue_number
-# Returns: 0 = 設計 PR / ラベル遷移を確認（成功） / 1 = いずれも未確認（fail-closed へ）
-#          2 = gate OFF（検証 skip / 呼び出し元は従来どおり成功扱い）
-# 参照グローバル: REPO / LABEL_AWAITING_DESIGN / DESIGN_PR_VERIFY_ENABLED
-# 副作用なし（gh 読み取りのみ）。gh 取得失敗は安全側で「確認できた」に倒す（false-fail 回避 / rc=0）。
-_slot_verify_design_pr_created() {
-  local _branch="${1:-}"
-  local _number="${2:-}"
-
-  # gate OFF（明示 opt-out）→ 検証 skip（導入前と同一挙動 / 呼び出し元は成功扱い）
-  if [ "${DESIGN_PR_VERIFY_ENABLED:-true}" != "true" ]; then
-    return 2
-  fi
-
-  # 入力検証（NFR: 未信頼な branch / number を gh へ渡す前に軽く検証。gh へは `--` を付与）
-  if [ -z "$_branch" ] || ! [[ "$_number" =~ ^[0-9]+$ ]]; then
-    # 検証材料が壊れている場合は false-fail を避けるため安全側（成功扱い）に倒す
-    return 0
-  fi
-
-  # 1. head=<branch> の open PR 有無（設計 PR が作成されたか）
-  local _pr_count
-  _pr_count=$(gh pr list --repo "$REPO" --head "$_branch" --state open --json number --jq 'length' 2>/dev/null || echo "")
-  case "$_pr_count" in
-    ''|*[!0-9]*) _pr_count=0 ;;
-  esac
-  if [ "$_pr_count" -ge 1 ]; then
-    return 0
-  fi
-
-  # 2. Issue が awaiting-design-review へ遷移済みか（PjM がラベル付け替えを完了したか）
-  local _labels _await
-  _labels=$(gh issue view "$_number" --repo "$REPO" --json labels --jq '.labels[].name' 2>/dev/null || echo "__GH_ERR__")
-  # gh 取得失敗（ネットワーク等）は false-fail を避けるため安全側（成功扱い）に倒す
-  if [ "$_labels" = "__GH_ERR__" ]; then
-    return 0
-  fi
-  _await="${LABEL_AWAITING_DESIGN:-awaiting-design-review}"
-  if printf '%s\n' "$_labels" | grep -qxF -- "$_await"; then
-    return 0
-  fi
-
-  # いずれも未確認 → 設計成果物なし（fail-closed 対象）
-  return 1
-}
-
 #   - claude / gh / git の副作用は Issue ラベル遷移として外部観測可能
 _slot_run_issue() {
   # slot 識別子をサブシェル内で見えるよう export（slot_log / _hook_invoke が参照）
@@ -11821,13 +11748,6 @@ ${STEPS}
 - **\`gh pr create\` の \`--base\` を省略しないこと**（GitHub default に依存すると本リポジトリの
   \`BASE_BRANCH\` 設定と乖離する事故が起きる。Issue #96）
 - 既存のテストを壊さないこと
-- **サブエージェント（product-manager / architect / project-manager）は \`run_in_background\` で
-  起動しないこと**（Issue #446）。各サブエージェントは前景で起動し、その**完了を待って成果物を
-  確認してから**次のサブエージェントへ進む逐次実行とすること。本セッションは watcher の headless
-  1-shot 実行（\`claude --print --max-turns N\`）であり、background subagent の完了通知で親ターンが
-  再開されることは無い。「バックグラウンドで起動しました／完了通知を待ちます」と述べて end_turn する
-  と、未完のサブエージェントが打ち切られ設計成果物が commit されず設計 PR も作られないまま Issue が
-  \`claude-claimed\` のまま放置される。**必ず PjM による設計 PR 作成まで本ターン内で完了させること**
 - 不明点は推測せず、PR 本文の「確認事項」セクションに列挙すること
 EOF
 )
@@ -11849,18 +11769,6 @@ EOF
         >> "$LOG" 2>&1 || _qa_rc_design=$?
     case "$_qa_rc_design" in
       0)
-        # Issue #446: fail-closed 検証。orchestrator が rc=0 でも設計 PR を作らず end_turn した
-        # （サブエージェント background 起動）場合、silent success で claude-claimed ゾンビ化するのを
-        # 防ぐ。設計 PR / awaiting-design-review 遷移のいずれも確認できなければ claude-failed へ倒す。
-        local _design_verify_rc=0
-        _slot_verify_design_pr_created "$BRANCH" "$NUMBER" || _design_verify_rc=$?
-        if [ "$_design_verify_rc" = "1" ]; then
-          rm -f "$_qa_reset_file_design"
-          echo "❌ #$NUMBER: $MODE 完了検証失敗（設計 PR 未作成 / ラベル未遷移）→ claude-failed" | tee -a "$LOG"
-          slot_log "$MODE fail-closed（設計 PR 未作成 / #446）"
-          _slot_mark_failed "design-pr-missing" "design モードの Claude 実行は rc=0 で終了しましたが、設計 PR が作成されず \`awaiting-design-review\` へのラベル遷移も行われていません（Issue #446: サブエージェントを background 起動したまま end_turn した可能性）。設計成果物が commit されていないため \`claude-failed\` に倒します。branch \`${BRANCH}\` に設計 PR が無いことを確認のうえ、Issue コメントで再実行を判断してください。"
-          return 1
-        fi
         echo "✅ #$NUMBER: $MODE 完了" | tee -a "$LOG"
         slot_log "$MODE 完了"
         # Issue #147: Tasks Count Gate — Architect 確定直後の tasks.md 件数を再評価し、

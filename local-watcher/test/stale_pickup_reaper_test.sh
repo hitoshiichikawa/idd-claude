@@ -1048,29 +1048,12 @@ else
   assert_rc "Req 3.1 観点 3: 99999 (不在 pid) で rc=0 (no session)" 0 sr_check_session '{}'
 fi
 
-# ── 10d: fuser stub が空文字を返す（保持 pid 無し = 残骸 lock） → rc=0 (no session / #447) ──
-# #447 回帰: fuser / lsof が利用可能（本 stub 経路）なのに保持 pid が空なのは
-# 「誰も掴んでいない残骸 lock」であり、生存 session ではない。safe-side（rc=1）に倒すと
-# 45min 閾値を超えても reap されず claude-claimed ゾンビが永久 keep されるバグを防ぐ。
+# ── 10d: fuser stub が空文字を返す（pid 取得失敗） → rc=1 (safe-side / Req 3.4) ──
 # shellcheck disable=SC2317
 fuser() {
   echo ""
 }
-assert_rc "#447: 保持 pid 無しの残骸 lock（空 fuser 出力）で rc=0 (no session / 要 reap)" 0 sr_check_session '{}'
-
-# ── 10d-2: lock file 2 件のうち 1 件が残骸（空）・もう 1 件が生存 pid → rc=1 (session may be alive) ──
-# 残骸 lock を continue でスキップしても、他 lock に生存 pid があれば正しく alive 判定されること。
-touch "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-2.lock"
-# shellcheck disable=SC2317
-fuser() {
-  # slot-1 は空（残骸）、slot-2 は自プロセス pid（生存）を返す
-  case "$1" in
-    *slot-2.lock) echo "$$" ;;
-    *) echo "" ;;
-  esac
-}
-assert_rc "#447: 残骸 lock + 生存 lock 混在で rc=1 (生存 session を優先検出)" 1 sr_check_session '{}'
-rm -f "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-2.lock"
+assert_rc "Req 3.4: pid 取得失敗（空 fuser 出力）で rc=1 (safe-side)" 1 sr_check_session '{}'
 
 # ── 10e: fuser / lsof どちらも不在 → rc=1 (safe-side / Req 3.4) ──
 # fuser / lsof を unset し、command -v が両方 fail する状態を作る
