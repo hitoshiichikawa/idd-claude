@@ -21,10 +21,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODULE_SH="$SCRIPT_DIR/../bin/modules/failed-recovery.sh"
+MODULE_SH="$SCRIPT_DIR/../bin/modules/failed-recovery-attempt.sh"
 
 if [ ! -f "$MODULE_SH" ]; then
-  echo "ERROR: cannot find failed-recovery.sh at $MODULE_SH" >&2
+  echo "ERROR: cannot find failed-recovery-attempt.sh at $MODULE_SH" >&2
   exit 2
 fi
 

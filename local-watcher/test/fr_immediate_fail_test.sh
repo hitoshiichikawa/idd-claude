@@ -31,10 +31,17 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-MODULE_SH="$SCRIPT_DIR/../bin/modules/failed-recovery.sh"
+# #471 で failed-recovery.sh は family 分割された。fr_resolve_dedicated_log_path /
+# fr_prepare_repo_worktree は failed-recovery-invoke.sh、それ以外は failed-recovery-attempt.sh。
+MODULE_SH="$SCRIPT_DIR/../bin/modules/failed-recovery-attempt.sh"
+INVOKE_SH="$SCRIPT_DIR/../bin/modules/failed-recovery-invoke.sh"
 
 if [ ! -f "$MODULE_SH" ]; then
-  echo "ERROR: cannot find failed-recovery.sh at $MODULE_SH" >&2
+  echo "ERROR: cannot find failed-recovery-attempt.sh at $MODULE_SH" >&2
+  exit 2
+fi
+if [ ! -f "$INVOKE_SH" ]; then
+  echo "ERROR: cannot find failed-recovery-invoke.sh at $INVOKE_SH" >&2
   exit 2
 fi
 
@@ -51,9 +58,9 @@ extract_function() {
 
 # 抽出: #411 で追加 / 既存利用の関数
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$MODULE_SH" "fr_resolve_dedicated_log_path")"
+eval "$(extract_function "$INVOKE_SH" "fr_resolve_dedicated_log_path")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$MODULE_SH" "fr_prepare_repo_worktree")"
+eval "$(extract_function "$INVOKE_SH" "fr_prepare_repo_worktree")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$MODULE_SH" "fr_terminate_immediate_failure_streak")"
 # shellcheck disable=SC1090,SC2086
@@ -291,7 +298,7 @@ trap 'cleanup_stub_state' EXIT
 # 正常 path: kind=issue + number=42 → `failed-recovery` / `issue` / `42` を含む
 unset -f fr_resolve_dedicated_log_path  # stub を外して本物を呼ぶ
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$MODULE_SH" "fr_resolve_dedicated_log_path")"
+eval "$(extract_function "$INVOKE_SH" "fr_resolve_dedicated_log_path")"
 out=$(fr_resolve_dedicated_log_path "issue" "42")
 rc=$?
 assert_rc "Req 2.1: 正常 path → rc=0" "0" "$rc"
