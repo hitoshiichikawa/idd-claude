@@ -1889,8 +1889,17 @@ review を dismissal API で剥がして `ready-for-review` に戻し、人間�
 | 判定 | 条件 | 副作用 | 残るラベル |
 |---|---|---|---|
 | `mechanical` | rebase 後の変更ファイルが **すべて** `MECHANICAL_PATHS` に一致 | `needs-rebase` 除去のみ。approve 維持・追加コメント無し | （元の approve がそのまま残り、auto-merge へ） |
-| `semantic` | 1 ファイルでも `MECHANICAL_PATHS` 外 / `MECHANICAL_PATHS` 未設定 | approve 全件 dismissal + `needs-rebase` 除去 + `ready-for-review` 付与 + 説明コメント 1 件 | `ready-for-review` |
+| `mechanical`（加算的昇格 / #438） | `AUTO_REBASE_ADDITIVE=claude` かつ 変更ファイルが **すべて** `AUTO_REBASE_ADDITIVE_PATHS`（bootstrap allowlist）に一致し、rebase 後累積 diff の各 hunk が **両 side 追加のみ**（削除/変更なし） | 既存 `mechanical` と **同一**（`needs-rebase` 除去のみ・approve 維持・コメント無し） | （元の approve がそのまま残り、auto-merge へ） |
+| `semantic` | 1 ファイルでも `MECHANICAL_PATHS` 外 / `MECHANICAL_PATHS` 未設定（加算的昇格も成立しない場合を含む） | approve 全件 dismissal + `needs-rebase` 除去 + `ready-for-review` 付与 + 説明コメント 1 件 | `ready-for-review` |
 | `failed` | Claude が conflict を解消できない / timeout / push 失敗 / dismissal API 失敗 | `claude-failed` 付与 + 原因種別コメント 1 件。`needs-rebase` は **残置** | `needs-rebase` + `claude-failed` |
+
+> **加算的 mechanical 昇格について（#438）**: `MECHANICAL_PATHS`（中身を問わない無条件
+> mechanical）で `semantic` に落ちる手前に、`AUTO_REBASE_ADDITIVE=claude` が有効なときだけ
+> 動く二次判定です。判定は **構文的な「追加のみ」に限定**し、削除/変更行を 1 つでも含む hunk・
+> rename / mode change / binary・diff 取得失敗はすべて安全側で `semantic` に倒します（コードを
+> 誤って機械解決して破壊しないため）。昇格後の副作用・auto-merge ゲートは既存 `mechanical` と
+> 完全に同一で、必須 status check（CI / レビュー）を迂回しません。本緩和は **Phase D
+> （auto-rebase）のみ**が対象で、merge-queue（Phase A）の conflict 経路は scope 外です。
 
 ### 環境変数
 
@@ -1904,6 +1913,8 @@ review を dismissal API で剥がして `ready-for-review` に戻し、人間�
 | `AUTO_REBASE_GIT_TIMEOUT` | `60` | git / gh の個別 timeout（秒）。`MERGE_QUEUE_GIT_TIMEOUT` と同既定 |
 | `AUTO_REBASE_MAX_PRS` | `3` | 1 サイクルで処理する PR 数の上限（残りは次サイクル持ち越し） |
 | `AUTO_REBASE_TEMPLATE` | `$HOME/bin/auto-rebase-prompt.tmpl` | prompt template の配置先（`install.sh` が自動配置） |
+| `AUTO_REBASE_ADDITIVE` | `off` | 加算的衝突緩和の opt-in 制御（#438）。`claude` で有効化、それ以外（未設定 / `off` / `on` / `true` / `CLAUDE` / typo）はすべて `off` に正規化。**migration note**: 既定 `off` で本機能導入前と完全に no-op（判定結果・副作用・ログ・exit code が外形等価）。不正値は安全側（`off`）へ正規化 |
+| `AUTO_REBASE_ADDITIVE_PATHS` | （空） | 加算的判定を許す bootstrap path allowlist（カンマ区切り bash glob、`MECHANICAL_PATHS` と同構文）。空なら二次判定を一切起動せず従来判定へフォールバック。`MECHANICAL_PATHS`（中身不問の無条件 mechanical）とは意味が異なり、こちらは「追加のみ」という条件付きのため専用 env として分離している |
 
 ### `MECHANICAL_PATHS` 構文
 
@@ -5629,7 +5640,8 @@ Stage C exit !=0 → claude-failed
 | 変数 | デフォルト | 推奨 | 用途 |
 |---|---|---|---|
 | `REVIEWER_MODEL` | `claude-opus-4-8` | `DEV_MODEL` と揃える運用が無難 | Reviewer サブエージェント用 Claude モデル ID |
-| `REVIEWER_MAX_TURNS` | `30` | turn 不足で parse 失敗が出る場合のみ増やす | Reviewer 1 起動あたりの Claude 実行 turn 数上限（NFR 1.1） |
+| `REVIEWER_MAX_TURNS` | `50` | turn 不足で verdict 未到達（turn 切れ）が頻発する場合のみ増やす | Reviewer 1 起動あたりの Claude 実行 turn 数上限（NFR 1.1）。**#442 で既定 30→50 に引き上げ**（下記 migration note 参照） |
+| `REVIEWER_MAX_TURNS_EXTENDED` | `REVIEWER_MAX_TURNS` の 2 倍（既定 `100`） | 大規模 spec / diff で拡張リトライ後も turn 切れが続く場合のみ増やす | **#442**: 独立 Reviewer が turn 切れ（`error_max_turns`）で終了したときの拡張リトライ用 turn 予算。未設定 / 数値非解釈の不正値は既定（`REVIEWER_MAX_TURNS` の 2 倍）にフォールバック。`REVIEWER_MAX_TURNS` 未満の値を指定すると `REVIEWER_MAX_TURNS` に引き上げ正規化される |
 | `REVIEWER_SKIP_PATTERN` | （空 = 無効） | アプリ系 repo の docs-only 変更向け（例 `'^docs/'`）。**idd-claude 自身では有効化しない**（markdown が成果物本体のため） | **opt-in（#333）**: 全変更ファイルが本 POSIX ERE に一致する場合のみ Stage B（独立 Reviewer）をスキップし、自動 approve の review-notes.md（hidden marker `idd-claude:reviewer-skip:v1` 付き）を生成。1 件でも不一致 / diff 空 / git 失敗はスキップしない（fail-safe）。スキップ時は run-summary に Stage B を記録しない |
 
 `REVIEWER_MODEL` / `REVIEWER_MAX_TURNS` は **既存環境変数（`TRIAGE_MODEL` / `DEV_MODEL` /
@@ -5648,10 +5660,29 @@ Stage C exit !=0 → claude-failed
 > なお全サブエージェントのモデルを一括 override したい場合は、cron / launchd 側で
 > `CLAUDE_CODE_SUBAGENT_MODEL=<model-id>` を渡せます（frontmatter / inherit より優先）。
 
+> **Migration note（#442 / `REVIEWER_MAX_TURNS` 既定 30→50 引き上げ）**:
+> #442 で独立 Reviewer（per-task ループ経路 / 非 per-task の単発経路の両方）の turn 上限既定を
+> **30 → 50** に引き上げました。`--max-turns` は上限（ceiling）であり固定消費ではないため、
+> 小規模 spec / diff のレビューは従来どおり早期終了し、common case の実コストはほぼ変わりません。
+> 本変更は **env default のみの変更**であり、`REVIEWER_MAX_TURNS=<値>` を明示 override している
+> 環境はその値が尊重され、本既定値更新で上書きされません（override 環境は影響なし）。**未設定
+> 環境のみ**有効値が 30 から 50 になります。あわせて #442 では、Reviewer が turn 切れ
+> （`error_max_turns`）で verdict（`review-notes.md` の `RESULT:` 行）に到達できなかった場合に、
+> 拡張 turn 予算（`REVIEWER_MAX_TURNS_EXTENDED`、既定は `REVIEWER_MAX_TURNS` の 2 倍）で
+> **同一 round 内に 1 回だけ再実行**する救済を追加しました（大規模 spec で 1 回目の turn 切れ即
+> `claude-failed` になり Issue が長期放置されるのを防ぐ）。拡張リトライ後もなお turn 切れで
+> verdict 未到達だった場合は、`claude crash`（`reviewer-error`）/ ファイル不在
+> （`reviewer-missing-file`）/ code reject のいずれとも区別される
+> **`reviewer-max-turns-exhausted`**（per-task 経路では `per-task-reviewer-max-turns-exhausted`）
+> カテゴリで `claude-failed` を付与し、ログ・Issue コメントに「turn 切れ枯渇」起因であることを
+> 記録します（run-summary にも Reviewer degraded として記録）。このカテゴリは grep で他の Reviewer
+> 障害カテゴリと識別可能です。拡張リトライは turn 切れ（`error_max_turns`）に限定され、claude crash /
+> parse 失敗 / ファイル不在は従来どおり拡張リトライせず即 error 扱いになります（後方互換）。
+
 cron 例（モデルや turn 数を override する場合）:
 
 ```bash
-*/2 * * * * REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo REVIEWER_MODEL=claude-opus-4-8 REVIEWER_MAX_TURNS=30 $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+*/2 * * * * REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo REVIEWER_MODEL=claude-opus-4-8 REVIEWER_MAX_TURNS=50 $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
 ```
 
 ### Reviewer の出力契約（review-notes.md）
@@ -5722,7 +5753,7 @@ Reviewer ゲート導入による後方互換性は以下のとおり保証さ�
   形式のままで Reviewer ステージが組み込まれて動作します
 - **依存コマンドの追加なし**: 既存の `gh` / `jq` / `git` / `flock` / `timeout` / `claude` のみ
   で動作
-- **挙動変化（impl 系のみ）**: PR 作成までの所要時間が **+1 Reviewer turn 分**（既定 30 turn
+- **挙動変化（impl 系のみ）**: PR 作成までの所要時間が **+1 Reviewer turn 分**（既定 50 turn
   上限）増えます。reject 時はさらに **+1 Developer turn 分** が追加されます
 - **opt-out env は提供しない**: 本機能は impl 系モード全 Issue で常時起動します。問題が発生した
   場合は watcher を git revert で戻してください
@@ -7243,7 +7274,7 @@ Claude CLI 実行コストが追加されます**。
 
 - **Debugger 1 回**: 最大 `DEBUGGER_MAX_TURNS` (既定 40) ターン
 - **Stage A''（Debugger 経由 Developer 再起動）1 回**: 最大 `DEV_MAX_TURNS` (既定 60) ターン
-- **Reviewer Round 3 1 回**: 最大 `REVIEWER_MAX_TURNS` (既定 30) ターン
+- **Reviewer Round 3 1 回**: 最大 `REVIEWER_MAX_TURNS` (既定 50) ターン
 
 これら 3 つが本機能で追加される最大コストです（Round 2 reject 経路 1 件あたり、NFR 3.2）。
 BLOCKED 経路は Debugger 1 回 + Stage A' 1 回（通常差し戻し相当）の追加コストとなります。
