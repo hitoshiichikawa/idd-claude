@@ -43,14 +43,14 @@ set -euo pipefail
 # shellcheck disable=SC2034
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PDR_SH="$SCRIPT_DIR/../bin/modules/pr-design-reviewer.sh"
-PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer.sh"
+PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer-publish.sh"
 
 if [ ! -f "$PDR_SH" ]; then
   echo "ERROR: cannot find pr-design-reviewer.sh at $PDR_SH" >&2
   exit 2
 fi
 if [ ! -f "$PR_MOD" ]; then
-  echo "ERROR: cannot find pr-reviewer.sh at $PR_MOD" >&2
+  echo "ERROR: cannot find pr-reviewer-publish.sh at $PR_MOD" >&2
   exit 2
 fi
 
@@ -71,7 +71,7 @@ eval "$(extract_function "$PDR_SH" "pdr_apply_label_decision")"
 eval "$(extract_function "$PDR_SH" "pdr_apply_status_decision")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PDR_SH" "pdr_post_decision_comment")"
-# pr-reviewer.sh から status publish 関連を抽出（read-only 流用 / Req 7.2）
+# pr-reviewer-publish.sh から status publish 関連を抽出（read-only 流用 / Req 7.2 / #470 で pr-reviewer.sh から移動）
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PR_MOD" "pr_status_check_enabled")"
 # shellcheck disable=SC1090,SC2086

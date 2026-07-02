@@ -86,7 +86,9 @@ idd-claude/
     │   │   ├── pr-iteration-state.sh     #   └ family: PR body marker read/write + no-progress streak（#469）
     │   │   ├── pr-iteration-oos.sh       #   └ family: out-of-scope 還流 / 検出（#437 / #469）
     │   │   ├── pr-iteration-exec.sh      #   └ family: 1 round 実行ヘルパー（prompt / escalation / quota / auto-commit・#469）
-    │   │   ├── pr-reviewer.sh            #   PR Reviewer ＋ claude-review catch-up（#261）
+    │   │   ├── pr-reviewer.sh            #   PR Reviewer orchestrator＋claude-review catch-up（#261 / #470 で family 分割）
+    │   │   ├── pr-reviewer-exec.sh       #   └ family: 外部ツール実行＋exec-fail-streak（#403 / #470）
+    │   │   ├── pr-reviewer-publish.sh    #   └ family: 結果投稿＋commit status publish（#349 / #470）
     │   │   ├── adjudicator.sh            #   PR Reviewer 裁定（adjudicator）プロセッサ（#404）
     │   │   ├── pr-design-reviewer.sh     #   設計 PR Reviewer プロセッサ（#407）
     │   │   ├── stage-a-verify.sh         #   Stage A Verify ゲート（#181 Part 3）
@@ -3709,7 +3711,7 @@ required status checks による auto-merge ゲートに組み込めるように
 
 ### Publish の発火タイミング
 
-- **`codex-review`**: `pr_run_review_for_pr`（modules/pr-reviewer.sh）が review コメントを投稿
+- **`codex-review`**: `pr_run_review_for_pr`（modules/pr-reviewer-exec.sh）が review コメントを投稿
   した直後。`pr_detect_iteration_keyword` の検出件数が 0 件なら `state=success`（VERDICT: approve）、
   > 0 件なら `state=failure`（VERDICT: needs-iteration）。target_url は PR URL。antigravity を
   使う場合も同じ `codex-review` context を共有します（AC 2.5）。

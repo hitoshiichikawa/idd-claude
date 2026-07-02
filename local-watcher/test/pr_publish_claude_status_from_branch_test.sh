@@ -36,9 +36,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer.sh"
+PR_PUBLISH_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer-publish.sh"
 
 if [ ! -f "$PR_MOD" ]; then
   echo "ERROR: cannot find pr-reviewer.sh at $PR_MOD" >&2
+  exit 2
+fi
+if [ ! -f "$PR_PUBLISH_MOD" ]; then
+  echo "ERROR: cannot find pr-reviewer-publish.sh at $PR_PUBLISH_MOD" >&2
   exit 2
 fi
 
@@ -57,16 +62,18 @@ extract_function() {
 # 対象関数群を読み込む（pr_status_check_enabled / pr_publish_claude_status /
 # pr_publish_commit_status / pr_detect_iteration_keyword は本テスト stub 経由で
 # 呼ばれるため一緒に読み込み、外部副作用（gh）を stub で受ける）。
+# #470 でこれら 5 関数は pr-reviewer-publish.sh へ移動、process_claude_review_status_catchup は
+# orchestrator（pr-reviewer.sh）に残置。
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PR_MOD" "pr_status_check_enabled")"
+eval "$(extract_function "$PR_PUBLISH_MOD" "pr_status_check_enabled")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PR_MOD" "pr_publish_commit_status")"
+eval "$(extract_function "$PR_PUBLISH_MOD" "pr_publish_commit_status")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PR_MOD" "pr_detect_iteration_keyword")"
+eval "$(extract_function "$PR_PUBLISH_MOD" "pr_detect_iteration_keyword")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PR_MOD" "pr_publish_claude_status")"
+eval "$(extract_function "$PR_PUBLISH_MOD" "pr_publish_claude_status")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PR_MOD" "pr_publish_claude_status_from_branch")"
+eval "$(extract_function "$PR_PUBLISH_MOD" "pr_publish_claude_status_from_branch")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PR_MOD" "process_claude_review_status_catchup")"
 

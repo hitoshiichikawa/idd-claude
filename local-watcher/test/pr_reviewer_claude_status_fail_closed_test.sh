@@ -28,10 +28,10 @@ set -euo pipefail
 # shellcheck disable=SC2034
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer.sh"
+PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer-publish.sh"
 
 if [ ! -f "$PR_MOD" ]; then
-  echo "ERROR: cannot find pr-reviewer.sh at $PR_MOD" >&2
+  echo "ERROR: cannot find pr-reviewer-publish.sh at $PR_MOD" >&2
   exit 2
 fi
 if ! command -v jq >/dev/null 2>&1; then
@@ -50,7 +50,7 @@ extract_function() {
   ' "$script"
 }
 
-# 対象関数を pr-reviewer.sh から読み込む
+# 対象関数を pr-reviewer-publish.sh から読み込む（#470 で pr-reviewer.sh から移動）
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PR_MOD" "pr_publish_claude_status")"
 

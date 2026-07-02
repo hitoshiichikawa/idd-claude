@@ -56,14 +56,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADJ_SH="$SCRIPT_DIR/../bin/modules/adjudicator.sh"
-PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer.sh"
+PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer-publish.sh"
 
 if [ ! -f "$ADJ_SH" ]; then
   echo "ERROR: cannot find adjudicator.sh at $ADJ_SH" >&2
   exit 2
 fi
 if [ ! -f "$PR_MOD" ]; then
-  echo "ERROR: cannot find pr-reviewer.sh at $PR_MOD" >&2
+  echo "ERROR: cannot find pr-reviewer-publish.sh at $PR_MOD" >&2
   exit 2
 fi
 
@@ -80,7 +80,7 @@ extract_function() {
 
 # adjudicator.sh から 4 関数を抽出（adj_apply_status_decision は pr_publish_claude_status を
 # 呼ぶため、pr_publish_claude_status / pr_publish_commit_status / pr_status_check_enabled も
-# pr-reviewer.sh から抽出して同一プロセスに読み込む）。
+# pr-reviewer-publish.sh から抽出して同一プロセスに読み込む / #470 で pr-reviewer.sh から移動）。
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$ADJ_SH" "adj_apply_label_decision")"
 # shellcheck disable=SC1090,SC2086
@@ -89,7 +89,7 @@ eval "$(extract_function "$ADJ_SH" "adj_read_reviewer_verdict")"
 eval "$(extract_function "$ADJ_SH" "adj_apply_status_decision")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$ADJ_SH" "adj_post_decision_comment")"
-# pr-reviewer.sh から status publish 関連の流用先を抽出
+# pr-reviewer-publish.sh から status publish 関連の流用先を抽出
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PR_MOD" "pr_status_check_enabled")"
 # shellcheck disable=SC1090,SC2086
