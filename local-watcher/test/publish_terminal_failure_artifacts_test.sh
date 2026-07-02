@@ -32,9 +32,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #458 で Debugger Gate（run_debugger_stage 等）は modules/debugger-gate.sh へ分離された。
+# debugger-notes-invalid の呼出は run_debugger_stage 内にあるため、探索元に含める。
+DEBUGGER_GATE_SH="$SCRIPT_DIR/../bin/modules/debugger-gate.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$DEBUGGER_GATE_SH" ]; then
+  echo "ERROR: cannot find debugger-gate.sh at $DEBUGGER_GATE_SH" >&2
   exit 2
 fi
 
@@ -76,8 +83,8 @@ if ! grep -q 'publish_terminal_failure_artifacts "per-task-reviewer-missing-file
   echo "ERROR: issue-watcher.sh から publish_terminal_failure_artifacts per-task-reviewer-missing-file の呼出がない" >&2
   exit 2
 fi
-if ! grep -q 'publish_terminal_failure_artifacts "debugger-notes-invalid"' "$WATCHER_SH"; then
-  echo "ERROR: issue-watcher.sh から publish_terminal_failure_artifacts debugger-notes-invalid の呼出がない" >&2
+if ! grep -q 'publish_terminal_failure_artifacts "debugger-notes-invalid"' "$DEBUGGER_GATE_SH"; then
+  echo "ERROR: modules/debugger-gate.sh から publish_terminal_failure_artifacts debugger-notes-invalid の呼出がない" >&2
   exit 2
 fi
 
