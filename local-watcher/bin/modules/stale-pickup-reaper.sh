@@ -432,18 +432,12 @@ sr_check_slot_lock() {
 #
 # Args: $1 = marker_json (将来拡張用 / 現状未使用)
 # Returns:
-#   0 = no session detected (lock file 不在 / 全 pid が非生存 / 保持 pid の無い残骸 lock のみ)
-#   1 = session may be alive (1 件でも pid 生存 / fuser & lsof 双方不在で判定不能の safe-side)
+#   0 = no session detected (lock file 不在 / 全 pid が非生存)
+#   1 = session may be alive (1 件でも pid 生存 / fuser & lsof 不在で判定不能含む safe-side)
 #
 # 副作用なし（pid 取得・生存確認のみ）。Linux は `fuser`、macOS は `lsof -t` で
 # lock file 保持 pid を取得し、`kill -0 <pid>` で生存確認する。fuser / lsof どちらも
 # 不在の環境では Req 3.4 の safe-side として rc=1 を返す。
-#
-# #447: pid 取得手段（fuser / lsof）が利用可能であることは per-file ループの前に確認済み。
-# その上で lock file の保持 pid が空だった場合は「誰も掴んでいない残骸 lock（stale）」であり、
-# 生存 session ではない。safe-side（rc=1）に倒すと 45min 閾値を超えても reap されず
-# `claude-claimed` ゾンビが永久 keep されるため、残骸 lock は「保持なし」として次の
-# lock file 検査へ continue する（safe-side は fuser/lsof 双方不在の場合に限定）。
 sr_check_session() {
   # 将来拡張用に引数を受け取るが本実装では未参照（SC2034 を `:` 参照で意図的に抑止）
   local _marker_json="${1:-}"
@@ -488,11 +482,11 @@ sr_check_session() {
     esac
 
     if [ -z "$pids" ]; then
-      # #447: pid 取得手段は利用可能（上の command -v で確認済み）なのに保持 pid が空
-      # = この lock file は誰も掴んでいない残骸（stale lock）。生存 session ではないので
-      # 「保持あり（safe-side）」に倒さず、次の lock file 検査へ進む。全 lock file が残骸 /
-      # 全 pid 非生存なら末尾で rc=0（no session）を返し、reaper が 45min 閾値で reap できる。
-      continue
+      # この lock file からは pid を取得できなかった → safe-side で「保持の可能性あり」
+      # （他 lock file で生存 pid を見つけても結論変わらないので即 return しない / 累積判定）
+      # ただし lock file が存在する以上、pid 取得自体ができないのは Req 3.4 の対象として
+      # safe-side 寄りに倒す。次の lock file 検査を続けるが、ここで return 1 しても良い。
+      return 1
     fi
 
     for pid in $pids; do

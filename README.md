@@ -4646,11 +4646,8 @@ Failed Recovery が Issue 単位の通算 attempt budget を持つのに対し�
    `flock -n -x` を試行し、いずれの slot も保持されていない（保持されている slot が 1 つでも
    あれば「アクティブの可能性あり」へ倒す）
 3. **watcher セッション不在**: slot ロックを保持していた pid を `fuser` / `lsof` で取得し、
-   `kill -0 <pid>` で現存確認。観測手段（`fuser` / `lsof`）が**双方とも不在**で判定不能な場合のみ
-   「セッション存在の可能性あり」へ倒す（保守的 fallback）。一方、観測手段は利用可能なのに lock file の
-   **保持 pid が空**（= 誰も掴んでいない残骸 lock）だった場合は「保持なし」として扱い、生存 session とは
-   みなさない（#447: 残骸 slot lock を live session と誤判定して `claude-claimed` ゾンビを 45min 閾値
-   超過後も永久 keep してしまう不具合の修正）
+   `kill -0 <pid>` で現存確認。pid 取得不能 / OS 差で観測手段が無い場合は「セッション存在の
+   可能性あり」へ倒す（保守的 fallback）
 
 **判定根拠取得失敗時は「アクティブの可能性あり」へ倒す** 保守的 fallback を全関数で徹底し、
 誤検出による進行中作業の喪失を構造的に防ぎます（Req 3.4）。判定根拠（age / lock / session）は
