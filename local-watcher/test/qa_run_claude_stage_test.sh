@@ -55,6 +55,14 @@ LOG="$TMPDIR_TEST/test.log"
 export LOG
 trap 'rm -rf "$TMPDIR_TEST"' EXIT
 
+# 抽出した qa_log / qa_warn / qa_error（core_utils.sh）は log 行の prefix として `[$REPO]` を
+# 無条件参照する。本テストは `set -euo pipefail`（-u）で走るため、REPO 未定義のままだと
+# opt-in ケースの qa_run_claude_stage → qa_log 呼び出しで "REPO: unbound variable" になり停止する。
+# 他テスト（full_auto_enabled_test.sh 等）と同じく fixture 値を定義しておく。
+# 参照は eval で読み込んだ qa_log 内にあり shellcheck からは見えないため SC2034 を局所抑止。
+# shellcheck disable=SC2034
+REPO="owner/test-repo"
+
 # 必要な関数だけを抽出して eval で読み込む。
 extract_function() {
   local script="$1"
