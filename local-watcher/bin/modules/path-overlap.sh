@@ -1,0 +1,1043 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+# path-overlap.sh — watcher の Path Overlap Checker プロセッサモジュール (#18, Phase E)
+#
+# 用途:
+#   同サイクル内 dispatch 競合予防・待機を行う Path Overlap Checker (#18, Phase E) の
+#   関数定義を集約する。Triage 結果の edit_paths を永続化し、in-flight Issue と
+#   top-level path が重複する場合に awaiting-slot ラベルを付与して dispatch を見送る。
+#   po_parse_triage_edit_paths / po_compute_overlap / po_check_dispatch_gate /
+#   po_apply_awaiting_slot / po_clear_awaiting_slot ほか。
+#
+#   #472 で promote-pipeline.sh から分割した（#181 design.md decision 3 で「独立
+#   モジュール化せず同居」としていた方針を変更。元コードで po_* が pp_* 定義群の物理的
+#   内部に挟まれていた経緯があったが、両者に関数呼び出し依存が無いことを確認したうえで
+#   分離した）。
+#
+# 配置先:
+#   $HOME/bin/modules/path-overlap.sh（install.sh が local-watcher/bin/modules/ から配置する）
+#
+# 依存:
+#   - 本モジュールは issue-watcher.sh 本体から `source` される前提（単体起動しない）。
+#   - `set -euo pipefail` は本体側で宣言済みのため、本モジュールでは宣言せず関数定義のみを持つ。
+#   - ロガー po_log / po_warn は本モジュール内で定義する（本体由来のため。#181 design.md
+#     decision 3 の記述を継承 / #472 で移動）。
+#   - グローバル変数（$REPO / $PATH_OVERLAP_CHECK / $LABEL_AWAITING_SLOT 等）は本体冒頭の
+#     Config ブロックで定義済み。bash の遅延束縛により呼び出し時に解決される。
+#   - dispatcher が po_check_dispatch_gate を、本モジュール内部から
+#     po_apply_awaiting_slot / po_clear_awaiting_slot を呼ぶ（既存構造を維持）。
+#   - 外部 CLI: gh / git / jq。
+#
+# セットアップ参照先:
+#   - 設計: docs/specs/181-feat-watcher-issue-watcher-sh-part-3-pr/design.md
+#   - README「Path Overlap Checker (Phase E)」節
+
+po_log() {
+  echo "[$(date '+%F %T')] [$REPO] path-overlap: $*"
+}
+po_warn() {
+  echo "[$(date '+%F %T')] [$REPO] path-overlap: WARN: $*" >&2
+}
+
+# ─── sticky comment 共通ヘルパー（#320 三重化解消 / 副作用なしの純粋関数） ───
+# po_persist_edit_paths / po_apply_awaiting_slot / po_apply_busy_wait_signal の
+# 3 箇所で同一だった URL/ID パースと marker 検索を共通化する。本ヘルパーは
+# gh / git を呼ばず状態も変更しない（各 call site の取得・PATCH/create・error
+# 分岐の制御フローは不変。差分等価）。
+
+# `gh ... --json comments` の `.url`（末尾 `#issuecomment-<numeric-id>`）から
+# REST API の数値 comment ID を抽出する。`.comments[].id` は GraphQL の base64 id で
+# REST PATCH には使えないため URL 末尾から取り出す。
+#
+# Args: $1 = comment URL（空文字可）
+# Stdout: 数値 comment ID（マッチしない場合は空文字）
+# Return: 0 always
+po_extract_comment_id_from_url() {
+  local url="$1"
+  [ -n "$url" ] || return 0
+  printf '%s' "$url" | sed -nE 's/.*#issuecomment-([0-9]+)$/\1/p'
+}
+
+# `gh issue view --json comments` の JSON から、本文に marker を含む最初のコメントの
+# URL を取り出す。jq 失敗・該当なしはいずれも空文字を返す fail-safe。
+#
+# Args: $1 = comments JSON（`{"comments":[...]}`）, $2 = marker 文字列
+# Stdout: 該当コメントの URL（該当なし / 失敗時は空文字）
+# Return: 0 always
+po_find_sticky_comment_url() {
+  local comments_json="$1"
+  local marker="$2"
+  printf '%s' "$comments_json" | jq -r --arg marker "$marker" '
+    (.comments // [])
+    | map(select(.body | contains($marker)))
+    | .[0].url // ""
+  ' 2>/dev/null || echo ""
+}
+
+# ─── Phase E: Triage Edit-Paths Parser (#18 Req 2.4 / 2.5) ───
+# Triage 結果 JSON から edit_paths 配列を fail-safe に抽出する。
+# - key 不在 / null / 非配列 / 要素に文字列以外混入はすべて空配列にフォールバック
+# - 既存 5 keys 抽出（jq -r '.status' 等）は変更しない（Req 2.5）
+#
+# Args: $1 = Triage 結果 JSON ファイルパス
+# Stdout: JSON 配列文字列（必ず `[...]` 形式、空でも `[]`）
+# Return: 0 always（失敗時は `[]` を返す fail-safe）
+po_parse_triage_edit_paths() {
+  local triage_file="$1"
+  if [ ! -f "$triage_file" ]; then
+    echo '[]'
+    return 0
+  fi
+  # `// []` で key 不在を吸収、`if type=="array" then ... else [] end` で型不正吸収、
+  # `map(select(type=="string"))` で文字列以外を除外。jq 失敗時も `[]` を返す。
+  jq -c '
+    (.edit_paths // [])
+    | if type == "array" then
+        map(select(type == "string"))
+      else
+        []
+      end
+  ' "$triage_file" 2>/dev/null || echo '[]'
+}
+
+# ─── Phase E: Path Overlap Persister (#18 Req 3.1〜3.4 / 12.1) ───
+# Triage で得た edit_paths を Issue 上に sticky comment として保存する。同じ marker
+# (<!-- idd-claude:edit-paths:v1 -->) を持つ既存コメントがあれば PATCH で上書き、
+# 無ければ新規 create する（Req 3.3 重複防止）。
+#
+# 本文形式（人間可読 md リスト + 機械可読 hidden JSON marker の 2 段構成）:
+#
+#   ## Triage edit_paths（Phase E）
+#
+#   本 Issue が編集見込みの top-level path:
+#
+#   - `local-watcher/`
+#   - `README.md`
+#
+#   *(自動生成: Path Overlap Checker。本機能の詳細は README の「Phase E」節を参照)*
+#
+#   <!-- idd-claude:edit-paths:v1 -->
+#   <!-- idd-claude:edit-paths-json:["local-watcher/","README.md"] -->
+#
+# Args: $1 = issue number, $2 = edit_paths JSON 配列文字列
+# Return: 0 = persist OK / 1 = persist 失敗（呼び出し側は warn のみで Triage 全体は成功扱い）
+po_persist_edit_paths() {
+  local issue_number="$1"
+  local edit_paths_json="$2"
+
+  # 本文 md リストを組み立てる（空配列なら "なし" 表示）
+  local list_md
+  list_md=$(echo "$edit_paths_json" | jq -r '
+    if length == 0 then
+      "_(Triage は確信のある edit_paths を推定できませんでした)_"
+    else
+      map("- `" + . + "`") | join("\n")
+    end
+  ' 2>/dev/null || echo '_(edit_paths 抽出失敗)_')
+
+  local marker_v1="<!-- idd-claude:edit-paths:v1 -->"
+  local json_marker
+  # JSON marker を 1 行に整形（jq -c で改行なしの compact 形式）
+  json_marker="<!-- idd-claude:edit-paths-json:${edit_paths_json} -->"
+
+  local body
+  body=$(cat <<EOF
+## Triage edit_paths（Phase E）
+
+本 Issue が編集見込みの top-level path:
+
+${list_md}
+
+*(自動生成: Path Overlap Checker。本機能の詳細は README の「Phase E」節を参照)*
+
+${marker_v1}
+${json_marker}
+EOF
+)
+
+  # 既存 sticky comment を gh API で検索（URL 末尾の `#issuecomment-<numeric-id>` から
+  # REST API id を抽出。`.comments[].id` は GraphQL の base64 id なので使えない）。
+  local comments_json
+  if ! comments_json=$(gh issue view "$issue_number" --repo "$REPO" --json comments 2>/dev/null); then
+    return 1
+  fi
+  local existing_url existing_comment_id
+  existing_url=$(po_find_sticky_comment_url "$comments_json" "<!-- idd-claude:edit-paths:v1 -->")
+  existing_comment_id=$(po_extract_comment_id_from_url "$existing_url")
+
+  if [ -n "$existing_comment_id" ]; then
+    # 既存 sticky comment を PATCH で上書き（Req 3.3）
+    if ! gh api -X PATCH "/repos/${REPO}/issues/comments/${existing_comment_id}" \
+        -f body="$body" >/dev/null 2>&1; then
+      return 1
+    fi
+  else
+    # 新規作成
+    if ! gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# ─── Phase E: Path Overlap Loader (#18 Req 12.1) ───
+# Issue の sticky comment から edit_paths JSON を読み出す。marker 不在 / API 失敗 /
+# 形式異常はすべて空配列 `[]` を返す fail-safe。
+# 1 candidate あたり gh issue view --json comments を **1 回のみ** 呼ぶ（Req 12.1）。
+#
+# Args: $1 = issue number
+# Stdout: edit_paths JSON 配列文字列（必ず `[...]` 形式、抽出失敗時は `[]`）
+# Return: 0 always
+po_load_edit_paths() {
+  local issue_number="$1"
+  local comments_json
+  if ! comments_json=$(gh issue view "$issue_number" --repo "$REPO" --json comments 2>/dev/null); then
+    echo '[]'
+    return 0
+  fi
+  # 全コメントから marker 行を抽出 → JSON 部を取り出して valid array かチェック
+  local extracted
+  extracted=$(echo "$comments_json" \
+    | jq -r '.comments // [] | map(.body) | .[]' 2>/dev/null \
+    | sed -nE 's/.*<!-- idd-claude:edit-paths-json:(.*) -->.*/\1/p' \
+    | tail -1)
+  if [ -z "$extracted" ]; then
+    echo '[]'
+    return 0
+  fi
+  # extracted が valid な JSON 配列であることを jq で再検証してから返す
+  local validated
+  validated=$(echo "$extracted" | jq -c '
+    if type == "array" then
+      map(select(type == "string"))
+    else
+      []
+    end
+  ' 2>/dev/null || echo '[]')
+  echo "$validated"
+}
+
+# ─── Phase E: Holder Label Set Resolver (#221 Req 1.1 / 2.1 / 3.1〜3.3 / 4.1 / NFR1.1) ───
+# 呼び出しコンテキストと branch 設定から、in-flight holder とみなすラベル集合を CSV で返す。
+# holder の本質は「dispatch 先 base ブランチにまだ取り込まれていない作業」であるため、
+# multi-branch（gitflow）運用の dispatch 文脈では develop 統合済みの `staged-for-release` を
+# holder から除外する。それ以外（promote / single-branch / 判定不能）は full 集合を返す。
+#
+# holder 集合決定の真理値表（design.md D3）:
+#   context    | BASE_BRANCH vs PROMOTION_TARGET_BRANCH | 返す集合
+#   dispatch   | != （multi-branch / gitflow）          | 6 ラベル（staged-for-release 除外）… Req 1.1
+#   dispatch   | == （single-branch）                   | 7 ラベル（full / ゼロ差分）       … NFR 1.1
+#   promote    | （不問）                               | 7 ラベル（full / SfR 維持）        … Req 2.1
+#   不明な値    | （不問）                               | 7 ラベル（full / fail-safe）       … Req 4.1
+#
+# invariants: 返す CSV は常に 6 基本ラベル
+#   claude-claimed / claude-picked-up / awaiting-design-review / ready-for-review /
+#   needs-iteration / needs-rebase
+# を含む（NFR 1.2）。コンテキストで変動するのは `staged-for-release` の有無のみ。
+#
+# Args:
+#   $1 = context（"dispatch" | "promote"）
+# Stdout: holder ラベル CSV（空白なしカンマ区切り。dispatch×multi-branch では
+#         staged-for-release を含まない）
+# Return: 0 always（判定不能でも full 集合を返す fail-safe / Req 4.1）
+po_resolve_holder_labels() {
+  local context="${1:-}"
+
+  # 6 基本ラベルは常時集合内（NFR 1.2 invariant）。`$LABEL_*` 定数は本体 Config ブロックで
+  # 束縛済みだが、未束縛時にも安全側へ倒すため `:-` で既定リテラルへ fallback する。
+  local base_labels
+  base_labels="${LABEL_CLAIMED:-claude-claimed},${LABEL_PICKED:-claude-picked-up},${LABEL_AWAITING_DESIGN:-awaiting-design-review},${LABEL_READY:-ready-for-review},${LABEL_NEEDS_ITERATION:-needs-iteration},${LABEL_NEEDS_REBASE:-needs-rebase}"
+
+  # full 集合 = 6 基本ラベル + staged-for-release（ラベル文字列はハードコード重複させず
+  # `$LABEL_STAGED_FOR_RELEASE` 定数を参照する / task 明記）。
+  local staged_label="${LABEL_STAGED_FOR_RELEASE:-staged-for-release}"
+  local full_labels="${base_labels},${staged_label}"
+
+  # dispatch かつ multi-branch（BASE_BRANCH != PROMOTION_TARGET_BRANCH）のみ
+  # staged-for-release を除外する。それ以外は full 集合（fail-safe / 安全側）。
+  if [ "$context" = "dispatch" ] && [ "${BASE_BRANCH:-main}" != "${PROMOTION_TARGET_BRANCH:-main}" ]; then
+    echo "$base_labels"
+    return 0
+  fi
+
+  echo "$full_labels"
+  return 0
+}
+
+# ─── Phase E: Label OR-clause Builder (#221 Req 1.2 / 4.2 / NFR 1.1) ───
+# holder ラベル CSV を `gh issue list --search` 用の OR clause
+# `label:"X" OR label:"Y" OR ...` へ組み立てる。空要素・前後空白は除去し、
+# 有効ラベルが 1 つも無ければ空文字列を返す（caller が full 集合へ fallback / Req 4.2）。
+#
+# 重要（#221 NFR 1.1 ゼロ差分）: 現行 7 ラベル CSV を与えた場合の出力は
+#   label:"claude-claimed" OR label:"claude-picked-up" OR label:"awaiting-design-review"
+#   OR label:"ready-for-review" OR label:"needs-iteration" OR label:"needs-rebase"
+#   OR label:"staged-for-release"
+# と完全一致し、これを (...) で挟んだ search_query が現行固定クエリと文字列一致する。
+#
+# Args: $1 = holder labels CSV
+# Stdout: OR clause 文字列（有効ラベル 0 件なら空文字列）
+# Return: 0 always
+po_build_label_or_clause() {
+  local csv="${1:-}"
+  local clause=""
+  local elem
+  # CSV をカンマで分割。各要素の前後空白を除去し、空要素はスキップする。
+  local IFS=','
+  for elem in $csv; do
+    # 前後の空白（スペース / タブ）を除去
+    elem="${elem#"${elem%%[![:space:]]*}"}"
+    elem="${elem%"${elem##*[![:space:]]}"}"
+    [ -z "$elem" ] && continue
+    if [ -z "$clause" ]; then
+      clause="label:\"${elem}\""
+    else
+      clause="${clause} OR label:\"${elem}\""
+    fi
+  done
+  printf '%s' "$clause"
+  return 0
+}
+
+# ─── Phase E: In-Flight Collector (#18 Req 4.1〜4.4 / 5.3 / 8.1) ───
+# 現サイクルの in-flight Issue（候補自身を除く）を gh で 1 回列挙し、各 Issue の
+# edit_paths を読み出して **union 配列**と **path → holder Issue 番号配列の map**
+# の両方を含む JSON object を返す。
+#
+# 戻り値の JSON object schema:
+#   {
+#     "union":   ["local-watcher/", "README.md"],         # 正規化前の paths を union
+#     "holders": {                                          # 正規化前の path → holders
+#       "local-watcher/": [39, 40],
+#       "README.md":      [40]
+#     }
+#   }
+#
+# Note: holders map のキーは **正規化前の生 path**（in-flight Issue が persist した
+# まま）。`po_check_dispatch_gate` 側で overlap path（正規化済 top-level）と
+# 突合する際は同じ `normalize` 関数を holders map のキーにも適用してから引く。
+#
+# Req 12.1 補足: API 呼び出し回数は本拡張で増えていない。各 in-flight Issue について
+# `po_load_edit_paths` を 1 回呼ぶのは従来同様で、その戻り値から union と holders map
+# を同時に構築するだけ。candidate 側の `po_load_edit_paths` も 1 回のまま。
+#
+# in-flight 判定ラベル（Req 4.1）: 第 2 引数 holder_labels（CSV）で与えられる集合を使う。
+#   default（引数省略時）= 現行 7 ラベル集合 #221 NFR 1.1 ゼロ差分:
+#     claude-claimed, claude-picked-up, awaiting-design-review, ready-for-review,
+#     needs-iteration, needs-rebase, staged-for-release
+#   dispatch×multi-branch 文脈では呼び出し側が staged-for-release を除いた 6 ラベル
+#   集合を渡す（#221 Req 1.2 / 1.4）。
+# 除外（Req 4.2）: st-failed, awaiting-slot（集合非依存で固定維持）
+# 候補自身を除外（Req 4.3）、同 repo のみ（Req 4.4: --repo "$REPO" 固定）
+#
+# Args:
+#   $1 = candidate issue number
+#   $2 = holder labels CSV（省略時 default = 現行 7 ラベル集合 / 後方互換 #221 NFR 1.1）
+# Stdout: JSON object `{"union": [...], "holders": {path: [issue#, ...]}}`
+# Return: 0 = 列挙 OK / 1 = gh API 失敗（caller は fail-open で empty 扱い + warn）
+po_collect_inflight_issues() {
+  local candidate="$1"
+  # #221 task 2: holder ラベル集合を第 2 引数で受ける。default は現行 7 ラベル集合に
+  # 固定（引数を渡さない既存呼び出し = single-branch 運用は現行クエリと完全一致 / NFR 1.1）。
+  local holder_labels="${2:-claude-claimed,claude-picked-up,awaiting-design-review,ready-for-review,needs-iteration,needs-rebase,staged-for-release}"
+
+  # 与えられた CSV を `label:"X" OR label:"Y" OR ...` 形式へ動的に組み立てる。
+  # `gh issue list --label A --label B` は AND になるため `--search 'label:A OR ...'`
+  # 形式を使う（既存 Phase B / Phase D が同形式を採用済）。
+  # fail-safe（#221 Req 4.2）: CSV が空 / 不正で有効ラベルが 1 つも得られない場合は
+  # full 7 ラベル集合へ fallback する（holder から誤って外さない安全側）。
+  local label_clause
+  label_clause=$(po_build_label_or_clause "$holder_labels")
+  if [ -z "$label_clause" ]; then
+    label_clause=$(po_build_label_or_clause "claude-claimed,claude-picked-up,awaiting-design-review,ready-for-review,needs-iteration,needs-rebase,staged-for-release")
+  fi
+
+  local search_query
+  search_query="is:open is:issue (${label_clause}) -label:\"st-failed\" -label:\"awaiting-slot\""
+  local issues_json
+  if ! issues_json=$(gh issue list --repo "$REPO" \
+      --search "$search_query" \
+      --json number \
+      --limit 50 2>/dev/null); then
+    return 1
+  fi
+
+  # 候補自身を除外（Req 4.3）、各 Issue について po_load_edit_paths を呼んで
+  # union（unique 済 path 配列）と holders map（path → [issue#, ...]）を併走更新する。
+  local accum
+  accum='{"union": [], "holders": {}}'
+  local n
+  while IFS= read -r n; do
+    [ -z "$n" ] && continue
+    if [ "$n" = "$candidate" ]; then
+      continue
+    fi
+    local paths
+    paths=$(po_load_edit_paths "$n")
+    # accum := accum + (paths を union に merge / 各 path に対し holders[path] に n を追記)
+    # holders は array で持ち、重複 issue# は jq の unique で抑止する。
+    accum=$(jq -nc \
+      --argjson acc "$accum" \
+      --argjson paths "$paths" \
+      --argjson holder "$n" '
+      .union as $_ |
+      $acc
+      | .union = (.union + $paths | unique)
+      | reduce $paths[] as $p (
+          .;
+          .holders[$p] = ((.holders[$p] // []) + [$holder] | unique)
+        )
+    ')
+  done < <(echo "$issues_json" | jq -r '.[].number')
+
+  echo "$accum"
+  return 0
+}
+
+# ─── Phase E: Holder Resolver (#18 Req 5.3 / 8.1) ───
+# overlap path（正規化済 top-level）と holders map（正規化前 path → [issue#, ...]）
+# から、各 overlap path に対応する holder Issue 番号配列を解決する。
+#
+# 既存 `po_compute_overlap` の `normalize` 規約（先頭 `./` 剥がし / 連続スラッシュ
+# 圧縮 / top-level セグメント + `/`）を holders map の生キーにも適用してから
+# 突合する。
+#
+# Args: $1 = overlap JSON 配列（正規化済 top-level path 文字列）
+#       $2 = holders map JSON（正規化前 path → [issue#, ...]）
+# Stdout: JSON object `{overlap_path: [issue#, ...], ...}`
+#         （overlap path はすべてキーに登場。holder が見つからない場合は空配列）
+# Return: 0 always
+po_resolve_overlap_holders() {
+  local overlap_json="$1"
+  local holders_json="$2"
+  jq -nc \
+    --argjson overlap "$overlap_json" \
+    --argjson holders "$holders_json" '
+    def normalize:
+      sub("^\\./"; "")
+      | gsub("/+"; "/")
+      | if test("/") then
+          (split("/")[0] + "/")
+        else
+          .
+        end;
+    # holders の生キーを normalize して bucket 化（同一 top-level に複数 raw path が
+    # 寄ってきた場合は holders を merge して unique）
+    ($holders | to_entries
+      | map(.key |= normalize)
+      | group_by(.key)
+      | map({ key: .[0].key, value: (map(.value) | add | unique) })
+      | from_entries
+    ) as $bucket
+    | reduce $overlap[] as $p (
+        {};
+        .[$p] = ($bucket[$p] // [])
+      )
+  '
+}
+
+# ─── Phase E: Holders Log Formatter (#18 Req 8.1) ───
+# overlap-holders map から overlap log line 用の holders フィールド文字列
+# （例: "#39,#40"）を生成する。重複 Issue# は除去、ソートして並び順を安定化。
+#
+# Args: $1 = overlap-holders map JSON（po_resolve_overlap_holders 出力）
+# Stdout: "#<N>,#<M>,..." or "" (holders が 1 件も無い場合)
+# Return: 0 always
+po_format_holders_for_log() {
+  local map_json="$1"
+  echo "$map_json" | jq -r '
+    [.[] | .[]] | unique | sort | map("#" + tostring) | join(",")
+  ' 2>/dev/null || echo ""
+}
+
+# ─── Phase E: Overlap Table Markdown Formatter (#18 Req 5.3) ───
+# overlap-holders map を sticky comment 本文の表形式 markdown に整形する。
+# design.md「Awaiting-Slot Sticky Comment Format」（design.md:855-863）参照。
+#
+# 出力例:
+#   | 重複 path | 保持中の Issue |
+#   |---|---|
+#   | `local-watcher/` | #39, #40 |
+#   | `README.md` | #40 |
+#
+# Args: $1 = overlap-holders map JSON
+# Stdout: markdown 表（先頭の見出し 2 行 + 各 overlap path 1 行）
+# Return: 0 always
+po_format_holders_table_md() {
+  local map_json="$1"
+  {
+    echo '| 重複 path | 保持中の Issue |'
+    echo '|---|---|'
+    echo "$map_json" | jq -r '
+      to_entries
+      | sort_by(.key)
+      | map(
+          "| `" + .key + "` | " +
+          (
+            if (.value | length) == 0 then
+              "_(holder 不明)_"
+            else
+              (.value | unique | sort | map("#" + tostring) | join(", "))
+            end
+          ) + " |"
+        )
+      | .[]
+    ' 2>/dev/null
+  }
+}
+
+# ─── Phase E: Overlap Engine (#18 Req 5.1 / 5.5 / 5.6) ───
+# candidate と in-flight の path 配列の積集合を top-level 粒度で計算する。
+#
+# 正規化規約:
+#   - 先頭 `./` を剥がす
+#   - 連続スラッシュ `/+` を `/` 1 つに圧縮
+#   - スラッシュを含むなら先頭セグメント + `/` を返す（ディレクトリ扱い）
+#   - スラッシュを含まないならそのまま（ルート直下ファイル扱い）
+#
+# 例:
+#   `local-watcher/bin/foo.sh` → `local-watcher/`
+#   `README.md`                → `README.md`
+#   `./docs/specs/18-foo/req.md` → `docs/`
+#
+# candidate が空配列なら常に積集合は空（Req 5.5 候補不在は dispatch 阻止しない）。
+#
+# Args: $1 = candidate edit_paths JSON 配列, $2 = in-flight union JSON 配列
+# Stdout: 交差 JSON 配列（正規化済 top-level key、重複排除済）
+# Return: 0 always
+po_compute_overlap() {
+  local cand_json="$1"
+  local inflight_json="$2"
+  jq -nc \
+    --argjson c "$cand_json" \
+    --argjson f "$inflight_json" '
+    def normalize:
+      sub("^\\./"; "")
+      | gsub("/+"; "/")
+      | if test("/") then
+          (split("/")[0] + "/")
+        else
+          .
+        end;
+    ($c | map(normalize) | unique) as $cn
+    | ($f | map(normalize) | unique) as $fn
+    | $cn | map(select(. as $p | $fn | index($p)))
+  '
+}
+
+# ─── Phase E: Awaiting Slot State Machine — apply (#18 Req 5.2 / 5.3 / 8.2) ───
+# `awaiting-slot` ラベルを付与（冪等）し、説明 sticky comment を post / update する。
+#
+# sticky comment marker: <!-- idd-claude:awaiting-slot:v1 -->
+# 同一 Issue に 1 件のみ。既存 marker 付きコメントがあれば PATCH で上書き、無ければ
+# 新規 create する（cron tick ごとのノイズ累積を抑制）。
+#
+# 本文には Req 5.3 が要求する「どの path がどの in-flight Issue に保持されているか」
+# を表形式（design.md「Awaiting-Slot Sticky Comment Format」L855-863 準拠）で表示する。
+#
+# Args: $1 = candidate issue number
+#       $2 = overlap JSON 配列（正規化済 top-level path 文字列、後方互換用）
+#       $3 = overlap-holders map JSON（path → [issue#, ...]、Req 5.3 holder 情報）
+# Return: 0 = apply OK / 1 = 致命的失敗（呼び出し側 warn）
+po_apply_awaiting_slot() {
+  local issue_number="$1"
+  local overlap_json="$2"
+  local holders_map_json="${3:-}"
+
+  # ラベル付与（冪等。既付与でも error にならない）。
+  # #187: ラベル付与に失敗しても early return せず、警告ログを残した上で sticky comment
+  # 投稿へ処理を継続する。これによりラベルが付与できなかったケースでも「なぜ Issue が
+  # 止まっているか」を Issue 上のコメントから読み取れるようにする（Req 1.1 / 1.2 / 3.1）。
+  # コメント投稿/更新はラベル付与の成否に依存せず必ず試行する。
+  if gh issue edit "$issue_number" --repo "$REPO" \
+      --add-label "$LABEL_AWAITING_SLOT" >/dev/null 2>&1; then
+    po_log "awaiting-slot added candidate=#${issue_number}"
+  else
+    po_warn "issue=#${issue_number} awaiting-slot ラベル付与に失敗（見送り理由コメントの投稿は継続）"
+  fi
+
+  # sticky comment 本文の組み立て
+  # holders_map_json が与えられた場合は表形式（| 重複 path | 保持中の Issue |）で
+  # 表示する（Req 5.3 + design.md L855-863）。未指定 / 空 map の場合は path のみの
+  # md リストにフォールバック（後方互換）。
+  local overlap_section
+  if [ -n "$holders_map_json" ] && \
+      [ "$(echo "$holders_map_json" | jq 'length' 2>/dev/null || echo 0)" -gt 0 ]; then
+    overlap_section=$(po_format_holders_table_md "$holders_map_json")
+  else
+    overlap_section=$(echo "$overlap_json" | jq -r '
+      if length == 0 then
+        "_(overlap path が空ですが本コメントが呼ばれました。状態不整合の可能性あり)_"
+      else
+        map("- `" + . + "`") | join("\n")
+      end
+    ' 2>/dev/null || echo '_(overlap 抽出失敗)_')
+  fi
+
+  local marker="<!-- idd-claude:awaiting-slot:v1 -->"
+  local body
+  body=$(cat <<EOF
+## ⏸️ Dispatch を見送り中（Phase E Path Overlap Checker）
+
+本 Issue が編集見込みの top-level path のうち、以下が現在 in-flight 中の他 Issue と重複しています。
+
+${overlap_section}
+
+先行 Issue の PR が merge されて in-flight 集合から外れた次サイクルで \`awaiting-slot\`
+ラベルが自動除去され、本 Issue は通常 dispatch に戻ります。手動介入は不要です。
+
+詳細は README の「Path Overlap Checker (Phase E)」節を参照してください。
+
+${marker}
+EOF
+)
+
+  # sticky 化: 既存 marker 付きコメントを検索 → あれば PATCH、無ければ新規 create
+  local comments_json
+  if ! comments_json=$(gh issue view "$issue_number" --repo "$REPO" --json comments 2>/dev/null); then
+    # コメント取得失敗時は新規 create を試みる（best-effort）
+    gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+    return 0
+  fi
+  local existing_url existing_comment_id
+  existing_url=$(po_find_sticky_comment_url "$comments_json" "<!-- idd-claude:awaiting-slot:v1 -->")
+  existing_comment_id=$(po_extract_comment_id_from_url "$existing_url")
+  if [ -n "$existing_comment_id" ]; then
+    gh api -X PATCH "/repos/${REPO}/issues/comments/${existing_comment_id}" \
+      -f body="$body" >/dev/null 2>&1 || true
+  else
+    gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+# ─── Phase E: Awaiting Slot State Machine — clear (#18 Req 6.2 / 6.4 / 8.3) ───
+# `awaiting-slot` ラベルを除去する（冪等）。説明 sticky comment は事後監査用に残置する。
+#
+# Args: $1 = candidate issue number
+# Return: 0 = clear OK / 1 = ラベル除去失敗（呼び出し側 warn → 次サイクルで再試行）
+po_clear_awaiting_slot() {
+  local issue_number="$1"
+  if ! gh issue edit "$issue_number" --repo "$REPO" \
+      --remove-label "$LABEL_AWAITING_SLOT" >/dev/null 2>&1; then
+    return 1
+  fi
+  po_log "awaiting-slot cleared candidate=#${issue_number} (overlap empty)"
+  return 0
+}
+
+# ─── Phase E: Busy-Cycle Wait Visibility — state dir resolver (#228 Req 3 / NFR 4) ───
+# 多忙サイクル待ちの「連続見送り tick 数」を永続化するローカル state ディレクトリを返す。
+# GitHub API を一切呼ばずローカルファイルだけで継続 tick 数を数えるため、in-flight 列挙
+# 回数・edit_paths 読み出し回数を本機能導入前から増やさない（NFR 4.1 / 4.2）。
+#
+# 配置: $LOG_DIR/busy-wait-state/（LOG_DIR は repo ごとに分離済み = repo 間で衝突しない）
+# Stdout: state ディレクトリの絶対パス
+# Return: 0 always（mkdir 失敗は呼び出し側が tee せず継続。state 不能でも dispatch は阻害しない）
+po_busy_wait_state_dir() {
+  local dir="${LOG_DIR:-$HOME/.issue-watcher/logs}/busy-wait-state"
+  mkdir -p "$dir" >/dev/null 2>&1 || true
+  printf '%s' "$dir"
+}
+
+# ─── Phase E: Busy-Cycle Wait Visibility — tick counter (#228 Req 3.1 / 3.2 / 3.4 / NFR 4) ───
+# candidate Issue について「dispatch を見送った連続サイクル数」を 1 増やし、累計を返す。
+# ローカル state ファイル（issue-<N>.tick）に整数を持つだけで GitHub API は呼ばない。
+# 既存値が非数値 / 欠落 / 不正なら 0 とみなしてから +1 する（fail-safe）。
+#
+# Args: $1 = candidate issue number
+# Stdout: 加算後の連続見送り tick 数（>= 1）
+# Return: 0 always
+po_busy_wait_tick() {
+  local issue_number="$1"
+  local dir
+  dir=$(po_busy_wait_state_dir)
+  local f="${dir}/issue-${issue_number}.tick"
+  local cur=0
+  if [ -f "$f" ]; then
+    cur=$(cat "$f" 2>/dev/null || echo 0)
+    # 非数値混入 fail-safe（途中で壊れたファイル / 手動編集等）
+    case "$cur" in
+      ''|*[!0-9]*) cur=0 ;;
+    esac
+  fi
+  local next=$((cur + 1))
+  printf '%s' "$next" > "$f" 2>/dev/null || true
+  printf '%s' "$next"
+  return 0
+}
+
+# ─── Phase E: Busy-Cycle Wait Visibility — tick reset (#228 Req 3.3 / NFR 4) ───
+# candidate Issue の連続見送り tick state を 0 へリセット（state ファイル削除）する。
+# dispatch に成功した / 見送り要因が解消したサイクルで呼び、次に再び見送られたときは
+# tick を 1 から数え直す（transient と継続待機を区別する / Req 3.3 / 3.4）。
+#
+# Args: $1 = candidate issue number
+# Return: 0 always（ファイル不在でも error にしない / 冪等）
+po_busy_wait_reset() {
+  local issue_number="$1"
+  local dir
+  dir=$(po_busy_wait_state_dir)
+  rm -f "${dir}/issue-${issue_number}.tick" >/dev/null 2>&1 || true
+  return 0
+}
+
+# ─── Phase E: Busy-Cycle Wait Visibility — signal apply (#228 Req 3.1〜3.2 / 4.1〜4.2 / 5.3) ───
+# 多忙サイクル待ちが可視化閾値を超えた Issue へ、待機中である旨の sticky comment を
+# post / update し `awaiting-slot` ラベルを付与する。冪等性のため専用 marker
+# <!-- idd-claude:busy-wait:v1 --> 付きコメントを 1 件に集約する（既存
+# awaiting-slot:v1 / edit-paths:v1 marker とは別管理 = 既存マーカー契約不変 / Req 5.3）。
+# ラベル付与失敗でも sticky comment 投稿は継続する（Req 1.4 と同方針）。
+#
+# Args: $1 = candidate issue number
+#       $2 = 連続見送り tick 数（本文へ埋め込む）
+#       $3 = 待機理由テキスト（"全 slot 使用中" 等。本文へ埋め込む）
+# Return: 0 = apply OK / 1 = 致命的失敗（呼び出し側 warn）
+po_apply_busy_wait_signal() {
+  local issue_number="$1"
+  local tick_count="$2"
+  local reason="${3:-空き slot 不足}"
+
+  # ラベル付与（冪等。既付与でも error にならない）。失敗しても sticky comment 投稿へ継続。
+  if gh issue edit "$issue_number" --repo "$REPO" \
+      --add-label "$LABEL_AWAITING_SLOT" >/dev/null 2>&1; then
+    po_log "busy-wait awaiting-slot added candidate=#${issue_number} ticks=${tick_count}"
+  else
+    po_warn "issue=#${issue_number} busy-wait awaiting-slot ラベル付与に失敗（可視化コメントの投稿は継続）"
+  fi
+
+  local marker="<!-- idd-claude:busy-wait:v1 -->"
+  local body
+  body=$(cat <<EOF
+## ⏳ Dispatch 待機中（多忙サイクル待ち / Phase E）
+
+本 Issue は dispatch 候補として評価されましたが、${reason}のため ${tick_count} サイクル連続で
+slot へ投入できず待機しています（path-overlap 由来の見送りではありません）。
+
+- 待機理由: ${reason}
+- 連続見送りサイクル数: ${tick_count}
+
+先行 Issue の処理が完了して空き slot が生まれた次サイクルで本 Issue は通常 dispatch に戻り、
+本コメントが付与した \`awaiting-slot\` ラベルは自動除去されます。手動介入は不要です。
+
+詳細は README の「Path Overlap Checker (Phase E)」節「多忙サイクル待ちの可視化」を参照してください。
+
+${marker}
+EOF
+)
+
+  # sticky 化: 既存 marker 付きコメントを検索 → あれば PATCH、無ければ新規 create
+  # （cron tick ごとのノイズ累積を抑制 / Req 4.1 / 4.2 / NFR 2.1）。
+  local comments_json
+  if ! comments_json=$(gh issue view "$issue_number" --repo "$REPO" --json comments 2>/dev/null); then
+    gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+    return 0
+  fi
+  local existing_url existing_comment_id
+  existing_url=$(po_find_sticky_comment_url "$comments_json" "<!-- idd-claude:busy-wait:v1 -->")
+  existing_comment_id=$(po_extract_comment_id_from_url "$existing_url")
+  if [ -n "$existing_comment_id" ]; then
+    gh api -X PATCH "/repos/${REPO}/issues/comments/${existing_comment_id}" \
+      -f body="$body" >/dev/null 2>&1 || true
+  else
+    gh issue comment "$issue_number" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
+  fi
+  return 0
+}
+
+# ─── Phase E: Busy-Cycle Wait Visibility — orchestrator (#228 Req 3.1〜3.4 / 5.1 / 5.2) ───
+# dispatcher の busy-wait 経路（候補が全 gate を通過したが空き slot を確保できず当該
+# サイクルの dispatch を見送った地点）から呼ぶ。連続見送り tick を 1 増やし、可視化閾値
+# （PATH_OVERLAP_BUSY_WAIT_THRESHOLD）に達したら可視化シグナルを残す。閾値未満では
+# シグナルを残さない（transient 抑制 / Req 3.4 / NFR 1.1）。
+#
+# opt-in gate（Req 5.1 / 5.2）: PATH_OVERLAP_CHECK="true" 厳密一致のときのみ動作する。
+# それ以外（未設定 / off / 不正値）は state ファイルも作らず即 return 0 = 本機能導入前と
+# 完全に同一挙動（ローカル state も GitHub 状態も一切変更しない）。
+#
+# Args: $1 = candidate issue number
+#       $2 = 待機理由テキスト（省略時 "空き slot 不足"）
+# Return: 0 always（dispatch 経路を阻害しない）
+po_check_busy_wait() {
+  local candidate="$1"
+  local reason="${2:-空き slot 不足}"
+
+  # Req 5.1 / 5.2: opt-in gate（厳密一致 "true" のみ通す）。off 時は state も作らない。
+  [ "${PATH_OVERLAP_CHECK:-off}" = "true" ] || return 0
+
+  # 閾値の正規化: 0 / 空 / 非数値は安全側（連投しない）で既定 5 にフォールバック。
+  local threshold="${PATH_OVERLAP_BUSY_WAIT_THRESHOLD:-5}"
+  case "$threshold" in
+    ''|*[!0-9]*) threshold=5 ;;
+  esac
+  [ "$threshold" -ge 1 ] 2>/dev/null || threshold=5
+
+  # 連続見送り tick を 1 増やす（ローカル state のみ / GitHub API は呼ばない / NFR 4）。
+  local ticks
+  ticks=$(po_busy_wait_tick "$candidate")
+
+  if [ "$ticks" -ge "$threshold" ]; then
+    # NFR 3.1: 1 行ログに連続見送り tick 数・閾値・理由を含める。
+    po_log "busy-wait visible candidate=#${candidate} ticks=${ticks} threshold=${threshold} reason=${reason}"
+    if ! po_apply_busy_wait_signal "$candidate" "$ticks" "$reason"; then
+      po_warn "issue=#${candidate} busy-wait 可視化シグナルの付与に失敗（次サイクルで再評価）"
+    fi
+  else
+    # 閾値未満は transient とみなしシグナルを残さない（Req 3.4 / NFR 1.1）。
+    po_log "busy-wait pending candidate=#${candidate} ticks=${ticks} threshold=${threshold} (閾値未満のため可視化なし)"
+  fi
+  return 0
+}
+
+# ─── Phase E: Dispatcher Integration Point (#18 Req 1.1〜1.4 / 5.x / 6.x / 12.2) ───
+# _dispatcher_run の candidate ループ内、check_existing_impl_pr 通過直後・
+# _dispatcher_find_free_slot 呼び出し前に挿入する gate 関数。
+#
+# 関数冒頭で `[ "$PATH_OVERLAP_CHECK" = "true" ] || return 0` で opt-in gate を成立
+# させ、未設定 / off / 不正値（True / 1 / typo 等）は早期 return 0 = 従来挙動と
+# 完全一致（Req 1.2 / 1.3 / NFR 1.1）。
+#
+# Args: $1 = candidate issue number, $2 = candidate labels JSON
+#       （gh issue list の `.labels` フィールドを jq -c で取り出したもの）
+# Return: 0 = claim を続行してよい / 1 = この cycle では dispatch skip（continue）
+po_check_dispatch_gate() {
+  local candidate="$1"
+  local labels_json="$2"
+
+  # Req 1.2 / 1.3 / 1.4: opt-in gate（厳密一致 "true" のみ通す）
+  [ "$PATH_OVERLAP_CHECK" = "true" ] || return 0
+
+  # 候補の edit_paths を sticky から読む（Req 5.5: marker 不在は空配列扱い）
+  local cand_paths
+  cand_paths=$(po_load_edit_paths "$candidate")
+
+  # #221 task 3: dispatch 文脈の holder ラベル集合を解決する（Req 1.1 / 3.1）。
+  # multi-branch（gitflow）運用では staged-for-release を除外した 6 ラベル、
+  # single-branch / 判定不能では full 7 ラベル集合（fail-safe）。
+  local holder_labels full_labels
+  holder_labels=$(po_resolve_holder_labels "dispatch")
+  full_labels=$(po_resolve_holder_labels "promote")
+  # NFR 3.1: 解決集合が full と異なる（staged-for-release を除外した）場合のみ
+  # 除外を判別可能にログ出力する。full と一致する場合（single-branch 等）は
+  # ログを出さない（ゼロ差分 / NFR 1.1 を壊さない）。
+  if [ "$holder_labels" != "$full_labels" ]; then
+    po_log "holder-set context=dispatch excluded=${LABEL_STAGED_FOR_RELEASE:-staged-for-release} base=${BASE_BRANCH:-main}"
+  fi
+
+  # in-flight union + holders map を取得（Req 4.1〜4.4 / 5.3 / 8.1）。
+  # 解決済み holder 集合を注入する（#221 Req 1.1 / 1.3）。
+  # 失敗時は fail-open で claim 続行
+  local inflight_obj
+  if ! inflight_obj=$(po_collect_inflight_issues "$candidate" "$holder_labels"); then
+    po_warn "issue=#${candidate} in-flight 列挙に失敗、本サイクルは overlap 判定を skip して claim 続行"
+    return 0
+  fi
+  local inflight_paths inflight_holders
+  inflight_paths=$(echo "$inflight_obj" | jq -c '.union // []' 2>/dev/null || echo '[]')
+  inflight_holders=$(echo "$inflight_obj" | jq -c '.holders // {}' 2>/dev/null || echo '{}')
+
+  # overlap 計算（Req 5.1 / 5.6）
+  local overlap overlap_count
+  overlap=$(po_compute_overlap "$cand_paths" "$inflight_paths")
+  overlap_count=$(echo "$overlap" | jq 'length' 2>/dev/null || echo 0)
+
+  # 現状の awaiting-slot ラベル付与状態（既存 labels_json から抽出）
+  local has_awaiting
+  has_awaiting=$(echo "$labels_json" \
+    | jq -r --arg lbl "$LABEL_AWAITING_SLOT" \
+        '[.[].name] | index($lbl) // empty' 2>/dev/null || echo "")
+
+  if [ "$overlap_count" -gt 0 ]; then
+    # Req 5.2 / 5.3 / 8.1 / 8.2: overlap 検出ログ（holders を含める）→ awaiting-slot
+    # 付与（冪等）と sticky comment の最新化。holders は overlap path（正規化済 top-level）
+    # ごとに in-flight Issue 番号配列を解決し、log では unique sort で平坦化する。
+    local overlap_holders_map holders_for_log paths_for_log
+    overlap_holders_map=$(po_resolve_overlap_holders "$overlap" "$inflight_holders")
+    holders_for_log=$(po_format_holders_for_log "$overlap_holders_map")
+    paths_for_log=$(echo "$overlap" | jq -r 'join(",")')
+    if [ -n "$holders_for_log" ]; then
+      po_log "overlap detected candidate=#${candidate} paths=${paths_for_log} holders=${holders_for_log}"
+    else
+      # holders が空（in-flight が close 直後 / holder 不明等）でも paths は記録し、
+      # holders=「-」で出力して欠落の事実をログに残す
+      po_log "overlap detected candidate=#${candidate} paths=${paths_for_log} holders=-"
+    fi
+    # #257 Req 1.1 / 1.2 / 1.3 / 2.2 / NFR 3.1: awaiting-slot ラベル付与状態に関わらず
+    # 毎サイクル po_apply_awaiting_slot を呼ぶ。同関数は内部で
+    #   ① ラベル付与（`gh issue edit --add-label` は既付与でも error にならず冪等）
+    #   ② 既存 marker (<!-- idd-claude:awaiting-slot:v1 -->) 付きコメントを検索
+    #      → 既存ありなら `gh api -X PATCH` で本文を最新の overlap / holders で上書き
+    #      → 無ければ `gh issue comment` で新規作成
+    # を行うため、既に awaiting-slot ラベルが付与されている Issue でも sticky comment
+    # が最新ブロッカー情報へ更新される（ラベル / コメントとも Issue あたり 1 件を維持 /
+    # NFR 3.1）。失敗しても警告ログのみで本サイクルの dispatch 見送り判定（return 1）
+    # は継続する（Req 3.1 / 3.2 / 3.3）。
+    if ! po_apply_awaiting_slot "$candidate" "$overlap" "$overlap_holders_map"; then
+      po_warn "issue=#${candidate} awaiting-slot 付与 / コメント更新に失敗（次サイクルで再評価）"
+    fi
+    return 1  # dispatch skip
+  fi
+
+  # overlap 空: Req 6.2 / 6.4 / 8.3 自然解消
+  if [ -n "$has_awaiting" ]; then
+    if ! po_clear_awaiting_slot "$candidate"; then
+      po_warn "issue=#${candidate} awaiting-slot 除去に失敗（次サイクルで再試行のため本 cycle は claim 見送り）"
+      return 1
+    fi
+  fi
+  return 0  # claim 続行
+}
+
+# ─── #243: flock skip 経路 path-overlap 可視化 — 候補評価コア ───
+# 1 候補について read-only の overlap 評価を行い、検出時 apply / 解消時 clear を呼ぶ。
+# po_check_dispatch_gate の overlap 判定部分（809-878 行）と同一の関数・引数・規約を
+# 用い、評価ロジックの分岐を作らない（Req 7.1 / 7.2）。dispatch 固有の return（0=続行
+# / 1=skip）は持たず、戻り値は呼び出し側の warn 判定にのみ使う。
+#
+# claim / dispatch / worktree・slot・dispatch ロックを取得せず、状態変更は
+# awaiting-slot ラベルと sticky comment の付与・除去・更新のみ（read＋label/comment）。
+#
+# Args: $1 = candidate issue number, $2 = candidate labels JSON
+# Preconditions: cd "$REPO_DIR" 済み、可視化専用 flock 保持中。
+# Return: 0 = 評価完了 / 1 = 評価中に警告（呼び出し側が warn ログを出す）
+po__visibility_evaluate_candidate() {
+  local candidate="$1"
+  local labels_json="$2"
+
+  # 候補の edit_paths を sticky から読む（marker 不在は空配列扱い / Req 7.1）
+  local cand_paths
+  cand_paths=$(po_load_edit_paths "$candidate")
+
+  # dispatch 文脈と同一の holder ラベル集合を解決する（通常経路と同一規約 / Req 7.1）。
+  # multi-branch（gitflow）運用では staged-for-release を除外、single-branch / 判定不能
+  # では full 集合（fail-safe）。
+  local holder_labels
+  holder_labels=$(po_resolve_holder_labels "dispatch")
+
+  # in-flight union + holders map を read-only で取得（Req 2.3 / 7.1）。失敗時は
+  # 当該候補のみ skip して warn 判定へ返す（fail-open / NFR 3.2）。
+  local inflight_obj
+  if ! inflight_obj=$(po_collect_inflight_issues "$candidate" "$holder_labels"); then
+    return 1
+  fi
+  local inflight_paths inflight_holders
+  inflight_paths=$(echo "$inflight_obj" | jq -c '.union // []' 2>/dev/null || echo '[]')
+  inflight_holders=$(echo "$inflight_obj" | jq -c '.holders // {}' 2>/dev/null || echo '{}')
+
+  # overlap 計算（通常経路と同一 / Req 7.1）
+  local overlap overlap_count
+  overlap=$(po_compute_overlap "$cand_paths" "$inflight_paths")
+  overlap_count=$(echo "$overlap" | jq 'length' 2>/dev/null || echo 0)
+
+  # 現状の awaiting-slot ラベル付与状態（既存 labels_json から抽出）
+  local has_awaiting
+  has_awaiting=$(echo "$labels_json" \
+    | jq -r --arg lbl "$LABEL_AWAITING_SLOT" \
+        '[.[].name] | index($lbl) // empty' 2>/dev/null || echo "")
+
+  if [ "$overlap_count" -gt 0 ]; then
+    # overlap 検出ログ（候補番号・overlap path を識別可能に出力 / NFR 4.1）→
+    # awaiting-slot 付与（未付与時のみ / Req 1.2 / 1.3 / 5.3）。通常経路と同一の
+    # sticky comment 出力形式（marker awaiting-slot:v1 の冪等更新 / Req 5.1 / 5.2 / 7.2）。
+    local overlap_holders_map holders_for_log paths_for_log
+    overlap_holders_map=$(po_resolve_overlap_holders "$overlap" "$inflight_holders")
+    holders_for_log=$(po_format_holders_for_log "$overlap_holders_map")
+    paths_for_log=$(echo "$overlap" | jq -r 'join(",")')
+    if [ -n "$holders_for_log" ]; then
+      po_log "route=flock-skip overlap detected candidate=#${candidate} paths=${paths_for_log} holders=${holders_for_log}"
+    else
+      po_log "route=flock-skip overlap detected candidate=#${candidate} paths=${paths_for_log} holders=-"
+    fi
+    if [ -z "$has_awaiting" ]; then
+      if ! po_apply_awaiting_slot "$candidate" "$overlap" "$overlap_holders_map"; then
+        po_warn "route=flock-skip issue=#${candidate} awaiting-slot 付与 / コメント投稿に失敗（次サイクルで再評価）"
+        return 1
+      fi
+    fi
+    return 0
+  fi
+
+  # overlap 空: 既付与なら自然解消（通常サイクルと共有の clear / Req 3.1）
+  if [ -n "$has_awaiting" ]; then
+    if ! po_clear_awaiting_slot "$candidate"; then
+      po_warn "route=flock-skip issue=#${candidate} awaiting-slot 除去に失敗（次サイクルで再試行）"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# ─── #243: flock skip 経路 path-overlap 可視化 — オーケストレータ ───
+# flock skip コンテキストで dispatch を伴わない path-overlap 可視化パスを 1 サイクル
+# 実行する。専用 flock 取得 → 候補列挙（claim 除外）→ 候補ごとに既存 po_* で overlap
+# 評価 → awaiting-slot＋sticky comment 付与（overlap あり）/ 除去（overlap なし & 既付与）。
+#
+# claim / dispatch / worktree・slot・dispatch ロックを取得しない（Req 2.1 / 2.2）。
+# 状態変更操作はラベル付与・除去・sticky comment の post/update のみ（read＋label/comment）。
+# 必ず return 0（呼び出し側の set -e 下でも watcher を異常終了させない / NFR 3.2 / NFR 1.1）。
+#
+# Args: なし（global $REPO / $REPO_DIR / $LOG_DIR / $PATH_OVERLAP_CHECK /
+#       $PATH_OVERLAP_VISIBILITY_LOCK_FILE / $LABEL_* / $BASE_BRANCH /
+#       $PROMOTION_TARGET_BRANCH に依存）。
+# Stdout/Stderr: po_log / po_warn による 1 行ログ（経路識別子 route=flock-skip を含む）。
+# Return: 0 always
+po_run_flock_skip_visibility() {
+  # ① opt-in gate（二重防御 / Req 6.1）。呼び出し側でも gate するが fail-safe に再確認。
+  [ "${PATH_OVERLAP_CHECK:-off}" = "true" ] || return 0
+
+  # ② 可視化専用 flock を別 fd（201）+ 別ファイルで非ブロッキング取得（Req 2.2 / 4.1）。
+  #    本サイクルの $LOCK_FILE（fd 200）とは別ファイル・別 fd で取得し、worktree / slot /
+  #    dispatch ロックは一切取得しない。
+  local lock_file="${PATH_OVERLAP_VISIBILITY_LOCK_FILE:-${LOG_DIR}/flock-skip-visibility.lock}"
+  if ! exec 201>"$lock_file" 2>/dev/null; then
+    po_warn "route=flock-skip 専用ロックファイルを開けません lock=${lock_file}"
+    return 0
+  fi
+  if ! flock -n 201; then
+    # 別の可視化パスが進行中（多重起動抑止 / Req 4.1）。抑止事実を識別可能ログで残す（Req 4.2）。
+    po_log "route=flock-skip visibility skipped (別の可視化パスが進行中 lock=${lock_file})"
+    exec 201>&- 2>/dev/null || true
+    return 0
+  fi
+
+  # ③ po_* の cwd 前提を満たす最小初期化（Req 2.4 / po_* 再利用）。失敗しても異常終了させない。
+  if ! cd "$REPO_DIR" 2>/dev/null; then
+    po_warn "route=flock-skip REPO_DIR へ cd 失敗 dir=${REPO_DIR}"
+    exec 201>&- 2>/dev/null || true
+    return 0
+  fi
+
+  po_log "route=flock-skip path-overlap visibility 開始"   # NFR 4.2 経路識別子
+
+  # ④ auto-dev 候補列挙（claim ラベル除外 = 本サイクル処理中 Issue を触らない / Req 2.4）。
+  #    重要: _dispatcher_run の search_filter / DISPATCH_LIMIT は同関数の local 変数で本関数
+  #    からは見えないため、同等の除外句・limit を本関数内で自前再構築する（既存 search_filter
+  #    に変更を加えず安全側）。除外集合に処理中ラベル（claude-claimed / claude-picked-up）と
+  #    既存 dispatcher の除外集合を必ず含めることで Req 2.4 を構造的に保証する。
+  local vis_search_filter
+  vis_search_filter="-label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_CLAIMED\" -label:\"$LABEL_PICKED\" -label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_STAGED_FOR_RELEASE\" -label:\"$LABEL_BLOCKED\""
+  local vis_limit=5
+  local candidates_json
+  if ! candidates_json=$(gh issue list --repo "$REPO" --label "$LABEL_TRIGGER" --state open \
+      --search "$vis_search_filter sort:created-asc" \
+      --json number,labels --limit "$vis_limit" 2>/dev/null); then
+    po_warn "route=flock-skip auto-dev 候補列挙に失敗（本サイクルの可視化を skip）"   # NFR 3.2
+    exec 201>&- 2>/dev/null || true
+    return 0
+  fi
+
+  # ⑤ 候補ごとに既存 po_* で overlap 評価（通常経路と同一規約 / Req 7.1）。
+  #    各候補の警告は warn ログして後続候補を継続する（fail-open / NFR 3.2）。
+  local issue candidate labels_json
+  while IFS= read -r issue; do
+    [ -z "$issue" ] && continue
+    candidate=$(echo "$issue" | jq -r '.number')
+    labels_json=$(echo "$issue" | jq -c '.labels')
+    po__visibility_evaluate_candidate "$candidate" "$labels_json" \
+      || po_warn "route=flock-skip issue=#${candidate} 可視化評価で警告（後続候補は継続）"
+  done < <(echo "$candidates_json" | jq -c '.[]')
+
+  # ⑥ 専用 flock 解放
+  exec 201>&- 2>/dev/null || true
+  return 0
+}
