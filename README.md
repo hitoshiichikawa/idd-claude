@@ -71,33 +71,56 @@ idd-claude/
     │   ├── issue-watcher.sh         # Issue 監視＋Claude Code 起動シェル（本体）
     │   ├── watcher-config.sh        # 本体が起動時に source する Config ブロック（env var 定義・正規化 / #460）
     │   ├── modules/                 # issue-watcher.sh が起動時に source するモジュール群
-    │   │   ├── core_utils.sh        #   低レベル共通ユーティリティ・ロガー（#177 Part 1）
-    │   │   ├── quota-aware.sh       #   クォータ待機制御プロセッサ（#180 Part 2）
-    │   │   ├── merge-queue.sh       #   マージキュー制御＋再チェックプロセッサ（#180 Part 2）
-    │   │   ├── auto-rebase.sh       #   自動 Rebase プロセッサ（#180 Part 2）
-    │   │   ├── promote-pipeline.sh  #   Promote Pipeline ＋ Path Overlap プロセッサ（#181 Part 3）
-    │   │   ├── pr-iteration.sh      #   PR Iteration プロセッサ（#181 Part 3）
-    │   │   ├── stage-a-verify.sh    #   Stage A Verify ゲート（#181 Part 3）
-    │   │   ├── design-review-release.sh  #   Design Review Release プロセッサ（#456）
-    │   │   ├── tasks-count-gate.sh  #   Tasks Count Gate（#457）
-    │   │   ├── debugger-gate.sh     #   Debugger Gate ヘルパー（#458）
-    │   │   ├── stage-checkpoint.sh  #   Stage Checkpoint（#459）
-    │   │   ├── per-task-loop.sh     #   Per-task TDD Loop（#461-462）
-    │   │   ├── impl-pipeline.sh     #   Reviewer Gate / impl stage pipeline（#463-464）
-    │   │   ├── dependency-resolver.sh  #   Dependency Resolver / Auto-Unblock Sweep（#465）
-    │   │   └── slot-worker.sh       #   Phase C Slot Runner（ヘルパー #466 + _slot_run_issue 本体 #467）
+    │   │   │   # 以下は REQUIRED_MODULES の source 順（core_utils を先頭に低レベル→上位）
+    │   │   ├── core_utils.sh             #   低レベル共通ユーティリティ・全 processor ロガー（#177 Part 1）
+    │   │   ├── env-loader.sh             #   per-repo env ファイル ローダ（#386）
+    │   │   ├── quota-aware.sh            #   クォータ待機制御プロセッサ（#180 Part 2）
+    │   │   ├── merge-queue.sh            #   マージキュー制御＋再チェックプロセッサ（#180 Part 2）
+    │   │   ├── auto-rebase.sh            #   自動 Rebase プロセッサ（#180 Part 2）
+    │   │   ├── auto-merge.sh             #   実装 PR native auto-merge プロセッサ（#352）
+    │   │   ├── auto-merge-design.sh      #   設計 PR native auto-merge プロセッサ（#354）
+    │   │   ├── auto-merge-disarm.sh      #   auto-merge 取り消しプロセッサ（#434）
+    │   │   ├── promote-pipeline.sh       #   Promote Pipeline ＋ Path Overlap プロセッサ（#181 Part 3）
+    │   │   ├── pr-iteration.sh           #   PR Iteration プロセッサ（#181 Part 3）
+    │   │   ├── pr-reviewer.sh            #   PR Reviewer ＋ claude-review catch-up（#261）
+    │   │   ├── adjudicator.sh            #   PR Reviewer 裁定（adjudicator）プロセッサ（#404）
+    │   │   ├── pr-design-reviewer.sh     #   設計 PR Reviewer プロセッサ（#407）
+    │   │   ├── stage-a-verify.sh         #   Stage A Verify ゲート（#181 Part 3）
+    │   │   ├── scaffolding-health.sh     #   scaffolding health ゲート／doctor（#238）
+    │   │   ├── run-summary.sh            #   per-run evidence サマリ（#239）
+    │   │   ├── token-usage.sh            #   token usage 計測レポート（#325）
+    │   │   ├── security-review.sh        #   Security Review プロセッサ（#279）
+    │   │   ├── guard-hook.sh             #   PreToolUse Guard Hook 注入（#294）
+    │   │   ├── context-map.sh            #   per-task context metadata 生成
+    │   │   ├── failed-recovery.sh        #   Failed Recovery プロセッサ（#359）
+    │   │   ├── stale-pickup-reaper.sh    #   Stale Pickup Reaper（#379）
+    │   │   ├── needs-decisions-auto.sh   #   needs-decisions 自動続行プロセッサ（#362）
+    │   │   ├── dep-cycle-detect.sh       #   Issue 依存サイクル検出（#368）
+    │   │   ├── slack-notify.sh           #   Slack 通知 emitter（#370）
+    │   │   ├── auto-merge-merged.sh      #   auto-merge 完了検知＋通知（#388）
+    │   │   ├── design-review-release.sh  #   Design Review Release プロセッサ（#40 / #456）
+    │   │   ├── tasks-count-gate.sh       #   Tasks Count Gate（#147 / #457）
+    │   │   ├── debugger-gate.sh          #   Debugger Gate ヘルパー（#22 / #458）
+    │   │   ├── stage-checkpoint.sh       #   Stage Checkpoint（#68 / #459）
+    │   │   ├── per-task-loop.sh          #   Per-task TDD Loop（#21 / #461-462）
+    │   │   ├── impl-pipeline.sh          #   Reviewer Gate／impl stage pipeline（#20 / #463-464）
+    │   │   ├── dependency-resolver.sh    #   Dependency Resolver／Auto-Unblock Sweep（#465）
+    │   │   └── slot-worker.sh            #   Phase C Slot Runner（ヘルパー #466 ＋ _slot_run_issue 本体 #467）
     │   └── triage-prompt.tmpl       # Triage フェーズ用プロンプト
     └── LaunchAgents/
         └── com.local.issue-watcher.plist   # macOS launchd 設定
 ```
 
-> **モジュール構成について**: `issue-watcher.sh` は約 1 万行を超えたため、責務単位で
-> `modules/*.sh` に段階的に分割している（#177 Part 1 で `core_utils.sh`、#180 Part 2 で
-> 3 プロセッサ、#181 Part 3 で `promote-pipeline.sh` / `pr-iteration.sh` /
-> `stage-a-verify.sh` の 3 プロセッサ）。本体は起動時にスクリプトディレクトリ基準（`BASH_SOURCE`）で
-> `modules/` 配下を `source` する。`install.sh` が `local-watcher/bin/modules/*.sh` を
-> `$HOME/bin/modules/` へ冪等配置する。必須モジュールが欠落していると本体は起動時に
-> 欠落名を stderr に出して `exit 1` で安全停止する（silent fail させない）。
+> **モジュール構成について**: `issue-watcher.sh` はかつて約 1 万行を超えたため、責務単位で
+> `modules/*.sh` に段階的に分割してきた（#177 Part 1 の `core_utils.sh` に始まり、#455 の
+> 分割リファクタで processor / gate / pipeline ヘルパーを全て module 化して完了）。現在の
+> **本体は約 900 行**で、bootstrap（config source / module loader / guard hook / `--doctor` /
+> flock / repo 最新化）＋ main loop（各 processor の呼び出し）＋ Phase C Dispatcher に集約され、
+> processor / gate の実体は上記 `modules/*.sh` 側にある。本体は起動時にスクリプトディレクトリ
+> 基準（`BASH_SOURCE`）で `modules/` 配下を `source` する（順序は本体の `REQUIRED_MODULES` 配列）。
+> `install.sh` が `local-watcher/bin/modules/*.sh` を `$HOME/bin/modules/` へ冪等配置する。
+> 必須モジュールが欠落していると本体は起動時に欠落名を stderr に出して `exit 1` で安全停止する
+> （silent fail させない）。
 >
 > **Config ブロックの分離（#460）**: 本体冒頭の Config ブロック（`REPO` / `REPO_DIR` /
 > ラベル名 / `*_ENABLED` フラグ / `TRIAGE_MODEL` 等のモデル指定 / 各種プロンプト・タイムアウトの

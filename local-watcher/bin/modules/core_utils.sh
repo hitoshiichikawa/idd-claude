@@ -203,6 +203,18 @@ pdr_error() {
   echo "[$(date '+%F %T')] [$REPO] pr-design-reviewer: ERROR: $*" >&2
 }
 
+# Reviewer / Pipeline 専用ロガー（既存 mq_log / pi_log と同形式 / #468 で issue-watcher.sh 本体から移設）
+# 他の processor ロガーと異なり `[$REPO]` prefix を持たない点は、移設前の本体定義を byte 等価で
+# 温存したもの（#455 共通規約: ログ文言を 1 文字も変えない）。消費側は impl-pipeline.sh /
+# per-task-loop.sh / debugger-gate.sh / stage-checkpoint.sh（いずれも本体より後に source される
+# ため遅延束縛で解決 / 本モジュールが先頭 source のため定義は全 caller より前）。
+rv_log() {
+  echo "[$(date '+%F %T')] reviewer: $*"
+}
+rv_dev_log() {
+  echo "[$(date '+%F %T')] developer: $*"
+}
+
 # ─── Issue #259: Claude API 529 Overloaded detector ───
 #
 # Claude API の一時的な過負荷 (HTTP 529 Overloaded) は claude CLI の stream-json

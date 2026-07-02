@@ -22,11 +22,20 @@
 #   同等の Stage A 起点固定挙動に戻る（NFR 1.1）。判定根拠は `stage-checkpoint:` prefix の
 #   ログで観測可能。
 #
-# 配置先: ~/bin/issue-watcher.sh
-# 依存  : gh / jq / claude / flock / git
+# 本体（このファイル）の構成（#455 分割完了 / Phase 1 gate #468）:
+#   config source（watcher-config.sh）→ Config 由来 helper（本体残置 3 関数 / load-order pin）
+#   → bootstrap（gtimeout fallback / 前提ツールチェック / module loader / guard hook 配線 /
+#   起動 config log / --doctor dispatch / flock / repo 最新化）→ main loop（各 processor の
+#   top-level 呼び出し）→ Phase C Dispatcher（slot 並列化の入口）。processor / gate /
+#   pipeline ヘルパーの実体はすべて modules/*.sh 側にあり、本体には call site のみが残る
+#   （詳細は main loop 冒頭の「モジュール分割完了マニフェスト」コメント参照）。
 #
-# セットアップ: このファイル冒頭の ━━━ Config ━━━ ブロックを編集し、
-#   launchd (macOS) または cron (Linux) に登録する。README.md を参照。
+# 配置先: ~/bin/issue-watcher.sh（同階層に watcher-config.sh と modules/*.sh を要配置）
+# 依存  : gh / jq / claude / flock / git / timeout（macOS は gtimeout フォールバック）
+#
+# セットアップ: 環境ごとの設定は同階層 watcher-config.sh を編集する（#460 で本体冒頭の
+#   Config ブロックから分離）。配置は install.sh --local、起動登録は launchd (macOS) /
+#   cron (Linux)。README.md を参照。
 # =============================================================================
 
 set -euo pipefail
@@ -71,14 +80,11 @@ IDD_CONFIG_FILE="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/w
 # processor の入口で AND 条件として参照される（Req 2.1〜2.5）。`full_auto_enabled`
 # が 1 を返した場合、当該 processor は外部副作用なしで早期 return する（Req 2.1〜2.5）。
 #
-# 配置メモ (#375): bash は top-level コードを順次実行するため、関数定義は最初の
-# 呼び出し（`process_auto_merge` / `process_auto_merge_design` の call site /
-# line 1168 / 1178 相当、および `dr_unblock_sweep` / `process_needs_decisions_auto` /
-# `dep-cycle-detect` 等）より物理的に前に配置する必要がある。元 #348 で本関数を
-# スクリプト末尾近く（line 9926 相当）に置いた結果、call site から見て前方参照と
-# なり `command not found` (rc=127) を返す load-order bug を発生させた。#375 では
-# 本関数を `FULL_AUTO_ENABLED` 正規化処理の直後（Config ブロック内）に move し、
-# 全 caller が定義位置より後ろに来ることを構造的に保証する。
+# 本体残置理由（load-order）: 全 caller（module 側の各 processor: process_auto_merge /
+# process_auto_merge_design / dr_unblock_sweep / process_needs_decisions_auto 等）より前に
+# 定義される必要がある。末尾に置くと前方参照となり `command not found` (rc=127) の silent
+# no-op を招く（#348 → #375 で本位置へ move して修正）。回帰は
+# full_auto_enabled_load_order_test.sh が「定義行 < caller 行」で機械検証する。
 #
 # Config ブロックで値正規化が完了している前提だが、外部から `FULL_AUTO_ENABLED` を
 # unset した状態で本関数だけが evaluation される万が一の経路でも安全側に倒すため、
@@ -108,9 +114,8 @@ full_auto_enabled() {
 #   0 = マッチあり（stdout に approve / reject）
 #   1 = マッチなし（stdout は空、ファイル無も含む）
 #
-# 配置メモ (#385): `parse_review_result` の依存関数として、`parse_review_result` と
-# 同じく Config ブロック直後に前出ししている。元位置（line 6558 相当）からの move 理由は
-# `parse_review_result` 側コメント参照。
+# 本体残置理由（load-order）: `parse_review_result` の依存関数として、同じく Config ブロック
+# 直後に前出し配置する。詳細は `parse_review_result` 側コメント参照。
 extract_review_result_token() {
   local path="$1"
   [ -f "$path" ] || return 1
@@ -154,16 +159,13 @@ extract_review_result_token() {
 #   - rc=3 は `review-notes.md` 自体が存在しないケース（Reviewer subagent の Write 漏れ）。
 #     呼び出し側で 1 回限定リトライを試みる経路を発火させるためのシグナル。
 #
-# 配置メモ (#385): bash は top-level コードを順次実行するため、関数定義は最初の
-# 呼び出し（`process_claude_review_status_catchup` の call site / line 1573 相当）
-# より物理的に前に配置する必要がある。元 #349 / #374 で本関数をスクリプト中盤
-# （line 6617 相当）に置いた結果、catch-up 経路から見て前方参照となり catch-up の
-# `declare -F parse_review_result` ガードが false 評価となって `reason=parse-helper-missing`
-# の WARN を残して safe-skip し、AND 二重 opt-in（`PR_REVIEWER_STATUS_CHECK_ENABLED=true`
-# AND `FULL_AUTO_ENABLED=true`）環境で `claude-review` commit status が永久に publish
-# されない silent load-order bug を発生させた。#385 では本関数を `full_auto_enabled` の
-# 直後（Config ブロック内）に move し、全 caller が定義位置より後ろに来ることを構造的に
-# 保証する。catch-up 側の `declare -F` 保険ガードは温存する（Req 3.3）。
+# 本体残置理由（load-order）: catch-up 経路（process_claude_review_status_catchup）が
+# `declare -F parse_review_result` で存在確認するため、定義が call site より後ろだと
+# `reason=parse-helper-missing` で safe-skip し、二重 opt-in（`PR_REVIEWER_STATUS_CHECK_ENABLED=true`
+# AND `FULL_AUTO_ENABLED=true`）環境で `claude-review` status が永久に publish されない silent
+# bug になる（#349 / #374 → #385 で本位置へ move して修正）。回帰は
+# pr_reviewer_parse_review_result_load_order_test.sh が機械検証する。catch-up 側の
+# `declare -F` 保険ガードは温存する（Req 3.3）。
 parse_review_result() {
   local path="$1"
   if [ ! -f "$path" ]; then
@@ -325,29 +327,14 @@ fi
 
 mkdir -p "$LOG_DIR"
 
-# 解決済み base branch を起動時 log に出力（Req 1.7 / NFR 4.1）。
-# 運用者が cron mailer / log で `base-branch=...` を grep できるよう、
-# 既定値（main）でも明示的に出力する。
-# Issue #348: cycle startup ログに `full-auto=` の解決値も含める（Req 4.2）。
-# 運用者は `grep full-auto=` で現在の kill switch 状態を確認できる。
-# Issue #352: cycle startup ログに `auto-merge=` の解決値も含める（Req 7.4）。
-# Issue #354: cycle startup ログに `auto-merge-design=` の解決値も含める（Req 9.4）。
-# 運用者は `grep auto-merge-design=` で現在の design auto-merge 有効状態を確認できる。
-# Issue #362: cycle startup ログに `needs-decisions-mode=` の解決値も含める（Req 6.4）。
-# 運用者は `grep needs-decisions-mode=` で現在の needs-decisions 自動続行モードを確認できる。
-# Issue #366: cycle startup ログに `auto-rebase-semantic=` の解決値も含める（Req 1.6）。
-# 運用者は `grep auto-rebase-semantic=` で Claude semantic 解決 gate の有効状態を確認できる。
-# Issue #370: cycle startup ログに `slack-notify=` の解決値も含める（Req 1.2 / NFR 5.1）。
-# 運用者は `grep slack-notify=` で現在の Slack 通知 emitter 有効状態を確認できる。
-# Issue #412: cycle startup ログに `pr-reviewer-adjudicator=` の解決値も含める（Req 1.6 / NFR 2.2）。
-# 運用者は `grep pr-reviewer-adjudicator=` で adjudicator 経路の有効 / 無効状態を事後に判別できる。
-# 既定反転（OFF → ON）後、`=false` を明示した opt-out 環境を grep で識別する目的を兼ねる。
-# Issue #432: cycle startup ログに `design-reviewer=` の解決値も含める（Req 1.6 / NFR 2.1）。
-# 運用者は `grep design-reviewer=` で Design PR Reviewer 経路の有効 / 無効状態を事後に判別できる。
-# 既定反転（OFF → ON）後、`=false` を明示した opt-out 環境を grep で識別する目的を兼ねる。共有
-# 起動 config echo に `design-reviewer=` トークンが載ることは #412 の `pr-reviewer-adjudicator=`
-# と同じ扱いであり、Req 1.4 / NFR 2.1 の「観測ログ行ゼロ」invariant（= processor 自身の
-# `[pr-design-reviewer]` 専用ログ行がゼロ）には抵触しない。
+# 解決済みの起動 config を 1 行で log 出力（Req 1.7 / NFR 4.1）。base-branch / full-auto /
+# auto-merge / auto-merge-design / needs-decisions-mode / auto-rebase-semantic / slack-notify /
+# pr-reviewer-adjudicator / design-reviewer / oos-enabled 等の解決値を含め、運用者が
+# `grep '<token>='` で各 gate の現在状態（既定反転後に `=false` を明示した opt-out 含む）を
+# 事後判別できるようにする。既定値（main 等）でも明示出力する（#348 / #352 / #354 / #362 /
+# #366 / #370 / #412 / #432 で順次トークン追加）。
+# 注: `design-reviewer=` トークンが共有 config echo に載ることは #412 `pr-reviewer-adjudicator=`
+# と同じ扱いで、「processor 専用観測ログ行ゼロ」invariant（Req 1.4 / NFR 2.1）には抵触しない。
 _idd_sn_resolved="off"
 if [ "${SLACK_NOTIFY_ENABLED:-false}" = "true" ]; then
   _idd_sn_resolved="on"
@@ -417,38 +404,31 @@ git checkout "$BASE_BRANCH"
 git pull --ff-only origin "$BASE_BRANCH"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Quota-Aware Watcher Helpers (#66) — modules/quota-aware.sh へ切り出し済み（#180 Part 2）
-#   qa_detect_rate_limit / qa_run_claude_stage / qa_persist_reset_time /
-#   qa_load_reset_time / qa_build_escalation_comment / build_partial_escalation_comment /
-#   qa_handle_quota_exceeded / process_quota_resume は modules/quota-aware.sh が定義する。
-#   call site（process_quota_resume）は実行順序温存のため本体の従来位置に残す。
+# メインループ: Processor / Gate 実行順序（モジュール分割完了マニフェスト / #455 Phase 1・#468 gate）
+#
+# 旧 issue-watcher.sh にインライン定義されていた processor / gate / pipeline ヘルパー群は
+# すべて modules/*.sh へ切り出し済み（#177 Part 1 〜 #467）。本体に残るのは以下の top-level
+# 呼び出し（call site）のみで、実行順序は分割前と完全に不変。bash は遅延束縛のため、関数定義の
+# 物理位置が module へ移っても、loader（上記 REQUIRED_MODULES）が main loop より前に全 module を
+# source する限り、呼び出し順序・名前解決の結果は変わらない。
+#
+# 参照（本体では再掲せず二重管理を避ける / CLAUDE.md「機能追加ガイドライン §4」）:
+#   - 各 module の関数一覧・設計参照 : modules/*.sh 冒頭ヘッダ
+#   - prefix ⇄ module 対応          : CLAUDE.md「機能追加ガイドライン §2 命名」の prefix 表
+#   - 配布ツリー                    : README「ディレクトリ構成」
+#   - processor ロガー              : core_utils.sh に同居（qa_log / mq_log / pi_log / rv_log …）
+#
+# 主な設計ドキュメント（docs/specs/ 配下）: Merge Queue / Promote / Auto Rebase / Path Overlap
+# （#15-18）/ Reviewer Gate（#20）/ Per-task TDD Loop（#21）/ Debugger Gate（#22）/
+# Stage Checkpoint（#68）/ Stage A Verify（#125）/ Phase C Dispatcher（#16、本体末尾に残置）。
+#
+# 以降、各 call 直上のコメントは「その call をなぜこの順序に置くか」の根拠のみを述べる
+# （切り出し済み関数の一覧は本マニフェストへ集約したため、call ごとには再掲しない）。
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # Quota Resume Processor を全 Processor の先頭で実行する（Req 5.1, 5.6 / NFR 3.2）。
 # 失敗時も後続 Processor を阻害しないよう || qa_warn で吸収。
 process_quota_resume || qa_warn "process_quota_resume が想定外のエラーで終了しました（後続 Processor は継続）"
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Phase A: Merge Queue Processor — modules/merge-queue.sh へ切り出し済み（#180 Part 2）
-#   mq_pr_has_label / mq_handle_conflict / mq_try_rebase_pr / process_merge_queue は
-#   modules/merge-queue.sh が定義する。Re-check（mqr_* / process_merge_queue_recheck）も
-#   同モジュールに同居する。call site（process_merge_queue 等）は実行順序温存のため
-#   本体の従来位置に残す。
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Phase D: Auto Rebase Processor (#17) — modules/auto-rebase.sh へ切り出し済み（#180 Part 2）
-#   ar_fetch_candidates / ar_build_prompt / ar_run_claude_rebase / ar_classify_diff /
-#   ar_apply_mechanical / ar_dismiss_all_approvals / ar_apply_semantic /
-#   ar_escalate_to_failed / ar_handle_pr / process_auto_rebase は modules/auto-rebase.sh が
-#   定義する。call site（process_auto_rebase）は実行順序温存のため本体の従来位置に残す。
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Phase A: Merge Queue Re-check Processor (#27) — modules/merge-queue.sh へ切り出し済み（#180 Part 2）
-#   mqr_log / mqr_warn / mqr_error / process_merge_queue_recheck は merge-queue.sh が定義する。
-#   call site（process_merge_queue_recheck）は実行順序温存のため本体の従来位置に残す。
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # AC 1.1: Phase A 本体ループの直前に Re-check Processor を 1 回起動
 process_merge_queue_recheck || mqr_warn "process_merge_queue_recheck が想定外のエラーで終了しました（後続処理は継続）"
@@ -502,48 +482,10 @@ process_auto_merge_disarm || amx_warn "process_auto_merge_disarm が想定外の
 #   armed 動作自体を遅らせない（auto-merge / auto-merge-design の直後に直列配置）。
 process_auto_merge_merged || amm_warn "process_auto_merge_merged が想定外のエラーで終了しました（後続 Issue 処理は継続）"
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Phase B: Promote Pipeline Processor (#15) + Phase E: Path Overlap Checker (#18)
-#   — modules/promote-pipeline.sh へ切り出し済み（#181 Part 3）
-#   Promote 関数群（pp_resolve_target_branch / pp_collect_merged_issues / pp_get_st_state /
-#   pp_handle_st_failure / pp_handle_st_success / pp_do_promote / pp_summary /
-#   process_promote_pipeline ほか）と Path Overlap 関数群（po_log / po_warn /
-#   po_parse_triage_edit_paths / po_compute_overlap / po_check_dispatch_gate /
-#   po_apply_awaiting_slot / po_clear_awaiting_slot ほか）は modules/promote-pipeline.sh が
-#   定義する（Path Overlap は独立せず Promote へ同居 / design.md decision 3）。
-#   ロガー pp_log / pp_warn / pp_error は core_utils.sh に定義済み（#180 Part 2）。
-#   call site（process_promote_pipeline / po_check_dispatch_gate）は実行順序温存のため
-#   本体の従来位置に残す。
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 # AC 1.1: Phase A 本体の直後に Promote Pipeline Processor を 1 回起動。
 # fail-continue を維持するため `|| pp_warn ...` で例外を吸収（NFR 3.1）。
 process_promote_pipeline \
   || pp_warn "process_promote_pipeline が想定外のエラーで終了しました（後続 Processor は継続）"
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PR Iteration Processor (#26) — modules/pr-iteration.sh へ切り出し済み（#181 Part 3）
-#   `needs-iteration` ラベル付き PR を fresh context の Claude で反復対応する processor。
-#   pi_pr_has_label / pi_fetch_candidate_prs / pi_resolve_max_rounds / pi_read_round_counter /
-#   pi_read_no_progress_streak / pi_write_marker / pi_finalize_labels / pi_classify_pr_kind /
-#   pi_select_template / build_recovery_hint / pi_escalate_to_failed / pi_build_iteration_prompt /
-#   pi_detect_quota_soft_fail / pi_run_iteration / process_pr_iteration ほかは
-#   modules/pr-iteration.sh が定義する。ロガー pi_log / pi_warn / pi_error は core_utils.sh
-#   に定義済み（#180 Part 2）。call site（process_pr_iteration）は実行順序温存のため
-#   本体の従来位置（Phase A 直後）に残す。標準機能としてデフォルト有効（#112）。
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Design Review Release Processor (#40) — modules/design-review-release.sh へ切り出し済み（#456）
-#   `awaiting-design-review` ラベルが付いた Issue について、リンクされた設計 PR（head branch
-#   が `^claude/issue-<N>-design-` 規約）が merged 状態なら、Issue からラベルを除去して
-#   ステータスコメントを 1 件投稿する processor。drr_already_processed /
-#   drr_find_merged_design_pr / drr_remove_label_and_comment / process_design_review_release は
-#   modules/design-review-release.sh が定義する。ロガー drr_log / drr_warn / drr_error は
-#   core_utils.sh に定義済み（#177 Part 1）。call site（process_design_review_release）は
-#   実行順序温存のため本体の従来位置（Issue 処理ループの直前）に残す。標準機能として
-#   デフォルト有効（#112）。
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # PR Reviewer Processor (#261) を PR Iteration の直前に実行。レビュー結果で付与した
 # needs-iteration ラベルを同一 flock 内で直後の process_pr_iteration が引き継げる
@@ -604,185 +546,6 @@ process_stale_pickup_reaper || sr_warn "process_stale_pickup_reaper が想定外
 
 # Design Review Release Processor を Issue 処理ループの直前に実行（#40 AC 1.3 / 1.5）
 process_design_review_release || drr_warn "process_design_review_release が想定外のエラーで終了しました（後続 Issue 処理は継続）"
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Stage A Verify Module (#125) — modules/stage-a-verify.sh へ切り出し済み（#181 Part 3）
-#   Stage A 完了直前に tasks.md 末尾の build/test/lint コマンドを watcher 自身が独立再実行
-#   する verify ゲート。sav_log / sav_warn / sav_error / _sav_cmd_starts_with_keyword /
-#   stage_a_verify_extract_command / stage_a_verify_resolve_command / stage_a_verify_round_path /
-#   stage_a_verify_read_round / stage_a_verify_bump_round / stage_a_verify_reset_round /
-#   _sav_handle_failure / stage_a_verify_run は modules/stage-a-verify.sh が定義する。
-#   Part 1 想定の impl-gates.sh 集約から独立分離（design.md decision 2）。sc_* / tc_* /
-#   stage_checkpoint_* は本モジュールへ移さず本体に残す。call site（run_impl_pipeline 内の
-#   stage_a_verify_run）は実行順序温存のため本体の従来位置に残す。
-#   設計参照: docs/specs/125-feat-watcher-stage-a-tasks-md-verify-bui/design.md
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Stage Checkpoint Module (#68) — modules/stage-checkpoint.sh へ切り出し済み（#459）
-#   impl / impl-resume の Stage A/B/C 完了 checkpoint を成果物（impl-notes.md /
-#   review-notes.md / 既存 impl PR）の存在で観測し、failed Stage 以降のみを再実行する
-#   機能。sc_log / sc_warn / sc_error / stage_checkpoint_has_impl_notes / sc_issue_state /
-#   sc_tasks_unchecked_count / stage_checkpoint_read_review_result /
-#   stage_checkpoint_find_impl_pr / stage_checkpoint_resolve_resume_point /
-#   stage_c_existing_pr_guard / stage_a_crossing_probe / _spec_missing_artifacts /
-#   _spec_create_docs_pr / _spec_escalate_incomplete / spec_artifacts_completeness_guard は
-#   modules/stage-checkpoint.sh が定義する。Slot Runner 内の類似名別関数
-#   （`_stage_checkpoint_assert_slug_match` / `_stage_checkpoint_has_resumable_state`）は
-#   対象外で本体に残る（取り違え注意）。呼び出し元（run_impl_pipeline 冒頭 / pipeline
-#   最終フック等）は実行順序温存のため本体側に残る。
-#   設計参照: docs/specs/68-feat-watcher-stage-checkpoint-reviewer-p/design.md
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Tasks Count Gate Module (#147) — modules/tasks-count-gate.sh へ切り出し済み（#457）
-#   Architect が `tasks.md` を確定した直後（design モードの Claude 実行 rc=0 直後）に
-#   watcher 側で task 件数を機械的に再カウントし、件数レンジに応じて 3 段階の運用判定
-#   （通常 / 警告 / Developer 抑止）を適用する harness ガード。tc_log / tc_warn / tc_error /
-#   tc_count_tasks / tc_classify / tc_should_run / tc_already_posted_marker_present /
-#   tc_post_warning_comment / tc_post_escalation_comment / tc_add_needs_decisions_label /
-#   tc_run_post_architect_check は modules/tasks-count-gate.sh が定義する。call site
-#   （design 分岐 rc=0 直後の `tc_run_post_architect_check || true`）は実行順序温存の
-#   ため本体側に残る。設定ブロック（TC_ENABLED 等）も Config 分離回（#460）待ちのため
-#   本体側に残る。設計参照: docs/specs/147-feat-harness-tasks-md-task-auto-dev-issu/design.md
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Reviewer Gate (#20 Phase 1) — impl 系モード stage 分割パイプライン
-#
-# 既存の impl / impl-resume モードは DEV_PROMPT 1 回で PM + Developer + PjM を
-# 直列起動していたが、Reviewer サブエージェントを独立 context で挟むため、以下の
-# stage に分割する:
-#
-#   Stage A  : PM + Developer（ただし impl-resume では PM をスキップ）
-#   Stage B  : Reviewer (round=1)
-#   Stage A' : Developer 再実行（reject 時のみ、最大 1 回）
-#   Stage B' : Reviewer (round=2、reject 時のみ)
-#   Stage C  : PjM（PR 作成）
-#
-# 各 stage は `claude --print` の独立プロセスで起動。stage 間の context 共有は
-# しない（要件 2.2「独立 Claude セッション」）。Reviewer 判定は
-# `docs/specs/<N>-<slug>/review-notes.md` の最終 RESULT 行で受け渡す。
-#
-# 設計参照: docs/specs/20-phase-1-reviewer-subagent-gate/design.md
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# Reviewer / Pipeline 専用ロガー（既存 mq_log / pi_log と同形式）
-rv_log() {
-  echo "[$(date '+%F %T')] reviewer: $*"
-}
-rv_dev_log() {
-  echo "[$(date '+%F %T')] developer: $*"
-}
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Per-task TDD Implementation Loop (#21 Phase 2) — modules/per-task-loop.sh へ切り出し済み（#461-462）
-#   `PER_TASK_LOOP_ENABLED=true` のときに `run_impl_pipeline` の Stage A 内で起動される
-#   per-task loop の全補助関数（ヘルパー + prompt builder + runner + escalation / 計 27）:
-#   pt_log / pt_warn / pt_extract_pending_tasks / pt_check_task_completed / pt_extract_learnings /
-#   pt_extract_findings_block / pt_extract_debugger_section / pt_snapshot_review_notes /
-#   pt_check_fail_fast / pt_mark_fail_fast_failed / pt_resolve_diff_range /
-#   pt_detect_post_marker_commits / pt_classify_post_marker_paths / pt_handle_post_marker_commits /
-#   pt_has_subtasks / pt_is_parent_checkbox_only_diff / pt_should_skip_reviewer /
-#   build_per_task_implementer_prompt / build_per_task_reviewer_prompt / run_per_task_implementer /
-#   run_per_task_implementer_redo / run_per_task_reviewer / pt_mark_diff_range_resolve_failed /
-#   pt_mark_post_marker_commits_detected / pt_post_docs_only_auto_refresh_comment /
-#   pt_mark_no_progress_failed / run_per_task_loop は modules/per-task-loop.sh が定義する。
-#   呼び出し元（run_impl_pipeline の Stage A dispatcher からの run_per_task_loop 起動）は
-#   実行順序温存のため本体側に残る（後続 issue で impl-pipeline.sh へ移動予定）。
-#   bash の遅延束縛のため順序問題なし。
-#   詳細: docs/specs/21-phase-2-per-task-tdd-implementation-loop/design.md
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Debugger Gate (#22 Phase 3) — modules/debugger-gate.sh へ切り出し済み（#458）
-#   `DEBUGGER_ENABLED=true` のときに Stage B' (Round 2) reject 直前 / Stage A 完了直後
-#   BLOCKED 検出経路で起動される Debugger サブエージェントの補助関数群。dbg_log / dbg_warn /
-#   detect_blocked_marker / detect_partial_status / detect_debugger_already_invoked /
-#   validate_debugger_notes / build_debugger_prompt / run_debugger_stage は
-#   modules/debugger-gate.sh が定義する。呼び出し元（per-task loop / impl pipeline。
-#   Reviewer Round 2 直前・BLOCKED 検出）は実行順序温存のため本体側に残る（後続 issue で
-#   移動予定）。bash の遅延束縛のため順序問題なし。
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Reviewer Gate (#20 Phase 1) 既存セクション（per-task ループ helper / Debugger Gate helper はここまで）
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# ─── Prompt Builders（Stage A / A' / B / C 用 4 関数）───
-#
-# 既存 DEV_PROMPT の組み立てパターン（heredoc + 変数展開）を踏襲する。
-# 入力は環境変数（NUMBER / TITLE / URL / BODY / BRANCH / SPEC_DIR_REL /
-# MODE / ARCHITECT_REASON）と関数引数。stdout に prompt 文字列を出力する。
-
-# ─── impl pipeline（Stage prompt builders + stage runner + escalation）— modules/impl-pipeline.sh へ切り出し済み（前半 #463 / 後半 #464）───
-#   前半（#463 / Stage prompt builders）: build_dev_prompt_a / build_dev_prompt_redo /
-#     build_dev_prompt_redo_with_fix_plan / build_reviewer_prompt / build_dev_prompt_c
-#   後半（#464 / stage runner + escalation）: _assert_base_branch_resolved /
-#     reviewer_skip_files_match / _reviewer_skip_check / run_reviewer_stage /
-#     publish_terminal_failure_artifacts / verify_pushed_or_retry / verify_stagec_pr_or_retry /
-#     mark_issue_failed / mark_issue_needs_decisions / handle_partial_status /
-#     stage_a_verify_round1_defer / run_impl_pipeline
-#   はいずれも modules/impl-pipeline.sh が定義する。呼び出し元のうち Slot Runner
-#   `_slot_run_issue`（run_impl_pipeline 起動 / design 分岐）は #467 で modules/slot-worker.sh へ
-#   移動済み、各 gate からの mark_issue_failed・mark_issue_needs_decisions 起動は本体・各 module に
-#   残置。bash の遅延束縛のため定義場所の移動は呼び出し順序に影響しない。
-
-# Issue #349 / #374 / #385: `extract_review_result_token()` / `parse_review_result()` の定義は
-# Config ブロック直後（line 184 / line 237 付近）に move 済み。bash の top-level 逐次実行下で
-# `process_claude_review_status_catchup`（line 1573 付近）から前方参照されないことを構造的に
-# 保証するため。詳細は move 先の関数ヘッダコメント参照。
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage A Verify の失敗ハンドラ / 統合ランナー（_sav_handle_failure / stage_a_verify_run）
-#   — modules/stage-a-verify.sh へ切り出し済み（#181 Part 3）。
-#   元はここ（mark_issue_failed 定義後の位置）に置かれていたが、Region 1 と共に
-#   stage-a-verify.sh へ統合した。call site（run_impl_pipeline 内の stage_a_verify_run）は
-#   本体の従来位置に残す。cross-module 呼び出し（_sav_handle_failure → mark_issue_failed）は
-#   全モジュールが run_impl_pipeline 実行前に source されるため挙動不変。
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Phase C: Issue 入口並列化 (worktree slot + dispatcher, #16)
-#
-# auto-dev Issue 処理ループを Dispatcher / Slot Worker パターンに置き換え、
-# 複数 Issue を時間的に重ねて処理できるようにする。
-#
-# 構成:
-#   - _parallel_validate_slots : PARALLEL_SLOTS 検証
-#   - Worktree Manager  : per-slot 永続 worktree の初期化・最新化
-#   - Slot Lock Manager : per-slot 非ブロッキング flock の取得・解放
-#   - Hook Layer        : SLOT_INIT_HOOK の絶対パス起動（eval 不使用）
-#   - Slot Runner       : 1 Issue を 1 worktree で処理する Worker
-#   - Dispatcher        : Issue 候補取得 → claim → slot 投入 → 全 Worker wait
-#
-# PARALLEL_SLOTS=1（デフォルト）のとき、slot-2 以降の lock / worktree を作成せず、
-# 本機能導入前と外形的に同一挙動になるよう実装する。
-#
-# 詳細: docs/specs/16-phase-c-worktree-slot-dispatcher/design.md
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# Phase C Slot Runner（ヘルパー群 + _slot_run_issue 本体）— modules/slot-worker.sh へ切り出し済み（#466 / #467）
-#   ヘルパー群（#466 / 計 24）: dispatcher_log / dispatcher_warn / dispatcher_error /
-#   pclp_log / pclp_warn / pclp_error / check_existing_impl_pr / check_open_design_pr /
-#   _parallel_validate_slots / slot_log / slot_warn / slot_error / _slot_mark_failed /
-#   _resume_normalize_flag / _resume_detect_existing_branch / _resume_branch_init /
-#   _resume_push / _resume_mark_nonff_failed / _normalize_slug / _slug_mismatch_escalate /
-#   _stage_checkpoint_assert_slug_match / _stage_checkpoint_has_resumable_state /
-#   _resume_branch_assert_slug_match / publish_claude_review_status
-#   本体（#467）: _slot_run_issue（Triage 後の 1 Issue 実行本体。branch 準備 → design / impl 系の
-#   モード別ディスパッチ → 結果処理を担う）
-#   はいずれも modules/slot-worker.sh が定義する。
-#   呼び出し元（Dispatcher = 本体最終盤の `( _slot_run_issue n issue_json ) &`）は実行順序温存の
-#   ため本体残置。bash の遅延束縛のため、定義場所の移動による呼び出し順序への影響はない。
-#   詳細: docs/specs/16-phase-c-worktree-slot-dispatcher/design.md
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-# dr_unblock_has_orphan_marker / dr_unblock_post_unblocked_comment /
-# dr_unblock_post_orphan_marker_comment / dr_unblock_resolve_one_issue / dr_unblock_sweep も
-# 同じく modules/dependency-resolver.sh へ切り出し済み（#465。詳細は上記 dr_log 跡地のヘッダ
-# コメント参照）。
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Phase C: Dispatcher
