@@ -203,12 +203,13 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
 ### 1. 配置: 本体 inline ではなく module へ切り出す
 
 - **新しい processor / まとまった機能は `local-watcher/bin/modules/<name>.sh` に新規ファイルとして
-  足す**。`issue-watcher.sh` 本体へ inline で大きな機能を継ぎ足さない（本体は config /
-  module loader / call site / main loop / `--doctor` dispatch に寄せる）。既存の切り出し実績:
-  `quota-aware.sh` / `merge-queue.sh` / `auto-rebase.sh` / `promote-pipeline.sh` /
-  `pr-reviewer.sh` / `pr-iteration.sh` / `security-review.sh` / `stage-a-verify.sh` /
-  `context-map.sh` / `guard-hook.sh` / `scaffolding-health.sh` / `run-summary.sh` /
-  `core_utils.sh`（低レベル共通）。
+  足す**。`issue-watcher.sh` 本体へ inline で大きな機能を継ぎ足さない（本体は config source /
+  module loader / guard hook / `--doctor` dispatch / main loop の call site / Phase C Dispatcher に
+  寄せる）。#455 の分割リファクタで processor / gate / pipeline ヘルパーを全て module 化し、
+  Config は `watcher-config.sh` に分離、**本体は約 900 行**まで縮小して完了した（#456-467 /
+  完了ゲート #468）。現在 modules は 34 本ある。**module の完全な一覧と責務は README「ディレクトリ
+  構成」ツリー**、**prefix ⇄ module 対応は下記 §2 の prefix 表**を正準とする（本節では代表例のみ
+  示し、全列挙はしない）。
 - module は**関数定義のみ**を置きトップレベル副作用を持たせない（`extract_function` テスト
   イディオムと module loader の前提）。本体の `REQUIRED_MODULES` ローダ（同階層 `modules/` を
   source）に登録し、`install.sh` が `$HOME/bin/modules/` へ配布することを確認する。
@@ -240,9 +241,10 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
   | `dbg_` | debugger-gate（非 prefix 関数 detect_blocked_marker 等はモジュール冒頭ヘッダで列挙 / #458） |
   | `sc_` / `stage_checkpoint_` / `_spec_` | stage-checkpoint（Slot Runner 内の類似名 `_stage_checkpoint_assert_slug_match` / `_stage_checkpoint_has_resumable_state` は本 module に非同居。#466 で slot-worker.sh へ移動済み） |
   | `pt_` / `build_per_task_*` / `run_per_task_*` | per-task-loop（前半 pt_ ヘルパー + prompt builder #461 / 後半 runner + escalation #462。呼び出し元 run_impl_pipeline は impl-pipeline.sh 側 = #464） |
-  | `build_dev_prompt_*` / `build_reviewer_prompt`（非 prefix。他 `run_reviewer_stage` / `verify_*` / `mark_issue_*` / `run_impl_pipeline` 等はモジュール冒頭ヘッダで列挙） | impl-pipeline（前半 Stage A/B/C prompt builder #463 / 後半 stage runner + escalation #464 で移動完了。呼び出し元 Slot Runner `_slot_run_issue` / design 分岐 は #467 で slot-worker.sh へ移動済み、各 gate は本体・各 module 残置） |
+  | `build_dev_prompt_*` / `build_reviewer_prompt`（非 prefix。他 `run_reviewer_stage` / `verify_*` / `mark_issue_*` / `run_impl_pipeline` 等はモジュール冒頭ヘッダで列挙） | impl-pipeline（前半 Stage A/B/C prompt builder #463 / 後半 stage runner + escalation #464 で移動完了。呼び出し元 Slot Runner `_slot_run_issue` / design 分岐 は #467 で slot-worker.sh へ移動済み、各 gate は本体・各 module 残置。Reviewer/Developer ロガー `rv_log` / `rv_dev_log` は core_utils に同居 = #468 で本体から移設） |
   | `dr_` | dependency-resolver（#465） |
   | `dispatcher_` / `pclp_` / `slot_` / `_resume_*` / `_normalize_slug` / `_slug_mismatch_escalate` / `_stage_checkpoint_assert_slug_match` / `_stage_checkpoint_has_resumable_state` / `publish_claude_review_status` / `_slot_run_issue`（非 prefix 統一。詳細はモジュール冒頭ヘッダで列挙） | slot-worker（Phase C Slot Runner: ヘルパー #466 + 本体 `_slot_run_issue` #467 で移動完了。呼び出し元 Dispatcher は本体最終盤に残置） |
+  | `_dispatcher_`（本体 issue-watcher.sh 残置 / #455 分割完了 = #468） | **本体最終盤の Dispatcher**（`_dispatcher_on_signal` / `_dispatcher_reap_finished_slots` / `_dispatcher_find_free_slot` / `_dispatcher_run`）。#455 分割完了後、本体に残る実装関数は Dispatcher 系のみ。例外として Config 由来の純粋 helper `full_auto_enabled` / `parse_review_result` / `extract_review_result_token` は load-order pin（近接テストが「定義行 < caller 行」を検証 / `full_auto_enabled_load_order_test.sh` ほか）のため本体残置。processor / gate / pipeline の実体は全て modules/ 側。 |
 
 - env var 名・ラベル名・コマンド名・ファイルパスは **英語固定**（言語方針に従う）。
 
