@@ -20,9 +20,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #464 で impl pipeline 後半（verify_stagec_pr_or_retry / run_impl_pipeline 内 Stage C 配線を
+# 含む）は modules/impl-pipeline.sh へ分離された。サニティ grep の探索元を module に切り替える。
+IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$IMPL_PIPELINE_SH" ]; then
+  echo "ERROR: cannot find impl-pipeline.sh at $IMPL_PIPELINE_SH" >&2
   exit 2
 fi
 
@@ -34,7 +41,7 @@ fi
 # 本仕様再現が issue-watcher.sh と divergent しないよう、issue-watcher.sh 側の
 # 該当ブロック（grep で "stageC-pr-missing" を含む行が存在することで担保）を
 # サニティチェックする。
-if ! grep -q "stageC-pr-missing" "$WATCHER_SH"; then
+if ! grep -q "stageC-pr-missing" "$IMPL_PIPELINE_SH"; then
   echo "ERROR: issue-watcher.sh に stageC-pr-missing ハンドラが見つからない" >&2
   exit 2
 fi
@@ -45,20 +52,20 @@ fi
 # （`gh pr view` は `--head` 非対応で常に失敗し、open のみ探索だと高速 merge 済み PR を
 #  取りこぼすため、list + `--state all` で open/merged 双方を検出する。stageC-pr-missing
 #  誤検知の回帰ガード。）
-if ! grep -q "verify_stagec_pr_or_retry()" "$WATCHER_SH"; then
+if ! grep -q "verify_stagec_pr_or_retry()" "$IMPL_PIPELINE_SH"; then
   echo "ERROR: issue-watcher.sh に verify_stagec_pr_or_retry 定義が見つからない (Issue #108)" >&2
   exit 2
 fi
 # 単一引用符内の \$ は文字列リテラル "$BRANCH" / "$NUMBER" を grep するためのもので、
 # 展開抑止が意図的（shellcheck SC2016 は false positive のため抑止）。
 # shellcheck disable=SC2016
-if ! grep -q 'verify_stagec_pr_or_retry "\$BRANCH" "\$NUMBER"' "$WATCHER_SH"; then
+if ! grep -q 'verify_stagec_pr_or_retry "\$BRANCH" "\$NUMBER"' "$IMPL_PIPELINE_SH"; then
   echo "ERROR: issue-watcher.sh に verify_stagec_pr_or_retry の呼び出し配線が見つからない (Issue #108)" >&2
   exit 2
 fi
 # 同上（"$REPO" / "$branch" の文字列リテラルを grep する）
 # shellcheck disable=SC2016
-if ! grep -q 'gh pr list --repo "\$REPO" --head "\$branch" --state all' "$WATCHER_SH"; then
+if ! grep -q 'gh pr list --repo "\$REPO" --head "\$branch" --state all' "$IMPL_PIPELINE_SH"; then
   echo "ERROR: issue-watcher.sh に PR 実在 verify (gh pr list --head --state all) が見つからない" >&2
   exit 2
 fi

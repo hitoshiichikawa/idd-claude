@@ -15,9 +15,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #464 で impl pipeline 後半関数は modules/impl-pipeline.sh へ分離された。
+IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$IMPL_PIPELINE_SH" ]; then
+  echo "ERROR: cannot find impl-pipeline.sh at $IMPL_PIPELINE_SH" >&2
   exit 2
 fi
 
@@ -32,7 +38,7 @@ extract_function() {
 }
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "reviewer_skip_files_match")"
+eval "$(extract_function "$IMPL_PIPELINE_SH" "reviewer_skip_files_match")"
 if ! declare -F reviewer_skip_files_match >/dev/null; then
   echo "ERROR: reviewer_skip_files_match not loaded" >&2
   exit 2

@@ -38,6 +38,8 @@ DEBUGGER_GATE_SH="$SCRIPT_DIR/../bin/modules/debugger-gate.sh"
 # #462 で run_per_task_reviewer は modules/per-task-loop.sh へ分離された。
 # per-task-reviewer-* の呼出は run_per_task_reviewer 内にあるため、探索元に含める。
 PER_TASK_LOOP_SH="$SCRIPT_DIR/../bin/modules/per-task-loop.sh"
+# #464 で publish_terminal_failure_artifacts は modules/impl-pipeline.sh へ分離された。
+IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
@@ -49,6 +51,10 @@ if [ ! -f "$DEBUGGER_GATE_SH" ]; then
 fi
 if [ ! -f "$PER_TASK_LOOP_SH" ]; then
   echo "ERROR: cannot find per-task-loop.sh at $PER_TASK_LOOP_SH" >&2
+  exit 2
+fi
+if [ ! -f "$IMPL_PIPELINE_SH" ]; then
+  echo "ERROR: cannot find impl-pipeline.sh at $IMPL_PIPELINE_SH" >&2
   exit 2
 fi
 
@@ -65,7 +71,7 @@ extract_function() {
 }
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "publish_terminal_failure_artifacts")"
+eval "$(extract_function "$IMPL_PIPELINE_SH" "publish_terminal_failure_artifacts")"
 
 if ! declare -F publish_terminal_failure_artifacts >/dev/null; then
   echo "ERROR: publish_terminal_failure_artifacts not loaded from issue-watcher.sh" >&2
