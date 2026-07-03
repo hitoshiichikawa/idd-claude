@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # pr_default_prompt_test.sh — Issue #399 既定プロンプト網羅性 / spec 整合チェック検証
 #
-# 対象: local-watcher/bin/modules/pr-reviewer.sh の pr_default_prompt 関数
+# 対象: local-watcher/bin/modules/pr-reviewer-exec.sh の pr_default_prompt 関数（#470 で pr-reviewer.sh から移動）
 # Issue: #399
 #
 # 検証する AC（docs/specs/399-feat-pr-reviewer-spec/requirements.md）:
@@ -30,7 +30,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-MODULE_PATH="$REPO_ROOT/local-watcher/bin/modules/pr-reviewer.sh"
+MODULE_PATH="$REPO_ROOT/local-watcher/bin/modules/pr-reviewer-exec.sh"
 
 if [ ! -f "$MODULE_PATH" ]; then
   echo "ERROR: module not found: $MODULE_PATH" >&2

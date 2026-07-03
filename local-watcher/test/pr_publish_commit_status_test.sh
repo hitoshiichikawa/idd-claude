@@ -37,10 +37,10 @@ set -euo pipefail
 # shellcheck disable=SC2034
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer.sh"
+PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer-publish.sh"
 
 if [ ! -f "$PR_MOD" ]; then
-  echo "ERROR: cannot find pr-reviewer.sh at $PR_MOD" >&2
+  echo "ERROR: cannot find pr-reviewer-publish.sh at $PR_MOD" >&2
   exit 2
 fi
 

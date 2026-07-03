@@ -37,9 +37,14 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer.sh"
+PR_EXEC_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer-exec.sh"
 
 if [ ! -f "$PR_MOD" ]; then
   echo "ERROR: cannot find pr-reviewer.sh at $PR_MOD" >&2
+  exit 2
+fi
+if [ ! -f "$PR_EXEC_MOD" ]; then
+  echo "ERROR: cannot find pr-reviewer-exec.sh at $PR_EXEC_MOD" >&2
   exit 2
 fi
 
@@ -56,7 +61,7 @@ extract_function() {
 
 # 対象関数群を読み込む。pr_increment_exec_fail_streak / pr_reset_exec_fail_streak は
 # pr_read_exec_fail_streak / pr_write_exec_fail_streak / pr_extract_exec_fail_streak に
-# 依存するため、合わせて抽出する。
+# 依存するため、合わせて抽出する（#470 で pr-reviewer-exec.sh へ移動）。
 for fn in \
   pr_extract_exec_fail_streak \
   pr_read_exec_fail_streak \
@@ -66,12 +71,15 @@ for fn in \
   pr_exec_fail_limit_reached \
   pr_truncate_stderr_tail \
   pr_save_stderr_artifact \
-  pr_post_exec_fail_escalation_comment \
-  pr_build_marker
+  pr_post_exec_fail_escalation_comment
 do
   # shellcheck disable=SC1090,SC2086
-  eval "$(extract_function "$PR_MOD" "$fn")"
+  eval "$(extract_function "$PR_EXEC_MOD" "$fn")"
 done
+
+# pr_build_marker は orchestrator（pr-reviewer.sh）に残置（#470）
+# shellcheck disable=SC1090,SC2086
+eval "$(extract_function "$PR_MOD" "pr_build_marker")"
 
 for fn in \
   pr_extract_exec_fail_streak \

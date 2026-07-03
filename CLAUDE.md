@@ -235,7 +235,7 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
   | `mq_` / `mqr_` | merge-queue |
   | `ar_` | auto-rebase |
   | `pp_` / `po_` | promote-pipeline（pp=Promote / po=Path Overlap） |
-  | `pr_` | pr-reviewer |
+  | `pr_` | pr-reviewer（#470 で family 分割 / 全ファイル `pr_` 共有）: orchestrator `pr-reviewer.sh`（エントリ `process_pr_reviewer` / 候補取得 / 冪等判定 / catch-up / merge gate visibility #412）+ sub `pr-reviewer-exec.sh`（外部ツール実行 + Issue #403 exec-fail-streak）/ `pr-reviewer-publish.sh`（結果投稿 + commit status publish #349）。非 prefix `process_*` / `mgv_*` は orchestrator に同居（#469 の build_recovery_hint 同様の例外） |
   | `pi_` | pr-iteration（#469 で family 分割 / 全ファイル `pi_` 共有）: orchestrator `pr-iteration.sh`（エントリ / 候補取得 / kind・round 解決 / round driver / 成功ラベル確定）+ sub `pr-iteration-comments.sh`（一般コメント収集 + filter chain）/ `pr-iteration-state.sh`（PR body marker read/write + round outcome / SHA ベース streak）/ `pr-iteration-oos.sh`（#437 out-of-scope 還流 / 検出 / 内容ベース streak）/ `pr-iteration-exec.sh`（1 round 実行ヘルパー: prompt 構築 / escalation / quota 検出 / auto-commit）。非 prefix `build_recovery_hint` は exec に同居し impl-pipeline / slot-worker からも遅延束縛で呼ばれる共有ヘルパー（#65） |
   | `sec_` | security-review |
   | `cm_` | context-map |
