@@ -35,6 +35,9 @@ WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #458 で Debugger Gate（run_debugger_stage 等）は modules/debugger-gate.sh へ分離された。
 # debugger-notes-invalid の呼出は run_debugger_stage 内にあるため、探索元に含める。
 DEBUGGER_GATE_SH="$SCRIPT_DIR/../bin/modules/debugger-gate.sh"
+# #462 で run_per_task_reviewer は modules/per-task-loop.sh へ分離された。
+# per-task-reviewer-* の呼出は run_per_task_reviewer 内にあるため、探索元に含める。
+PER_TASK_LOOP_SH="$SCRIPT_DIR/../bin/modules/per-task-loop.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
@@ -42,6 +45,10 @@ if [ ! -f "$WATCHER_SH" ]; then
 fi
 if [ ! -f "$DEBUGGER_GATE_SH" ]; then
   echo "ERROR: cannot find debugger-gate.sh at $DEBUGGER_GATE_SH" >&2
+  exit 2
+fi
+if [ ! -f "$PER_TASK_LOOP_SH" ]; then
+  echo "ERROR: cannot find per-task-loop.sh at $PER_TASK_LOOP_SH" >&2
   exit 2
 fi
 
@@ -67,20 +74,20 @@ fi
 
 # サニティ: 実装側の per-task terminal failure 経路が新ヘルパー名で呼んでいること
 # （関数差し替え漏れを検出 / Issue #306）
-if ! grep -q 'publish_terminal_failure_artifacts "per-task-reviewer-reject2"' "$WATCHER_SH"; then
-  echo "ERROR: issue-watcher.sh から publish_terminal_failure_artifacts per-task-reviewer-reject2 の呼出がない" >&2
+if ! grep -q 'publish_terminal_failure_artifacts "per-task-reviewer-reject2"' "$PER_TASK_LOOP_SH"; then
+  echo "ERROR: modules/per-task-loop.sh から publish_terminal_failure_artifacts per-task-reviewer-reject2 の呼出がない" >&2
   exit 2
 fi
-if ! grep -q 'publish_terminal_failure_artifacts "per-task-reviewer-reject3"' "$WATCHER_SH"; then
-  echo "ERROR: issue-watcher.sh から publish_terminal_failure_artifacts per-task-reviewer-reject3 の呼出がない" >&2
+if ! grep -q 'publish_terminal_failure_artifacts "per-task-reviewer-reject3"' "$PER_TASK_LOOP_SH"; then
+  echo "ERROR: modules/per-task-loop.sh から publish_terminal_failure_artifacts per-task-reviewer-reject3 の呼出がない" >&2
   exit 2
 fi
-if ! grep -q 'publish_terminal_failure_artifacts "per-task-reviewer-error"' "$WATCHER_SH"; then
-  echo "ERROR: issue-watcher.sh から publish_terminal_failure_artifacts per-task-reviewer-error の呼出がない" >&2
+if ! grep -q 'publish_terminal_failure_artifacts "per-task-reviewer-error"' "$PER_TASK_LOOP_SH"; then
+  echo "ERROR: modules/per-task-loop.sh から publish_terminal_failure_artifacts per-task-reviewer-error の呼出がない" >&2
   exit 2
 fi
-if ! grep -q 'publish_terminal_failure_artifacts "per-task-reviewer-missing-file"' "$WATCHER_SH"; then
-  echo "ERROR: issue-watcher.sh から publish_terminal_failure_artifacts per-task-reviewer-missing-file の呼出がない" >&2
+if ! grep -q 'publish_terminal_failure_artifacts "per-task-reviewer-missing-file"' "$PER_TASK_LOOP_SH"; then
+  echo "ERROR: modules/per-task-loop.sh から publish_terminal_failure_artifacts per-task-reviewer-missing-file の呼出がない" >&2
   exit 2
 fi
 if ! grep -q 'publish_terminal_failure_artifacts "debugger-notes-invalid"' "$DEBUGGER_GATE_SH"; then

@@ -47,6 +47,15 @@
 #     グローバル $LOG / $REPO_DIR / $SPEC_DIR_REL / $BASE_BRANCH 等。
 #
 # prefix: pt_（per-task loop 固有の非 prefix 関数 build_per_task_* / run_per_task_* を含む）
+#
+# SC2153 disable の背景（#462 / split 起因の info 級誤検知抑止）:
+#   本 module の runner 関数は大文字グローバル環境変数 `$BODY`（Issue 本文 / 本体 main loop で
+#   代入）・`$MODE`（実行モード / 本体で代入）を prompt heredoc・ログ文言内で参照する。同一
+#   ファイル内の別関数に小文字ローカル `body`（cat heredoc 一時変数）/ `mode`
+#   （POST_MARKER_RECOVERY_MODE フォールバック）が存在するため、分割前の issue-watcher.sh 単体
+#   では大文字側の実代入が同一ファイルに見えて非発火だった SC2153（「typo では」）が、module
+#   単体では cross-file 可視性の喪失で新規発火する。関数移動対象自体は無改変。
+# shellcheck disable=SC2153
 
 # ─── pt_log ───
 # per-task ロガー。`[YYYY-MM-DD HH:MM:SS] per-task: <msg>` 形式で stdout に出力。
@@ -1588,4 +1597,1344 @@ reviewer サブエージェントを起動し、以下を判定して \`${SPEC_D
 - スタイル / 命名 / lint / フォーマット観点での reject はしないこと
 ${context_map_block_section}
 EOF
+}
+
+# ─── run_per_task_implementer <task_id> ───
+#
+# 当該 task 1 件のみを対象に fresh Claude session で Implementer を起動。
+#
+# 戻り値:
+#   0  = success（Implementer が正常終了 + `docs(tasks): mark <id> as done` commit が積まれた前提）
+#   1  = claude 非 0 exit / 規約違反（claude-failed は呼び出し側で付与）
+#   99 = quota 超過（既存 #66 規約に従い呼び出し側に伝搬）
+#
+# Requirements: 2.2, 2.6, NFR 1.3, NFR 2.1, NFR 2.2
+run_per_task_implementer() {
+  local task_id="$1"
+  local prompt
+  prompt=$(build_per_task_implementer_prompt "$task_id")
+
+  pt_log "task=$task_id implementer start (model=$DEV_MODEL, max-turns=$DEV_MAX_TURNS)" >> "$LOG"
+  echo "--- per-task Implementer 実行 (task=$task_id) ---" >> "$LOG"
+
+  local _qa_reset_file _qa_rc=0 _qa_ts _qa_stage_label
+  _qa_ts=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-pt-impl-${task_id}-${_qa_ts}"
+  _qa_stage_label="PerTask-Impl-${task_id}"
+  qa_run_claude_stage "$_qa_stage_label" "$_qa_reset_file" -- \
+    claude \
+      --print "$prompt" \
+      --model "$DEV_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$DEV_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      "${CLAUDE_HOOK_ARGS[@]}" \
+      >> "$LOG" 2>&1 || _qa_rc=$?
+
+  case "$_qa_rc" in
+    0)
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer end rc=0" >> "$LOG"
+      return 0
+      ;;
+    99)
+      local _qa_epoch
+      _qa_epoch=$(cat "$_qa_reset_file")
+      qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label" "$_qa_epoch"
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer end rc=99 result=quota-exceeded" >> "$LOG"
+      return 99
+      ;;
+    *)
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer end rc=$_qa_rc result=error" >> "$LOG"
+      return 1
+      ;;
+  esac
+}
+
+# ─── run_per_task_implementer_redo <task_id> <redo_mode> ───
+#
+# Reviewer reject / Debugger 経由 redo 経路専用の Implementer 起動 wrapper。
+# `run_per_task_implementer` をベースに以下 2 点のみ差分:
+#
+#   1. prompt 組み立て時に `build_per_task_implementer_prompt "$task_id" "$redo_mode"` を呼び、
+#      Reviewer Findings / Debugger Fix Plan / Finding Closure Matrix 規約節を inline 注入する
+#      （注入ロジックは build 関数側に実装済み / Issue #305 task 3 で実装）
+#   2. stage_label を `PerTask-Impl-Redo-${task_id}-${redo_mode}` に変更し、quota log /
+#      grep フィルタで初回起動 (`PerTask-Impl-${task_id}`) と区別可能にする
+#
+# `redo_mode` は build 関数側で `initial|after-round1|after-debugger` のみ受け付け、未知の値は
+# 安全側に `initial` へ fallback する。本 wrapper はその値を stage_label 用にもそのまま使うが、
+# stage_label への ASCII 制約は redo_mode の値域が事前定義されているため別途検証しない。
+#
+# 既存 `run_per_task_implementer <task_id>` は **無改変**（NFR 1.1 を構造保証）。
+# BLOCKED 経路 (`run_per_task_loop` の `_pt_blocked_reason` 分岐) は本 wrapper を呼ばず
+# 既存 `run_per_task_implementer` を継続使用する（BLOCKED は Reviewer reject ではないため
+# Findings 注入対象外 / Issue #305 task 4）。
+#
+# 戻り値:
+#   0  = success
+#   1  = claude 非 0 exit / 規約違反（claude-failed は呼び出し側で付与）
+#   99 = quota 超過（既存 #66 規約に従い呼び出し側に伝搬）
+#
+# Requirements: 1.1, 1.2, 4.3 (Issue #305), NFR 1.1, NFR 1.2
+run_per_task_implementer_redo() {
+  local task_id="$1"
+  local redo_mode="$2"
+  local prompt
+  prompt=$(build_per_task_implementer_prompt "$task_id" "$redo_mode")
+
+  pt_log "task=$task_id implementer-redo start (model=$DEV_MODEL, max-turns=$DEV_MAX_TURNS, redo_mode=$redo_mode)" >> "$LOG"
+  echo "--- per-task Implementer Redo 実行 (task=$task_id, redo_mode=$redo_mode) ---" >> "$LOG"
+
+  local _qa_reset_file _qa_rc=0 _qa_ts _qa_stage_label
+  _qa_ts=$(date +%Y%m%d-%H%M%S)
+  _qa_reset_file="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-pt-impl-redo-${task_id}-${redo_mode}-${_qa_ts}"
+  _qa_stage_label="PerTask-Impl-Redo-${task_id}-${redo_mode}"
+  qa_run_claude_stage "$_qa_stage_label" "$_qa_reset_file" -- \
+    claude \
+      --print "$prompt" \
+      --model "$DEV_MODEL" \
+      --permission-mode bypassPermissions \
+      --max-turns "$DEV_MAX_TURNS" \
+      --output-format stream-json \
+      --verbose \
+      "${CLAUDE_HOOK_ARGS[@]}" \
+      >> "$LOG" 2>&1 || _qa_rc=$?
+
+  case "$_qa_rc" in
+    0)
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer-redo end rc=0 redo_mode=$redo_mode" >> "$LOG"
+      return 0
+      ;;
+    99)
+      local _qa_epoch
+      _qa_epoch=$(cat "$_qa_reset_file")
+      qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label" "$_qa_epoch"
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer-redo end rc=99 redo_mode=$redo_mode result=quota-exceeded" >> "$LOG"
+      return 99
+      ;;
+    *)
+      rm -f "$_qa_reset_file"
+      pt_log "task=$task_id implementer-redo end rc=$_qa_rc redo_mode=$redo_mode result=error" >> "$LOG"
+      return 1
+      ;;
+  esac
+}
+
+# ─── run_per_task_reviewer <task_id> <round> ───
+#
+# 当該 task の diff range のみを対象に fresh Claude session で Reviewer を起動。
+# `pt_resolve_diff_range` で range を解決し、`build_per_task_reviewer_prompt` で prompt を
+# 組み立てて `claude --print` 起動 → `parse_review_result` で RESULT を抽出。
+#
+# 戻り値:
+#   0  = approve
+#   1  = reject
+#   2  = 異常終了（claude crash / parse 失敗 = 装飾起因 parse 失敗）
+#   3  = diff range 解決失敗（marker commit が単記でも連記でも見つからない / Issue #164）
+#   4  = ファイル不在で 1 回限定リトライ後も生成されず（Issue #296 Req 2 / Req 4.2 で導入）
+#   5  = post-marker commit を marker 後に検出 + POST_MARKER_RECOVERY_MODE=fail-with-diagnostic
+#        （default）で停止（idd-codex #14 同型 commit shape / Issue #304 Req 2.1, 2.2, 2.3）
+#   99 = quota 超過
+#
+# 戻り値 2 / 3 / 4 / 5 の使い分け:
+#   - rc=2: claude プロセスが起動した後の異常終了（claude crash / RESULT 行欠落 = 装飾起因 parse 失敗）。
+#     呼び出し側は既存の `per-task-reviewer-error` カテゴリで `claude-failed` 付与。
+#   - rc=3: claude プロセス起動前に diff range が解決できなかった（marker 不在 / Issue #164 Req 4）。
+#     呼び出し側は専用の復旧手順付き Issue コメントで `claude-failed` 付与する。
+#     NFR 3.1 に従い「reflog で push 前 commit を回収」「1 commit = 1 task ID で分割」
+#     旨を運用者向けに 5 分以内に判断できる粒度で出力する。
+#   - rc=4: review-notes.md がファイル不在で 1 回限定リトライ後も生成されず（Issue #296 Req 2.3 /
+#     Req 4.2）。呼び出し側は `per-task-reviewer-missing-file` カテゴリで `claude-failed` 付与し、
+#     NFR 2.2 に従い装飾起因 parse 失敗（rc=2）と grep で区別可能な reason を出力する。
+#   - rc=5: claude プロセス起動前に marker 後の未レビュー commit を検出した（Issue #304）。
+#     `pt_mark_post_marker_commits_detected` で `per-task-post-marker-commits-detected` カテゴリの
+#     `claude-failed` を本関数内で付与済みのため、呼び出し側は Issue コメント投稿を重ねずに
+#     即停止（既存 rc=3 のように `pt_mark_diff_range_resolve_failed` を loop 側で呼ぶ pattern
+#     と異なり、本経路は marker_sha / post_marker_list を本関数内で保持済みなため loop 側に
+#     データを引き上げず本関数で完結させる）。
+#
+# Requirements: 3.1, 3.2, 3.3, NFR 2.1, NFR 2.2, NFR 2.3, Issue #164 Req 4.1, 4.2, 4.3, NFR 2.2,
+#               Issue #304 Req 2.1, 2.2, 2.3, NFR 1.1, NFR 1.3
+run_per_task_reviewer() {
+  local task_id="$1"
+  local round="$2"
+
+  # diff range 解決
+  local range_line range_start range_end
+  if ! range_line=$(pt_resolve_diff_range "$task_id"); then
+    # Issue #164 NFR 2.2: 単記 / 連記いずれの候補も見つからなかった旨を明示
+    pt_log "task=$task_id reviewer start round=$round result=error reason=diff-range-resolve-failed detail=no-marker-commit-found(single-id-and-multi-id-both-missing)" >> "$LOG"
+    return 3
+  fi
+  range_start=$(printf '%s' "$range_line" | cut -f1)
+  range_end=$(printf '%s' "$range_line" | cut -f2)
+  if [ -z "$range_start" ] || [ -z "$range_end" ]; then
+    pt_log "task=$task_id reviewer start round=$round result=error reason=diff-range-empty detail=resolved-but-empty-pair" >> "$LOG"
+    return 3
+  fi
+
+  # ─── Issue #304: post-marker commit の safety net ──────────────────────────
+  # `pt_resolve_diff_range` で得た range_end（= 当該 task の marker commit）より後ろに
+  # 未レビュー commit が積まれていないかを `pt_detect_post_marker_commits` で確認する。
+  # idd-codex #14 同型の Implementer 契約違反（Reviewer reject 後の再実行で修正 commit を
+  # 旧 marker 後ろに残置）を検出して silent range truncation を防ぐ。
+  #
+  # 後方互換性（NFR 1.1, 1.3）:
+  #   - 検出 0 件（rc=1）: post-marker commit が無い典型シナリオ → 既存ルートで Reviewer 起動
+  #   - git エラー（rc=2）: fail-safe で既存ルート fall-through（NFR 1.3 と同方針）
+  #   - 検出 1 件以上（rc=0）: `pt_handle_post_marker_commits` で recovery dispatch
+  #     - extend-range（rc=0）: 新 range で Reviewer を起動（range_end を HEAD まで拡張）
+  #     - fail-with-diagnostic（rc=5）: `pt_mark_post_marker_commits_detected` を呼んで
+  #       claude-failed を付与した上で rc=5 を呼び出し側に返す
+  local post_marker_list pt_detect_rc=0 extended="false"
+  post_marker_list=$(pt_detect_post_marker_commits "$range_end") || pt_detect_rc=$?
+  case "$pt_detect_rc" in
+    0)
+      # 1 件以上検出 → recovery dispatcher を起動
+      local pt_handle_out pt_handle_rc=0
+      pt_handle_out=$(pt_handle_post_marker_commits "$task_id" "$round" "$range_start" "$range_end" "$post_marker_list") || pt_handle_rc=$?
+      case "$pt_handle_rc" in
+        0)
+          # rc=0 経路は以下 2 パターンのいずれか:
+          #   (a) POST_MARKER_RECOVERY_MODE=extend-range で既存どおり range を HEAD まで拡張
+          #   (b) Issue #356: docs-only-auto-refresh で marker を HEAD まで auto-refresh
+          # 両者は stdout フォーマット（<new_range_start>\t<new_range_end>）が同一なため、
+          # 呼び出し側 では `POST_MARKER_RECOVERY_MODE` の正規化値で判別する
+          # （`pt_handle_post_marker_commits` 内と同じ正規化規則）。
+          local new_range_start new_range_end
+          new_range_start=$(printf '%s' "$pt_handle_out" | cut -f1)
+          new_range_end=$(printf '%s' "$pt_handle_out" | cut -f2)
+          if [ -z "$new_range_start" ] || [ -z "$new_range_end" ]; then
+            pt_log "task=$task_id reviewer start round=$round result=error reason=post-marker-extend-range-empty detail=handle-returned-empty-pair" >> "$LOG"
+            # fail-safe: 拡張結果が空なら fail-with-diagnostic と同等扱いで停止
+            pt_mark_post_marker_commits_detected "$task_id" "$round" "$range_end" "$post_marker_list" || true
+            return 5
+          fi
+          local _recovery_kind="extend-range"
+          local _normalized_mode="${POST_MARKER_RECOVERY_MODE:-fail-with-diagnostic}"
+          case "$_normalized_mode" in
+            extend-range) _recovery_kind="extend-range" ;;
+            *)            _recovery_kind="docs-only-auto-refresh" ;;
+          esac
+          pt_log "task=$task_id reviewer start round=$round post-marker-commits-detected recovery=${_recovery_kind} old_range_end=${range_end:0:7} new_range_end=${new_range_end:0:7}" >> "$LOG"
+          if [ "$_recovery_kind" = "docs-only-auto-refresh" ]; then
+            # Req 1.3: 当該 Issue に 1 行の事実記録を残す（auto-refresh が起きた task_id と理由）
+            pt_post_docs_only_auto_refresh_comment "$task_id" "$round" "$range_end" "$new_range_end" "$post_marker_list" || true
+          fi
+          range_start="$new_range_start"
+          range_end="$new_range_end"
+          extended="true"
+          ;;
+        5)
+          # fail-with-diagnostic: claude-failed を付与して rc=5 を返す
+          pt_log "task=$task_id reviewer start round=$round result=error reason=per-task-post-marker-commits-detected marker=${range_end:0:7}" >> "$LOG"
+          pt_mark_post_marker_commits_detected "$task_id" "$round" "$range_end" "$post_marker_list" || true
+          return 5
+          ;;
+        *)
+          # 想定外の rc: 安全側に倒して fail-with-diagnostic 相当の停止
+          pt_log "task=$task_id reviewer start round=$round result=error reason=post-marker-handle-unexpected-rc rc=$pt_handle_rc marker=${range_end:0:7}" >> "$LOG"
+          pt_mark_post_marker_commits_detected "$task_id" "$round" "$range_end" "$post_marker_list" || true
+          return 5
+          ;;
+      esac
+      ;;
+    1)
+      # 0 件 → 既存ルート（NFR 1.3 既存挙動温存）
+      :
+      ;;
+    2)
+      # git エラー → fail-safe で既存ルート fall-through（NFR 1.3 同方針）
+      pt_log "task=$task_id reviewer start round=$round post-marker-commits-detect-git-error marker=${range_end:0:7} (fall-through to existing route)" >> "$LOG"
+      ;;
+    *)
+      # 想定外の rc → fail-safe で既存ルート fall-through
+      pt_log "task=$task_id reviewer start round=$round post-marker-commits-detect-unexpected-rc rc=$pt_detect_rc marker=${range_end:0:7} (fall-through to existing route)" >> "$LOG"
+      ;;
+  esac
+
+  # prev_result（round=2 のみ意味あり）
+  local prev_result="(none)"
+  local notes_path="$REPO_DIR/$SPEC_DIR_REL/review-notes.md"
+  if [ "$round" = "2" ] && [ -f "$notes_path" ]; then
+    local _prev_token
+    if _prev_token=$(extract_review_result_token "$notes_path"); then
+      prev_result="RESULT: $_prev_token"
+    fi
+  fi
+
+  pt_log "task=$task_id reviewer start round=$round model=$REVIEWER_MODEL max-turns=$REVIEWER_MAX_TURNS range=${range_start:0:7}..${range_end:0:7} extended=${extended}" >> "$LOG"
+
+  local prompt
+  # Issue #304 Req 3.3: post-marker recovery で extend-range 経路に入った場合は extended="true"。
+  # normal 経路では extended="false"（task 5 で初期化済み）。`build_per_task_reviewer_prompt`
+  # の 6 番目の引数として渡し、prompt の `range_extended:` 行と extended-range 説明文に反映。
+  prompt=$(build_per_task_reviewer_prompt "$task_id" "$range_start" "$range_end" "$round" "$prev_result" "$extended")
+
+  # Issue #296 Req 2.4 / NFR 3.1 / Req 4.2: per-task 経路でもファイル不在起因の再起動は
+  # 同一 round 内で最大 1 回まで（単発経路 run_reviewer_stage と対称）。
+  # Issue #442 Req 1: 上記 missing-file リトライ（for attempt in 1 2）とは直交する形で、
+  # turn 切れ（error_max_turns）起因の拡張リトライを同一 round 内で最大 1 回だけ追加する。
+  # `_current_max_turns`（初期 REVIEWER_MAX_TURNS）を可変化し、`_max_turns_retry_used` で
+  # 1 回限定を担保する（Req 1.3）。turn 切れ以外の非ゼロ exit は従来どおり即 return 2（Req 2.1）。
+  local attempt
+  local parsed=""
+  local parse_rc
+  local _current_max_turns="$REVIEWER_MAX_TURNS"
+  local _max_turns_retry_used="false"
+  for attempt in 1 2; do
+    if [ "$attempt" = "2" ]; then
+      pt_log "task=$task_id reviewer round=$round attempt=2 retry reason=missing-file" >> "$LOG"
+      echo "--- per-task Reviewer 実行 (task=$task_id, round=$round, retry attempt=2 / missing-file) ---" >> "$LOG"
+    else
+      echo "--- per-task Reviewer 実行 (task=$task_id, round=$round) ---" >> "$LOG"
+    fi
+
+    # Issue #442: 同一 attempt 内で turn 切れ拡張リトライを最大 1 回まで回す内側ループ。
+    # 反復上限を 2（初回 + 拡張リトライ 1 回）に固定し無限ループを防ぐ（Req 1.3）。
+    local _qa_rc=0 _mt_inner
+    for _mt_inner in 1 2; do
+      local _qa_reset_file _qa_ts _qa_stage_label _rev_log_offset
+      _qa_ts=$(date +%Y%m%d-%H%M%S)
+      _qa_reset_file="/tmp/qa-reset-${REPO_SLUG}-${NUMBER}-pt-rev-${task_id}-r${round}-a${attempt}-m${_mt_inner}-${_qa_ts}"
+      _qa_stage_label="PerTask-Rev-${task_id}-r${round}-a${attempt}-m${_mt_inner}"
+      # claude 実行前の $LOG 行数を記録（直前 stage の result 行誤検出を避ける / Req 2.4）。
+      # token-usage.sh 未ロード時は 0（reviewer_is_error_max_turns 側で安全側に倒れる）。
+      if declare -F tu_mark_log_offset >/dev/null 2>&1; then
+        _rev_log_offset=$(tu_mark_log_offset)
+      else
+        _rev_log_offset=0
+      fi
+      _qa_rc=0
+      qa_run_claude_stage "$_qa_stage_label" "$_qa_reset_file" -- \
+        claude \
+          --print "$prompt" \
+          --model "$REVIEWER_MODEL" \
+          --permission-mode bypassPermissions \
+          --max-turns "$_current_max_turns" \
+          --output-format stream-json \
+          --verbose \
+          "${CLAUDE_HOOK_ARGS[@]}" \
+          >> "$LOG" 2>&1 || _qa_rc=$?
+
+      # turn 切れ起因の非ゼロ exit のみ、同一 round 内で 1 回だけ拡張 turn 予算で再実行する。
+      if [ "$_qa_rc" != "0" ] && [ "$_qa_rc" != "99" ] \
+         && [ "$_max_turns_retry_used" = "false" ] \
+         && reviewer_is_error_max_turns "$LOG" "$_rev_log_offset"; then
+        rm -f "$_qa_reset_file"
+        _max_turns_retry_used="true"
+        _current_max_turns="$REVIEWER_MAX_TURNS_EXTENDED"
+        # NFR 2.1 / Req 4.6: round / attempt / 拡張 turn 予算 / reason を 1 行で記録
+        pt_log "task=$task_id reviewer round=$round attempt=$attempt retry reason=max-turns-extended extended-max-turns=$_current_max_turns" >> "$LOG"
+        echo "--- per-task Reviewer 実行 (task=$task_id, round=$round, retry / max-turns-extended=$_current_max_turns) ---" >> "$LOG"
+        continue
+      fi
+      break
+    done
+
+    case "$_qa_rc" in
+      0)
+        rm -f "$_qa_reset_file"
+        ;;
+      99)
+        local _qa_epoch
+        _qa_epoch=$(cat "$_qa_reset_file")
+        qa_handle_quota_exceeded "$NUMBER" "$_qa_stage_label" "$_qa_epoch"
+        rm -f "$_qa_reset_file"
+        pt_log "task=$task_id reviewer end round=$round attempt=$attempt result=quota-exceeded" >> "$LOG"
+        return 99
+        ;;
+      *)
+        rm -f "$_qa_reset_file"
+        # Issue #442 Req 3.1, 3.4: 拡張リトライ後も turn 切れ枯渇なら区別された return code 6
+        # （per-task-reviewer-max-turns-exhausted）で escalation。それ以外の非ゼロ exit は
+        # 従来どおり即 return 2（claude crash / parse 失敗と同じ扱い / Req 2.1）。
+        if [ "$_max_turns_retry_used" = "true" ] && reviewer_is_error_max_turns "$LOG" "$_rev_log_offset"; then
+          pt_log "task=$task_id reviewer end round=$round attempt=$attempt result=error reason=max-turns-exhausted extended-max-turns=$_current_max_turns" >> "$LOG"
+          return 6
+        fi
+        pt_log "task=$task_id reviewer end round=$round attempt=$attempt result=error reason=claude-exit-nonzero rc=$_qa_rc" >> "$LOG"
+        return 2
+        ;;
+    esac
+
+    # review-notes.md を parse
+    parse_rc=0
+    parsed=$(parse_review_result "$notes_path") || parse_rc=$?
+    case "$parse_rc" in
+      0) break ;;
+      3)
+        if [ "$attempt" = "1" ]; then
+          pt_log "task=$task_id reviewer round=$round attempt=1 result=missing-file" >> "$LOG"
+          continue
+        fi
+        pt_log "task=$task_id reviewer end round=$round attempt=2 result=missing-file-after-retry" >> "$LOG"
+        return 4
+        ;;
+      *)
+        # rc=2: 装飾起因 parse 失敗（ファイルあり）。リトライしない（Req 5.3）。
+        pt_log "task=$task_id reviewer end round=$round attempt=$attempt result=error reason=parse-failed" >> "$LOG"
+        return 2
+        ;;
+    esac
+  done
+
+  local result categories targets
+  result=$(echo "$parsed" | cut -f1)
+  categories=$(echo "$parsed" | cut -f2)
+  targets=$(echo "$parsed" | cut -f3)
+
+  case "$result" in
+    approve)
+      pt_log "task=$task_id reviewer end round=$round result=approve verified=$targets" >> "$LOG"
+      return 0
+      ;;
+    reject)
+      # NFR 2.3: reject 時は task ID / カテゴリ / 対応 requirement ID をログに 1 行で記録
+      pt_log "task=$task_id reviewer end round=$round result=reject categories=$categories targets=$targets" >> "$LOG"
+      return 1
+      ;;
+    *)
+      pt_log "task=$task_id reviewer end round=$round result=error reason=unknown-result" >> "$LOG"
+      return 2
+      ;;
+  esac
+}
+
+# ─── pt_mark_diff_range_resolve_failed <task_id> <round> ───
+#
+# diff-range-resolve-failed カテゴリで `claude-failed` を付与し、復旧手順付き Issue
+# コメントを投稿する専用ヘルパー（Issue #164 Req 4）。
+#
+# 通常の `per-task-reviewer-error` 経路（claude crash / parse 失敗等）との違い:
+#   - claude プロセス起動 **前** の失敗（marker commit 単記 / 連記いずれも見つからない）
+#   - 重大なデータ損失リスク（push 前の Developer commit が次サイクル worktree reset で
+#     失われる）を回避するため、運用者向けに `git reflog` 復旧手順と marker commit 分割
+#     規約（1 commit = 1 task ID）を明示する
+#
+# 重複コメント抑制（Req 4.4）:
+#   - HTML コメント marker `<!-- idd-claude:per-task-diff-range-resolve-failed:#<issue>:<task> -->`
+#     を本文末尾に埋め込み、当該 Issue に同一 marker のコメントが既存なら新規投稿を skip
+#     して既存コメントに「追記」する形式の単発コメントのみ追加する
+#
+# Args:
+#   $1 = task_id (例: `1.2`)
+#   $2 = round (1 / 2 / 3 のいずれか / どの round で失敗したかを Issue に明示するため)
+#
+# 副作用:
+#   1. claude-claimed / claude-picked-up を除去し claude-failed を付与
+#   2. 復旧手順付き Issue コメントを 1 件投稿（既存があれば追記コメント）
+#
+# Requirements: Issue #164 Req 4.1, 4.2, 4.3, 4.4, NFR 1.2, NFR 3.1
+pt_mark_diff_range_resolve_failed() {
+  local task_id="$1"
+  local round="$2"
+  local hostname_val
+  hostname_val=$(hostname)
+  local marker="<!-- idd-claude:per-task-diff-range-resolve-failed:#${NUMBER}:${task_id} -->"
+
+  # NFR 1.2: 重複コメント抑制のため既存 marker を gh API で検索
+  local comments_json existing_count=0
+  if comments_json=$(gh issue view "$NUMBER" --repo "$REPO" --json comments 2>/dev/null); then
+    existing_count=$(echo "$comments_json" | jq -r --arg marker "$marker" '
+      (.comments // []) | map(select(.body | contains($marker))) | length
+    ' 2>/dev/null || echo "0")
+    [ -n "$existing_count" ] || existing_count=0
+  fi
+
+  # ラベル付け替え（既存 mark_issue_failed と同方針 / 1 コマンド原子的に発行）
+  gh issue edit "$NUMBER" --repo "$REPO" \
+    --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
+
+  local body_header
+  if [ "$existing_count" -gt 0 ]; then
+    body_header="⚠️ 自動開発が失敗しました（${hostname_val} / モード: $MODE / 失敗 stage: per-task-diff-range-resolve-failed / round=${round}）— **追記コメント**
+
+本 Issue には同一カテゴリ (\`diff-range-resolve-failed\` / task=\`${task_id}\`) の失敗コメントが既に存在します。
+本コメントは状況が再発生したことを示す追記です。詳細な復旧手順は既存コメントを参照してください。"
+  else
+    body_header="⚠️ 自動開発が失敗しました（${hostname_val} / モード: $MODE / 失敗 stage: per-task-diff-range-resolve-failed / round=${round}）"
+  fi
+
+  local body
+  body=$(cat <<EOF
+${body_header}
+
+## 失敗カテゴリ
+- カテゴリ: \`diff-range-resolve-failed\`
+- 対象 task ID: \`${task_id}\`
+- 失敗 round: ${round}
+- ログ: \`$LOG\`
+
+## 原因
+per-task Reviewer が当該 task の \`docs(tasks): mark ${task_id} as done\` marker commit を
+\`${BASE_BRANCH}..HEAD\` 範囲で解決できませんでした（単記 marker / 連記 marker いずれも
+不一致）。Developer が以下のいずれかに該当した可能性があります:
+
+- 進捗 marker commit を作成せずに実装 commit のみで完了した
+- marker commit subject が canonical 形式 \`docs(tasks): mark <id> as done\` から逸脱した
+  （例: prefix 違い / suffix の追加 / typo）
+- 連記 marker commit に task ID \`${task_id}\` と完全一致するトークンが含まれていない
+  （Issue #164 で許容拡大した連記マッチ機構でも検出できなかった）
+
+## 復旧手順（重要 / データ損失リスク回避）
+
+**【重要】次サイクルで本ブランチの worktree が reset される可能性があります。**
+push 前の Developer commit が残っていれば、次サイクル前に必ず以下を実施してください:
+
+1. **push 前 commit の有無を確認**:
+   \`\`\`bash
+   cd <worktree-or-repo-dir>
+   git reflog --date=iso | head -50
+   git log --oneline ${BASE_BRANCH}..HEAD
+   git status
+   \`\`\`
+2. **push 前 commit がある場合は手動で push して保護**:
+   \`\`\`bash
+   git push origin <current-branch>
+   \`\`\`
+   または、reflog から拾い直して別ブランチに退避:
+   \`\`\`bash
+   git branch <rescue-branch-name> <reflog-sha>
+   git push origin <rescue-branch-name>
+   \`\`\`
+3. **marker commit の補完**: 不足している \`docs(tasks): mark ${task_id} as done\` commit を
+   手動で作成（tasks.md の \`- [ ]\` → \`- [x]\` を 1 行編集して 1 commit）してから
+   \`claude-failed\` ラベルを外す。これにより次サイクルで watcher が当該 task を resume できる
+
+## 推奨される marker commit 分割の規約（1 commit = 1 task ID）
+
+per-task Reviewer の diff range 解決は **task ID 単位**で行われます。Developer は以下を厳守すること:
+
+- **1 つの \`docs(tasks): mark <id> as done\` commit には 1 つの task ID のみを含める**
+- 親 task の完了昇格も **別 commit に分割**する（例: 子 \`1.1\` 完了で親 \`1\` も全完了に
+  なる場合、\`docs(tasks): mark 1.1 as done\` と \`docs(tasks): mark 1 as done\` を別 commit
+  にする）
+- 連記表記（\`mark 1 / 1.1 as done\` / \`mark 1, 1.1 as done\`）は watcher が fallback 解決を
+  試行するが、canonical ではない。発見次第、commit を分割し直すこと
+
+詳細は \`repo-template/.claude/agents/developer.md\` の「per-task ループ下での Implementer の
+責務」節を参照してください。
+
+${marker}
+EOF
+)
+
+  body="${body}
+
+問題を解決してから \`claude-failed\` ラベルを外してください。"
+
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
+}
+
+# ─── pt_mark_post_marker_commits_detected <task_id> <round> <marker_sha> <post_marker_list> ───
+#
+# `per-task-post-marker-commits-detected` カテゴリで `claude-failed` を付与し、復旧手順付き
+# Issue コメントを投稿する専用ヘルパー（Issue #304 Req 2.3, NFR 2.1）。
+#
+# 通常の `per-task-reviewer-error` 経路（claude crash / parse 失敗等）および
+# `diff-range-resolve-failed`（marker 不在）との違い:
+#   - marker commit は見つかったが、その後ろに未レビュー commit が積まれた状態を検出した
+#     ケース（idd-codex #14 同型 / Implementer 契約違反: marker を task の終端 commit として
+#     refresh せずに修正 commit を旧 marker 後ろに残置）
+#   - silent range truncation（marker で range_end を止めて post-marker commit を見逃す）を
+#     防ぐため、`POST_MARKER_RECOVERY_MODE=fail-with-diagnostic`（default）経路で
+#     `run_per_task_reviewer` 起動を中止し、本ヘルパーで運用者向けの復旧手順を提示する
+#
+# 重複コメント抑制:
+#   - HTML コメント marker `<!-- idd-claude:per-task-post-marker-commits-detected:#<issue>:<task> -->`
+#     を本文末尾に埋め込み、当該 Issue に同一 marker のコメントが既存なら新規投稿を skip
+#     して既存コメントに「追記」する形式の単発コメントのみ追加する
+#     （`pt_mark_diff_range_resolve_failed` と同パターン）
+#
+# Args:
+#   $1 = task_id (例: `1.2`)
+#   $2 = round (1 / 2 / 3 のいずれか / どの round で検出したかを Issue に明示するため)
+#   $3 = marker_sha (検出時の対象 marker commit SHA)
+#   $4 = post_marker_list (改行区切りの post-marker SHA 列。`git log --format=%H` 由来 /
+#        新しい順 / 0 件の状態では本関数は呼ばれない想定だが空文字を許容する)
+#
+# 副作用:
+#   1. claude-claimed / claude-picked-up を除去し claude-failed を付与
+#   2. 復旧手順付き Issue コメントを 1 件投稿（既存があれば追記コメント）
+#
+# Requirements: Issue #304 Req 2.3, NFR 2.1
+pt_mark_post_marker_commits_detected() {
+  local task_id="$1"
+  local round="$2"
+  local marker_sha="$3"
+  local post_marker_list="$4"
+  local hostname_val
+  hostname_val=$(hostname)
+  local marker="<!-- idd-claude:per-task-post-marker-commits-detected:#${NUMBER}:${task_id} -->"
+
+  # post-marker SHA を CSV / bullet 表記に整形（NFR 2.1: 観測可能性）
+  local post_csv post_bullets
+  post_csv=$(printf '%s' "$post_marker_list" | tr '\n' ',' | sed 's/,$//')
+  post_bullets=$(printf '%s\n' "$post_marker_list" | sed '/^$/d' | sed 's/^/  - `/' | sed 's/$/`/')
+
+  # 重複コメント抑制のため既存 marker を gh API で検索
+  local comments_json existing_count=0
+  if comments_json=$(gh issue view "$NUMBER" --repo "$REPO" --json comments 2>/dev/null); then
+    existing_count=$(echo "$comments_json" | jq -r --arg marker "$marker" '
+      (.comments // []) | map(select(.body | contains($marker))) | length
+    ' 2>/dev/null || echo "0")
+    [ -n "$existing_count" ] || existing_count=0
+  fi
+
+  # ラベル付け替え（既存 mark_issue_failed / pt_mark_diff_range_resolve_failed と同方針 /
+  # 1 コマンド原子的に発行）
+  gh issue edit "$NUMBER" --repo "$REPO" \
+    --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" --add-label "$LABEL_FAILED" || true
+
+  local body_header
+  if [ "$existing_count" -gt 0 ]; then
+    body_header="⚠️ 自動開発が失敗しました（${hostname_val} / モード: $MODE / 失敗 stage: per-task-post-marker-commits-detected / round=${round}）— **追記コメント**
+
+本 Issue には同一カテゴリ (\`per-task-post-marker-commits-detected\` / task=\`${task_id}\`) の失敗コメントが既に存在します。
+本コメントは状況が再発生したことを示す追記です。詳細な復旧手順は既存コメントを参照してください。"
+  else
+    body_header="⚠️ 自動開発が失敗しました（${hostname_val} / モード: $MODE / 失敗 stage: per-task-post-marker-commits-detected / round=${round}）"
+  fi
+
+  local body
+  body=$(cat <<EOF
+${body_header}
+
+## 失敗カテゴリ
+- カテゴリ: \`per-task-post-marker-commits-detected\`
+- 対象 task ID: \`${task_id}\`
+- 失敗 round: ${round}
+- 対象 marker SHA: \`${marker_sha}\`
+- post-marker SHA リスト（新しい順 / CSV）: \`${post_csv}\`
+- post-marker SHA リスト（詳細）:
+${post_bullets}
+- ログ: \`$LOG\`
+
+## 原因
+per-task Reviewer 起動前の safety net (\`pt_detect_post_marker_commits\`) が、当該 task の
+\`docs(tasks): mark ${task_id} as done\` marker commit (\`${marker_sha}\`) より後ろに、未レビューの
+commit が積まれている状態を検出しました。このまま Reviewer を起動すると range_end が marker
+で止まり、post-marker commit が判定対象から漏れる **silent range truncation** を引き起こすため、
+\`POST_MARKER_RECOVERY_MODE=fail-with-diagnostic\`（default）に従って Reviewer 起動前に停止しました
+（idd-codex #14 同型の failure mode 予防 / Issue #304）。
+
+Implementer 側で以下のいずれかに該当した可能性があります:
+
+- Reviewer reject / Debugger guidance 後の再実行で、修正 commit を旧 marker 後ろに積んだまま
+  marker を refresh しなかった
+- marker contract（marker は task の終端 commit / retry 時に refresh）に違反した順序で
+  marker commit を作成した
+
+## 復旧手順（重要 / データ損失リスク回避）
+
+**【重要】次サイクルで本ブランチの worktree が reset される可能性があります。**
+push 前の Developer commit が残っていれば、次サイクル前に必ず以下を実施してください:
+
+1. **push 前 commit の有無と現状の commit 列を確認**:
+   \`\`\`bash
+   cd <worktree-or-repo-dir>
+   git reflog --date=iso | head -50
+   git log --oneline ${BASE_BRANCH}..HEAD
+   git status
+   \`\`\`
+2. **push 前 commit がある場合は手動で push して保護**:
+   \`\`\`bash
+   git push origin <current-branch>
+   \`\`\`
+   または、reflog から拾い直して別ブランチに退避:
+   \`\`\`bash
+   git branch <rescue-branch-name> <reflog-sha>
+   git push origin <rescue-branch-name>
+   \`\`\`
+3. **marker commit を refresh**（marker を task の終端 commit に戻す）:
+   - 推奨 (a): 旧 marker を \`git reset --soft <marker^>\` で剥がし、修正 commit を含めた状態で
+     新 marker を末尾に作り直す
+   - 推奨 (b): \`git rebase -i ${BASE_BRANCH}\` で marker commit を tip に移動し、続けて
+     marker SHA を更新する
+   - いずれの場合も「\`docs(tasks): mark ${task_id} as done\` commit が \`${BASE_BRANCH}..HEAD\` の
+     最終 commit」になっていることを \`git log --oneline ${BASE_BRANCH}..HEAD\` で確認すること
+4. **修正完了後**: 修正 push を実施し、\`claude-failed\` ラベルを外すと watcher が次サイクルで
+   再 pickup する
+
+## Marker contract（再周知）
+
+per-task Implementer は以下の contract を厳守してください（詳細は
+\`repo-template/.claude/agents/developer.md\` の「per-task ループ下での Implementer の責務」節
+「Marker contract」subsection を参照）:
+
+- \`docs(tasks): mark <id> as done\` marker commit は、当該 task の **終端 commit**。
+  実装・テスト・learning 追記が完了した時点でのみ作成する
+- Reviewer reject / Debugger guidance 後の再実行では、修正 commit を旧 marker 後ろに残してはならない。
+  必要なら旧 marker を剥がして新 marker を末尾に積み直す（marker refresh）
+- 1 commit = 1 task ID（連記 \`mark 1 / 1.1 as done\` を作らない / 親 task 完了昇格は別 commit）
+
+## 切替 env（運用者向け / 通常は変更不要）
+
+- \`POST_MARKER_RECOVERY_MODE=fail-with-diagnostic\`（**default**）: 本コメントのような失敗扱いで停止
+- \`POST_MARKER_RECOVERY_MODE=extend-range\`: marker を捨てて HEAD まで range を拡張して
+  Reviewer を起動（marker contract 違反を黙って吸収するため、Implementer 側の修正契約が
+  弱くなる点に注意）
+
+${marker}
+EOF
+)
+
+  body="${body}
+
+問題を解決してから \`claude-failed\` ラベルを外してください。"
+
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
+}
+
+# ─── pt_post_docs_only_auto_refresh_comment <task_id> <round> <old_marker_sha> <new_range_end_sha> <post_marker_list> ───
+#
+# Issue #356: docs-only auto-refresh が発火したことを当該 Issue に 1 行の事実記録として残す
+# 専用ヘルパー（Req 1.3）。`pt_mark_post_marker_commits_detected` と異なりラベル付け替えは
+# 行わず、`claude-failed` も付与しない（auto-refresh 続行のため）。
+#
+# 重複コメント抑制:
+#   - HTML コメント marker `<!-- idd-claude:per-task-post-marker-docs-only-auto-refresh:#<issue>:<task> -->`
+#     を本文末尾に埋め込み、当該 Issue に同一 marker のコメントが既存なら新規投稿を skip する
+#     （既存コメント末尾への追記もしない / 同一 task で auto-refresh が複数回発火した場合の
+#     コメント増殖を抑制）。
+#
+# Args:
+#   $1 = task_id
+#   $2 = round
+#   $3 = old_marker_sha (auto-refresh 前の marker SHA)
+#   $4 = new_range_end_sha (auto-refresh 後の new range_end = HEAD SHA)
+#   $5 = post_marker_list (改行区切りの post-marker SHA 列)
+#
+# 副作用:
+#   - 既存マーカー無し: 1 件 Issue コメントを投稿
+#   - 既存マーカー有り: 何もしない（rc=0）
+#
+# Requirements: Issue #356 Req 1.3, NFR 1.3, NFR 2.2
+pt_post_docs_only_auto_refresh_comment() {
+  local task_id="$1"
+  local round="$2"
+  local old_marker_sha="$3"
+  local new_range_end_sha="$4"
+  local post_marker_list="$5"
+  local marker="<!-- idd-claude:per-task-post-marker-docs-only-auto-refresh:#${NUMBER}:${task_id} -->"
+
+  local post_csv post_bullets
+  post_csv=$(printf '%s' "$post_marker_list" | tr '\n' ',' | sed 's/,$//')
+  post_bullets=$(printf '%s\n' "$post_marker_list" | sed '/^$/d' | sed 's/^/  - `/' | sed 's/$/`/')
+
+  # 重複コメント抑制
+  local comments_json existing_count=0
+  if comments_json=$(gh issue view "$NUMBER" --repo "$REPO" --json comments 2>/dev/null); then
+    existing_count=$(echo "$comments_json" | jq -r --arg marker "$marker" '
+      (.comments // []) | map(select(.body | contains($marker))) | length
+    ' 2>/dev/null || echo "0")
+    [ -n "$existing_count" ] || existing_count=0
+  fi
+
+  if [ "$existing_count" -gt 0 ]; then
+    return 0
+  fi
+
+  local body
+  body=$(cat <<EOF
+ℹ️ per-task post-marker docs-only auto-refresh が発火しました（task=\`${task_id}\` / round=${round}）。
+
+\`docs(tasks): mark ${task_id} as done\` marker commit (\`${old_marker_sha}\`) より後ろに、
+docs-only allowlist（\`POST_MARKER_DOCS_ALLOWLIST\` 既定: \`**/impl-notes.md,docs/specs/**/*.md\`）
+内のファイルのみで構成される commit が積まれている状態を検出したため、
+marker を HEAD (\`${new_range_end_sha}\`) まで auto-refresh して per-task Reviewer を続行します。
+本コメントは事実記録のみであり、自動開発は停止していません。
+
+- 旧 marker SHA: \`${old_marker_sha}\`
+- 新 range_end SHA: \`${new_range_end_sha}\`
+- post-marker SHA リスト（新しい順 / CSV）: \`${post_csv}\`
+- post-marker SHA リスト（詳細）:
+${post_bullets}
+
+参考: 本判定は Issue #356 の docs-only auto-refresh 機能によるものです。
+${marker}
+EOF
+)
+
+  gh issue comment "$NUMBER" --repo "$REPO" --body "$body" || true
+}
+
+# ─── run_per_task_loop ───
+#
+# Stage A の代替実体。未完了 task を numeric ID 順に 1 件ずつ Implementer + Reviewer で
+# 消化する dispatcher。
+#
+# 戻り値:
+#   0  = 全 task 消化成功（Stage A 完了相当）/ pending 0 件で no-op /
+#        tasks.md 不在の防御ガード（呼び出し側で Stage A fallback 済みの想定 / #166）
+#   1  = Implementer / Reviewer 失敗で claude-failed 付与済み（呼び出し側は伝搬 return 1）
+#
+# 副作用:
+#   - 成功時: 全 task が `- [x]` 化 + `docs(tasks): mark <id> as done` commit が積まれる
+#   - 失敗時: `mark_issue_failed` 経由で claude-failed 付与済
+#   - quota 超過時: 呼び出し側に return 99 相当で伝搬する代わりに return 0（既存 Stage A
+#     の quota パスと同じく watcher は正常終了し、Resume Processor が次 tick で再開）
+#
+# ─── pt_mark_no_progress_failed <task_id> <stage_phase> <check_rc> ───
+#
+# per-task Implementer が rc=0 で終了したにもかかわらず対象 task の
+# `- [ ] → - [x]` 遷移が検出できなかった場合に `claude-failed` 化する専用ヘルパー
+# （Issue #263）。`mark_issue_failed` を流用し、stage 識別子と Issue コメント本文だけを
+# 本機能用に組み立てる（NFR 1.2: 既存失敗ハンドラの挙動を変更せず流用のみ）。
+#
+# Args:
+#   $1 = task_id (例: `1.2`)
+#   $2 = stage_phase (`initial` / `blocked-redo` / `round2-redo` / `round3-redo`)
+#        Implementer 呼出 4 箇所のどの段階で進捗ゼロが検出されたかを識別する
+#   $3 = check_rc (`1` = `- [ ]` のまま / `2` = 該当行不在 or tasks.md 不在)
+#
+# 副作用（mark_issue_failed と等価 / Req 2.1, 2.2, 4.x, NFR 1.2）:
+#   1. claude-claimed / claude-picked-up を除去し claude-failed を付与
+#   2. 復旧手順付き Issue コメントを 1 件投稿
+#   3. watcher ログに grep 可能な 1 行を出力（呼び出し側で pt_log を発射する想定）
+#
+# Requirements: #263 Req 2.1, 2.2, 2.5, 4.1, 4.2, 4.3, 4.4, 4.5, 4.6, NFR 1.2, NFR 2.1
+pt_mark_no_progress_failed() {
+  local task_id="$1"
+  local stage_phase="$2"
+  local check_rc="$3"
+
+  local cause_desc
+  case "$check_rc" in
+    2)
+      cause_desc="tasks.md 上で task=\`${task_id}\` に対応する \`- [ ]\` / \`- [x]\` 行が見つかりませんでした（tasks.md 読取失敗 / 該当行不在）。fail-safe として無限ループに入る前に停止します（Req 5.3）。"
+      ;;
+    *)
+      cause_desc="tasks.md 上の task=\`${task_id}\` 行が \`- [ ]\` のまま \`- [x]\` に遷移していません。Implementer が編集失敗（置換競合・コンパイルエラー等）から復旧できなかった可能性があります。"
+      ;;
+  esac
+
+  local extra_body
+  extra_body=$(cat <<EOF
+## 失敗カテゴリ
+- カテゴリ: \`per-task-implementer-no-progress\`
+- 対象 task ID: \`${task_id}\`
+- 検出フェーズ: \`${stage_phase}\` (Implementer 呼出 4 箇所のいずれか: initial / blocked-redo / round2-redo / round3-redo)
+- 判定根拠: pt_check_task_completed rc=${check_rc}
+- ログ: \`$LOG\`
+
+## 原因
+per-task Implementer が rc=0（正常終了扱い）で終了したにもかかわらず、対象 task の
+\`- [ ]\` → \`- [x]\` 遷移が \`tasks.md\` で確認できませんでした。${cause_desc}
+
+このまま再開すると次 tick の dispatcher が同じ Issue を再 pickup し、Implementer が同じ
+失敗を rc=0 で繰り返す無限リトライループに陥るため、自動再開を停止しました（Issue #263）。
+
+## 次の手順
+1. watcher ログ \`$LOG\` を確認し、当該 task=\`${task_id}\` の Implementer 実行で
+   何が失敗していたか（編集競合・テスト失敗・prompt 不備等）を特定する
+2. 必要なら手動で修正 commit を積み、tasks.md の該当行を \`- [x]\` に更新する
+   （または Architect 差し戻し / Issue 分割を判断する）
+3. 復旧操作完了後、Issue から \`claude-failed\` ラベルを外すと watcher が次サイクルで
+   再 pickup する
+EOF
+)
+
+  # grep 可能ログを 1 行出力（NFR 2.1, NFR 2.2 / 既存 per-task ログ書式と整合）
+  pt_log "task=${task_id} implementer end rc=0 progress=zero phase=${stage_phase} check_rc=${check_rc} → claude-failed (per-task-implementer-no-progress)" >> "$LOG"
+
+  mark_issue_failed "per-task-implementer-no-progress" "$extra_body"
+}
+
+# Requirements: 2.1, 2.6, 2.7, 3.4, 3.5, 3.6, 3.7, 5.1, 5.2
+run_per_task_loop() {
+  local tasks_md="$REPO_DIR/$SPEC_DIR_REL/tasks.md"
+  # tasks.md 不在の事前分岐は呼び出し側 run_impl_pipeline() の Stage A 分岐で実施済み
+  # （#166: tasks.md 不在なら per-task ループへ入らず従来 Stage A へフォールバックする）。
+  # 本ブロックは万一直接呼び出し等で到達した場合の防御ガード。Issue を失敗扱いせず
+  # （claude-failed を付けず）no-op return 0 で抜け、メッセージと実装の乖離を作らない。
+  if [ ! -f "$tasks_md" ]; then
+    pt_warn "tasks.md が存在しません: $tasks_md → per-task ループを起動せず no-op return 0（呼び出し側で Stage A fallback 済みの想定）"
+    return 0
+  fi
+
+  # pending タスク一覧
+  local pending
+  pending=$(pt_extract_pending_tasks "$tasks_md" || true)
+  if [ -z "$pending" ]; then
+    pt_log "pending tasks=0 → no-op return 0 (Stage A 完了相当)" >> "$LOG"
+    return 0
+  fi
+
+  local pending_count
+  pending_count=$(printf '%s\n' "$pending" | wc -l | tr -d '[:space:]')
+  pt_log "pending tasks=$pending_count" >> "$LOG"
+
+  # PER_TASK_MAX_TASKS 超過チェック（暴走防止）
+  local max_tasks="${PER_TASK_MAX_TASKS:-0}"
+  if [ -n "$max_tasks" ] && [ "$max_tasks" != "0" ] && [ "$pending_count" -gt "$max_tasks" ]; then
+    pt_warn "pending tasks=$pending_count が PER_TASK_MAX_TASKS=$max_tasks を超過 → claude-failed"
+    mark_issue_failed "per-task-max-tasks-exceeded" "per-task ループの安全装置: 未完了 task 件数（${pending_count}）が \`PER_TASK_MAX_TASKS=${max_tasks}\` を超過したため、暴走防止のためループ起動前に停止しました。tasks.md を縮小するか \`PER_TASK_MAX_TASKS\` を引き上げてください。"
+    return 1
+  fi
+
+  # 各 task をループで消化
+  local task_id
+  while IFS= read -r task_id; do
+    [ -n "$task_id" ] || continue
+
+    # ─── #313: Context Map 生成（標準機能 / Req 2.1, 1.4） ───
+    # per-task ループ配下（`PER_TASK_LOOP_ENABLED=true`）では `cm_enabled` が常に
+    # rc=0 を返し、各 task で context-map.md を生成する。失敗は `cm_warn` で吸収し
+    # per-task ループは継続
+    # させる（NFR 2.3「per-task ループを止めない」）。call site をループ冒頭に置く
+    # ことで Implementer / Reviewer の双方が同じ context-map.md を参照できる。
+    if cm_enabled; then
+      cm_generate "$task_id" || cm_warn "task=$task_id context-map.md 生成で警告（per-task ループは継続）"
+    fi
+
+    # Issue #305 task 6: 当該 task の前 cycle 残骸 snapshot を防御的に削除
+    # （/tmp の OS cleanup を待たず冒頭で除去。新規 snapshot 取得時は ts で
+    # 名前衝突を回避するため実害はないが、長期 watcher 稼働で /tmp が肥大化
+    # するのを抑止する）
+    rm -f "/tmp/idd-claude-${REPO_SLUG}-${NUMBER}-pt-snapshot-${task_id}-"* 2>/dev/null || true
+
+    # ── round=1: Implementer + Reviewer ──
+    local impl_rc=0
+    run_per_task_implementer "$task_id" || impl_rc=$?
+    case "$impl_rc" in
+      0)
+        # Issue #263: 進捗ゼロ検出。Implementer が rc=0 を返したが対象 task の checkbox が
+        # `- [ ] → - [x]` に遷移していない場合、次 tick で同じ Issue が再 pickup されて
+        # 同じ Implementer 失敗を rc=0 で繰り返す無限リトライループに陥るため、ここで
+        # claude-failed 化して停止する。tasks.md 不在は run_per_task_loop 冒頭で防御済み
+        # だが、grep no-match や該当行不在を fail-safe として捕捉する（Req 1.1, 1.3, 5.3）。
+        local _pt_check_rc=0
+        pt_check_task_completed "$tasks_md" "$task_id" || _pt_check_rc=$?
+        if [ "$_pt_check_rc" != "0" ]; then
+          echo "❌ #$NUMBER: per-task Implementer (task=$task_id, phase=initial) rc=0 だが進捗ゼロ検出 (check_rc=$_pt_check_rc) → claude-failed (per-task-implementer-no-progress)" | tee -a "$LOG"
+          pt_mark_no_progress_failed "$task_id" "initial" "$_pt_check_rc"
+          return 1
+        fi
+        ;;
+      99)
+        # quota 超過: 既存 #66 規約に従い watcher は正常終了。Resume Processor が次 tick で再開
+        echo "⏸️ #$NUMBER: per-task Implementer (task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+        return 0
+        ;;
+      *)
+        echo "❌ #$NUMBER: per-task Implementer (task=$task_id) 失敗 → claude-failed" | tee -a "$LOG"
+        mark_issue_failed "per-task-implementer-failed" "per-task ループの Implementer が task=\`${task_id}\` で失敗しました（claude 非 0 exit）。残りの未完了 task は処理しません。\`$LOG\` を確認してください。"
+        return 1
+        ;;
+    esac
+
+    # ── Phase 3 (#22) Debugger Gate: per-task Implementer 完了直後 BLOCKED 検出 ──
+    # `DEBUGGER_ENABLED=true` 時のみ、当該 task の Implementer が impl-notes.md に
+    # `BLOCKED: <reason>` を出力していたら task 単位で Debugger を 1 回起動して
+    # Implementer 再起動 → 通常 Reviewer Round 1 サイクルに合流する（Req 6.2, 6.3）。
+    # 既起動なら直行 claude-failed（Req 5.2）。OFF 時は本ブロックが構造的に skip。
+    if [ "${DEBUGGER_ENABLED:-false}" = "true" ]; then
+      local _pt_blocked_reason=""
+      if _pt_blocked_reason=$(detect_blocked_marker "$REPO_DIR/$SPEC_DIR_REL/impl-notes.md"); then
+        if detect_debugger_already_invoked "$task_id"; then
+          dbg_log "trigger=blocked issue=#${NUMBER} task=${task_id} reason=\"${_pt_blocked_reason}\" result=skipped reason=debugger-already-invoked" >> "$LOG"
+          echo "❌ #$NUMBER: per-task BLOCKED 宣言検出 (task=$task_id) だが Debugger 既起動 → claude-failed (Req 5.2)" | tee -a "$LOG"
+          mark_issue_failed "per-task-debugger-blocked-but-invoked" "per-task ループの Developer が task=\`${task_id}\` で \`BLOCKED:\` 行を出力しましたが、本 task では既に Debugger が 1 回起動済みのため再起動を抑止し人間判断に委ねます（Req 5.1, 5.2, 6.3）。
+
+- 対象 task ID: ${task_id}
+- BLOCKED reason: ${_pt_blocked_reason}
+- 既存 Debugger Fix Plan: \`${SPEC_DIR_REL}/debugger-notes.md\` の \`## Task ${task_id}\` セクション
+- impl-notes.md: \`${SPEC_DIR_REL}/impl-notes.md\`
+
+\`$LOG\` を確認し、Fix Plan の追加修正 / 別 Issue 切り出し等を判断してください。"
+          return 1
+        fi
+
+        echo "🐛 #$NUMBER: per-task Developer BLOCKED 宣言検出 (task=$task_id) → Debugger Gate 起動" | tee -a "$LOG"
+        dbg_log "trigger=blocked issue=#${NUMBER} task=${task_id} reason=\"${_pt_blocked_reason}\" start" >> "$LOG"
+        local _pt_dbg_bl_rc=0
+        run_debugger_stage "blocked" "$task_id" "" || _pt_dbg_bl_rc=$?
+        case "$_pt_dbg_bl_rc" in
+          99)
+            echo "⏸️ #$NUMBER: Debugger (task=$task_id / BLOCKED 経路) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+            return 0
+            ;;
+          0)
+            echo "✅ #$NUMBER: Debugger (task=$task_id / BLOCKED 経路) 完了 → per-task Implementer 再起動" | tee -a "$LOG"
+            ;;
+          *)
+            return 1
+            ;;
+        esac
+
+        # Implementer 再起動（task 単位 / Fix Plan は impl-notes.md / debugger-notes.md を Implementer が読む）
+        local impl_bl_rc=0
+        run_per_task_implementer "$task_id" || impl_bl_rc=$?
+        case "$impl_bl_rc" in
+          0)
+            # Issue #263: BLOCKED 経路再実行後も進捗ゼロのまま rc=0 で抜けるケースを検出。
+            # 通常の Reviewer Round 1 に合流させる前に、対象 task の `- [ ] → - [x]` 遷移を
+            # 機械検証する（Req 1.3 / 全 4 箇所適用）。
+            local _pt_check_bl_rc=0
+            pt_check_task_completed "$tasks_md" "$task_id" || _pt_check_bl_rc=$?
+            if [ "$_pt_check_bl_rc" != "0" ]; then
+              echo "❌ #$NUMBER: per-task Implementer (BLOCKED 経路再実行 / task=$task_id, phase=blocked-redo) rc=0 だが進捗ゼロ検出 (check_rc=$_pt_check_bl_rc) → claude-failed (per-task-implementer-no-progress)" | tee -a "$LOG"
+              pt_mark_no_progress_failed "$task_id" "blocked-redo" "$_pt_check_bl_rc"
+              return 1
+            fi
+            ;;
+          99)
+            echo "⏸️ #$NUMBER: per-task Implementer (BLOCKED 経路再実行 / task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+            return 0
+            ;;
+          *)
+            echo "❌ #$NUMBER: per-task Implementer (BLOCKED 経路再実行 / task=$task_id) 失敗 → claude-failed" | tee -a "$LOG"
+            mark_issue_failed "per-task-implementer-blocked-redo-failed" "per-task ループの BLOCKED 経路 Implementer 再実行が task=\`${task_id}\` で失敗しました（claude 非 0 exit）。\`$LOG\` を確認してください。"
+            return 1
+            ;;
+        esac
+      fi
+    fi
+
+    # Issue #270: 親タスク完了マーク commit のみで構成される task の Reviewer 起動を抑止する。
+    # 親タスク（子タスクを 1 件以上持つ task）かつ diff range の変更が `tasks.md` のみ かつ
+    # その変更が当該 task ID の checkbox flip のみ なら、Reviewer は本来レビュー対象を持たず
+    # `review-notes.md` を書き出さないため `parse-failed` → `claude-failed` を引き起こす。
+    # 該当する場合のみ Reviewer 起動をスキップし approve 扱い（rev_rc=0）で続行する。
+    # 通常タスク / 子タスク / 異常系（diff range 解決失敗等）は本判定を bypass し従来経路へ。
+    local rev_rc=0
+    if pt_should_skip_reviewer "$task_id" >> "$LOG"; then
+      rev_rc=0
+    else
+      run_per_task_reviewer "$task_id" 1 || rev_rc=$?
+    fi
+    case "$rev_rc" in
+      0)
+        # approve → 次 task へ
+        # Issue #349 Req 3.1: per-task Reviewer round=1 approve → claude-review=success を publish
+        publish_claude_review_status 1 || true
+        ;;
+      99)
+        echo "⏸️ #$NUMBER: per-task Reviewer (task=$task_id, round=1) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+        return 0
+        ;;
+      1)
+        # reject 1 回目 → Implementer 再起動 + Reviewer round=2
+        # Issue #349 Req 3.2: per-task Reviewer round=1 reject → claude-review=failure を publish
+        publish_claude_review_status 1 || true
+        echo "🔁 #$NUMBER: per-task Reviewer (task=$task_id, round=1) reject → Implementer 再実行" | tee -a "$LOG"
+
+        # Issue #305 task 6: 連続 reject fail-fast 用の prev snapshot 取得 +
+        # round=2 redo Implementer 起動直前の HEAD SHA を記録（Req 3.1）。
+        # snapshot 取得失敗時は空文字が返り、pt_check_fail_fast 側で
+        # prev-snapshot-missing として不成立扱いとなる（Req 3.4 安全側）。
+        # git rev-parse 失敗時も `|| echo ""` で空文字に倒し、pt_check_fail_fast
+        # 側で git-diff-failed 経由 return 1（既存 Debugger Gate 経路に進む）。
+        local _pt_ff_prev_snapshot _pt_ff_sha_before
+        _pt_ff_prev_snapshot="$(pt_snapshot_review_notes "$task_id" 1)"
+        _pt_ff_sha_before="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+
+        local impl2_rc=0
+        run_per_task_implementer_redo "$task_id" "after-round1" || impl2_rc=$?
+        case "$impl2_rc" in
+          0)
+            # Issue #263: Reviewer reject 後の Implementer 再実行も rc=0 で抜けたが進捗ゼロ
+            # のままだと、後段 Reviewer round=2 が同じ未完了状態を再 reject → 同じ無限
+            # ループに陥る。round=2 起動前にここで停止する（Req 1.3）。
+            local _pt_check_r2_rc=0
+            pt_check_task_completed "$tasks_md" "$task_id" || _pt_check_r2_rc=$?
+            if [ "$_pt_check_r2_rc" != "0" ]; then
+              echo "❌ #$NUMBER: per-task Implementer 再実行 (task=$task_id, phase=round2-redo) rc=0 だが進捗ゼロ検出 (check_rc=$_pt_check_r2_rc) → claude-failed (per-task-implementer-no-progress)" | tee -a "$LOG"
+              pt_mark_no_progress_failed "$task_id" "round2-redo" "$_pt_check_r2_rc"
+              return 1
+            fi
+            ;;
+          99)
+            echo "⏸️ #$NUMBER: per-task Implementer 再実行 (task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+            return 0
+            ;;
+          *)
+            echo "❌ #$NUMBER: per-task Implementer 再実行 (task=$task_id) 失敗 → claude-failed" | tee -a "$LOG"
+            mark_issue_failed "per-task-implementer-redo-failed" "per-task ループの Implementer 再実行が task=\`${task_id}\` で失敗しました（Reviewer reject 後の再起動 / claude 非 0 exit）。\`$LOG\` を確認してください。"
+            return 1
+            ;;
+        esac
+
+        local rev2_rc=0
+        run_per_task_reviewer "$task_id" 2 || rev2_rc=$?
+        case "$rev2_rc" in
+          0)
+            # round=2 approve → 次 task へ
+            # Issue #349 Req 3.1: per-task Reviewer round=2 approve → claude-review=success
+            publish_claude_review_status 2 || true
+            ;;
+          99)
+            echo "⏸️ #$NUMBER: per-task Reviewer (task=$task_id, round=2) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+            return 0
+            ;;
+          1)
+            # Issue #305 task 6: 連続 reject + テスト差分なしの fail-fast 判定
+            # （Debugger Gate 判定の前 / Req 3.2 / 3.3）。成立時は Debugger Gate
+            # 経由 round=3 redo に進まず即 claude-failed 化して turn 予算消費を
+            # 停止する。不成立時は既存 Debugger Gate / per-task-reviewer-reject2
+            # 経路へ進む（Req 3.4 / 既存挙動温存）。
+            local _pt_ff_sha_after _pt_ff_out _pt_ff_rc=0
+            _pt_ff_sha_after="$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || echo "")"
+            _pt_ff_out="$(pt_check_fail_fast "$task_id" \
+              "$_pt_ff_prev_snapshot" \
+              "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" \
+              "$_pt_ff_sha_before" \
+              "$_pt_ff_sha_after" 2>&1)" || _pt_ff_rc=$?
+            # pt_check_fail_fast の stdout（grep 可能 1 行）を LOG に転記
+            # （Physical Data Model 行 528-530 / NFR 3.1）
+            if [ -n "$_pt_ff_out" ]; then
+              printf '[%s] [%s] per-task: %s\n' "$(date '+%F %T')" "$REPO" "$_pt_ff_out" >> "$LOG"
+            fi
+            if [ "$_pt_ff_rc" = "0" ]; then
+              # fail-fast 成立 → category / target を stdout から再抽出して
+              # pt_mark_fail_fast_failed に渡し claude-failed 化
+              local _pt_ff_cat _pt_ff_tgt
+              _pt_ff_cat="$(printf '%s' "$_pt_ff_out" | sed -n 's/.*category=\([^ ]*\).*/\1/p')"
+              _pt_ff_tgt="$(printf '%s' "$_pt_ff_out" | sed -n 's/.*target=\([^ ]*\).*/\1/p')"
+              echo "❌ #$NUMBER: per-task fail-fast 検出 (task=$task_id, category=${_pt_ff_cat:-unknown}, target=${_pt_ff_tgt:-unknown}) → claude-failed (per-task-implementer-fail-fast-loop)" | tee -a "$LOG"
+              pt_mark_fail_fast_failed "$task_id" "${_pt_ff_cat:-unknown}" "${_pt_ff_tgt:-unknown}"
+              return 1
+            fi
+            # fail-fast 不成立 → 既存 Debugger Gate 経路にそのまま進む（Req 3.4）
+            # Issue #349 Req 3.2: per-task Reviewer round=2 reject → claude-review=failure
+            # （fail-fast 成立時は既に return 1 済 / 不成立時のみここに到達）
+            publish_claude_review_status 2 || true
+
+            # 再 reject → Phase 3 (#22) Debugger Gate に分岐 (Req 6.1, 6.3)、
+            # 未対応なら claude-failed + Issue コメント
+            if [ "${DEBUGGER_ENABLED:-false}" = "true" ] && ! detect_debugger_already_invoked "$task_id"; then
+              echo "🐛 #$NUMBER: per-task Reviewer (task=$task_id, round=2) reject → Debugger Gate 起動（task scope）" | tee -a "$LOG"
+              local _pt_dbg_rc=0
+              run_debugger_stage "round2-reject" "$task_id" "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" || _pt_dbg_rc=$?
+              case "$_pt_dbg_rc" in
+                99)
+                  echo "⏸️ #$NUMBER: Debugger (task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+                  return 0
+                  ;;
+                0)
+                  echo "✅ #$NUMBER: Debugger (task=$task_id) 完了 → per-task Implementer 再起動 + Reviewer round=3" | tee -a "$LOG"
+                  ;;
+                *)
+                  # Debugger 異常終了 → mark_issue_failed 既発射
+                  return 1
+                  ;;
+              esac
+
+              # Implementer 再起動（Issue #305 task 4 で `run_per_task_implementer_redo` に置換。
+              # `redo_mode=after-debugger` で review-notes.md の Findings と debugger-notes.md
+              # の `## Task <id>` セクションを prompt に inline 注入する。これにより従来
+              # `### Task <id>` の自発参照に依拠していた弱い情報注入を、prompt 内 inline 運搬に
+              # 切り替える）
+              local impl3_rc=0
+              run_per_task_implementer_redo "$task_id" "after-debugger" || impl3_rc=$?
+              case "$impl3_rc" in
+                0)
+                  # Issue #263: Debugger 経由 Implementer 再実行も rc=0 で抜けたが進捗ゼロ
+                  # のままだと、Reviewer round=3 が同じ未完了状態を reject 確定し、結果として
+                  # Debugger Gate 終端の round=3 経路で `per-task-reviewer-reject3` を出すが、
+                  # 進捗ゼロが原因であることを stage 識別子で区別できないため、ここで
+                  # `per-task-implementer-no-progress` として停止する（Req 1.3）。
+                  local _pt_check_r3_rc=0
+                  pt_check_task_completed "$tasks_md" "$task_id" || _pt_check_r3_rc=$?
+                  if [ "$_pt_check_r3_rc" != "0" ]; then
+                    echo "❌ #$NUMBER: per-task Implementer 3 回目 (task=$task_id, phase=round3-redo / Debugger 経由) rc=0 だが進捗ゼロ検出 (check_rc=$_pt_check_r3_rc) → claude-failed (per-task-implementer-no-progress)" | tee -a "$LOG"
+                    pt_mark_no_progress_failed "$task_id" "round3-redo" "$_pt_check_r3_rc"
+                    return 1
+                  fi
+                  ;;
+                99)
+                  echo "⏸️ #$NUMBER: per-task Implementer 3 回目 (task=$task_id) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+                  return 0
+                  ;;
+                *)
+                  echo "❌ #$NUMBER: per-task Implementer 3 回目 (task=$task_id / Debugger 経由) 失敗 → claude-failed" | tee -a "$LOG"
+                  mark_issue_failed "per-task-implementer-pp-failed" "per-task ループの Debugger 経由 Implementer 再実行が task=\`${task_id}\` で失敗しました（claude 非 0 exit）。\`$LOG\` を確認してください。"
+                  return 1
+                  ;;
+              esac
+
+              # Reviewer Round 3（task 単位）
+              local rev3_rc=0
+              run_per_task_reviewer "$task_id" 3 || rev3_rc=$?
+              case "$rev3_rc" in
+                0)
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=approve" >> "$LOG"
+                  # approve → 次 task へ
+                  # Issue #349 Req 3.1: per-task Reviewer round=3 approve → claude-review=success
+                  publish_claude_review_status 3 || true
+                  ;;
+                99)
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=quota-exceeded" >> "$LOG"
+                  echo "⏸️ #$NUMBER: per-task Reviewer (task=$task_id, round=3) で quota 超過検出 → needs-quota-wait" | tee -a "$LOG"
+                  return 0
+                  ;;
+                1)
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=reject" >> "$LOG"
+                  # Issue #349 Req 3.2: per-task Reviewer round=3 reject → claude-review=failure
+                  publish_claude_review_status 3 || true
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) reject → claude-failed (Req 3.5)" | tee -a "$LOG"
+                  local parsed3pt cat3pt tgt3pt
+                  parsed3pt=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
+                  cat3pt=$(echo "$parsed3pt" | cut -f2)
+                  tgt3pt=$(echo "$parsed3pt" | cut -f3)
+                  publish_terminal_failure_artifacts "per-task-reviewer-reject3" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) も reject を出したため、自動 iteration を打ち切り人間判断に委ねます（Debugger は 1 task あたり 1 回のみ起動するため再起動しません / Req 3.5, 6.3）。
+
+- 対象 task ID: ${task_id}
+- 対象 requirement ID: ${tgt3pt:-(unknown)}
+- reject カテゴリ: ${cat3pt:-(unknown)}
+- Reviewer 判定詳細: \`${SPEC_DIR_REL}/review-notes.md\` を参照
+- Debugger Fix Plan: \`${SPEC_DIR_REL}/debugger-notes.md\` を参照
+
+### 次の手順
+1. review-notes.md / debugger-notes.md / watcher ログ \`$LOG\` を読み、Reviewer 判定が妥当か確認
+2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
+3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
+                  return 1
+                  ;;
+                3)
+                  # diff-range-resolve-failed (Issue #164) → 専用の復旧手順付き失敗ハンドラ
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=diff-range-resolve-failed" >> "$LOG"
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) diff range 解決失敗 → claude-failed (diff-range-resolve-failed)" | tee -a "$LOG"
+                  pt_mark_diff_range_resolve_failed "$task_id" 3
+                  return 1
+                  ;;
+                4)
+                  # Issue #296 Req 2.3 / Req 4.2, 4.3 / NFR 2.2: ファイル不在 + 1 回限定リトライ後も生成されず
+                  # → `per-task-reviewer-missing-file` カテゴリで `claude-failed`（round=3 / Debugger 経由）。
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=missing-file-after-retry" >> "$LOG"
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) ファイル不在（リトライ後も未生成）→ claude-failed (per-task-reviewer-missing-file)" | tee -a "$LOG"
+                  publish_terminal_failure_artifacts "per-task-reviewer-missing-file" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+                  return 1
+                  ;;
+                5)
+                  # per-task-post-marker-commits-detected (Issue #304) → marker 後の未レビュー
+                  # commit を検出し fail-with-diagnostic で停止（Debugger 経由 round=3）。
+                  # `run_per_task_reviewer` 内で `pt_mark_post_marker_commits_detected` 済み。
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=per-task-post-marker-commits-detected" >> "$LOG"
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) marker 後の未レビュー commit を検出 → claude-failed (per-task-post-marker-commits-detected)" | tee -a "$LOG"
+                  return 1
+                  ;;
+                6)
+                  # Issue #442 Req 3.1, 3.2, 3.4, 3.5: 拡張リトライ後も turn 切れ枯渇 →
+                  # `per-task-reviewer-max-turns-exhausted` カテゴリで `claude-failed`（Debugger 経由 round=3）。
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=max-turns-exhausted" >> "$LOG"
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) turn 切れ枯渇（拡張リトライ後も未到達）→ claude-failed (per-task-reviewer-max-turns-exhausted)" | tee -a "$LOG"
+                  publish_terminal_failure_artifacts "per-task-reviewer-max-turns-exhausted" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) が turn 上限到達（\`error_max_turns\`）で終了し、拡張 turn 予算（\`REVIEWER_MAX_TURNS_EXTENDED\`=${REVIEWER_MAX_TURNS_EXTENDED}）での 1 回再実行後もなお turn 切れで verdict（\`RESULT:\` 行）に到達できませんでした（Issue #442）。claude crash / ファイル不在 / code reject とは異なり、turn 不足が原因です。大規模 spec / diff の場合は \`REVIEWER_MAX_TURNS\` / \`REVIEWER_MAX_TURNS_EXTENDED\` の引き上げを検討してください。\`$LOG\` を確認してください。"
+                  return 1
+                  ;;
+                *)
+                  dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} round3 result=error" >> "$LOG"
+                  echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=3) 異常終了 → claude-failed" | tee -a "$LOG"
+                  publish_terminal_failure_artifacts "per-task-reviewer-error" "per-task ループの Debugger 経由 Reviewer (task=\`${task_id}\`, round=3) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+                  return 1
+                  ;;
+              esac
+            else
+              # DEBUGGER_ENABLED != "true" もしくは task sentinel 既起動 → 既存 per-task-reviewer-reject2 経路
+              if [ "${DEBUGGER_ENABLED:-false}" = "true" ]; then
+                dbg_log "trigger=round2-reject issue=#${NUMBER} task=${task_id} result=skipped reason=debugger-already-invoked" >> "$LOG"
+              fi
+              echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) reject → claude-failed" | tee -a "$LOG"
+              local parsed2 cat2 tgt2
+              parsed2=$(parse_review_result "$REPO_DIR/$SPEC_DIR_REL/review-notes.md" 2>/dev/null || echo "")
+              cat2=$(echo "$parsed2" | cut -f2)
+              tgt2=$(echo "$parsed2" | cut -f3)
+              publish_terminal_failure_artifacts "per-task-reviewer-reject2" "per-task ループの Reviewer が task=\`${task_id}\` で 2 回連続 reject を出したため、残りの未完了 task の処理を停止し人間判断に委ねます。
+
+- 対象 task ID: ${task_id}
+- 対象 requirement ID: ${tgt2:-(unknown)}
+- reject カテゴリ: ${cat2:-(unknown)}
+- Reviewer 判定詳細: \`${SPEC_DIR_REL}/review-notes.md\` を参照
+
+### 次の手順
+1. review-notes.md と watcher ログ \`$LOG\` を読み、Reviewer 判定が妥当か確認
+2. 妥当なら手動で修正 commit を積み、\`claude-failed\` を外す
+3. Reviewer 判定が誤りなら、Issue コメントで Architect 差し戻しを提案"
+              return 1
+            fi
+            ;;
+          3)
+            # diff-range-resolve-failed (Issue #164) → 専用の復旧手順付き失敗ハンドラ
+            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) diff range 解決失敗 → claude-failed (diff-range-resolve-failed)" | tee -a "$LOG"
+            pt_mark_diff_range_resolve_failed "$task_id" 2
+            return 1
+            ;;
+          4)
+            # Issue #296 Req 2.3 / Req 4.2 / NFR 2.2: ファイル不在 + 1 回限定リトライ後も生成されず
+            # → `per-task-reviewer-missing-file` カテゴリで `claude-failed`（round=2）。
+            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) ファイル不在（リトライ後も未生成）→ claude-failed (per-task-reviewer-missing-file)" | tee -a "$LOG"
+            publish_terminal_failure_artifacts "per-task-reviewer-missing-file" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+            return 1
+            ;;
+          5)
+            # per-task-post-marker-commits-detected (Issue #304) → marker 後の未レビュー commit
+            # を検出し fail-with-diagnostic で停止。`run_per_task_reviewer` 内で
+            # `pt_mark_post_marker_commits_detected` 済みのため追加の Issue コメントは行わない。
+            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) marker 後の未レビュー commit を検出 → claude-failed (per-task-post-marker-commits-detected)" | tee -a "$LOG"
+            return 1
+            ;;
+          6)
+            # Issue #442 Req 3.1, 3.2, 3.4, 3.5: 拡張リトライ後も turn 切れ枯渇 →
+            # `per-task-reviewer-max-turns-exhausted` カテゴリで `claude-failed`（round=2）。
+            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) turn 切れ枯渇（拡張リトライ後も未到達）→ claude-failed (per-task-reviewer-max-turns-exhausted)" | tee -a "$LOG"
+            publish_terminal_failure_artifacts "per-task-reviewer-max-turns-exhausted" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が turn 上限到達（\`error_max_turns\`）で終了し、拡張 turn 予算（\`REVIEWER_MAX_TURNS_EXTENDED\`=${REVIEWER_MAX_TURNS_EXTENDED}）での 1 回再実行後もなお turn 切れで verdict（\`RESULT:\` 行）に到達できませんでした（Issue #442）。claude crash / ファイル不在 / code reject とは異なり、turn 不足が原因です。大規模 spec / diff の場合は \`REVIEWER_MAX_TURNS\` / \`REVIEWER_MAX_TURNS_EXTENDED\` の引き上げを検討してください。\`$LOG\` を確認してください。"
+            return 1
+            ;;
+          *)
+            echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=2) 異常終了 → claude-failed" | tee -a "$LOG"
+            publish_terminal_failure_artifacts "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=2) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+            return 1
+            ;;
+        esac
+        ;;
+      3)
+        # diff-range-resolve-failed (Issue #164) → 専用の復旧手順付き失敗ハンドラ
+        echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) diff range 解決失敗 → claude-failed (diff-range-resolve-failed)" | tee -a "$LOG"
+        pt_mark_diff_range_resolve_failed "$task_id" 1
+        return 1
+        ;;
+      4)
+        # Issue #296 Req 2.3 / Req 4.2 / NFR 2.2: ファイル不在 + 1 回限定リトライ後も生成されず
+        # → `per-task-reviewer-missing-file` カテゴリで `claude-failed`（round=1）。
+        echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) ファイル不在（リトライ後も未生成）→ claude-failed (per-task-reviewer-missing-file)" | tee -a "$LOG"
+        publish_terminal_failure_artifacts "per-task-reviewer-missing-file" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が rc=0 で終了しましたが、\`${SPEC_DIR_REL}/review-notes.md\` が同一 round 内の 1 回限定リトライ後も生成されませんでした（Issue #296 ファイル不在経路）。Reviewer subagent の Write 漏れが疑われます。\`$LOG\` を確認してください。"
+        return 1
+        ;;
+      5)
+        # per-task-post-marker-commits-detected (Issue #304) → marker 後の未レビュー commit
+        # を検出し、`POST_MARKER_RECOVERY_MODE=fail-with-diagnostic`（default）で停止。
+        # `run_per_task_reviewer` 内で `pt_mark_post_marker_commits_detected` 済みのため、
+        # ここでは追加の Issue コメント投稿は行わず、stdout / log 出力のみで停止する。
+        echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) marker 後の未レビュー commit を検出 → claude-failed (per-task-post-marker-commits-detected)" | tee -a "$LOG"
+        return 1
+        ;;
+      6)
+        # Issue #442 Req 3.1, 3.2, 3.4, 3.5: 拡張リトライ後も turn 切れ枯渇 → 区別された
+        # `per-task-reviewer-max-turns-exhausted` カテゴリで `claude-failed`（round=1）。
+        # per-task-reviewer-error（claude crash）/ per-task-reviewer-missing-file（ファイル不在）/
+        # code reject のいずれとも grep 区別可能。run-summary degraded は呼び出し側 Stage A の
+        # rs_scan_degraded_log で反映される（単発経路と非対称だが既存実装に合わせる）。
+        echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) turn 切れ枯渇（拡張リトライ後も未到達）→ claude-failed (per-task-reviewer-max-turns-exhausted)" | tee -a "$LOG"
+        publish_terminal_failure_artifacts "per-task-reviewer-max-turns-exhausted" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が turn 上限到達（\`error_max_turns\`）で終了し、拡張 turn 予算（\`REVIEWER_MAX_TURNS_EXTENDED\`=${REVIEWER_MAX_TURNS_EXTENDED}）での 1 回再実行後もなお turn 切れで verdict（\`RESULT:\` 行）に到達できませんでした（Issue #442）。claude crash / ファイル不在 / code reject とは異なり、turn 不足が原因です。大規模 spec / diff の場合は \`REVIEWER_MAX_TURNS\` / \`REVIEWER_MAX_TURNS_EXTENDED\` の引き上げを検討してください。\`$LOG\` を確認してください。"
+        return 1
+        ;;
+      *)
+        # round=1 reviewer error → claude-failed
+        echo "❌ #$NUMBER: per-task Reviewer (task=$task_id, round=1) 異常終了 → claude-failed" | tee -a "$LOG"
+        publish_terminal_failure_artifacts "per-task-reviewer-error" "per-task ループの Reviewer (task=\`${task_id}\`, round=1) が異常終了しました（claude crash / parse 失敗）。\`$LOG\` を確認してください。"
+        return 1
+        ;;
+    esac
+  done <<<"$pending"
+
+  pt_log "all pending tasks completed (count=$pending_count) → return 0" >> "$LOG"
+  return 0
 }
