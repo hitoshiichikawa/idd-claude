@@ -80,7 +80,8 @@ idd-claude/
     │   │   ├── auto-merge.sh             #   実装 PR native auto-merge プロセッサ（#352）
     │   │   ├── auto-merge-design.sh      #   設計 PR native auto-merge プロセッサ（#354）
     │   │   ├── auto-merge-disarm.sh      #   auto-merge 取り消しプロセッサ（#434）
-    │   │   ├── promote-pipeline.sh       #   Promote Pipeline ＋ Path Overlap プロセッサ（#181 Part 3）
+    │   │   ├── promote-pipeline.sh       #   Promote Pipeline プロセッサ（#15 / #181 Part 3 / #472 で path-overlap.sh を分離）
+    │   │   ├── path-overlap.sh           #   Path Overlap Checker プロセッサ（#18 Phase E / #472 で promote-pipeline.sh から分割）
     │   │   ├── pr-iteration.sh           #   PR Iteration プロセッサ orchestrator（#181 Part 3 / #469 で family 分割）
     │   │   ├── pr-iteration-comments.sh  #   └ family: 一般コメント収集 + filter chain（#469）
     │   │   ├── pr-iteration-state.sh     #   └ family: PR body marker read/write + no-progress streak（#469）

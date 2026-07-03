@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# 用途: local-watcher/bin/modules/promote-pipeline.sh の #320（sticky comment の
+# 用途: local-watcher/bin/modules/path-overlap.sh（#472 で promote-pipeline.sh から分割）の
+#       #320（sticky comment の
 #       URL/ID パース純粋関数抽出）で新設した 2 ヘルパーを fixture で検証する
 #       スモークテスト。
 #
@@ -19,10 +20,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROMOTE_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/promote-pipeline.sh"
+PATH_OVERLAP_SH="$SCRIPT_DIR/../bin/modules/path-overlap.sh"
 
-if [ ! -f "$PROMOTE_PIPELINE_SH" ]; then
-  echo "ERROR: cannot find promote-pipeline.sh at $PROMOTE_PIPELINE_SH" >&2
+if [ ! -f "$PATH_OVERLAP_SH" ]; then
+  echo "ERROR: cannot find path-overlap.sh at $PATH_OVERLAP_SH" >&2
   exit 2
 fi
 
@@ -39,9 +40,9 @@ extract_function() {
 }
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PROMOTE_PIPELINE_SH" "po_extract_comment_id_from_url")"
+eval "$(extract_function "$PATH_OVERLAP_SH" "po_extract_comment_id_from_url")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PROMOTE_PIPELINE_SH" "po_find_sticky_comment_url")"
+eval "$(extract_function "$PATH_OVERLAP_SH" "po_find_sticky_comment_url")"
 
 if ! declare -F po_extract_comment_id_from_url >/dev/null; then
   echo "ERROR: po_extract_comment_id_from_url not loaded" >&2

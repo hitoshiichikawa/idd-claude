@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 #
-# 用途: local-watcher/bin/modules/promote-pipeline.sh の Issue #187（awaiting-slot
+# 用途: local-watcher/bin/modules/path-overlap.sh（#472 で promote-pipeline.sh から分割）の
+#       Issue #187（awaiting-slot
 #       付与失敗時も見送り理由コメントを投稿する）で組み替えた
 #       po_apply_awaiting_slot を fixture で検証するスモークテスト。
 #
@@ -23,10 +24,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROMOTE_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/promote-pipeline.sh"
+PATH_OVERLAP_SH="$SCRIPT_DIR/../bin/modules/path-overlap.sh"
 
-if [ ! -f "$PROMOTE_PIPELINE_SH" ]; then
-  echo "ERROR: cannot find promote-pipeline.sh at $PROMOTE_PIPELINE_SH" >&2
+if [ ! -f "$PATH_OVERLAP_SH" ]; then
+  echo "ERROR: cannot find path-overlap.sh at $PATH_OVERLAP_SH" >&2
   exit 2
 fi
 
@@ -46,13 +47,13 @@ extract_function() {
 # #320: po_apply_awaiting_slot が呼ぶ sticky comment 共通ヘルパー 2 つも実物で読み込む
 # （extract_function は単一関数を隔離抽出するため、依存ヘルパーは明示的に読み込む必要がある）。
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PROMOTE_PIPELINE_SH" "po_apply_awaiting_slot")"
+eval "$(extract_function "$PATH_OVERLAP_SH" "po_apply_awaiting_slot")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PROMOTE_PIPELINE_SH" "po_format_holders_table_md")"
+eval "$(extract_function "$PATH_OVERLAP_SH" "po_format_holders_table_md")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PROMOTE_PIPELINE_SH" "po_find_sticky_comment_url")"
+eval "$(extract_function "$PATH_OVERLAP_SH" "po_find_sticky_comment_url")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PROMOTE_PIPELINE_SH" "po_extract_comment_id_from_url")"
+eval "$(extract_function "$PATH_OVERLAP_SH" "po_extract_comment_id_from_url")"
 
 if ! declare -F po_apply_awaiting_slot >/dev/null; then
   echo "ERROR: po_apply_awaiting_slot not loaded" >&2
