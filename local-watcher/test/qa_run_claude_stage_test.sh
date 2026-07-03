@@ -27,6 +27,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #177 Part 1 で低レベル共通ユーティリティ（qa_log 等のロガーを含む）は
 # modules/core_utils.sh へ分離された。関数抽出の探索元に core_utils.sh も含める。
@@ -64,32 +67,22 @@ trap 'rm -rf "$TMPDIR_TEST"' EXIT
 REPO="owner/test-repo"
 
 # 必要な関数だけを抽出して eval で読み込む。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script" "$CORE_UTILS_SH" "$QUOTA_AWARE_SH"
-}
-
 # qa_log / qa_warn / qa_error は qa_run_claude_stage が呼ぶので必ず loaded する
 # shellcheck disable=SC1090
-eval "$(extract_function "$WATCHER_SH" "qa_log")"
+eval "$(extract_function "$WATCHER_SH" "qa_log" "$CORE_UTILS_SH" "$QUOTA_AWARE_SH")"
 # shellcheck disable=SC1090
-eval "$(extract_function "$WATCHER_SH" "qa_warn")"
+eval "$(extract_function "$WATCHER_SH" "qa_warn" "$CORE_UTILS_SH" "$QUOTA_AWARE_SH")"
 # shellcheck disable=SC1090
-eval "$(extract_function "$WATCHER_SH" "qa_error")"
+eval "$(extract_function "$WATCHER_SH" "qa_error" "$CORE_UTILS_SH" "$QUOTA_AWARE_SH")"
 # Issue #416: qa_detect_rate_limit は内部で qa_parse_session_limit_reset を呼ぶため、
 # 当該ヘルパーも extract して同 shell に読み込む（extract_function イディオムの依存関数
 # 追従 / CLAUDE.md「7. テストの近接配置」）。
 # shellcheck disable=SC1090
-eval "$(extract_function "$WATCHER_SH" "qa_parse_session_limit_reset")"
+eval "$(extract_function "$WATCHER_SH" "qa_parse_session_limit_reset" "$CORE_UTILS_SH" "$QUOTA_AWARE_SH")"
 # shellcheck disable=SC1090
-eval "$(extract_function "$WATCHER_SH" "qa_detect_rate_limit")"
+eval "$(extract_function "$WATCHER_SH" "qa_detect_rate_limit" "$CORE_UTILS_SH" "$QUOTA_AWARE_SH")"
 # shellcheck disable=SC1090
-eval "$(extract_function "$WATCHER_SH" "qa_run_claude_stage")"
+eval "$(extract_function "$WATCHER_SH" "qa_run_claude_stage" "$CORE_UTILS_SH" "$QUOTA_AWARE_SH")"
 
 for fn in qa_log qa_warn qa_error qa_parse_session_limit_reset qa_detect_rate_limit qa_run_claude_stage; do
   if ! declare -F "$fn" >/dev/null; then
@@ -101,21 +94,6 @@ done
 # ─── アサーションヘルパ ───
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 # fake-claude: fixture を stdout にダンプし、指定された exit code を返す。
 # qa_run_claude_stage は "$@" を実行するため、引数として fixture と rc を受け取る。

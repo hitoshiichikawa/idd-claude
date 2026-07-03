@@ -131,6 +131,9 @@ echo ""
 echo "--- pdr_gate_enabled contract (unchanged after #432) ---"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 PDR_SH="$SCRIPT_DIR/../bin/modules/pr-design-reviewer.sh"
 if [ ! -f "$PDR_SH" ]; then
   echo "ERROR: cannot find pr-design-reviewer.sh at $PDR_SH" >&2

@@ -28,6 +28,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #177 Part 1 で低レベル共通ユーティリティ（qa_log / mq_log / pi_log / drr_log 等の
 # ロガーを含む）は modules/core_utils.sh へ分離された。関数抽出の探索元に core_utils.sh も含める。
@@ -51,16 +54,6 @@ if [ ! -f "$MERGE_QUEUE_SH" ]; then
 fi
 
 # issue-watcher.sh / modules から関数 1 つだけを抽出する（normalize_slug_test.sh と同じ awk）。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script" "$CORE_UTILS_SH" "$MERGE_QUEUE_SH"
-}
-
 # テスト用に REPO を固定値で上書き（cron 起動時の `REPO=owner/your-repo` を模倣）
 REPO="owner/test-repo"
 export REPO
@@ -76,7 +69,7 @@ LOGGER_FUNCS=(
 
 for fn in "${LOGGER_FUNCS[@]}"; do
   # shellcheck disable=SC1090,SC2086
-  eval "$(extract_function "$WATCHER_SH" "$fn")"
+  eval "$(extract_function "$WATCHER_SH" "$fn" "$CORE_UTILS_SH" "$MERGE_QUEUE_SH")"
   if ! declare -F "$fn" >/dev/null; then
     echo "ERROR: $fn not loaded from $WATCHER_SH" >&2
     exit 2
