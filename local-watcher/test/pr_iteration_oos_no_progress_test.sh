@@ -26,22 +26,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 PR_ITERATION_SH="$SCRIPT_DIR/../bin/modules/pr-iteration-oos.sh"
 
 if [ ! -f "$PR_ITERATION_SH" ]; then
   echo "ERROR: cannot find pr-iteration-oos.sh at $PR_ITERATION_SH" >&2
   exit 2
 fi
-
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
 
 for fn in pi_detect_developer_oos_marker pi_oos_fingerprint \
           pi_read_oos_no_progress_streak pi_read_oos_fingerprint \
@@ -56,18 +49,6 @@ done
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1" expected="$2" actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"; PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 assert_ne() {
   local label="$1" a="$2" b="$3"

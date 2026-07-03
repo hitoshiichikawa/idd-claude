@@ -16,6 +16,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 FIXTURE_DIR="$SCRIPT_DIR/fixtures/parse_review_result"
 
@@ -26,16 +29,6 @@ fi
 
 # issue-watcher.sh から該当関数 2 個だけを抽出する。
 # awk で「関数開始行」から最初の単独 `}` までを抜き出す（インデント無し close brace を境界とする）。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # 関数定義のみを current shell に読み込む。
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$WATCHER_SH" "extract_review_result_token")"
@@ -55,21 +48,6 @@ fi
 # ─── アサーションヘルパ ───
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 assert_rc() {
   local label="$1"

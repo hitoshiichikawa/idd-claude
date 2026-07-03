@@ -28,6 +28,9 @@ set -euo pipefail
 # 見える。本ファイル全体で SC2034 を抑止する。
 # shellcheck disable=SC2034
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 MODULE_SH="$SCRIPT_DIR/../bin/modules/auto-rebase.sh"
 FIXTURE_DIR="$SCRIPT_DIR/../../docs/specs/438--bootstrap-cmd-main-di-issue-merge-confl/test-fixtures"
 
@@ -42,16 +45,6 @@ fi
 
 # 既存テスト（ar_semantic_test.sh）と同じイディオム: 対象スクリプトから 1 関数だけを
 # awk で切り出して eval で読み込む。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # ar_classify_diff は内部で ar_classify_additive を呼ぶため、隔離抽出の特性上
 # 依存関数も明示 source する必要がある。
 # shellcheck disable=SC1090,SC2086
@@ -124,21 +117,6 @@ reset_git_stub() {
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 # 1 行目 / 2 行目を取り出すヘルパ（呼び出しと rc を捕捉）。
 LAST_RC=0

@@ -19,6 +19,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #464 で impl pipeline 後半（verify_stagec_pr_or_retry / run_impl_pipeline 内 Stage C 配線を
 # 含む）は modules/impl-pipeline.sh へ分離された。サニティ grep の探索元を module に切り替える。
@@ -101,19 +104,6 @@ gh() { :; }
 # ─── アサーションヘルパ ───
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1" expected="$2" actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 # 共通 env（実装側の echo / qa_warn は本テストの仕様再現関数に含めていないため
 # NUMBER は未参照になる。実装側ログのフォーマットには含まれることを覚書として残す）

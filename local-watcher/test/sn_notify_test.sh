@@ -27,6 +27,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 MODULE_SH="$SCRIPT_DIR/../bin/modules/slack-notify.sh"
 
 if [ ! -f "$MODULE_SH" ]; then

@@ -22,6 +22,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #180 Part 2 で qa_detect_rate_limit は modules/quota-aware.sh へ分離された。
 # 関数抽出の探索元に quota-aware.sh も含める。
@@ -44,23 +47,13 @@ fi
 
 # issue-watcher.sh / modules から qa_detect_rate_limit() のみを抽出する。
 # awk で「関数開始行」から最初の単独 `}` までを抜き出す。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script" "$QUOTA_AWARE_SH"
-}
-
 # Issue #416: qa_detect_rate_limit は内部で qa_parse_session_limit_reset を呼ぶため、
 # 当該ヘルパーも extract して同 shell に読み込む（extract_function イディオムの依存関数
 # 追従 / CLAUDE.md「7. テストの近接配置」）。
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "qa_parse_session_limit_reset")"
+eval "$(extract_function "$WATCHER_SH" "qa_parse_session_limit_reset" "$QUOTA_AWARE_SH")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "qa_detect_rate_limit")"
+eval "$(extract_function "$WATCHER_SH" "qa_detect_rate_limit" "$QUOTA_AWARE_SH")"
 
 if ! declare -F qa_detect_rate_limit >/dev/null; then
   echo "ERROR: qa_detect_rate_limit not loaded" >&2
@@ -74,21 +67,6 @@ fi
 # ─── アサーションヘルパ ───
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 # fixture を qa_detect_rate_limit に流し、最終検出行（または "$path<TAB>$epoch"）を返す。
 # 検出が無ければ空文字列を返す。

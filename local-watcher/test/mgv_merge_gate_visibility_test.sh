@@ -19,22 +19,15 @@ set -euo pipefail
 # shellcheck disable=SC2034
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 PR_SH="$SCRIPT_DIR/../bin/modules/pr-reviewer.sh"
 
 if [ ! -f "$PR_SH" ]; then
   echo "ERROR: cannot find pr-reviewer.sh at $PR_SH" >&2
   exit 2
 fi
-
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
 
 # 対象関数群を読み込む（mgv_* と依存先 pr_warn / timeout はテスト内で stub）。
 # shellcheck disable=SC1090,SC2086

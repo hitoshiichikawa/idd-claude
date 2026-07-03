@@ -37,6 +37,9 @@ set -euo pipefail
 # shellcheck disable=SC2034
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer-publish.sh"
 
 if [ ! -f "$PR_MOD" ]; then
@@ -46,16 +49,6 @@ fi
 
 # 既存テストと同じイディオム: 対象スクリプトから 1 関数だけを awk で切り出して
 # eval で読み込む。トップレベル副作用は回避する。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # 対象関数群を読み込む。pr_publish_codex_status は pr_detect_iteration_keyword を
 # 呼ぶためそれも合わせて読み込む。
 # shellcheck disable=SC1090,SC2086
@@ -83,56 +76,6 @@ PR_REVIEWER_ITERATION_PATTERN='^[[:space:]]*VERDICT:[[:space:]]*needs-iteration[
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
-
-assert_rc() {
-  local label="$1"
-  local expected_rc="$2"
-  shift 2
-  local actual_rc=0
-  "$@" >/dev/null 2>&1 || actual_rc=$?
-  if [ "$expected_rc" = "$actual_rc" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected rc: $expected_rc"
-    echo "  actual rc  : $actual_rc"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
-
-assert_contains() {
-  local label="$1"
-  local haystack="$2"
-  local needle="$3"
-  case "$haystack" in
-    *"$needle"*)
-      echo "PASS: $label"
-      PASS_COUNT=$((PASS_COUNT + 1))
-      ;;
-    *)
-      echo "FAIL: $label"
-      echo "  expected to contain: $(printf '%q' "$needle")"
-      echo "  actual             : $(printf '%q' "$haystack")"
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      ;;
-  esac
-}
 
 # ── stub state ──
 reset_stub_state() {

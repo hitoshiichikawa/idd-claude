@@ -132,6 +132,9 @@ echo ""
 echo "--- adj_gate_enabled contract (unchanged after #412) ---"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 ADJ_SH="$SCRIPT_DIR/../bin/modules/adjudicator.sh"
 if [ ! -f "$ADJ_SH" ]; then
   echo "ERROR: cannot find adjudicator.sh at $ADJ_SH" >&2

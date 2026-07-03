@@ -24,6 +24,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 MODULE_SH="$SCRIPT_DIR/../bin/modules/failed-recovery.sh"
 
 if [ ! -f "$MODULE_SH" ]; then
@@ -33,16 +36,6 @@ fi
 
 # 既存テスト（full_auto_enabled_test.sh）と同じイディオム: 対象スクリプトから 1
 # 関数だけを awk で切り出して eval で読み込む。トップレベル副作用は回避する。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$MODULE_SH" "fr_is_enabled")"
 
@@ -53,23 +46,6 @@ fi
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_rc() {
-  local label="$1"
-  local expected_rc="$2"
-  shift 2
-  local actual_rc=0
-  "$@" >/dev/null 2>&1 || actual_rc=$?
-  if [ "$expected_rc" = "$actual_rc" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected rc: $expected_rc"
-    echo "  actual rc  : $actual_rc"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 # ============================================================
 # Section 1: 両方 ON（Req 1.1）

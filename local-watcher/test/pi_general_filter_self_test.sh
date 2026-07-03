@@ -19,6 +19,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 PR_ITERATION_SH="$SCRIPT_DIR/../bin/modules/pr-iteration-comments.sh"
 
 if [ ! -f "$PR_ITERATION_SH" ]; then
@@ -27,16 +30,6 @@ if [ ! -f "$PR_ITERATION_SH" ]; then
 fi
 
 # 既存テストと同じイディオム: 対象スクリプトから 1 関数だけを awk で切り出して eval。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PR_ITERATION_SH" "pi_general_filter_self")"
 # shellcheck disable=SC1090,SC2086
@@ -53,21 +46,6 @@ fi
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 # ─── pi_general_filter_self (Issue #400 Req 1 / Req 2) ───
 

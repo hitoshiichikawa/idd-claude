@@ -35,6 +35,9 @@ set -euo pipefail
 # shellcheck disable=SC2034
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 MODULE_SH="$SCRIPT_DIR/../bin/modules/dep-cycle-detect.sh"
 # #465 で dr_extract_deps / dr_unblock_gate_enabled は modules/dependency-resolver.sh へ分離された。
@@ -44,16 +47,6 @@ if [ ! -f "$WATCHER_SH" ] || [ ! -f "$MODULE_SH" ] || [ ! -f "$DR_SH" ]; then
   echo "ERROR: cannot find watcher or module" >&2
   exit 2
 fi
-
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
 
 # dep-cycle-detect.sh の関数群を抽出ロード
 # shellcheck disable=SC1090,SC2086
@@ -99,39 +92,6 @@ DC_CYCLE_MARKER='<!-- idd-claude:dep-cycle-detected:v1 -->'
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
-
-assert_contains() {
-  local label="$1"
-  local haystack="$2"
-  local needle="$3"
-  case "$haystack" in
-    *"$needle"*)
-      echo "PASS: $label"
-      PASS_COUNT=$((PASS_COUNT + 1))
-      ;;
-    *)
-      echo "FAIL: $label"
-      echo "  expected to contain: $(printf '%q' "$needle")"
-      echo "  actual             : $(printf '%q' "$haystack")"
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      ;;
-  esac
-}
 
 assert_not_contains() {
   local label="$1"

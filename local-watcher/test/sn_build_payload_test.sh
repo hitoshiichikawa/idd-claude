@@ -25,6 +25,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 MODULE_SH="$SCRIPT_DIR/../bin/modules/slack-notify.sh"
 
 if [ ! -f "$MODULE_SH" ]; then
@@ -38,16 +41,6 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # 関数抽出イディオム（fr_is_enabled_test.sh と同形式）
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # sn_warn / sn_log は env 由来副作用なし & stderr/stdout 出力のみ → スタブで /dev/null に流す
 sn_warn() { :; }
 sn_log() { :; }

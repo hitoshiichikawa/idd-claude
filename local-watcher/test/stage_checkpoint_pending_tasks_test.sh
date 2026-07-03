@@ -17,6 +17,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #461 で per-task loop 前半関数は modules/per-task-loop.sh へ分離された。
 PER_TASK_LOOP_SH="$SCRIPT_DIR/../bin/modules/per-task-loop.sh"
@@ -29,15 +32,6 @@ if [ ! -f "$PER_TASK_LOOP_SH" ]; then
   echo "ERROR: cannot find per-task-loop.sh at $PER_TASK_LOOP_SH" >&2
   exit 2
 fi
-
-extract_function() {
-  local script="$1" fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
 
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PER_TASK_LOOP_SH" "pt_extract_pending_tasks")"

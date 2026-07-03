@@ -27,6 +27,9 @@ set -euo pipefail
 # shellcheck disable=SC2034
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer.sh"
 
 if [ ! -f "$PR_MOD" ]; then
@@ -35,16 +38,6 @@ if [ ! -f "$PR_MOD" ]; then
 fi
 
 # extract_function イディオム（pr_reviewer_exec_fail_streak_test.sh と同一）
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 for fn in pr_already_processed pr_build_marker; do
   # shellcheck disable=SC1090,SC2086
   eval "$(extract_function "$PR_MOD" "$fn")"
@@ -62,34 +55,6 @@ PR_REVIEWER_GIT_TIMEOUT="120"
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_rc() {
-  local label="$1"; local expected_rc="$2"; shift 2
-  local actual_rc=0
-  "$@" >/dev/null 2>&1 || actual_rc=$?
-  if [ "$expected_rc" = "$actual_rc" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected rc: $expected_rc"
-    echo "  actual rc  : $actual_rc"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
-
-assert_eq() {
-  local label="$1"; local expected="$2"; local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 # ── 共通 stub ─────────────────────────────────────────────────────────────────
 # timeout: 第 1 引数（秒数）を捨てて残りを実行する素通し stub

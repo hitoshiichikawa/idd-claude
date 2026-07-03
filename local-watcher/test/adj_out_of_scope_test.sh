@@ -30,6 +30,9 @@ set -euo pipefail
 # PR_ITERATION_OOS_ENABLED / PR_REVIEWER_OOS_ROUTE_LABEL / REPO 等は抽出関数本体から参照される。
 # shellcheck disable=SC2034
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 ADJ_SH="$SCRIPT_DIR/../bin/modules/adjudicator.sh"
 
 if [ ! -f "$ADJ_SH" ]; then
@@ -38,16 +41,6 @@ if [ ! -f "$ADJ_SH" ]; then
 fi
 
 # 既存テストと同じ extract_function イディオム。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$ADJ_SH" "adj_oos_enabled")"
 # shellcheck disable=SC1090,SC2086
@@ -77,31 +70,6 @@ PR_REVIEWER_OOS_ROUTE_LABEL="needs-decisions"
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1" expected="$2" actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"; PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
-
-assert_contains() {
-  local label="$1" haystack="$2" needle="$3"
-  case "$haystack" in
-    *"$needle"*) echo "PASS: $label"; PASS_COUNT=$((PASS_COUNT + 1)) ;;
-    *)
-      echo "FAIL: $label"
-      echo "  expected to contain: $(printf '%q' "$needle")"
-      echo "  actual             : $(printf '%q' "$haystack")"
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      ;;
-  esac
-}
 
 assert_not_contains() {
   local label="$1" haystack="$2" needle="$3"

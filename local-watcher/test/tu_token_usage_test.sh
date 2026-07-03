@@ -19,6 +19,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 MODULE_SH="$SCRIPT_DIR/../bin/modules/token-usage.sh"
 
 if [ ! -f "$MODULE_SH" ]; then
@@ -29,16 +32,6 @@ fi
 # 既存テストと同じイディオム: 対象スクリプトから関数だけを awk で切り出して
 # eval で読み込む。トップレベル副作用は回避する（本モジュールは関数定義のみだが
 # 他テストとの一貫性のため同じ方式を採る）。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 for fn in tu_enabled tu_mark_log_offset tu_extract_last_result_json tu_format_usage_kv tu_report_stage_usage tu_emit_issue_summary; do
   # shellcheck disable=SC1090,SC2086
   eval "$(extract_function "$MODULE_SH" "$fn")"
@@ -50,21 +43,6 @@ done
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 assert_contains() {
   local label="$1"
