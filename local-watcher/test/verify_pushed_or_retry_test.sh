@@ -35,8 +35,12 @@ WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # modules/core_utils.sh へ分離された。関数抽出の探索元に core_utils.sh も含める。
 CORE_UTILS_SH="$SCRIPT_DIR/../bin/modules/core_utils.sh"
 # #464 で verify_pushed_or_retry と各 stage-id 呼出（run_impl_pipeline 内）は
-# modules/impl-pipeline.sh へ分離された。
+# modules/impl-pipeline.sh へ分離された。#501 の family 分割で verify_pushed_or_retry 自体は
+# modules/impl-pipeline-review.sh へ移動したが、各 stage-id 呼出（run_impl_pipeline 内）は
+# orchestrator の modules/impl-pipeline.sh に残置されたため、サニティ grep の探索元は
+# 分離せず 2 変数で使い分ける。
 IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline.sh"
+IMPL_PIPELINE_REVIEW_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline-review.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
@@ -50,6 +54,10 @@ if [ ! -f "$IMPL_PIPELINE_SH" ]; then
   echo "ERROR: cannot find impl-pipeline.sh at $IMPL_PIPELINE_SH" >&2
   exit 2
 fi
+if [ ! -f "$IMPL_PIPELINE_REVIEW_SH" ]; then
+  echo "ERROR: cannot find impl-pipeline-review.sh at $IMPL_PIPELINE_REVIEW_SH" >&2
+  exit 2
+fi
 
 # issue-watcher.sh から verify_pushed_or_retry / qa_log / qa_warn / qa_error の
 # 関数定義のみを抽出して current shell に load する。トップレベル副作用は回避する。
@@ -61,7 +69,7 @@ eval "$(extract_function "$WATCHER_SH" "qa_warn" "$CORE_UTILS_SH")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$WATCHER_SH" "qa_error" "$CORE_UTILS_SH")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$IMPL_PIPELINE_SH" "verify_pushed_or_retry" "$CORE_UTILS_SH")"
+eval "$(extract_function "$IMPL_PIPELINE_REVIEW_SH" "verify_pushed_or_retry" "$CORE_UTILS_SH")"
 
 for fn in qa_log qa_warn qa_error verify_pushed_or_retry; do
   if ! declare -F "$fn" >/dev/null; then

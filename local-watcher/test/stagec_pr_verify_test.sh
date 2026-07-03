@@ -25,7 +25,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #464 で impl pipeline 後半（verify_stagec_pr_or_retry / run_impl_pipeline 内 Stage C 配線を
 # 含む）は modules/impl-pipeline.sh へ分離された。サニティ grep の探索元を module に切り替える。
+# #501 の family 分割で verify_stagec_pr_or_retry 自体（定義 + 内部の gh pr list 呼出）は
+# modules/impl-pipeline-review.sh へ移動したが、Stage C 完了時の呼び出し配線
+# （run_impl_pipeline 内、"stageC-pr-missing" ハンドラ含む）は orchestrator の
+# modules/impl-pipeline.sh に残置されたため、サニティ grep の探索元を 2 変数で使い分ける。
 IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline.sh"
+IMPL_PIPELINE_REVIEW_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline-review.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
@@ -33,6 +38,10 @@ if [ ! -f "$WATCHER_SH" ]; then
 fi
 if [ ! -f "$IMPL_PIPELINE_SH" ]; then
   echo "ERROR: cannot find impl-pipeline.sh at $IMPL_PIPELINE_SH" >&2
+  exit 2
+fi
+if [ ! -f "$IMPL_PIPELINE_REVIEW_SH" ]; then
+  echo "ERROR: cannot find impl-pipeline-review.sh at $IMPL_PIPELINE_REVIEW_SH" >&2
   exit 2
 fi
 
@@ -55,7 +64,7 @@ fi
 # （`gh pr view` は `--head` 非対応で常に失敗し、open のみ探索だと高速 merge 済み PR を
 #  取りこぼすため、list + `--state all` で open/merged 双方を検出する。stageC-pr-missing
 #  誤検知の回帰ガード。）
-if ! grep -q "verify_stagec_pr_or_retry()" "$IMPL_PIPELINE_SH"; then
+if ! grep -q "verify_stagec_pr_or_retry()" "$IMPL_PIPELINE_REVIEW_SH"; then
   echo "ERROR: issue-watcher.sh に verify_stagec_pr_or_retry 定義が見つからない (Issue #108)" >&2
   exit 2
 fi
@@ -68,7 +77,7 @@ if ! grep -q 'verify_stagec_pr_or_retry "\$BRANCH" "\$NUMBER"' "$IMPL_PIPELINE_S
 fi
 # 同上（"$REPO" / "$branch" の文字列リテラルを grep する）
 # shellcheck disable=SC2016
-if ! grep -q 'gh pr list --repo "\$REPO" --head "\$branch" --state all' "$IMPL_PIPELINE_SH"; then
+if ! grep -q 'gh pr list --repo "\$REPO" --head "\$branch" --state all' "$IMPL_PIPELINE_REVIEW_SH"; then
   echo "ERROR: issue-watcher.sh に PR 実在 verify (gh pr list --head --state all) が見つからない" >&2
   exit 2
 fi

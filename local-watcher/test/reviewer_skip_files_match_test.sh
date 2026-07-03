@@ -18,15 +18,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
-# #464 で impl pipeline 後半関数は modules/impl-pipeline.sh へ分離された。
-IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline.sh"
+# #464 で impl pipeline 後半関数は modules/impl-pipeline.sh へ分離され、
+# #501 で reviewer_skip_files_match は modules/impl-pipeline-review.sh へ family 分割された。
+IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline-review.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
   exit 2
 fi
 if [ ! -f "$IMPL_PIPELINE_SH" ]; then
-  echo "ERROR: cannot find impl-pipeline.sh at $IMPL_PIPELINE_SH" >&2
+  echo "ERROR: cannot find impl-pipeline-review.sh at $IMPL_PIPELINE_SH" >&2
   exit 2
 fi
 
