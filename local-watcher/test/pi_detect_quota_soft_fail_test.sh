@@ -21,15 +21,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 FIXTURE_DIR="$SCRIPT_DIR/fixtures/pi_detect_quota_soft_fail"
 # #181 Part 3 で PR Iteration Processor の関数群（pi_detect_quota_soft_fail ほか）は
-# modules/pr-iteration.sh へ切り出された。抽出元を本体から pr-iteration.sh へ repoint する。
-PR_ITERATION_SH="$SCRIPT_DIR/../bin/modules/pr-iteration.sh"
+# modules/pr-iteration.sh へ、#469 の family 分割で modules/pr-iteration-exec.sh へ切り出された。
+# 抽出元を pr-iteration-exec.sh へ repoint する。
+PR_ITERATION_SH="$SCRIPT_DIR/../bin/modules/pr-iteration-exec.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
   exit 2
 fi
 if [ ! -f "$PR_ITERATION_SH" ]; then
-  echo "ERROR: cannot find pr-iteration.sh at $PR_ITERATION_SH" >&2
+  echo "ERROR: cannot find pr-iteration-exec.sh at $PR_ITERATION_SH" >&2
   exit 2
 fi
 

@@ -26,10 +26,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PR_ITERATION_SH="$SCRIPT_DIR/../bin/modules/pr-iteration.sh"
+# #469 の family 分割で pi_route_out_of_scope_escalate は pr-iteration-oos.sh、
+# pi_general_filter_oos は filter chain 側の pr-iteration-comments.sh へ切り出された。
+# 関数ごとに抽出元 family を使い分ける。
+PR_ITERATION_SH="$SCRIPT_DIR/../bin/modules/pr-iteration-oos.sh"
+PR_ITERATION_COMMENTS_SH="$SCRIPT_DIR/../bin/modules/pr-iteration-comments.sh"
 
 if [ ! -f "$PR_ITERATION_SH" ]; then
-  echo "ERROR: cannot find pr-iteration.sh at $PR_ITERATION_SH" >&2
+  echo "ERROR: cannot find pr-iteration-oos.sh at $PR_ITERATION_SH" >&2
+  exit 2
+fi
+if [ ! -f "$PR_ITERATION_COMMENTS_SH" ]; then
+  echo "ERROR: cannot find pr-iteration-comments.sh at $PR_ITERATION_COMMENTS_SH" >&2
   exit 2
 fi
 
@@ -45,7 +53,7 @@ extract_function() {
 }
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$PR_ITERATION_SH" "pi_general_filter_oos")"
+eval "$(extract_function "$PR_ITERATION_COMMENTS_SH" "pi_general_filter_oos")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PR_ITERATION_SH" "pi_route_out_of_scope_escalate")"
 

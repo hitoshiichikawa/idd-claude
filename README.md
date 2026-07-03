@@ -81,7 +81,11 @@ idd-claude/
     │   │   ├── auto-merge-design.sh      #   設計 PR native auto-merge プロセッサ（#354）
     │   │   ├── auto-merge-disarm.sh      #   auto-merge 取り消しプロセッサ（#434）
     │   │   ├── promote-pipeline.sh       #   Promote Pipeline ＋ Path Overlap プロセッサ（#181 Part 3）
-    │   │   ├── pr-iteration.sh           #   PR Iteration プロセッサ（#181 Part 3）
+    │   │   ├── pr-iteration.sh           #   PR Iteration プロセッサ orchestrator（#181 Part 3 / #469 で family 分割）
+    │   │   ├── pr-iteration-comments.sh  #   └ family: 一般コメント収集 + filter chain（#469）
+    │   │   ├── pr-iteration-state.sh     #   └ family: PR body marker read/write + no-progress streak（#469）
+    │   │   ├── pr-iteration-oos.sh       #   └ family: out-of-scope 還流 / 検出（#437 / #469）
+    │   │   ├── pr-iteration-exec.sh      #   └ family: 1 round 実行ヘルパー（prompt / escalation / quota / auto-commit・#469）
     │   │   ├── pr-reviewer.sh            #   PR Reviewer ＋ claude-review catch-up（#261）
     │   │   ├── adjudicator.sh            #   PR Reviewer 裁定（adjudicator）プロセッサ（#404）
     │   │   ├── pr-design-reviewer.sh     #   設計 PR Reviewer プロセッサ（#407）

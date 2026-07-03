@@ -19,10 +19,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PR_ITERATION_SH="$SCRIPT_DIR/../bin/modules/pr-iteration.sh"
+PR_ITERATION_SH="$SCRIPT_DIR/../bin/modules/pr-iteration-comments.sh"
 
 if [ ! -f "$PR_ITERATION_SH" ]; then
-  echo "ERROR: cannot find pr-iteration.sh at $PR_ITERATION_SH" >&2
+  echo "ERROR: cannot find pr-iteration-comments.sh at $PR_ITERATION_SH" >&2
   exit 2
 fi
 
