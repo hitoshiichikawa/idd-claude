@@ -318,6 +318,13 @@ watcher は Issue/PR 本文・コメント・ラベル・ブランチ名・branc
   純粋関数（副作用なし）は入出力 fixture で、副作用を伴う関数は `gh` / `git` を stub して
   呼び出しトレースで検証する。**ヘルパーを抽出したら、それを呼ぶ既存テストの抽出リストにも
   追随させる**（隔離抽出の特性上、依存関数を明示 source する必要がある）。
+- `extract_function` / `assert_eq` / `assert_contains` / `assert_rc` は
+  **`local-watcher/test/lib/test-helpers.sh` を source して利用する**（#474 で共通化済み。
+  新規テストで自前コピーしない）。定型は `SCRIPT_DIR` 解決直後に
+  `. "$SCRIPT_DIR/lib/test-helpers.sh"`。共有実装と異なる引数順・文言が必要な場合のみ、
+  source の**後**にローカル定義で shadow する（#474 の少数派温存パターン）。heredoc 内に
+  行頭 `}` を含む関数は共通 `extract_function` では切り出せないため、従来どおり
+  テスト内の専用抽出を使う（例: `adj_oos_prompt_test.sh`）。
 
 ### 8. 機能追加 PR 提出前チェックリスト
 
