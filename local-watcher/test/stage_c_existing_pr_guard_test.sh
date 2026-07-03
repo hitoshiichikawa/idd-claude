@@ -34,13 +34,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #459 で stage_c_existing_pr_guard は modules/stage-checkpoint.sh へ分離された。
+STAGE_CHECKPOINT_SH="$SCRIPT_DIR/../bin/modules/stage-checkpoint.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
   exit 2
 fi
+if [ ! -f "$STAGE_CHECKPOINT_SH" ]; then
+  echo "ERROR: cannot find stage-checkpoint.sh at $STAGE_CHECKPOINT_SH" >&2
+  exit 2
+fi
 
-# issue-watcher.sh から該当関数 1 個だけを抽出する。
+# issue-watcher.sh / modules から該当関数 1 個だけを抽出する。
 # awk で「関数開始行」から最初の単独 `}`（インデント無し close brace）までを抜き出す。
 extract_function() {
   local script="$1"
@@ -53,7 +59,7 @@ extract_function() {
 }
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "stage_c_existing_pr_guard")"
+eval "$(extract_function "$STAGE_CHECKPOINT_SH" "stage_c_existing_pr_guard")"
 
 # サニティチェック: 関数が読み込まれていることを確認。
 if ! declare -F stage_c_existing_pr_guard >/dev/null; then
@@ -61,9 +67,9 @@ if ! declare -F stage_c_existing_pr_guard >/dev/null; then
   exit 2
 fi
 
-# サニティチェック: call site の配線（issue-watcher.sh 側）が残っていること。
-if ! grep -q "stage_c_existing_pr_guard" "$WATCHER_SH"; then
-  echo "ERROR: issue-watcher.sh に stage_c_existing_pr_guard の配線が見つからない (Issue #212)" >&2
+# サニティチェック: call site の配線（modules/stage-checkpoint.sh 側）が残っていること。
+if ! grep -q "stage_c_existing_pr_guard" "$STAGE_CHECKPOINT_SH"; then
+  echo "ERROR: modules/stage-checkpoint.sh に stage_c_existing_pr_guard の配線が見つからない (Issue #212)" >&2
   exit 2
 fi
 

@@ -40,9 +40,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #461 で per-task loop 前半関数は modules/per-task-loop.sh へ分離された。
+PER_TASK_LOOP_SH="$SCRIPT_DIR/../bin/modules/per-task-loop.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$PER_TASK_LOOP_SH" ]; then
+  echo "ERROR: cannot find per-task-loop.sh at $PER_TASK_LOOP_SH" >&2
   exit 2
 fi
 
@@ -58,7 +64,7 @@ extract_function() {
 }
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "pt_resolve_diff_range")"
+eval "$(extract_function "$PER_TASK_LOOP_SH" "pt_resolve_diff_range")"
 
 if ! declare -F pt_resolve_diff_range >/dev/null; then
   echo "ERROR: pt_resolve_diff_range not loaded" >&2

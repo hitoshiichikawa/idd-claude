@@ -26,10 +26,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #461 で per-task loop 前半関数は modules/per-task-loop.sh へ分離された。
+PER_TASK_LOOP_SH="$SCRIPT_DIR/../bin/modules/per-task-loop.sh"
 FIXTURE_DIR="$SCRIPT_DIR/fixtures/pt_check_fail_fast"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$PER_TASK_LOOP_SH" ]; then
+  echo "ERROR: cannot find per-task-loop.sh at $PER_TASK_LOOP_SH" >&2
   exit 2
 fi
 if [ ! -d "$FIXTURE_DIR" ]; then
@@ -49,7 +55,7 @@ extract_function() {
 }
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "pt_check_fail_fast")"
+eval "$(extract_function "$PER_TASK_LOOP_SH" "pt_check_fail_fast")"
 
 if ! declare -F pt_check_fail_fast >/dev/null; then
   echo "ERROR: pt_check_fail_fast not loaded" >&2

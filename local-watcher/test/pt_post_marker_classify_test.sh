@@ -31,9 +31,15 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #461 で per-task loop 前半関数は modules/per-task-loop.sh へ分離された。
+PER_TASK_LOOP_SH="$SCRIPT_DIR/../bin/modules/per-task-loop.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$PER_TASK_LOOP_SH" ]; then
+  echo "ERROR: cannot find per-task-loop.sh at $PER_TASK_LOOP_SH" >&2
   exit 2
 fi
 
@@ -55,11 +61,11 @@ pt_warn() {
 }
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "pt_classify_post_marker_paths")"
+eval "$(extract_function "$PER_TASK_LOOP_SH" "pt_classify_post_marker_paths")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "pt_handle_post_marker_commits")"
+eval "$(extract_function "$PER_TASK_LOOP_SH" "pt_handle_post_marker_commits")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "pt_detect_post_marker_commits")"
+eval "$(extract_function "$PER_TASK_LOOP_SH" "pt_detect_post_marker_commits")"
 
 for fn in pt_classify_post_marker_paths pt_handle_post_marker_commits pt_detect_post_marker_commits; do
   if ! declare -F "$fn" >/dev/null; then

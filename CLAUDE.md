@@ -236,7 +236,10 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
   | `rs_` | run-summary |
   | `sr_` | stale-pickup-reaper |
   | `drr_` | design-review-release（ロガー `drr_log` 等は core_utils に同居 / #456） |
-  | `pt_` / `sc_` / `tc_` / `dr_` | issue-watcher 本体内（per-task / stage checkpoint / tasks-count / dependency-resolver） |
+  | `tc_` | tasks-count-gate（#457） |
+  | `dbg_` | debugger-gate（非 prefix 関数 detect_blocked_marker 等はモジュール冒頭ヘッダで列挙 / #458） |
+  | `sc_` / `stage_checkpoint_` / `_spec_` | stage-checkpoint（Slot Runner 内の類似名 `_stage_checkpoint_assert_slug_match` / `_stage_checkpoint_has_resumable_state` は対象外で本体残置 / #459） |
+  | `pt_` / `dr_` | issue-watcher 本体内（per-task / dependency-resolver）。※ pt_ ヘルパー + prompt builder は modules/per-task-loop.sh へ移行中（前半 #461 完了 / 後半 runner は #462 で完了予定） |
 
 - env var 名・ラベル名・コマンド名・ファイルパスは **英語固定**（言語方針に従う）。
 
@@ -358,5 +361,6 @@ Issue 本文に実値が含まれた場合、PM エージェントは実装を�
 - サブエージェント定義: `.claude/agents/*.md`
 - Triage プロンプト: `local-watcher/bin/triage-prompt.tmpl`（配置先: `~/bin/triage-prompt.tmpl`）
 - Watcher 実装: `local-watcher/bin/issue-watcher.sh`（配置先: `~/bin/issue-watcher.sh`）
+- Watcher Config: `local-watcher/bin/watcher-config.sh`（配置先: `~/bin/watcher-config.sh` / 本体が起動時に source する env var 定義・正規化ブロック / #460）
 - ワークフロー全体像・セットアップ手順: `README.md`
 - パイプライン全体設計: Issue #13（フェーズ別実装: #14〜#18）
