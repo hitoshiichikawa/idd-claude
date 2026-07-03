@@ -38,8 +38,10 @@ WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #458 で Debugger Gate（run_debugger_stage 等）は modules/debugger-gate.sh へ分離された。
 # debugger-notes-invalid の呼出は run_debugger_stage 内にあるため、探索元に含める。
 DEBUGGER_GATE_SH="$SCRIPT_DIR/../bin/modules/debugger-gate.sh"
-# #462 で run_per_task_reviewer は modules/per-task-loop.sh へ分離された。
-# per-task-reviewer-* の呼出は run_per_task_reviewer 内にあるため、探索元に含める。
+# per-task-reviewer-* の呼出は run_per_task_reviewer 自体ではなく、その戻り値を
+# round 別に分岐する dispatcher 側（run_per_task_loop）にある。#500 の family 分割でも
+# run_per_task_loop は modules/per-task-loop.sh（orchestrator）に残置されたため、
+# 探索元は変更なし。
 PER_TASK_LOOP_SH="$SCRIPT_DIR/../bin/modules/per-task-loop.sh"
 # #464 で publish_terminal_failure_artifacts は modules/impl-pipeline.sh へ分離された。
 IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline.sh"

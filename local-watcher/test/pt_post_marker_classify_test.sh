@@ -34,15 +34,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
-# #461 で per-task loop 前半関数は modules/per-task-loop.sh へ分離された。
-PER_TASK_LOOP_SH="$SCRIPT_DIR/../bin/modules/per-task-loop.sh"
+# #500 で post-marker 系 3 関数は modules/per-task-loop-diffrange.sh へ移動された
+# （#461 で per-task loop 前半関数として modules/per-task-loop.sh へ分離された後、
+# #500 の family 分割で diff-range・fail-fast・post-marker 判定ヘルパー群として独立）。
+PER_TASK_LOOP_SH="$SCRIPT_DIR/../bin/modules/per-task-loop-diffrange.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
   exit 2
 fi
 if [ ! -f "$PER_TASK_LOOP_SH" ]; then
-  echo "ERROR: cannot find per-task-loop.sh at $PER_TASK_LOOP_SH" >&2
+  echo "ERROR: cannot find per-task-loop-diffrange.sh at $PER_TASK_LOOP_SH" >&2
   exit 2
 fi
 

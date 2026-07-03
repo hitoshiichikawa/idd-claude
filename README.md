@@ -112,7 +112,10 @@ idd-claude/
     │   │   ├── tasks-count-gate.sh       #   Tasks Count Gate（#147 / #457）
     │   │   ├── debugger-gate.sh          #   Debugger Gate ヘルパー（#22 / #458）
     │   │   ├── stage-checkpoint.sh       #   Stage Checkpoint（#68 / #459）
-    │   │   ├── per-task-loop.sh          #   Per-task TDD Loop（#21 / #461-462）
+    │   │   ├── per-task-loop.sh                    #   Per-task TDD Loop orchestrator（#21 / #461-462 / #500 で family 分割）
+    │   │   ├── per-task-loop-diffrange.sh          #   └ family: diff-range・fail-fast・post-marker 判定ヘルパー（#500）
+    │   │   ├── per-task-loop-exec.sh               #   └ family: Implementer/Reviewer 実行 + escalation（#500）
+    │   │   ├── per-task-loop-prompt.sh             #   └ family: prompt builders（#500）
     │   │   ├── impl-pipeline.sh          #   Reviewer Gate／impl stage pipeline（#20 / #463-464）
     │   │   ├── dependency-resolver.sh    #   Dependency Resolver／Auto-Unblock Sweep（#465）
     │   │   └── slot-worker.sh            #   Phase C Slot Runner（ヘルパー #466 ＋ _slot_run_issue 本体 #467）
