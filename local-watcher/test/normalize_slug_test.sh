@@ -19,13 +19,19 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #466 で _normalize_slug は modules/slot-worker.sh へ分離された。
+SLOT_WORKER_SH="$SCRIPT_DIR/../bin/modules/slot-worker.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
   exit 2
 fi
+if [ ! -f "$SLOT_WORKER_SH" ]; then
+  echo "ERROR: cannot find slot-worker.sh at $SLOT_WORKER_SH" >&2
+  exit 2
+fi
 
-# issue-watcher.sh から `_normalize_slug` のみを抽出する。
+# modules/slot-worker.sh から `_normalize_slug` のみを抽出する（#466）。
 # awk で「関数開始行」から最初の単独 `}` までを抜き出す。
 extract_function() {
   local script="$1"
@@ -38,7 +44,7 @@ extract_function() {
 }
 
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "_normalize_slug")"
+eval "$(extract_function "$SLOT_WORKER_SH" "_normalize_slug")"
 
 if ! declare -F _normalize_slug >/dev/null; then
   echo "ERROR: _normalize_slug not loaded" >&2
