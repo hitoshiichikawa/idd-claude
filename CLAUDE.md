@@ -244,6 +244,7 @@ GitHub Actions workflow + テンプレート群で構成され、processor / gat
   | `stage_a_verify_` / `sav_` | stage-a-verify |
   | `rs_` | run-summary |
   | `sr_` | stale-pickup-reaper |
+  | `fr_` | failed-recovery（#359 / #471 で family 分割 / 全ファイル `fr_` 共有）: orchestrator `failed-recovery.sh`（エントリ `process_failed_recovery` / 候補列挙 / `_fr_dispatch_candidate`）+ sub `failed-recovery-attempt.sh`（attempt budget / state 永続化 / no-progress 判定 / 終端処理。`fr_run_recovery_attempt` を含む）/ `failed-recovery-invoke.sh`（context 収集 / claude 起動 / 作業ツリー準備） |
   | `drr_` | design-review-release（ロガー `drr_log` 等は core_utils に同居 / #456） |
   | `tc_` | tasks-count-gate（#457） |
   | `dbg_` | debugger-gate（非 prefix 関数 detect_blocked_marker 等はモジュール冒頭ヘッダで列挙 / #458） |

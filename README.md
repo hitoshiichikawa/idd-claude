@@ -98,7 +98,9 @@ idd-claude/
     │   │   ├── security-review.sh        #   Security Review プロセッサ（#279）
     │   │   ├── guard-hook.sh             #   PreToolUse Guard Hook 注入（#294）
     │   │   ├── context-map.sh            #   per-task context metadata 生成
-    │   │   ├── failed-recovery.sh        #   Failed Recovery プロセッサ（#359）
+    │   │   ├── failed-recovery.sh        #   Failed Recovery orchestrator（#359 / #471 で family 分割）
+    │   │   ├── failed-recovery-attempt.sh #   └ family: attempt budget / state 永続化 / 終端処理（#471）
+    │   │   ├── failed-recovery-invoke.sh  #   └ family: context 収集 / claude 起動 / 作業ツリー準備（#471）
     │   │   ├── stale-pickup-reaper.sh    #   Stale Pickup Reaper（#379）
     │   │   ├── needs-decisions-auto.sh   #   needs-decisions 自動続行プロセッサ（#362）
     │   │   ├── dep-cycle-detect.sh       #   Issue 依存サイクル検出（#368）
