@@ -37,8 +37,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 MODULE_SH="$SCRIPT_DIR/../bin/modules/dep-cycle-detect.sh"
+# #465 で dr_extract_deps / dr_unblock_gate_enabled は modules/dependency-resolver.sh へ分離された。
+DR_SH="$SCRIPT_DIR/../bin/modules/dependency-resolver.sh"
 
-if [ ! -f "$WATCHER_SH" ] || [ ! -f "$MODULE_SH" ]; then
+if [ ! -f "$WATCHER_SH" ] || [ ! -f "$MODULE_SH" ] || [ ! -f "$DR_SH" ]; then
   echo "ERROR: cannot find watcher or module" >&2
   exit 2
 fi
@@ -73,11 +75,11 @@ eval "$(extract_function "$MODULE_SH" "dc_escalate_member")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$MODULE_SH" "dc_cycle_sweep")"
 
-# issue-watcher.sh から遅延束縛で呼ばれる関数を抽出ロード
+# modules/dependency-resolver.sh から遅延束縛で呼ばれる関数を抽出ロード（#465）
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_extract_deps")"
+eval "$(extract_function "$DR_SH" "dr_extract_deps")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_unblock_gate_enabled")"
+eval "$(extract_function "$DR_SH" "dr_unblock_gate_enabled")"
 
 for fn in dc_gate_enabled dc_normalize_targets dc_extract_edges dc_build_graph_lines \
           dc_find_cycles dc_has_cycle_marker dc_format_cycle_comment \

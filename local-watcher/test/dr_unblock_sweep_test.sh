@@ -41,9 +41,16 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+# #465 で dr_* 関数群（Dependency Resolver / Auto-Unblock Sweep）は
+# modules/dependency-resolver.sh へ分離された。
+DR_SH="$SCRIPT_DIR/../bin/modules/dependency-resolver.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
+  exit 2
+fi
+if [ ! -f "$DR_SH" ]; then
+  echo "ERROR: cannot find dependency-resolver.sh at $DR_SH" >&2
   exit 2
 fi
 
@@ -59,24 +66,24 @@ extract_function() {
   ' "$script"
 }
 
-# 対象関数群を読み込む。dr_extract_deps と dr_resolve_one は dr_unblock_resolve_one_issue
-# が遅延束縛で呼ぶため明示的に読み込む。
+# 対象関数群を読み込む（#465 より modules/dependency-resolver.sh から）。dr_extract_deps と
+# dr_resolve_one は dr_unblock_resolve_one_issue が遅延束縛で呼ぶため明示的に読み込む。
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_unblock_gate_enabled")"
+eval "$(extract_function "$DR_SH" "dr_unblock_gate_enabled")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_unblock_has_orphan_marker")"
+eval "$(extract_function "$DR_SH" "dr_unblock_has_orphan_marker")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_unblock_post_unblocked_comment")"
+eval "$(extract_function "$DR_SH" "dr_unblock_post_unblocked_comment")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_unblock_post_orphan_marker_comment")"
+eval "$(extract_function "$DR_SH" "dr_unblock_post_orphan_marker_comment")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_unblock_resolve_one_issue")"
+eval "$(extract_function "$DR_SH" "dr_unblock_resolve_one_issue")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_unblock_sweep")"
+eval "$(extract_function "$DR_SH" "dr_unblock_sweep")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_extract_deps")"
+eval "$(extract_function "$DR_SH" "dr_extract_deps")"
 # shellcheck disable=SC1090,SC2086
-eval "$(extract_function "$WATCHER_SH" "dr_format_unresolved_comment")"
+eval "$(extract_function "$DR_SH" "dr_format_unresolved_comment")"
 # Issue #348: dr_unblock_sweep 内で full_auto_enabled を呼ぶため、ヘルパー抽出規約
 # （CLAUDE.md 機能追加ガイドライン §7）に従って当該抽出リストへ追随させる。
 # shellcheck disable=SC1090,SC2086
@@ -122,7 +129,7 @@ LABEL_BLOCKED="blocked"
 LABEL_FAILED="claude-failed"
 # shellcheck disable=SC2034
 LABEL_NEEDS_DECISIONS="needs-decisions"
-# 通知マーカー（issue-watcher.sh のグローバル定義と一致させる）
+# 通知マーカー（modules/dependency-resolver.sh のグローバル定義と一致させる）
 # 抽出関数 dr_unblock_post_unblocked_comment / dr_unblock_post_orphan_marker_comment が
 # 遅延束縛で参照するため、static 解析からは未使用に見える。
 # shellcheck disable=SC2034
