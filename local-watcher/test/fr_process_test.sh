@@ -33,6 +33,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 MODULE_SH="$SCRIPT_DIR/../bin/modules/failed-recovery.sh"
 
 if [ ! -f "$MODULE_SH" ]; then
@@ -41,16 +44,6 @@ if [ ! -f "$MODULE_SH" ]; then
 fi
 
 # 既存テスト（fr_attempt_test.sh / fr_terminate_test.sh）と同じ extract_function イディオム
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # 抽出: orchestrator entry 2 関数（process_failed_recovery / _fr_dispatch_candidate）
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$MODULE_SH" "_fr_dispatch_candidate")"
@@ -74,21 +67,6 @@ FAILED_RECOVERY_MAX_PRS=3
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 assert_rc() {
   local label="$1"

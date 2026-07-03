@@ -30,6 +30,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #461 で per-task loop 前半関数は modules/per-task-loop.sh へ分離された。
 PER_TASK_LOOP_SH="$SCRIPT_DIR/../bin/modules/per-task-loop.sh"
@@ -44,16 +47,6 @@ if [ ! -f "$PER_TASK_LOOP_SH" ]; then
 fi
 
 # issue-watcher.sh から該当関数 1 個だけを抽出する（インデント無しの単独 `}` まで）。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # pt_warn は pt_classify_post_marker_paths / pt_handle_post_marker_commits から
 # 呼ばれるため stub で隔離する（実体は date / hostname / >&2 への副作用を含むため）。
 pt_warn() {
@@ -122,21 +115,6 @@ git() {
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 assert_contains() {
   local label="$1"

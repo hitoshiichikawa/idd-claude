@@ -36,6 +36,9 @@ set -euo pipefail
 # shellcheck disable=SC2034
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 AMM_MOD="$SCRIPT_DIR/../bin/modules/auto-merge-merged.sh"
 
 if [ ! -f "$AMM_MOD" ]; then
@@ -48,16 +51,6 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # extract_function イディオム
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # 対象関数群を auto-merge-merged.sh から読み込む
 for fn in amm_log amm_warn amm_error amm_resolve_gate_enabled amm_state_dir amm_state_path amm_save_pending amm_remove_pending amm_list_pending_pr_numbers amm_check_one_pending process_auto_merge_merged; do
   # shellcheck disable=SC1090,SC2086
@@ -142,38 +135,6 @@ REPO_SLUG="owner-test-repo"
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
-
-assert_rc() {
-  local label="$1"
-  local expected_rc="$2"
-  shift 2
-  local actual_rc=0
-  "$@" >/dev/null 2>&1 || actual_rc=$?
-  if [ "$expected_rc" = "$actual_rc" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected rc: $expected_rc"
-    echo "  actual rc  : $actual_rc"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 reset_state() {
   : >"$LOG_OUT"

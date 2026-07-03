@@ -32,6 +32,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #464 で impl pipeline 後半関数は modules/impl-pipeline.sh へ分離された。
 IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline.sh"
@@ -46,16 +49,6 @@ if [ ! -f "$IMPL_PIPELINE_SH" ]; then
 fi
 
 # issue-watcher.sh から該当関数 1 個だけを抽出する（インデント無しの単独 `}` まで）。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$IMPL_PIPELINE_SH" "stage_a_verify_round1_defer")"
 

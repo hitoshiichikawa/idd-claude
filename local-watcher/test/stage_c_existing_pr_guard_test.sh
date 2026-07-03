@@ -33,6 +33,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #459 で stage_c_existing_pr_guard は modules/stage-checkpoint.sh へ分離された。
 STAGE_CHECKPOINT_SH="$SCRIPT_DIR/../bin/modules/stage-checkpoint.sh"
@@ -48,16 +51,6 @@ fi
 
 # issue-watcher.sh / modules から該当関数 1 個だけを抽出する。
 # awk で「関数開始行」から最初の単独 `}`（インデント無し close brace）までを抜き出す。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$STAGE_CHECKPOINT_SH" "stage_c_existing_pr_guard")"
 
@@ -92,35 +85,6 @@ gh() {
 # ─── アサーションヘルパ ───
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1" expected="$2" actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
-
-assert_contains() {
-  local label="$1" haystack="$2" needle="$3"
-  case "$haystack" in
-    *"$needle"*)
-      echo "PASS: $label"
-      PASS_COUNT=$((PASS_COUNT + 1))
-      ;;
-    *)
-      echo "FAIL: $label"
-      echo "  expected to contain: $(printf '%q' "$needle")"
-      echo "  actual            : $(printf '%q' "$haystack")"
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      ;;
-  esac
-}
 
 assert_not_contains() {
   local label="$1" haystack="$2" needle="$3"

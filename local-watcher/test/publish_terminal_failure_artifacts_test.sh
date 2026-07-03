@@ -31,6 +31,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #458 で Debugger Gate（run_debugger_stage 等）は modules/debugger-gate.sh へ分離された。
 # debugger-notes-invalid の呼出は run_debugger_stage 内にあるため、探索元に含める。
@@ -60,16 +63,6 @@ fi
 
 # publish_terminal_failure_artifacts は内部で mark_issue_failed を呼ぶため、
 # 関数定義のみを抽出して current shell に load する。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$IMPL_PIPELINE_SH" "publish_terminal_failure_artifacts")"
 
@@ -170,19 +163,6 @@ setup_work_without_upstream() {
 # ─── アサーションヘルパ ───
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1" expected="$2" actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 assert_contains() {
   local label="$1" needle="$2" haystack="$3"

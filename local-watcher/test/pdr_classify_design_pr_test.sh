@@ -24,6 +24,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 PDR_SH="$SCRIPT_DIR/../bin/modules/pr-design-reviewer.sh"
 
 if [ ! -f "$PDR_SH" ]; then
@@ -32,16 +35,6 @@ if [ ! -f "$PDR_SH" ]; then
 fi
 
 # 既存テストと同じイディオム: 対象スクリプトから 1 関数だけを awk で切り出して eval。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PDR_SH" "pdr_classify_design_pr")"
 
@@ -52,21 +45,6 @@ fi
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 # DESIGN_REVIEWER_HEAD_PATTERN を既定値 (issue-watcher.sh Config と同一) で設定。
 # pdr_classify_design_pr は extract_function で抽出された関数本体内で参照される。

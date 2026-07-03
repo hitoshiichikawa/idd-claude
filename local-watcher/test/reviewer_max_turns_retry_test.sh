@@ -16,6 +16,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #460: Config ブロックが watcher-config.sh へ分離され、reviewer_normalize_extended_max_turns /
 # reviewer_is_error_max_turns の定義も config 側（source 時に config 行から呼ばれるため同伴）へ
@@ -35,16 +38,6 @@ if [ ! -f "$TU_SH" ]; then
   echo "ERROR: cannot find token-usage.sh at $TU_SH" >&2
   exit 2
 fi
-
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
 
 # reviewer_normalize_extended_max_turns / reviewer_is_error_max_turns を隔離抽出。
 # reviewer_is_error_max_turns は tu_extract_last_result_json に依存するため、その依存関数も

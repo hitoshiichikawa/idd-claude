@@ -23,6 +23,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #466 で _stage_checkpoint_has_resumable_state は modules/slot-worker.sh へ分離された。
 SLOT_WORKER_SH="$SCRIPT_DIR/../bin/modules/slot-worker.sh"
@@ -35,15 +38,6 @@ if [ ! -f "$SLOT_WORKER_SH" ]; then
   echo "ERROR: cannot find slot-worker.sh at $SLOT_WORKER_SH" >&2
   exit 2
 fi
-
-extract_function() {
-  local script="$1" fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
 
 # ─── 対象関数の load ───
 # shellcheck disable=SC1090,SC2086

@@ -29,6 +29,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MODULE_PATH="$REPO_ROOT/local-watcher/bin/modules/pr-reviewer-exec.sh"
 

@@ -38,6 +38,9 @@ set -euo pipefail
 # shellcheck disable=SC2034
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 NDA_MOD="$SCRIPT_DIR/../bin/modules/needs-decisions-auto.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 # #460: NEEDS_DECISIONS_MODE の正規化ブロックは Config 分離で watcher-config.sh へ移動した。
@@ -59,16 +62,6 @@ fi
 
 # 既存テスト同イディオム: 対象スクリプトから 1 関数だけを awk で切り出して
 # eval で読み込む。トップレベル副作用は回避する。
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # nda module から対象関数を抽出
 for fn in nda_log nda_warn nda_error \
   nda_resolve_mode_enabled \
@@ -137,38 +130,6 @@ NUMBER="42"
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
-
-assert_rc() {
-  local label="$1"
-  local expected_rc="$2"
-  shift 2
-  local actual_rc=0
-  "$@" >/dev/null 2>&1 || actual_rc=$?
-  if [ "$expected_rc" = "$actual_rc" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected rc: $expected_rc"
-    echo "  actual rc  : $actual_rc"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
 
 # ── stub state for nda_auto_continue / nda_evaluate_auto_continue gh observability ──
 GH_CALL_LOG=""

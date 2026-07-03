@@ -26,22 +26,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 PDR_SH="$SCRIPT_DIR/../bin/modules/pr-design-reviewer.sh"
 
 if [ ! -f "$PDR_SH" ]; then
   echo "ERROR: cannot find pr-design-reviewer.sh at $PDR_SH" >&2
   exit 2
 fi
-
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
 
 # 被テスト関数 + 内部で呼ぶ純粋 helper（pdr_parse_verdict / pdr_validate_verdict）を抽出。
 # 副作用を伴う依存（pdr_invoke_reviewer / pdr_classify_design_pr / pdr_already_processed /
@@ -61,39 +54,6 @@ fi
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"
-  local expected="$2"
-  local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
-
-assert_contains() {
-  local label="$1"
-  local haystack="$2"
-  local needle="$3"
-  case "$haystack" in
-    *"$needle"*)
-      echo "PASS: $label"
-      PASS_COUNT=$((PASS_COUNT + 1))
-      ;;
-    *)
-      echo "FAIL: $label"
-      echo "  expected to contain: $(printf '%q' "$needle")"
-      echo "  actual             : $(printf '%q' "$haystack")"
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      ;;
-  esac
-}
 
 # ── 観測ファイル（subshell をまたいでも残す） ──
 SIDE_LOG=""        # 副作用系（status/label/comment）の呼び出しトレース

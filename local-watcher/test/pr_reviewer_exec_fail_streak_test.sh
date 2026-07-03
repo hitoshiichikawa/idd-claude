@@ -36,6 +36,9 @@ set -euo pipefail
 # shellcheck disable=SC2034
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# extract_function / assert_eq / assert_contains / assert_rc を共有ライブラリから source（#474）。
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/lib/test-helpers.sh"
 PR_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer.sh"
 PR_EXEC_MOD="$SCRIPT_DIR/../bin/modules/pr-reviewer-exec.sh"
 
@@ -49,16 +52,6 @@ if [ ! -f "$PR_EXEC_MOD" ]; then
 fi
 
 # pr_publish_commit_status_test.sh と同じ extract_function イディオム
-extract_function() {
-  local script="$1"
-  local fn_name="$2"
-  awk -v fn="${fn_name}() {" '
-    $0 == fn { in_fn = 1 }
-    in_fn { print }
-    in_fn && $0 == "}" { in_fn = 0 }
-  ' "$script"
-}
-
 # 対象関数群を読み込む。pr_increment_exec_fail_streak / pr_reset_exec_fail_streak は
 # pr_read_exec_fail_streak / pr_write_exec_fail_streak / pr_extract_exec_fail_streak に
 # 依存するため、合わせて抽出する（#470 で pr-reviewer-exec.sh へ移動）。
@@ -115,50 +108,6 @@ PR_REVIEWER_STDERR_ARTIFACT_MAX_BYTES="1048576"
 
 PASS_COUNT=0
 FAIL_COUNT=0
-
-assert_eq() {
-  local label="$1"; local expected="$2"; local actual="$3"
-  if [ "$expected" = "$actual" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected: $(printf '%q' "$expected")"
-    echo "  actual  : $(printf '%q' "$actual")"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
-
-assert_rc() {
-  local label="$1"; local expected_rc="$2"; shift 2
-  local actual_rc=0
-  "$@" >/dev/null 2>&1 || actual_rc=$?
-  if [ "$expected_rc" = "$actual_rc" ]; then
-    echo "PASS: $label"
-    PASS_COUNT=$((PASS_COUNT + 1))
-  else
-    echo "FAIL: $label"
-    echo "  expected rc: $expected_rc"
-    echo "  actual rc  : $actual_rc"
-    FAIL_COUNT=$((FAIL_COUNT + 1))
-  fi
-}
-
-assert_contains() {
-  local label="$1"; local haystack="$2"; local needle="$3"
-  case "$haystack" in
-    *"$needle"*)
-      echo "PASS: $label"
-      PASS_COUNT=$((PASS_COUNT + 1))
-      ;;
-    *)
-      echo "FAIL: $label"
-      echo "  expected to contain: $(printf '%q' "$needle")"
-      echo "  actual             : $(printf '%q' "$haystack")"
-      FAIL_COUNT=$((FAIL_COUNT + 1))
-      ;;
-  esac
-}
 
 # ── stub state ──
 reset_stub_state() {
