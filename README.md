@@ -116,7 +116,9 @@ idd-claude/
     │   │   ├── per-task-loop-diffrange.sh          #   └ family: diff-range・fail-fast・post-marker 判定ヘルパー（#500）
     │   │   ├── per-task-loop-exec.sh               #   └ family: Implementer/Reviewer 実行 + escalation（#500）
     │   │   ├── per-task-loop-prompt.sh             #   └ family: prompt builders（#500）
-    │   │   ├── impl-pipeline.sh          #   Reviewer Gate／impl stage pipeline（#20 / #463-464）
+    │   │   ├── impl-pipeline.sh          #   Reviewer Gate／impl stage pipeline orchestrator（#20 / #463-464 / #501 で family 分割）
+    │   │   ├── impl-pipeline-prompt.sh   #   └ family: Stage prompt builders（#501）
+    │   │   ├── impl-pipeline-review.sh   #   └ family: Reviewer 実行 + 検証 + escalation（#501）
     │   │   ├── dependency-resolver.sh    #   Dependency Resolver／Auto-Unblock Sweep（#465）
     │   │   └── slot-worker.sh            #   Phase C Slot Runner（ヘルパー #466 ＋ _slot_run_issue 本体 #467）
     │   └── triage-prompt.tmpl       # Triage フェーズ用プロンプト

@@ -43,8 +43,9 @@ DEBUGGER_GATE_SH="$SCRIPT_DIR/../bin/modules/debugger-gate.sh"
 # run_per_task_loop は modules/per-task-loop.sh（orchestrator）に残置されたため、
 # 探索元は変更なし。
 PER_TASK_LOOP_SH="$SCRIPT_DIR/../bin/modules/per-task-loop.sh"
-# #464 で publish_terminal_failure_artifacts は modules/impl-pipeline.sh へ分離された。
-IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline.sh"
+# #464 で publish_terminal_failure_artifacts は modules/impl-pipeline.sh へ分離され、
+# #501 で modules/impl-pipeline-review.sh へ family 分割された。
+IMPL_PIPELINE_SH="$SCRIPT_DIR/../bin/modules/impl-pipeline-review.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
@@ -59,7 +60,7 @@ if [ ! -f "$PER_TASK_LOOP_SH" ]; then
   exit 2
 fi
 if [ ! -f "$IMPL_PIPELINE_SH" ]; then
-  echo "ERROR: cannot find impl-pipeline.sh at $IMPL_PIPELINE_SH" >&2
+  echo "ERROR: cannot find impl-pipeline-review.sh at $IMPL_PIPELINE_SH" >&2
   exit 2
 fi
 
