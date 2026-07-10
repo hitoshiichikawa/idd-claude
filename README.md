@@ -120,7 +120,8 @@ idd-claude/
     │   │   ├── impl-pipeline-prompt.sh   #   └ family: Stage prompt builders（#501）
     │   │   ├── impl-pipeline-review.sh   #   └ family: Reviewer 実行 + 検証 + escalation（#501）
     │   │   ├── dependency-resolver.sh    #   Dependency Resolver／Auto-Unblock Sweep（#465）
-    │   │   └── slot-worker.sh            #   Phase C Slot Runner（ヘルパー #466 ＋ _slot_run_issue 本体 #467）
+    │   │   ├── slot-worker.sh            #   Phase C Slot Runner orchestrator（ヘルパー #466 ＋ _slot_run_issue 本体 #467 / #502 で family 分割）
+    │   │   └── slot-worker-resume.sh     #   └ family: resume / slug 判定 / pre-claim / status publish（#502）
     │   └── triage-prompt.tmpl       # Triage フェーズ用プロンプト
     └── LaunchAgents/
         └── com.local.issue-watcher.plist   # macOS launchd 設定

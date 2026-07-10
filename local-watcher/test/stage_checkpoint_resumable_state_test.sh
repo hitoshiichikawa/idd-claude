@@ -27,15 +27,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=/dev/null
 . "$SCRIPT_DIR/lib/test-helpers.sh"
 WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
-# #466 で _stage_checkpoint_has_resumable_state は modules/slot-worker.sh へ分離された。
-SLOT_WORKER_SH="$SCRIPT_DIR/../bin/modules/slot-worker.sh"
+# #466 で _stage_checkpoint_has_resumable_state は modules/slot-worker.sh へ分離され、
+# #502 で modules/slot-worker-resume.sh へ family 分割された。
+SLOT_WORKER_SH="$SCRIPT_DIR/../bin/modules/slot-worker-resume.sh"
 
 if [ ! -f "$WATCHER_SH" ]; then
   echo "ERROR: cannot find issue-watcher.sh at $WATCHER_SH" >&2
   exit 2
 fi
 if [ ! -f "$SLOT_WORKER_SH" ]; then
-  echo "ERROR: cannot find slot-worker.sh at $SLOT_WORKER_SH" >&2
+  echo "ERROR: cannot find slot-worker-resume.sh at $SLOT_WORKER_SH" >&2
   exit 2
 fi
 
