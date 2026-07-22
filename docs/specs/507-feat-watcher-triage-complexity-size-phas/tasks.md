@@ -99,7 +99,7 @@
   - _Requirements: 7.3, 7.4, 7.5, 7.6, 7.7_
   - _Boundary: OperatorDocs_
 
-- [ ] 7. 最終検証（静的解析 / 近接テスト / parity 抽出比較 / 手動スモーク手順）
+- [x] 7. 最終検証（静的解析 / 近接テスト / parity 抽出比較 / 手動スモーク手順）
   - `shellcheck` を変更した全 bash スクリプト（新規 module / slot-worker / watcher-config /
     issue-watcher / labels script）に対して実行し警告ゼロを確認する
   - `bash -n` を新規 module と変更した既存スクリプトに対して実行する
