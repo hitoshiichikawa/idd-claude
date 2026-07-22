@@ -30,6 +30,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/lib/test-helpers.sh"
 
 MODEL_ROUTER_SH="$SCRIPT_DIR/../bin/modules/model-router.sh"
+WATCHER_CONFIG_SH="$SCRIPT_DIR/../bin/watcher-config.sh"
+ISSUE_WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
 
 if [ ! -f "$MODEL_ROUTER_SH" ]; then
   echo "ERROR: cannot find model-router.sh at $MODEL_ROUTER_SH" >&2
@@ -407,6 +409,39 @@ cleanup_stub_state
 remove_label_lines=$( { grep -v '^[[:space:]]*#' "$MODEL_ROUTER_SH" | grep -- '--remove-label' || true; } | wc -l)
 assert_eq "Req 5.5: model-router.sh の実行行に --remove-label が無い（既存ラベル遷移契約不変）" \
   "0" "$((remove_label_lines))"
+
+# ════════════════════════════════════════════════════════════════════
+# Wiring（grep ベース / 実行なし）: gate 宣言と module ローダ登録（Req 3.1 / 3.6 / NFR 1.2）
+# ════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- Wiring: gate 宣言 / module ローダ登録 ---"
+
+# W1: issue-watcher.sh の REQUIRED_MODULES に model-router.sh が含まれる
+required_modules_line="$(grep -E '^REQUIRED_MODULES=\(' "$ISSUE_WATCHER_SH" || true)"
+assert_contains "W1: REQUIRED_MODULES に model-router.sh が登録されている" \
+  "$required_modules_line" '"model-router.sh"'
+assert_contains "W1: model-router.sh は path-overlap.sh の直後に登録されている（design.md 指定位置）" \
+  "$required_modules_line" '"path-overlap.sh" "model-router.sh"'
+
+# W2: watcher-config.sh に MODEL_ROUTING_ENABLED の既定値宣言が存在し、既定は無効
+config_decl="$(grep -E '^MODEL_ROUTING_ENABLED=' "$WATCHER_CONFIG_SH" || true)"
+# 期待値は「宣言行そのもの」のリテラルなので単一引用符での展開抑止が意図的（SC2016 抑止）。
+# shellcheck disable=SC2016
+assert_eq "W2: watcher-config.sh に既定無効の gate 宣言が 1 行ある（Req 3.1）" \
+  'MODEL_ROUTING_ENABLED="${MODEL_ROUTING_ENABLED:-false}"' "$config_decl"
+
+# W3: #112 の「デフォルト有効化フラグの値正規化」ループ（既定 true 側）に含めない（新規 opt-in）
+default_true_loop_hits=$( { grep -n 'MODEL_ROUTING_ENABLED' "$WATCHER_CONFIG_SH" \
+  | grep -E 'for |_flag|正規化ループ' || true; } | wc -l)
+assert_eq "W3: gate はデフォルト有効化フラグの正規化ループに含まれない（新規 opt-in / Req 3.1）" \
+  "0" "$((default_true_loop_hits))"
+
+# W4: Phase 別の追加 gate を設けていない（単一 gate / Req 3.6）
+phase_gate_hits=$( { grep -rE '^[[:space:]]*MODEL_ROUTING_[A-Z_]*=' \
+  "$WATCHER_CONFIG_SH" "$MODEL_ROUTER_SH" || true; } \
+  | { grep -vc 'MODEL_ROUTING_ENABLED=' || true; } )
+assert_eq "W4: MODEL_ROUTING_ENABLED 以外の Phase 別 gate を宣言していない（Req 3.6）" \
+  "0" "$((phase_gate_hits))"
 
 echo ""
 echo "==========================================="
