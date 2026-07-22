@@ -83,7 +83,7 @@ idd-claude/
     │   │   ├── auto-merge-disarm.sh      #   auto-merge 取り消しプロセッサ（#434）
     │   │   ├── promote-pipeline.sh       #   Promote Pipeline プロセッサ（#15 / #181 Part 3 / #472 で path-overlap.sh を分離）
     │   │   ├── path-overlap.sh           #   Path Overlap Checker プロセッサ（#18 Phase E / #472 で promote-pipeline.sh から分割）
-    │   │   ├── model-router.sh           #   Model Routing（Triage complexity → size ラベル永続化 / #507 Phase 1）
+    │   │   ├── model-router.sh           #   Model Routing（#507 Phase 1: size ラベル永続化 / #508 Phase 2: Developer モデル解決）
     │   │   ├── pr-iteration.sh           #   PR Iteration プロセッサ orchestrator（#181 Part 3 / #469 で family 分割）
     │   │   ├── pr-iteration-comments.sh  #   └ family: 一般コメント収集 + filter chain（#469）
     │   │   ├── pr-iteration-state.sh     #   └ family: PR body marker read/write + no-progress streak（#469）
@@ -636,6 +636,12 @@ cron / launchd 側でリポジトリを指定する運用にします（単一 r
 | `DEV_MODEL` | `claude-opus-4-8` | Stage A 系（PM + Developer）/ design モード / Per-Task Impl |
 | `PJM_MODEL` | `claude-sonnet-4-6` | **Stage C（PjM / 実装 PR 作成）**。機械的作業のため軽量既定（#328） |
 | `REVIEWER_MODEL` | `claude-opus-4-8` | Reviewer（独立レビューゲート）/ Per-Task Reviewer |
+| `DEV_MODEL_SMALL` | **（空）** | `size:small` ラベル付き Issue の Developer 実行。空のままなら `DEV_MODEL`（#508 / opt-in） |
+| `DEV_MODEL_MEDIUM` | **（空）** | `size:medium` ラベル付き Issue の Developer 実行。空のままなら `DEV_MODEL`（#508 / opt-in） |
+
+> `DEV_MODEL_SMALL` / `DEV_MODEL_MEDIUM` は **`MODEL_ROUTING_ENABLED=true` かつ値の明示**という
+> 二重 opt-in で初めて効きます（既定は空 = 全 Issue が `DEV_MODEL`）。詳細と既知の制約は
+> [Model Routing Phase 2: size ラベル → Developer モデル (#508)](#model-routing-phase-2-size-ラベル--developer-モデル-508) を参照してください。
 
 > **Migration note（#328 / `PJM_MODEL` 導入）**: #328 以前の Stage C は `DEV_MODEL`
 > （既定 Opus）で起動されていました。PR 作成は review-notes の commit / `gh pr create` /
@@ -1573,6 +1579,7 @@ idd-claude は基本フロー（Triage → 実装 → PR 作成）以外の機�
 | **Slack 通知 emitter**（自動 merge armed / 自動 merge merged 完了 / failed-recovery 終端 / needs-decisions 自動続行 / promote 完了 / impl 着手（claude-pickup）といった人間が能動的に把握すべき重要イベントを Slack Incoming Webhook 経由で push 通知する補助的な観測チャネル（D-18・低優先）。通常運用は `run-summary` + watcher ログで完結し、本機能は「Slack を見ていれば異常終端・自動マージ完了・実装着手に気付ける」程度の補助的可視化を担う。完全な opt-in（gate OFF 時は本機能導入前と完全に等価で gh / git API 呼び出しゼロ・curl 呼び出しゼロ・ラベル遷移ゼロ）。webhook URL は env 経由のみで受け取り、コードベース・ログ・テストフィクスチャに実値を残さない。通知失敗（HTTP 4xx/5xx / curl 非ゼロ exit / payload 整形失敗）はパイプライン本体に伝播せず WARN ログ 1 行のみ残す（fail-open）。payload には event 種別識別子・repo 識別子・Issue/PR 番号・GitHub URL・result status・detail（secret scrub 済）を含み、Slack Block Kit `section` ブロック + フォールバック `text` フィールドで構成される。secret scrub は GitHub token prefix（`ghp_` 等）/ Slack webhook URL / 32 桁以上連続英数字を `[REDACTED]` に置換する best-effort 防御。**通知対象イベント**: auto-merge armed（実装 PR / `result=armed`）/ auto-merge-design armed（設計 PR / `result=armed`）/ **auto-merge-merged**（実装 PR の実 merge 完了 / `SLACK_NOTIFY_MERGED_ENABLED=true` でのみ発火 / #388）/ **auto-merge-design-merged**（設計 PR の実 merge 完了 / 同上 / #388）/ failed-recovery 終端 3 種（recovered / max-attempts / no-progress）/ needs-decisions auto-continue 成功 / promote 完了 / claude-pickup（impl 着手時のラベル付け替え成功 / #390）。**Migration Note (#388)**: 旧バージョンでは auto-merge / auto-merge-design の armed 通知（GitHub auto-merge を有効化した時点）が `result=success` で発火し Slack 上で「merge 完了」と誤読される問題があった。本修正で armed 通知は `result=armed` + detail に `armed (squash on green checks)` 明示に変更され、実際の merge 完了は新規 event_type `auto-merge-merged` / `auto-merge-design-merged` で別途通知される。`SLACK_NOTIFY_ENABLED=true` 既存ユーザは armed 文面が変わる（`result=success` ではなく `result=armed`）点に注意。新規 merged 通知の発火は `SLACK_NOTIFY_MERGED_ENABLED=true` 厳密一致でのみ有効（未設定なら本機能導入前と等価で armed 通知のみ）。merged 検知は GitHub auto-merge enable 成功時に PR 番号を `$HOME/.issue-watcher/auto-merge-pending/<repo-slug>/pr-<N>.json` に積み、後続サイクルで `gh pr view` の `state=MERGED` 観測時に 1 度だけ通知 + state 削除する方式。人間が手動 merge した PR は state に積まれていないため通知されない） | `SLACK_NOTIFY_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `on` / `yes` / typo / 前後空白付き）はすべて OFF に正規化（外部副作用ゼロで sn_notify が早期 return） | **必須**: `SLACK_WEBHOOK_URL`（Slack Incoming Webhook URL。secret 値。リポジトリにコミットしない。`SLACK_NOTIFY_ENABLED=true` かつ本 env が未設定 / 空のときは sn_warn 1 行 + no-op で起動可）。推奨: `SLACK_NOTIFY_TIMEOUT`（秒。curl `--max-time` に渡す HTTP POST タイムアウト上限。既定 `5`。非数値 / 負数 / 空は既定 5 に正規化）。**#388 で追加**: `SLACK_NOTIFY_MERGED_ENABLED`（`=true` 厳密一致で auto-merge-merged / auto-merge-design-merged 通知を有効化。既定 `false` で未設定環境は本機能導入前と等価）、`AUTO_MERGE_MERGED_STATE_DIR`（pending state 配置先。既定 `$HOME/.issue-watcher/auto-merge-pending/<repo-slug>` / 通常変更不要）、`AUTO_MERGE_MERGED_MAX_CHECKS`（1 サイクルあたりの `gh pr view` 呼び出し上限。既定 `50`）、`AUTO_MERGE_MERGED_GH_TIMEOUT`（1 件あたりの gh タイムアウト秒。既定 `60`） | — | #370, #388, #390 |
 | **Full-Auto Kill Switch**（full-auto 系 processor の単一 kill switch。**AND セマンティクス**で個別 gate と並列に作用し、`FULL_AUTO_ENABLED=true` かつ個別 gate=true の場合のみ full-auto 系 processor が発火する二重 opt-in。不具合発生時に env 1 つで全 full-auto 挙動を即時 no-op に倒すための運用 knob。**現在の配線対象**は Dependency Auto-Unblock Sweep (#346) + Auto-Merge (#352) + Design Auto-Merge (#354) + PR Reviewer Commit Status (#349) + Failed Recovery (#359) + needs-decisions Auto-Continue (#362) の 6 系統。semantic conflict / blocked cascade は未実装のため将来追加時に同じ kill switch を参照する設計。既存 opt-in 機能（merge-queue / auto-rebase / promote-pipeline / pr-iteration / pr-reviewer / security-review / design-review-release / stage-checkpoint / stage-a-verify / quota-aware / debugger / hooks）は **本フラグ配下に入れず** 個別 gate で独立制御を維持） | `FULL_AUTO_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / `True` / `TRUE` / `1` / `on` / `False` / 空文字 / 前後空白付き / typo）はすべて OFF に正規化（外部副作用ゼロで早期 return + suppression ログ 1 行）。本機能導入前と完全に等価（NFR 1.1） | — | (本表の各 full-auto processor 行を参照) | #348 |
 | **Model Routing Phase 1**（Triage が出力した変更規模 `complexity` を `size:small` / `size:medium` / `size:large` ラベルとして Issue に永続化する。Triage を再実行しないサイクル（impl-resume / PR Iteration / Failed Recovery）でも判定結果を sticky に参照でき、人間が事前にラベルを貼れば Triage 判定を override できる。既存 `size:*` ラベルが 1 つでもあれば追加・付け替え・削除のいずれも行わない（先に存在するラベル優先 / 人間 override と過去 Triage 由来を区別しない）。`skip-triage` / impl-resume 経路は Triage ブロックごと迂回されるため付与されない。値の不正は WARN のみで継続（fail-safe）、GitHub 操作の失敗も WARN のみで当該サイクルを中断しない（fail-open）。gate OFF 時は本機能に起因する GitHub API 呼び出し 0 回・ログ 0 行で本機能導入前と完全に等価。**Triage 側の `complexity` / `complexity_reason` 出力は gate に依らず常時行われる**（gate は watcher 側の永続化のみを制御）） | `MODEL_ROUTING_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `on` / `off` / typo）はすべて安全側 OFF に正規化 | **前提**: `bash .github/scripts/idd-claude-labels.sh` で `size:small` / `size:medium` / `size:large` ラベルを作成済みであること（未作成の repo では付与が毎回失敗し WARN が出る / 処理自体は継続） | [Model Routing Phase 1: Triage complexity → size ラベル (#507)](#model-routing-phase-1-triage-complexity--size-ラベル-507) | #507 |
+| **Model Routing Phase 2**（Issue に付いた `size:*` ラベルを読んで、その Issue の **Developer 実行モデル**（`DEV_MODEL`）を slot 内で切り替える。**gate 有効化だけではモデルは変わらない二重 opt-in**（`DEV_MODEL_SMALL` / `DEV_MODEL_MEDIUM` に値を明示して初めて適用される）。解決は **slot 起動時点のラベル集合に基づく 1 回のみ**で、追加の GitHub API 呼び出し・LLM 実行はゼロ。size ラベル不在 / `size:*` 複数付与 / 許可値外はすべて `DEV_MODEL` へ fail-safe。適用先は当該 slot 内の Developer 実行（design セッション / 実装 Stage 群 / per-task ループ）のみで、Triage / Reviewer / PjM / slot 外プロセッサは対象外。gate OFF 時は本機能に起因する外部コマンド呼び出し 0 回・ログ 0 行で導入前と完全に等価） | `MODEL_ROUTING_ENABLED`（Phase 1 と**共通の単一 gate**。Phase 別 gate は設けない） | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `on` / `off` / typo）はすべて安全側 OFF に正規化 | **必須（これが無いと何も変わらない）**: `DEV_MODEL_SMALL` および / または `DEV_MODEL_MEDIUM`（**既定はいずれも空**。モデル ID は埋め込まれていないため運用者が明示指定する。例: `DEV_MODEL_SMALL=claude-sonnet-4-6`）。`size:large` 専用 env は無く `large` は `DEV_MODEL` を使う | [Model Routing Phase 2: size ラベル → Developer モデル (#508)](#model-routing-phase-2-size-ラベル--developer-モデル-508) | #508 |
 | **GitHub Actions ワークフロー**（local watcher の代替実行基盤） | `IDD_CLAUDE_USE_ACTIONS`（GitHub Repository Variable。**env var ではない**） | 未設定 = 無効 | Repository Variable に `true` を厳密一致で設定。未設定 / `true` 以外（`on` / `True` / `1` 等）はワークフロー発火を停止 | — | [Step 3-B. GitHub Actions をセットアップ](#step-3-b-github-actions-をセットアップ代替) | #10 |
 
 各機能は**互いに独立**に制御できます。例えば `MERGE_QUEUE_RECHECK_ENABLED=false` だけを
@@ -2451,9 +2458,11 @@ cd ~/.idd-claude && git pull && ./install.sh --local
    （`auto-dev` ラベル運用と同型の運用ゲート）
 
 > **本 Phase のスコープ**: 判定結果の**永続化まで**です。size ラベルに基づく Developer
-> モデル ID の解決（Phase 2 / #508）と、tasks 件数超過時の子 Issue 分割案コメント
-> （Phase 3 / #509）は本 Phase には含まれません。したがって現時点で gate を有効化しても、
-> 起きることは size ラベルの付与のみです。
+> モデル ID の解決は [Phase 2 (#508)](#model-routing-phase-2-size-ラベル--developer-モデル-508)、
+> tasks 件数超過時の子 Issue 分割案コメント（Phase 3 / #509）は本 Phase には含まれません。
+> Phase 2 も同じ `MODEL_ROUTING_ENABLED` gate 配下ですが、**size 別モデルを明示しない限り
+> モデルは変わりません**（二重 opt-in）。したがって gate だけを有効化した状態で起きることは
+> size ラベルの付与のみです。
 
 ### size ラベルの意味
 
@@ -2532,6 +2541,134 @@ MODEL_ROUTING_ENABLED=true \
 
 `local-watcher/bin/modules/model-router.sh`（新規）/ `local-watcher/bin/watcher-config.sh` /
 `local-watcher/bin/triage-prompt.tmpl` を変更する PR を merge しただけでは、cron / launchd が
+実行する `$HOME/bin/` 配下は古いままです。反映するには以下を実施してください:
+
+```bash
+cd ~/.idd-claude && git pull && ./install.sh --local
+```
+
+---
+
+## Model Routing Phase 2: size ラベル → Developer モデル (#508)
+
+Phase 1 で Issue に永続化された `size:*` ラベルを読み、**その Issue の Developer 実行モデル**
+（`DEV_MODEL`）を slot 内で切り替えます。軽微な Issue で最上位モデルの quota / コストを
+消費しないための機能です。
+
+**モデルが変わるには 2 つの条件が両方必要です（二重 opt-in）**:
+
+1. `MODEL_ROUTING_ENABLED=true`（Phase 1 と**共通の単一 gate**。Phase 別 gate はありません）
+2. `DEV_MODEL_SMALL` / `DEV_MODEL_MEDIUM` に**モデル ID を明示**（既定はいずれも**空**）
+
+gate を有効化しただけではモデルは変わりません（silent にモデルが下がる事故を避けるため、
+既定値に具体的なモデル ID を埋め込んでいません）。
+
+### 設定値
+
+| env | 既定 | 意味 |
+|---|---|---|
+| `DEV_MODEL_SMALL` | **（空）** | `size:small` の Issue に適用する Developer モデル ID。空なら `DEV_MODEL` |
+| `DEV_MODEL_MEDIUM` | **（空）** | `size:medium` の Issue に適用する Developer モデル ID。空なら `DEV_MODEL` |
+
+`size:large` 専用の env はありません（`large` は `DEV_MODEL` を使います）。設定値はモデル ID の
+許可値リストと照合されず、指定した文字列がそのまま `--model` に渡ります。
+
+### 解決結果の一覧
+
+| Issue のラベル状態 | 適用される Developer モデル |
+|---|---|
+| `size:small` あり + `DEV_MODEL_SMALL` 設定あり | `DEV_MODEL_SMALL` |
+| `size:small` あり + `DEV_MODEL_SMALL` 空 | `DEV_MODEL`（fallback） |
+| `size:medium` あり + `DEV_MODEL_MEDIUM` 設定あり | `DEV_MODEL_MEDIUM` |
+| `size:medium` あり + `DEV_MODEL_MEDIUM` 空 | `DEV_MODEL`（fallback） |
+| `size:large` あり | `DEV_MODEL` |
+| `size:*` ラベルなし | `DEV_MODEL`（fallback） |
+| `size:*` ラベルが 2 つ以上 | `DEV_MODEL`（どれも採用しない fail-safe） |
+| 不正値（`size:huge` / `size:Small` / 末尾に空白 等） | `DEV_MODEL`（fail-safe） |
+| `MODEL_ROUTING_ENABLED` が `true` 以外 | `DEV_MODEL`（機能そのものが動かない） |
+
+ラベル名は `^size:(small|medium|large)$` に**厳密一致**した場合のみ採用されます
+（大文字混じり・前後空白・部分一致はすべて fallback）。
+
+### 適用範囲と対象外
+
+**適用されるもの**（当該 slot 内の Developer 実行すべてに同一モデルが一貫して適用されます）:
+
+- design セッション（PM → Architect → PjM の単一セッション実行）
+- 実装 Stage 群（Stage A / A' / B）
+- per-task ループ（Implementer）
+
+**適用されないもの**（本機能では一切変更しません）:
+
+- `TRIAGE_MODEL`（Triage）/ `REVIEWER_MODEL`（Reviewer・Per-Task Reviewer）/ `PJM_MODEL`（Stage C）
+  — Reviewer は品質ゲートのため上位モデルを維持します
+- slot 外プロセッサのモデル: `PR_ITERATION_DEV_MODEL`（PR Iteration）/
+  `FAILED_RECOVERY_DEV_MODEL`（Failed Recovery）/ `AUTO_REBASE_MODEL` / `DEBUGGER_MODEL` 等
+- `DEV_MODEL` 自体の既定値・意味・上書き方法（変更していません）
+
+### 適用タイミングと既知の制約（重要）
+
+モデル解決は **slot 起動時点のラベル集合スナップショットに基づき、1 Issue の 1 slot 実行に
+つき 1 回だけ**行われます（追加の GitHub API 呼び出しは 0 回）。Triage 実行後の再解決は
+行いません。
+
+> **⚠️ 初回 Triage 経路では効きません**: 新規 Issue が同一 slot 実行内で「Triage → size ラベル
+> 付与 → 実装」と進む経路では、slot 起動時点のスナップショットに `size:*` がまだ含まれないため
+> `DEV_MODEL` へ fallback します。これは**意図された既知の制約**であり不具合ではありません。
+
+したがって本機能が実際に効くのは次の 3 経路です:
+
+1. **人間が事前に size ラベルを貼った Issue**（初回の slot 実行から適用されます）
+2. **`skip-triage` 経路**（既に付いている size ラベルが使われます）
+3. **impl-resume / 再 pickup サイクル**（前サイクルで付与された size ラベルが使われます）
+
+誤って `size:small` を貼った Issue は、ラベルを剥がすまで下位モデルで実装され続けます。
+訂正手順は Phase 1 と同じく「ラベルを剥がす → 次回 Triage で再付与」です。
+
+### 有効化
+
+```bash
+MODEL_ROUTING_ENABLED=true \
+  DEV_MODEL_SMALL=claude-sonnet-4-6 \
+  DEV_MODEL_MEDIUM=claude-sonnet-4-6 \
+  REPO=owner/name REPO_DIR=$HOME/src/name $HOME/bin/issue-watcher.sh
+```
+
+（上記のモデル ID は**記入例**です。実際に使うモデルは運用方針に合わせて指定してください。）
+
+### ログ（可観測性）
+
+gate 有効時は、解決のたびに `model-router:` prefix 付きのログが cron ログ / slot ログへ
+**1 行**残ります（すべての分岐でログを残し silent fail を作りません）:
+
+```text
+model-router: issue=#123 size=small dev_model=claude-sonnet-4-6
+model-router: issue=#124 size=none dev_model=claude-opus-4-8 fallback=DEV_MODEL（理由: size ラベル不在）
+model-router: issue=#125 size=multiple dev_model=claude-opus-4-8 fallback=DEV_MODEL（理由: size:* ラベルが複数付与）
+model-router: issue=#126 size=invalid dev_model=claude-opus-4-8 fallback=DEV_MODEL（理由: size ラベル値が許可値に不一致）
+```
+
+`fallback=DEV_MODEL` の有無で「size 別モデルが適用されたか」を判別できます。未信頼な
+ラベル値そのものはログへ出力せず、判定結果を表す固定トークン（`none` / `multiple` /
+`invalid`）のみを出します。
+
+### migration note（後方互換）
+
+- `DEV_MODEL_SMALL` / `DEV_MODEL_MEDIUM` は **新規追加・既定空**です。未設定環境では
+  `MODEL_ROUTING_ENABLED` の値に関わらず全 Issue が従来どおり `DEV_MODEL` で実行されます
+- gate OFF 時は本機能に起因する外部コマンド呼び出し **0 回**・ログ **0 行**で、本機能導入前と
+  完全に同一の挙動になります
+- 既存 env var 名（`DEV_MODEL` / `TRIAGE_MODEL` / `REVIEWER_MODEL` / `PJM_MODEL` /
+  `PR_ITERATION_DEV_MODEL` / `FAILED_RECOVERY_DEV_MODEL` / `MODEL_ROUTING_ENABLED`）の
+  名称・既定値・解決順序はいずれも変更していません。ラベル遷移契約 / exit code の意味 /
+  ログ出力先 / cron 登録文字列も不変です
+- slot 内で確定した Developer モデルは**当該サブシェル内に閉じ**、親プロセスや他 slot の
+  設定へは伝播しません（slot ごとに独立して解決されます）
+
+### ⚠️ merge 後の再配置が必要
+
+`local-watcher/bin/modules/model-router.sh` / `local-watcher/bin/modules/slot-worker.sh` /
+`local-watcher/bin/watcher-config.sh` を変更する PR を merge しただけでは、cron / launchd が
 実行する `$HOME/bin/` 配下は古いままです。反映するには以下を実施してください:
 
 ```bash
