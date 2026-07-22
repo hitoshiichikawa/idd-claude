@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. size ラベル 3 種を labels script 2 系統へ additive parity で追加する (P)
+- [x] 1. size ラベル 3 種を labels script 2 系統へ additive parity で追加する (P)
   - `.github/scripts/idd-claude-labels.sh` の `LABELS=()` 配列末尾に `size:small` / `size:medium` /
     `size:large` の 3 行を追加する（`name|color|description` 形式 / design.md「`size:*` ラベル定義案」表）
   - color は 6 桁小文字 hex（`c2e0c6` / `fef2c0` / `f7c6c7`）、description は `【Issue 用】` prefix +
