@@ -1220,6 +1220,26 @@ DEV_MAX_TURNS="${DEV_MAX_TURNS:-60}"
 # design モード（PM → Architect → PjM の単一セッション）は対象外（DEV_MODEL のまま）。
 PJM_MODEL="${PJM_MODEL:-claude-sonnet-4-6}"
 
+# ─── Model Routing Phase 2: size 別 Developer モデル (#508) ───
+# `size:small` / `size:medium` ラベルが付いた Issue の Developer 実行に用いるモデル ID。
+# **既定はいずれも空文字**（Req 2.1）。`MODEL_ROUTING_ENABLED=true` にしただけではモデルは
+# 変わらず、ここに値を明示したときに初めて当該 size の Issue へ適用される（gate 有効化だけで
+# silent にモデルが下がる事故を避ける二重 opt-in / Req 2.3）。
+#
+# - 具体的なモデル ID を既定値として埋め込まない（運用者の明示設定にのみ依存 / Req 2.2 /
+#   NFR 3.4）。設定例: `DEV_MODEL_SMALL=claude-sonnet-4-6`
+# - `size:large` 専用の設定値は設けない。`large` は `DEV_MODEL` を用いる（Req 1.3）。
+# - size ラベル不在 / `size:*` 複数付与 / 許可値外はすべて `DEV_MODEL` へ fail-safe。
+# - 適用先は **slot 内の Developer 実行のみ**（design セッション / 実装 Stage 群 /
+#   per-task ループ）。Triage / Reviewer / PjM / slot 外プロセッサ
+#   （`PR_ITERATION_DEV_MODEL` / `FAILED_RECOVERY_DEV_MODEL`）は対象外（Req 3.8 / 3.9）。
+# - 解決は slot 起動時点のラベル集合に基づく 1 回のみ。初回 Triage で size ラベルが付いた
+#   同一 slot 実行内では `DEV_MODEL` に倒れる（既知の制約 / Req 4.2。詳細は README
+#   「Model Routing Phase 2: size ラベル → Developer モデル (#508)」節）。
+# - `DEV_MODEL` の既定値・意味・上書き方法は変更していない（Req 2.4）。
+DEV_MODEL_SMALL="${DEV_MODEL_SMALL:-}"
+DEV_MODEL_MEDIUM="${DEV_MODEL_MEDIUM:-}"
+
 # Triage の --bare 実行 (#332, opt-in)。`true` 厳密一致のみ有効（それ以外はすべて OFF）。
 # --bare は CLAUDE.md / .claude/rules / hooks / skills / MCP の自動ロードをスキップし、
 # Triage の固定 context を排除する（Triage の判定基準は triage-prompt.tmpl 内で自己完結。

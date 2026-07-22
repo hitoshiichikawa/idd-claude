@@ -1,18 +1,23 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-# model-router.sh — watcher のモデルルーティングモジュール (#507, Phase 1)
+# model-router.sh — watcher のモデルルーティングモジュール (#507 Phase 1 / #508 Phase 2)
 #
 # 用途:
-#   Triage が出力した変更規模判定 `complexity` を安全に解釈し、`size:<complexity>`
-#   ラベルとして Issue に冪等・fail-open で永続化する。ラベルに永続化することで、
-#   Triage を再実行しないサイクル（impl-resume / PR Iteration / Failed Recovery）でも
-#   判定結果を sticky に参照でき、人間が事前にラベルを貼ることで判定を override できる。
-#   mr_is_enabled / mr_parse_triage_complexity / mr_has_size_label /
-#   mr_persist_size_label ほか。
+#   Phase 1 (#507): Triage が出力した変更規模判定 `complexity` を安全に解釈し、
+#   `size:<complexity>` ラベルとして Issue に冪等・fail-open で永続化する。ラベルに
+#   永続化することで、Triage を再実行しないサイクル（impl-resume / PR Iteration /
+#   Failed Recovery）でも判定結果を sticky に参照でき、人間が事前にラベルを貼ることで
+#   判定を override できる。mr_is_enabled / mr_parse_triage_complexity /
+#   mr_has_size_label / mr_persist_size_label。
 #
-#   本 Phase（#507）はサイズ判定の永続化までを担当し、判定結果を使ったモデル解決
-#   （Phase 2 / #508）と分割提案（Phase 3 / #509）は含まない。gate は Phase 共通の
-#   単一変数 `MODEL_ROUTING_ENABLED` とし、Phase 別 gate は設けない（Req 3.6）。
+#   Phase 2 (#508): 永続化された `size:*` ラベルから当該 Issue の Developer 実行モデル ID を
+#   決める **解決規則**（副作用なしの純粋関数）を提供する。mr_extract_size_label /
+#   mr_resolve_dev_model。gate 判定・`DEV_MODEL` への適用・ログ出力は呼び出し側
+#   （slot-worker.sh の Slot Runner = `_slot_apply_dev_model_routing`）が担い、本 module 側は
+#   「size 値と設定値からモデル ID を決める」責務のみを持つ（#508 Req 1.7 / 1.8）。
+#
+#   分割提案（Phase 3 / #509）は含まない。gate は Phase 共通の単一変数
+#   `MODEL_ROUTING_ENABLED` とし、Phase 別 gate は設けない（#507 Req 3.6 / #508 Req 5.1）。
 #
 # 配置先:
 #   $HOME/bin/modules/model-router.sh（install.sh が local-watcher/bin/modules/ から配置する）
@@ -22,16 +27,20 @@
 #   - `set -euo pipefail` は本体側で宣言済みのため、本モジュールでは宣言せず関数定義のみを持つ。
 #   - ロガー mr_log / mr_warn は本モジュール内で定義する（新規 module のため。
 #     path-overlap.sh の po_log / po_warn と同型）。
-#   - グローバル変数（$REPO / $MODEL_ROUTING_ENABLED）は watcher-config.sh の Config
-#     ブロックで定義済み。bash の遅延束縛により呼び出し時に解決される。
-#   - slot-worker.sh の Triage 消費部（Triage 直後の 1 箇所のみ）から呼ばれる。
-#   - 外部 CLI: gh / jq。
+#   - グローバル変数（$REPO / $MODEL_ROUTING_ENABLED / $DEV_MODEL / $DEV_MODEL_SMALL /
+#     $DEV_MODEL_MEDIUM）は watcher-config.sh の Config ブロックで定義済み。bash の
+#     遅延束縛により呼び出し時に解決される。
+#   - slot-worker.sh から呼ばれる（Phase 1: Triage 消費部の 1 箇所 / Phase 2: Slot Runner
+#     `_slot_run_issue` 冒頭の 1 箇所）。
+#   - 外部 CLI: gh / jq（Phase 1 の永続化系のみ。Phase 2 の解決系は外部コマンドを使わない）。
 #
 # 関数 prefix: mr_
 #
 # セットアップ参照先:
 #   - 設計: docs/specs/507-feat-watcher-triage-complexity-size-phas/design.md
+#   - 要件: docs/specs/508-feat-watcher-size-developer-phase-2/requirements.md
 #   - README「Model Routing Phase 1: Triage complexity → size ラベル (#507)」節
+#   - README「Model Routing Phase 2: size ラベル → Developer モデル (#508)」節
 
 mr_log() {
   echo "[$(date '+%F %T')] [$REPO] model-router: $*"
@@ -214,5 +223,112 @@ mr_persist_size_label() {
 
   # rc=0: 付与成功。Issue 番号と確定した complexity 値をログに残す（Req 4.1 / NFR 2.1）。
   mr_log "issue=#${issue_number} size ラベルを付与しました complexity=${complexity} label=${label_name}"
+  return 0
+}
+
+# ─── Phase 2: Size Label Extractor (#508 Req 3.2〜3.5 / NFR 3.1 / 3.2) ───
+# slot 起動時点で取得済みの Issue ラベル集合（`jq -r '.labels[].name'` 由来の改行区切り
+# リスト）から、`^size:(small|medium|large)$` に **厳密一致** するラベルがちょうど 1 つ
+# 存在する場合に限り size 値を stdout へ返す純粋関数。
+#
+# 未信頼入力（Issue ラベル名）は外部コマンドへ一切渡さず、bash の `case` による完全一致
+# のみで検証する（grep / sed を経由しないため、`-` 始まりのラベル名によるオプション注入も
+# 正規表現メタ文字の解釈も構造的に発生しない / NFR 3.1 / 3.2）。
+#
+# 副作用を持たず、同一入力に対して常に同一の出力を返す（Req 1.7 / 1.8 と同じ性質）。
+# 判定不能・fail-safe のケースは stdout を空にし、rc で理由を返す（呼び出し側がログの
+# fallback 理由を判別できるようにするため / Req 6.2）。
+#
+# Args: $1 = ラベル名の改行区切りリスト
+# Stdout: 厳密一致した size 値（small|medium|large）。それ以外のケースでは無出力。
+# Return:
+#   0 = size 値を 1 つ確定（Req 3.2）
+#   1 = `size:` prefix を持つラベルが 0 件（Req 3.3）
+#   2 = `size:` prefix を持つラベルが 2 件以上（採用しない / Req 3.4）
+#   3 = `size:` prefix ラベルが 1 件だが厳密一致に失敗（`size:huge` / `size:Small` /
+#       末尾に空白を含む 等 / Req 3.5）
+# 注: 先頭に空白を含むラベル（` size:small`）は prefix 判定に一致しないため rc=1
+#     （0 件）へ倒れる。いずれの rc でも呼び出し側の適用結果は `DEV_MODEL` で同一。
+mr_extract_size_label() {
+  local labels="${1:-}"
+  local line candidate="" count=0
+
+  while IFS= read -r line; do
+    case "$line" in
+      "size:"*) ;;
+      *) continue ;;
+    esac
+    count=$((count + 1))
+    candidate="$line"
+  done <<<"$labels"
+
+  if [ "$count" -eq 0 ]; then
+    return 1
+  fi
+  if [ "$count" -gt 1 ]; then
+    return 2
+  fi
+
+  # 許可値集合との完全一致（= `^size:(small|medium|large)$` の厳密一致 / Req 3.2）。
+  case "$candidate" in
+    "size:small") echo "small" ;;
+    "size:medium") echo "medium" ;;
+    "size:large") echo "large" ;;
+    *) return 3 ;;
+  esac
+  return 0
+}
+
+# ─── Phase 2: Developer Model Resolver (#508 Req 1.1〜1.8) ───
+# size 値と設定値から Developer 実行モデル ID を決める **解決規則そのもの**（the Model
+# Router）。副作用を一切持たず（GitHub API / ラベル変更 / ファイル書き込み / 呼び出し元の
+# 状態変更のいずれも行わない）、解決結果のみを stdout へ出力する（Req 1.7）。
+#
+# 解決規則:
+#   small  かつ DEV_MODEL_SMALL  が非空 → DEV_MODEL_SMALL   （Req 1.1）
+#   medium かつ DEV_MODEL_MEDIUM が非空 → DEV_MODEL_MEDIUM  （Req 1.2）
+#   large                               → DEV_MODEL         （Req 1.3 / `DEV_MODEL_LARGE` は持たない）
+#   許可値以外 / 空 / 未指定             → DEV_MODEL         （fail-safe / Req 1.4）
+#   size 値に対応する設定が未設定・空文字 → DEV_MODEL         （Req 1.5）
+#
+# 設定された値は許可値リストとの照合・変換・補完のいずれも行わずそのまま返す
+# （モデル ID の許可値リストを持たない / Req 1.6）。同一入力（size 値 + DEV_MODEL /
+# DEV_MODEL_SMALL / DEV_MODEL_MEDIUM）に対して常に同一の結果を返す（Req 1.8）。
+#
+# gate（MODEL_ROUTING_ENABLED）は **本関数では判定しない**。Req 1.8 が解決結果の入力を
+# 上記 4 値に限定しており、gate を解決規則へ持ち込むと決定性の定義がぶれるため。gate 無効時
+# に「読み取りも解決も行わない」責務は Req 5.2 / 5.3 のとおり Slot Runner 側にある
+# （呼び出し側 `_slot_apply_dev_model_routing` が gate 判定して本関数を呼ばない）。
+#
+# Args: $1 = size 値（small|medium|large|それ以外|空）
+# Stdout: 適用すべき Developer モデル ID（DEV_MODEL 未設定という想定外状態では空文字）
+# Return: 0 always（fail-safe。呼び出し側は rc を分岐に使わない）
+mr_resolve_dev_model() {
+  local size="${1:-}"
+
+  case "$size" in
+    small)
+      if [ -n "${DEV_MODEL_SMALL:-}" ]; then
+        printf '%s\n' "$DEV_MODEL_SMALL"
+        return 0
+      fi
+      ;;
+    medium)
+      if [ -n "${DEV_MODEL_MEDIUM:-}" ]; then
+        printf '%s\n' "$DEV_MODEL_MEDIUM"
+        return 0
+      fi
+      ;;
+    large)
+      : # large は常に DEV_MODEL（専用設定値を設けない / Req 1.3）
+      ;;
+    *)
+      : # 許可値以外 / 空文字 / 未指定 → fail-safe（Req 1.4）
+      ;;
+  esac
+
+  # Req 1.3 / 1.4 / 1.5 の合流点。DEV_MODEL 自体が未設定という想定外状態では空文字を返し、
+  # 呼び出し側が「再代入しない」判断をできるようにする（fail-open / Req 5.6）。
+  printf '%s\n' "${DEV_MODEL:-}"
   return 0
 }
