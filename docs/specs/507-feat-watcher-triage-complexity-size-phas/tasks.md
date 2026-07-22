@@ -33,7 +33,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 2.1, 2.2, 3.5, NFR 3.3, NFR 3.4_
   - _Boundary: TriagePromptTemplate_
 
-- [ ] 3. `modules/model-router.sh` を新設し近接テストを追加する
+- [x] 3. `modules/model-router.sh` を新設し近接テストを追加する
   - `local-watcher/bin/modules/model-router.sh` を新規作成する（ファイル冒頭コメントに用途 / 配置先 /
     依存 / 設計参照 / prefix `mr_` を明記。**関数定義のみ・トップレベル副作用なし**）
   - `mr_log` / `mr_warn` を定義する（`[ts] [$REPO] model-router:` の 3 段 prefix / WARN は `>&2`）
