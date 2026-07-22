@@ -6,12 +6,13 @@
 #   （本ファイル）と 1 つの sub-file が family を構成する（dispatcher_ / pclp_ / slot_ /
 #   _resume_* / _slot_* 等が混在する非 prefix 統一系のため、単一の共有 prefix は持たない）。
 #   分割マニフェスト（どの関数がどのファイルにあるか）:
-#     - slot-worker.sh          … 本ファイル: Slot Runner 本体 + ロガー + slot 失敗処理（計 12）
+#     - slot-worker.sh          … 本ファイル: Slot Runner 本体 + ロガー + slot 失敗処理（計 13）
 #         dispatcher_log / dispatcher_warn / dispatcher_error : Dispatcher 共通ロガー
 #         pclp_log / pclp_warn / pclp_error                   : pre-claim filter 共通ロガー
 #         _parallel_validate_slots                            : PARALLEL_SLOTS 設定値検証
 #         slot_log / slot_warn / slot_error                   : Slot Worker 共通ロガー
 #         _slot_mark_failed                                   : slot 失敗時の claude-failed 遷移
+#         _slot_apply_dev_model_routing                       : size ラベル → DEV_MODEL 適用（#508）
 #         _slot_run_issue                                     : Slot Runner 本体（モード別ディスパッチ / #467）
 #     - slot-worker-resume.sh   … resume / slug 判定 / pre-claim / status publish（計 13）
 #         check_existing_impl_pr / check_open_design_pr / _resume_normalize_flag /
@@ -177,6 +178,86 @@ $(build_recovery_hint "unknown")"
   gh issue comment "$NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
 }
 
+# ─── Model Routing Phase 2: size ラベル → Developer モデル適用 (Issue #508) ───
+#
+# 当該 slot が起動時点で取得済みの Issue ラベル集合から size 値を読み取り、Model Router
+# （modules/model-router.sh の純粋関数）が解決した Developer モデル ID を **当該 slot 内の**
+# グローバル `DEV_MODEL` へ再代入する（Req 3.1）。以降の Developer 実行（design セッション /
+# 実装 Stage 群 / per-task ループ）はすべてこの `DEV_MODEL` を参照するため、1 Issue 内で
+# モデルが混在しない（Req 3.6）。
+#
+# `_slot_run_issue` 冒頭からのみ呼ばれる（1 slot 実行あたり 1 回 / Req 4.1 / NFR 2.4）。
+# 追加の GitHub API 呼び出し・LLM 実行は発生しない（NFR 2.2 / 2.3）。
+#
+# 引数:
+#   $1 = Issue 番号（ログ用）
+#   $2 = ラベル名の改行区切りリスト（`jq -r '.labels[].name'` 由来 / 未信頼入力）
+# 戻り値: 常に 0（fail-open。本機能が Issue 処理を止めることはない / Req 5.6）
+#
+# 副作用:
+#   - `DEV_MODEL` の再代入。`_slot_run_issue` は Dispatcher からサブシェルで fork される
+#     ため、親プロセス・他 slot の `DEV_MODEL` へは伝播しない（Req 3.7）。後段の
+#     `REPO_DIR="$WT"`（Issue #76）と同じサブシェル境界に依拠する。
+#   - `mr_log` / `mr_warn` を 1 行（gate 有効時のみ / Req 6.1 / 6.2 / 6.4）。
+#
+# gate 判定を本関数側に置く理由: Model Router（mr_resolve_dev_model）は Req 1.7 / 1.8 が
+# 副作用なし・入力を「size 値 + DEV_MODEL / DEV_MODEL_SMALL / DEV_MODEL_MEDIUM」に限定した
+# 純粋関数と規定しているため、gate を解決規則へ持ち込まない。gate 無効時に「読み取りも解決も
+# 行わない」責務は Req 5.2 / 5.3 のとおり Slot Runner 側にある。
+_slot_apply_dev_model_routing() {
+  local issue_number="${1:-}"
+  local labels="${2:-}"
+
+  # gate 無効（未設定 / 空 / `false` / `True` / `1` / typo はすべて安全側で無効）→ 即 return。
+  # size ラベルの読み取りもモデル解決も行わず、ログ 0 行・外部コマンド 0 回で
+  # 本機能導入前と完全に同一の挙動になる（Req 5.2 / 5.3 / NFR 1.1 / 2.1）。
+  mr_is_enabled || return 0
+
+  # 未信頼入力（ラベル名）は Model Router 側の `case` 厳密一致のみで検証され、外部コマンド
+  # へは渡らない（NFR 3.1 / 3.2）。rc は fallback 理由のログ出力にのみ用いる。
+  local _mr_size="" _mr_rc=0
+  _mr_size=$(mr_extract_size_label "$labels") || _mr_rc=$?
+
+  local _mr_resolved=""
+  _mr_resolved=$(mr_resolve_dev_model "$_mr_size") || _mr_resolved=""
+
+  # 解決結果が空（`DEV_MODEL` 自体が未設定という想定外状態）のときは再代入せず現状維持
+  # （fail-open / Req 5.6）。silent fail にしないため WARN を 1 行残す（Req 6.4）。
+  if [ -z "$_mr_resolved" ]; then
+    mr_warn "issue=#${issue_number} Developer モデルの解決結果が空のため DEV_MODEL を変更しません（DEV_MODEL の設定を確認してください）"
+    return 0
+  fi
+
+  # ログ用の size 表示と fallback 理由（Req 6.1 / 6.2）。未信頼なラベル値そのものは
+  # ログへ出さず、判定結果を表す固定トークンのみを出す（NFR 3.3）。
+  local _mr_size_token="$_mr_size" _mr_fallback=""
+  case "$_mr_rc" in
+    0)
+      # size は確定したが、対応する size 別モデルが未設定なら DEV_MODEL へ倒れる（Req 1.5）。
+      # `large` は仕様として DEV_MODEL を使うため fallback 扱いにしない（Req 1.3）。
+      case "$_mr_size" in
+        small) [ -n "${DEV_MODEL_SMALL:-}" ] || _mr_fallback="DEV_MODEL_SMALL 未設定" ;;
+        medium) [ -n "${DEV_MODEL_MEDIUM:-}" ] || _mr_fallback="DEV_MODEL_MEDIUM 未設定" ;;
+        *) : ;;
+      esac
+      ;;
+    1) _mr_size_token="none"; _mr_fallback="size ラベル不在" ;;
+    2) _mr_size_token="multiple"; _mr_fallback="size:* ラベルが複数付与" ;;
+    3) _mr_size_token="invalid"; _mr_fallback="size ラベル値が許可値に不一致" ;;
+    *) _mr_size_token="unknown"; _mr_fallback="size 判定不能" ;;
+  esac
+
+  # サブシェル境界内でのみ有効な再代入（Req 3.7）。
+  DEV_MODEL="$_mr_resolved"
+
+  if [ -n "$_mr_fallback" ]; then
+    mr_log "issue=#${issue_number} size=${_mr_size_token} dev_model=${DEV_MODEL} fallback=DEV_MODEL（理由: ${_mr_fallback}）"
+  else
+    mr_log "issue=#${issue_number} size=${_mr_size_token} dev_model=${DEV_MODEL}"
+  fi
+  return 0
+}
+
 # ─── Slot Runner 本体: _slot_run_issue (Issue #16 / #467 で本体から移動) ───
 
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
@@ -213,6 +294,24 @@ _slot_run_issue() {
   exec > >(tee -a "$SLOT_LOG") 2>&1
 
   slot_log "Worker 起動 (LOG=$LOG SLOT_LOG=$SLOT_LOG)"
+
+  # ── Model Routing Phase 2: size ラベル → Developer モデル解決（#508 / Req 3.1, 4.1） ──
+  # 直上で確定した $LABELS（slot 起動時点のラベル集合スナップショット）だけを入力に
+  # **1 slot 実行につき 1 回だけ** 解決し、当該 slot 内の DEV_MODEL を確定させる
+  # （追加の GitHub API 呼び出しは 0 回 / NFR 2.2）。log 出力先を SLOT_LOG へ束ねる
+  # `exec > >(tee ...)` の直後に置くことで、解決結果が cron ログと slot ログの双方に残る
+  # （Req 6.3）。worktree 初期化や Triage より前に解決するため、以降の Developer 実行
+  # （design セッション / 実装 Stage 群 / per-task ループ）すべてに一貫して適用される
+  # （Req 3.6）。
+  #
+  # Triage 実行後の再解決は行わない（Req 4.3 / Out of Scope）。同一 slot 実行内で Triage が
+  # size ラベルを新規付与する経路では、slot 起動時点のスナップショットに当該ラベルが
+  # 含まれないため DEV_MODEL へ倒れる（意図された既知の制約 / Req 4.2）。
+  #
+  # 本サブシェル内の再代入であり親 dispatcher・他 slot へは伝播しない（Req 3.7 / 後段の
+  # `REPO_DIR="$WT"` と同じ境界）。gate 無効時は即 return し、ログ 0 行・外部コマンド 0 回
+  # （Req 5.2 / 5.3）。rc は常に 0 だが fail-open を明示するため `|| true` で吸収する。
+  _slot_apply_dev_model_routing "$NUMBER" "$LABELS" || true
 
   # ── per-run evidence サマリの初期化と終端 emit 配線（#239 / Req 1.1, 1.3, 1.5） ──
   # rs_init で per-slot 状態変数を既定値にし、Issue 番号を確定。EXIT trap は本サブシェル
