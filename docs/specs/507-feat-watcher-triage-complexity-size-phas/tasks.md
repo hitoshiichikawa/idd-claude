@@ -68,7 +68,7 @@
   - _Boundary: WatcherConfig, ModuleLoader_
   - _Depends: 3_
 
-- [ ] 5. slot-worker.sh の Triage 消費部に call site を配線する
+- [x] 5. slot-worker.sh の Triage 消費部に call site を配線する
   - `local-watcher/bin/modules/slot-worker.sh` の Phase E edit_paths 永続化ブロック（L498-511）の
     **直後**、`needs-decisions` 分岐（L513）より前に、design.md「Wiring」節の擬似構造どおりの
     gate ブロックを 1 つ挿入する
