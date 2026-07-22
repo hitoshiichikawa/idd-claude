@@ -19,7 +19,7 @@
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 7.1, 7.2_
   - _Boundary: LabelProvisioner_
 
-- [ ] 2. Triage prompt に `complexity` / `complexity_reason` を additive 追加する (P)
+- [x] 2. Triage prompt に `complexity` / `complexity_reason` を additive 追加する (P)
   - `local-watcher/bin/triage-prompt.tmpl` の出力 JSON スキーマ例に、`edit_paths` の**後ろ**へ
     `complexity`（`small` / `medium` / `large` の 1 値）と `complexity_reason`（1〜2 行）を追加する
   - 新規節「`## complexity の出力指示（モデルルーティング Phase 1）`」を末尾に追加し、
