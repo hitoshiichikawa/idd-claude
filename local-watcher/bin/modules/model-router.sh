@@ -128,8 +128,9 @@ mr_has_size_label() {
 # 既存のラベル遷移契約（claude-claimed 等）には構造的に一切触れない（Req 5.5）。
 #
 # 未信頼値（LLM 出力の complexity）は **ラベル名構成の直前** に許可値集合との
-# `case` 厳密一致で検証する（Req 5.2 / NFR 4.1）。`gh` へは変数をクォートし
-# `--add-label -- "size:<complexity>"` と `--` でオプション解釈を打ち切る（NFR 4.2）。
+# `case` 厳密一致で検証する（Req 5.2 / NFR 4.1）。`gh` へは変数をクォートし、
+# `--add-label="size:<complexity>"` の `=` 束縛形で値をフラグへ構文的に束縛して
+# オプション解釈を封じる（NFR 4.2 / 理由は下記 gh 呼び出し箇所のコメント参照）。
 # `complexity_reason` はラベル名の構成に用いない（NFR 4.3）。
 #
 # gh 呼び出し回数は labels 取得 1 回 + 付与 1 回の計 2 回以下、gate 無効時は 0 回
@@ -195,8 +196,18 @@ mr_persist_size_label() {
 
   # rc=5: 付与失敗（API 不達 / レート制限 / 権限不足 / 対象ラベル未定義等）は WARN を
   # 残して呼び出し側の処理を継続させる（fail-open / Req 5.3）。
-  # gh 呼び出し 2 回目（NFR 3.1）。`--` でオプション解釈を打ち切る（NFR 4.2）。
-  if ! gh issue edit "$issue_number" --repo "$REPO" --add-label -- "$label_name" >/dev/null 2>&1; then
+  # gh 呼び出し 2 回目（NFR 3.1）。
+  #
+  # NFR 4.2（オプション解釈の打ち切り）は `--add-label=<値>` の **`=` 束縛形**で満たす。
+  # `gh`（cobra/pflag）は値を取るフラグの直後の引数を無条件に値として消費するため、
+  # `--add-label -- "$label_name"` と書くと `--` 自体が `--add-label` の値として消費され、
+  # ラベル名が 2 つ目の positional 引数として残って `invalid issue format` で必ず失敗する
+  # （実機 gh 2.96.0 で確認 / design.md 196・298・384 の記述からの意図的な逸脱。詳細は
+  # impl-notes.md「確認事項」）。`=` 形は値をフラグへ構文的に束縛するため、値が `-` で
+  # 始まってもフラグとして解釈される余地がない。
+  # なお `complexity` は上の `case` で許可値 3 種に厳密一致検証済みのため、ラベル名が
+  # `-` 始まりになること自体が構造的にあり得ない（Req 5.2 / NFR 4.1 で担保）。
+  if ! gh issue edit "$issue_number" --repo "$REPO" --add-label="$label_name" >/dev/null 2>&1; then
     mr_warn "issue=#${issue_number} size ラベルの付与に失敗しました label=${label_name}（対象ラベル未定義の可能性: idd-claude-labels.sh の再実行を検討 / 処理は継続）"
     return 5
   fi

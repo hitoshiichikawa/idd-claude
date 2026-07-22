@@ -86,6 +86,63 @@ mr_log()  { echo "$*" >>"$LOG_LOG"; }
 # shellcheck disable=SC2317
 mr_warn() { echo "$*" >>"$WARN_LOG"; }
 
+# `gh issue edit` の引数列を **cobra/pflag と同じ規則** で解釈し、解決後の
+# `--add-label` 値と positional 引数の個数を記録する（#507 の実機不具合を再発防止する要）。
+#
+# pflag の規則（実機 gh 2.96.0 で確認）:
+#   - 値を取るフラグ（`--repo` / `--add-label` 等）は **直後の引数を無条件に値として消費**する。
+#     したがって `--add-label -- "size:small"` と書くと `--` が値として消費され、
+#     `size:small` が 2 つ目の positional として残り `invalid issue format` で失敗する
+#   - `--flag=value` の `=` 束縛形は値をフラグへ構文的に束縛する
+#
+# 生の引数文字列だけを突き合わせる旧アサーションでは上記を検出できなかったため、
+# 「解決後のラベル値」と「positional 個数」を観測する方式に強化した。
+# 記録形式: `GH-PARSED-EDIT add_label=<解決値> positionals=<個数>`
+# shellcheck disable=SC2317  # 対象関数から間接的に呼ばれる stub
+_stub_parse_gh_issue_edit() {
+  local add_label="" end_of_flags=0
+  local -a positionals=()
+  while [ "$#" -gt 0 ]; do
+    if [ "$end_of_flags" -eq 0 ]; then
+      case "$1" in
+        --)
+          end_of_flags=1
+          shift
+          continue
+          ;;
+        --add-label=*)
+          add_label="${1#--add-label=}"
+          shift
+          continue
+          ;;
+        --repo=*|--remove-label=*)
+          shift
+          continue
+          ;;
+        --add-label)
+          # pflag: 直後の引数を無条件に値として消費する（`--` であっても値になる）
+          shift
+          add_label="${1:-}"
+          shift
+          continue
+          ;;
+        --repo|--remove-label)
+          shift
+          shift
+          continue
+          ;;
+        -*)
+          shift
+          continue
+          ;;
+      esac
+    fi
+    positionals+=("$1")
+    shift
+  done
+  echo "GH-PARSED-EDIT add_label=${add_label} positionals=${#positionals[@]}"
+}
+
 # shellcheck disable=SC2317  # 対象関数から間接的に呼ばれる stub
 gh() {
   local sub="${1:-}"
@@ -103,6 +160,8 @@ gh() {
           ;;
         edit)
           echo "gh issue edit $*" >>"$GH_CALL_LOG"
+          shift 2
+          _stub_parse_gh_issue_edit "$@" >>"$GH_CALL_LOG"
           return "${GH_EDIT_RC:-0}"
           ;;
         *)
@@ -269,9 +328,20 @@ for c in small medium large; do
   assert_eq "I1(${c}): 正常付与の rc=0" "0" "$rc"
   add_count=$(count_calls "gh issue edit")
   assert_eq "I1(${c}): gh issue edit（--add-label）が 1 回" "1" "$add_count"
+  # pflag 規則で解釈した「解決後のラベル値」を検証する（Req 4.1）。
+  # 生の引数文字列マッチではなく解決値を見ることで、`--add-label -- <値>` のように
+  # 値が `--` に化けて実機で `invalid issue format` になる形を検出できる。
+  parsed="$(grep 'GH-PARSED-EDIT' "$GH_CALL_LOG" || true)"
+  assert_contains "I1(${c}): --add-label の解決値が size:${c} である（Req 4.1 / 実機で付与が成立する形）" \
+    "$parsed" "add_label=size:${c}"
+  # NFR 4.2: 値がフラグへ正しく束縛され、余剰 positional（issue 番号以外）が残らないこと。
+  # `--add-label -- size:X` 形では positionals=2 になりここで落ちる。
+  assert_contains "I1(${c}): positional は issue 番号のみ（値がフラグへ束縛される / NFR 4.2）" \
+    "$parsed" "positionals=1"
+  # `=` 束縛形であること（値が `-` 始まりでもフラグ解釈される余地がない構文 / NFR 4.2）
   edit_call="$(grep 'gh issue edit' "$GH_CALL_LOG" || true)"
-  assert_contains "I1(${c}): --add-label -- size:${c} が渡される（-- でオプション解釈打ち切り / NFR 4.2）" \
-    "$edit_call" "--add-label -- size:${c}"
+  assert_contains "I1(${c}): \`=\` 束縛形 --add-label=size:${c} で渡す（NFR 4.2）" \
+    "$edit_call" "--add-label=size:${c}"
   log_out="$(cat "$LOG_LOG")"
   assert_contains "I1(${c}): ログに Issue 番号を含む（NFR 2.1）" "$log_out" "#42"
   assert_contains "I1(${c}): ログに確定した complexity 値を含む（NFR 2.1）" "$log_out" "complexity=${c}"
