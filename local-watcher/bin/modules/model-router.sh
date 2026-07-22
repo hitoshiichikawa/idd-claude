@@ -170,9 +170,10 @@ mr_persist_size_label() {
     return 4
   fi
 
-  # rc=3 / rc=4: 既存 size:* ラベルの有無を判定する。
+  # rc=3 / rc=4: 既存ラベルの有無を判定する。prefix は mr_has_size_label の既定引数に
+  # 委ねる（literal をここで再掲すると命名変更時の変更点が増えるため / design.md）。
   local has_rc=0
-  mr_has_size_label "$labels_json" "size:" || has_rc=$?
+  mr_has_size_label "$labels_json" || has_rc=$?
   case "$has_rc" in
     0)
       # 既存あり → 追加・付け替え・削除のいずれも行わない（Req 4.2 / 4.3 / 4.4）。
