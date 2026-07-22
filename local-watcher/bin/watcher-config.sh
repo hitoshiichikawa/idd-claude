@@ -1105,6 +1105,25 @@ TC_WARN_LOWER="${TC_WARN_LOWER:-8}"
 TC_WARN_UPPER="${TC_WARN_UPPER:-10}"
 TC_ESCALATE_LOWER="${TC_ESCALATE_LOWER:-11}"
 
+# ─── Tasks Count Gate: 子 Issue 分割案コメント (#509, モデルルーティング Phase 3) ───
+# 新規 opt-in 機能。明示的に `=true`（リテラル文字列 / 厳密一致）を指定したときだけ、
+# escalate 判定（既定 ≥ 11 件）に伴って `tasks.md` の最上位・未完了タスクから
+# 機械生成した **子 Issue 分割案** をコメント投稿する（Req 1.2 / 2.1）。
+# `=true` 以外（未設定 / 空 / `false` / `off` / `True` / `1` / typo 等）はすべて
+# 安全側（無効）へ正規化する（Req 1.1 / 1.3）。無効時は本機能に起因する
+# GitHub API 呼び出しもログ出力も 0 件で、本機能導入前と完全に同一の escalate
+# 挙動になる（Req 1.4 / 6.1 / NFR 1.1）。
+#
+# 本 gate は `TC_ENABLED`（tasks-count gate 自体の opt-out）および
+# `MODEL_ROUTING_ENABLED`（#507）とは **独立した変数** で制御する（Req 1.5）。
+# ただし `TC_ENABLED=false` で tasks-count gate 自体が走らない場合、本機能も
+# 構造的に起動しない（Req 1.6）。
+# 子 Issue の自動起票は行わず提案コメントの投稿までに留める（Out of Scope）。
+# 本フラグは新規追加 = opt-in 制 + 既定無効が要件のため、上記「デフォルト有効化
+# フラグの値正規化」ループには **含めない**（#112 の 8 種反転対象とは別扱い）。
+# 詳細は docs/specs/509-feat-watcher-tasks-count-gate-escalate-i/requirements.md を参照。
+TC_SPLIT_PROPOSAL_ENABLED="${TC_SPLIT_PROPOSAL_ENABLED:-false}"
+
 # ─── Phase E: Path Overlap Checker 設定 (#18) ───
 # 新規 opt-in 機能。明示的に `=true` を指定したときだけ起動する（Req 1.1〜1.4）。
 # `=true` 以外（未設定 / 空 / `false` / `0` / `True` / `1` / typo 等）はすべて off
