@@ -53,7 +53,7 @@
   - _Requirements: 2.3, 2.4, 3.1, 3.2, 3.3, 3.4, 4.1, 4.2, 4.3, 4.4, 4.7, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 8.3, 8.4, NFR 2.1, NFR 2.2, NFR 3.1, NFR 3.2, NFR 4.1, NFR 4.2, NFR 4.3_
   - _Boundary: ModelRouterModule, ModelRouterTest_
 
-- [ ] 4. gate 変数の宣言と module ローダ登録を行う
+- [x] 4. gate 変数の宣言と module ローダ登録を行う
   - `local-watcher/bin/watcher-config.sh` の Phase E gate 群（`PATH_OVERLAP_CHECK` 付近）の直後に
     `MODEL_ROUTING_ENABLED="${MODEL_ROUTING_ENABLED:-false}"` を宣言し、opt-in / 既定無効 /
     `true` 厳密一致・不正値は安全側という意図をコメントで明記する
