@@ -1126,6 +1126,22 @@ PATH_OVERLAP_CHECK="${PATH_OVERLAP_CHECK:-off}"
 # 0 / 空 / 非数値は安全側で既定値 5 へフォールバックする（誤設定で連投しない）。
 PATH_OVERLAP_BUSY_WAIT_THRESHOLD="${PATH_OVERLAP_BUSY_WAIT_THRESHOLD:-5}"
 
+# ─── Model Routing: Triage complexity → size ラベル永続化 (#507, Phase 1) ───
+# 新規 opt-in 機能。明示的に `=true`（リテラル文字列 / 厳密一致）を指定したときだけ
+# size ラベルの永続化を行う（Req 3.2）。`=true` 以外（未設定 / 空 / `false` / `off` /
+# `True` / `1` / typo 等）はすべて安全側（無効）へ正規化する（Req 3.1 / 3.3）。
+# 無効時は本機能に起因するラベル読み書き・GitHub API 呼び出しを一切行わず、
+# ログ出力も 0 行 = 本機能導入前と完全に同一の挙動になる（Req 3.4 / NFR 1.1）。
+# 本フラグは新規追加 = opt-in 制 + 既定無効が要件のため、上記「デフォルト有効化
+# フラグの値正規化」ループには **含めない**（#112 の 8 種反転対象とは別扱い）。
+#
+# gate 粒度: モデルルーティング機能 family（Phase 1 のラベル永続化および後続 Phase の
+# モデル解決）を **単一の gate** で制御し、Phase 別の追加 gate は設けない（Req 3.6）。
+# なお Triage 側の `complexity` / `complexity_reason` 出力は gate に依らず常時行われる
+# （gate は watcher 側の永続化のみを制御する / Req 3.5）。
+# 詳細は docs/specs/507-feat-watcher-triage-complexity-size-phas/design.md を参照。
+MODEL_ROUTING_ENABLED="${MODEL_ROUTING_ENABLED:-false}"
+
 # ─── Phase 2: Per-task TDD Implementation Loop 設定 (#21) ───
 # 新規 opt-in 機能。明示的に `=true` を指定したときだけ Stage A 内で per-task ループ
 # （task 1 件ごとに fresh Implementer + fresh Reviewer を起動）に分岐する（Req 1.2）。

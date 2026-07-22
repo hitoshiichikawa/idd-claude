@@ -80,6 +80,9 @@ LABELS=(
   "hotfix|d93f0b|【Issue 用】 hotfix 優先処理対象（Dispatcher が非 hotfix より先に投入）"
   "needs-security-fix|d73a4a|【PR 用】 Security Review strict モード（#281）で severity 閾値以上の検出により付与される。手動剥がしで override 可"
   "needs-merge-gate-attention|f9d0c4|【PR 用】 claude-review が required だが adjudicator も catch-up も発火せず merge gate を満たせない停滞状態（#412）"
+  "size:small|c2e0c6|【Issue 用】 Triage 判定の変更規模: 小（単一〜少数ファイルの軽微な変更）"
+  "size:medium|fef2c0|【Issue 用】 Triage 判定の変更規模: 中（数ファイル横断・設計判断は自明）"
+  "size:large|f7c6c7|【Issue 用】 Triage 判定の変更規模: 大（複数モジュール横断・新規連携・永続構造変更）"
 )
 
 echo "📌 idd-claude ラベルを作成します"

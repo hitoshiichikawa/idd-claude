@@ -510,6 +510,27 @@ _slot_run_issue() {
       fi
     fi
 
+    # ── Model Routing Phase 1: size ラベル永続化 (#507 Req 4.1〜4.7 / 5.1〜5.6) ──
+    # MODEL_ROUTING_ENABLED=true のときのみ、Triage が返した complexity を
+    # `size:<complexity>` ラベルとして Issue に永続化し、Triage を再実行しない
+    # サイクル（impl-resume / PR Iteration / Failed Recovery）でも参照できるようにする。
+    # gate 無効時は本ブロック全体が no-op（ログ 0 行 / gh 0 回 / Req 3.4 / NFR 1.1）。
+    #
+    # 本ブロックは $STATUS / $NEEDS_ARCHITECT / $MODE を読み書きしないため、mode 判定と
+    # needs-decisions 経路は構造的に不変（Req 2.5）。mr_persist_size_label の戻り値は
+    # 吸収して後続へ伝播させず、Triage の成功／失敗判定を変えない（Req 2.4 / 5.3 fail-open。
+    # rc ごとのログは関数側で完結して出力される）。
+    #
+    # 配置は Phase E ブロックの直後・`needs-decisions` 分岐より前とし、needs-decisions で
+    # 早期 return する Issue にもラベルが残るようにする。`skip-triage` / `impl-resume`
+    # 経路は Triage ブロックごと迂回されるため、追加のラベル判定を書かずに非付与が
+    # 構造的に保証される（Req 4.5 / 4.6）。
+    if mr_is_enabled; then
+      local _mr_complexity
+      _mr_complexity=$(mr_parse_triage_complexity "$TRIAGE_FILE")
+      mr_persist_size_label "$NUMBER" "$_mr_complexity" || true
+    fi
+
     if [ "$STATUS" = "needs-decisions" ] && [ "$DECISION_COUNT" -gt 0 ]; then
       # ── Issue #362: needs-decisions 自動続行（D-08 / D-09） ──
       # AND 二重 opt-in（FULL_AUTO_ENABLED=true AND NEEDS_DECISIONS_MODE in (classified, all-auto)）

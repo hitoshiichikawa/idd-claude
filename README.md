@@ -83,6 +83,7 @@ idd-claude/
     │   │   ├── auto-merge-disarm.sh      #   auto-merge 取り消しプロセッサ（#434）
     │   │   ├── promote-pipeline.sh       #   Promote Pipeline プロセッサ（#15 / #181 Part 3 / #472 で path-overlap.sh を分離）
     │   │   ├── path-overlap.sh           #   Path Overlap Checker プロセッサ（#18 Phase E / #472 で promote-pipeline.sh から分割）
+    │   │   ├── model-router.sh           #   Model Routing（Triage complexity → size ラベル永続化 / #507 Phase 1）
     │   │   ├── pr-iteration.sh           #   PR Iteration プロセッサ orchestrator（#181 Part 3 / #469 で family 分割）
     │   │   ├── pr-iteration-comments.sh  #   └ family: 一般コメント収集 + filter chain（#469）
     │   │   ├── pr-iteration-state.sh     #   └ family: PR body marker read/write + no-progress streak（#469）
@@ -1571,6 +1572,7 @@ idd-claude は基本フロー（Triage → 実装 → PR 作成）以外の機�
 | **Design Auto-Merge Processor**（設計 PR (head が `^claude/issue-.*-design` パターン、draft でない、`mergeable=MERGEABLE`) に対し `gh pr merge --auto --squash --delete-branch` で **GitHub ネイティブの auto-merge** を有効化。必須 status checks (CI + `codex-review` + `claude-review`) が全 green に到達した時点で GitHub 側が squash merge + branch 削除を実行する。watcher 自体は polling せず enable 呼び出しのみ。**`AUTO_MERGE_DESIGN_ENABLED=true` AND `FULL_AUTO_ENABLED=true`** の AND 二重 opt-in 配下。gate OFF 時は gh API 呼び出しゼロで本機能導入前と完全に等価。`mergeable=CONFLICTING` PR は既存 merge-queue / auto-rebase 経路に委譲し本 processor は触らない / `claude-failed` / `needs-decisions` / `needs-iteration` / 既に auto-merge enabled 済み PR も skip（冪等）。impl PR (`^claude/issue-.*-impl`) は head pattern により排他され本 processor は触らない。enable 失敗は WARN log を残しパイプライン継続（silent fail 禁止）。merge 後の `awaiting-design-review` ラベル除去は既存 [Design Review Release Processor (#40)](#design-review-release-processor-40) が引き続き担当） | `AUTO_MERGE_DESIGN_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `on` / `yes` / typo）はすべて OFF に正規化。さらに `FULL_AUTO_ENABLED=true` との AND 評価で双方 ON のときのみ enable | **前提**: `FULL_AUTO_ENABLED=true`（[#348 kill switch](#full-auto-kill-switch) との AND 評価）。**運用設定**: GitHub の repo 設定 → General → Pull Requests で **Allow auto-merge** を有効化、Branches → Branch protection rules で `codex-review` / `claude-review` + CI を **Required status checks** に追加（[#349](#pr-reviewer-commit-status-publishing-349) で publish 済み）。`PR_REVIEWER_STATUS_CHECK_ENABLED=true` で codex-review / claude-review が publish される（head pattern に関わらず設計 PR にも適用される）。推奨: `AUTO_MERGE_DESIGN_MAX_PRS`（既定 `10`）、`AUTO_MERGE_DESIGN_HEAD_PATTERN`（既定 `^claude/issue-.*-design`） | [Design Auto-Merge Processor (#354)](#design-auto-merge-processor-354) | #354 |
 | **Slack 通知 emitter**（自動 merge armed / 自動 merge merged 完了 / failed-recovery 終端 / needs-decisions 自動続行 / promote 完了 / impl 着手（claude-pickup）といった人間が能動的に把握すべき重要イベントを Slack Incoming Webhook 経由で push 通知する補助的な観測チャネル（D-18・低優先）。通常運用は `run-summary` + watcher ログで完結し、本機能は「Slack を見ていれば異常終端・自動マージ完了・実装着手に気付ける」程度の補助的可視化を担う。完全な opt-in（gate OFF 時は本機能導入前と完全に等価で gh / git API 呼び出しゼロ・curl 呼び出しゼロ・ラベル遷移ゼロ）。webhook URL は env 経由のみで受け取り、コードベース・ログ・テストフィクスチャに実値を残さない。通知失敗（HTTP 4xx/5xx / curl 非ゼロ exit / payload 整形失敗）はパイプライン本体に伝播せず WARN ログ 1 行のみ残す（fail-open）。payload には event 種別識別子・repo 識別子・Issue/PR 番号・GitHub URL・result status・detail（secret scrub 済）を含み、Slack Block Kit `section` ブロック + フォールバック `text` フィールドで構成される。secret scrub は GitHub token prefix（`ghp_` 等）/ Slack webhook URL / 32 桁以上連続英数字を `[REDACTED]` に置換する best-effort 防御。**通知対象イベント**: auto-merge armed（実装 PR / `result=armed`）/ auto-merge-design armed（設計 PR / `result=armed`）/ **auto-merge-merged**（実装 PR の実 merge 完了 / `SLACK_NOTIFY_MERGED_ENABLED=true` でのみ発火 / #388）/ **auto-merge-design-merged**（設計 PR の実 merge 完了 / 同上 / #388）/ failed-recovery 終端 3 種（recovered / max-attempts / no-progress）/ needs-decisions auto-continue 成功 / promote 完了 / claude-pickup（impl 着手時のラベル付け替え成功 / #390）。**Migration Note (#388)**: 旧バージョンでは auto-merge / auto-merge-design の armed 通知（GitHub auto-merge を有効化した時点）が `result=success` で発火し Slack 上で「merge 完了」と誤読される問題があった。本修正で armed 通知は `result=armed` + detail に `armed (squash on green checks)` 明示に変更され、実際の merge 完了は新規 event_type `auto-merge-merged` / `auto-merge-design-merged` で別途通知される。`SLACK_NOTIFY_ENABLED=true` 既存ユーザは armed 文面が変わる（`result=success` ではなく `result=armed`）点に注意。新規 merged 通知の発火は `SLACK_NOTIFY_MERGED_ENABLED=true` 厳密一致でのみ有効（未設定なら本機能導入前と等価で armed 通知のみ）。merged 検知は GitHub auto-merge enable 成功時に PR 番号を `$HOME/.issue-watcher/auto-merge-pending/<repo-slug>/pr-<N>.json` に積み、後続サイクルで `gh pr view` の `state=MERGED` 観測時に 1 度だけ通知 + state 削除する方式。人間が手動 merge した PR は state に積まれていないため通知されない） | `SLACK_NOTIFY_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `on` / `yes` / typo / 前後空白付き）はすべて OFF に正規化（外部副作用ゼロで sn_notify が早期 return） | **必須**: `SLACK_WEBHOOK_URL`（Slack Incoming Webhook URL。secret 値。リポジトリにコミットしない。`SLACK_NOTIFY_ENABLED=true` かつ本 env が未設定 / 空のときは sn_warn 1 行 + no-op で起動可）。推奨: `SLACK_NOTIFY_TIMEOUT`（秒。curl `--max-time` に渡す HTTP POST タイムアウト上限。既定 `5`。非数値 / 負数 / 空は既定 5 に正規化）。**#388 で追加**: `SLACK_NOTIFY_MERGED_ENABLED`（`=true` 厳密一致で auto-merge-merged / auto-merge-design-merged 通知を有効化。既定 `false` で未設定環境は本機能導入前と等価）、`AUTO_MERGE_MERGED_STATE_DIR`（pending state 配置先。既定 `$HOME/.issue-watcher/auto-merge-pending/<repo-slug>` / 通常変更不要）、`AUTO_MERGE_MERGED_MAX_CHECKS`（1 サイクルあたりの `gh pr view` 呼び出し上限。既定 `50`）、`AUTO_MERGE_MERGED_GH_TIMEOUT`（1 件あたりの gh タイムアウト秒。既定 `60`） | — | #370, #388, #390 |
 | **Full-Auto Kill Switch**（full-auto 系 processor の単一 kill switch。**AND セマンティクス**で個別 gate と並列に作用し、`FULL_AUTO_ENABLED=true` かつ個別 gate=true の場合のみ full-auto 系 processor が発火する二重 opt-in。不具合発生時に env 1 つで全 full-auto 挙動を即時 no-op に倒すための運用 knob。**現在の配線対象**は Dependency Auto-Unblock Sweep (#346) + Auto-Merge (#352) + Design Auto-Merge (#354) + PR Reviewer Commit Status (#349) + Failed Recovery (#359) + needs-decisions Auto-Continue (#362) の 6 系統。semantic conflict / blocked cascade は未実装のため将来追加時に同じ kill switch を参照する設計。既存 opt-in 機能（merge-queue / auto-rebase / promote-pipeline / pr-iteration / pr-reviewer / security-review / design-review-release / stage-checkpoint / stage-a-verify / quota-aware / debugger / hooks）は **本フラグ配下に入れず** 個別 gate で独立制御を維持） | `FULL_AUTO_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / `True` / `TRUE` / `1` / `on` / `False` / 空文字 / 前後空白付き / typo）はすべて OFF に正規化（外部副作用ゼロで早期 return + suppression ログ 1 行）。本機能導入前と完全に等価（NFR 1.1） | — | (本表の各 full-auto processor 行を参照) | #348 |
+| **Model Routing Phase 1**（Triage が出力した変更規模 `complexity` を `size:small` / `size:medium` / `size:large` ラベルとして Issue に永続化する。Triage を再実行しないサイクル（impl-resume / PR Iteration / Failed Recovery）でも判定結果を sticky に参照でき、人間が事前にラベルを貼れば Triage 判定を override できる。既存 `size:*` ラベルが 1 つでもあれば追加・付け替え・削除のいずれも行わない（先に存在するラベル優先 / 人間 override と過去 Triage 由来を区別しない）。`skip-triage` / impl-resume 経路は Triage ブロックごと迂回されるため付与されない。値の不正は WARN のみで継続（fail-safe）、GitHub 操作の失敗も WARN のみで当該サイクルを中断しない（fail-open）。gate OFF 時は本機能に起因する GitHub API 呼び出し 0 回・ログ 0 行で本機能導入前と完全に等価。**Triage 側の `complexity` / `complexity_reason` 出力は gate に依らず常時行われる**（gate は watcher 側の永続化のみを制御）） | `MODEL_ROUTING_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `on` / `off` / typo）はすべて安全側 OFF に正規化 | **前提**: `bash .github/scripts/idd-claude-labels.sh` で `size:small` / `size:medium` / `size:large` ラベルを作成済みであること（未作成の repo では付与が毎回失敗し WARN が出る / 処理自体は継続） | [Model Routing Phase 1: Triage complexity → size ラベル (#507)](#model-routing-phase-1-triage-complexity--size-ラベル-507) | #507 |
 | **GitHub Actions ワークフロー**（local watcher の代替実行基盤） | `IDD_CLAUDE_USE_ACTIONS`（GitHub Repository Variable。**env var ではない**） | 未設定 = 無効 | Repository Variable に `true` を厳密一致で設定。未設定 / `true` 以外（`on` / `True` / `1` 等）はワークフロー発火を停止 | — | [Step 3-B. GitHub Actions をセットアップ](#step-3-b-github-actions-をセットアップ代替) | #10 |
 
 各機能は**互いに独立**に制御できます。例えば `MERGE_QUEUE_RECHECK_ENABLED=false` だけを
@@ -2429,6 +2431,110 @@ cron / launchd が実行する `$HOME/bin/issue-watcher.sh` / `$HOME/bin/triage-
 
 ```bash
 # watcher 本体の同期（推奨: install.sh --local 再実行で *.tmpl も自動配置される）
+cd ~/.idd-claude && git pull && ./install.sh --local
+```
+
+---
+
+## Model Routing Phase 1: Triage complexity → size ラベル (#507)
+
+`MODEL_ROUTING_ENABLED=true` を明示すると、Triage が判定した Issue の**変更規模**
+（`complexity`）を `size:*` ラベルとして Issue に永続化します。Triage は既に Issue 全文を
+読んでいるため、追加の LLM 実行は発生しません（出力 JSON に 2 keys が additive 追加される
+だけ）。
+
+ラベルとして永続化する理由は 2 つです:
+
+1. **sticky に参照できる**: impl-resume / PR Iteration / Failed Recovery のように Triage を
+   再実行しないサイクルでも、判定結果を低コストで読み出せる
+2. **人間が override できる**: 事前にラベルを貼っておけば Triage 判定より優先される
+   （`auto-dev` ラベル運用と同型の運用ゲート）
+
+> **本 Phase のスコープ**: 判定結果の**永続化まで**です。size ラベルに基づく Developer
+> モデル ID の解決（Phase 2 / #508）と、tasks 件数超過時の子 Issue 分割案コメント
+> （Phase 3 / #509）は本 Phase には含まれません。したがって現時点で gate を有効化しても、
+> 起きることは size ラベルの付与のみです。
+
+### size ラベルの意味
+
+| ラベル | 変更規模 | 判定の目安 |
+|---|---|---|
+| `size:small` | 小 | 単一〜少数ファイルの軽微な変更（既存関数内のロジック改善 / 文言変更 / テスト・ドキュメント追加のみ） |
+| `size:medium` | 中 | 数ファイルにまたがるが設計判断が自明な変更（新規ヘルパー追加程度） |
+| `size:large` | 大 | 複数モジュール横断 / 新規外部連携 / 永続構造・スキーマの変更のいずれかを含む |
+
+判定ルールの補足:
+
+- Triage が `needs_architect: true` と判定した Issue は **必ず `size:large`** になります
+- 2 段階の境界で確信が持てない場合は **大きい側**に倒します（過小評価による実装失敗の
+  コストを重く見る方針）
+- `complexity` は「変更規模」の観点のみで判定され、`needs_architect` の判定基準・値・意味は
+  変更されません（両者は独立した別フィールド）
+
+### 人間 override と誤付与時の訂正手順
+
+**既存の `size:*` ラベルが 1 つでも付いている Issue には、watcher は一切触りません**
+（追加・付け替え・削除のいずれも行わない）。人間が貼ったラベルと過去の Triage が貼った
+ラベルは区別せず、**先に存在するラベルが優先**されます。
+
+- **事前 override**: Triage 実行前に `size:large` 等を貼っておけば、その値が固定されます
+- **誤付与の訂正**: 誤ったラベルを Issue から**剥がす**と、次回 Triage 実行時に改めて
+  判定結果が付与されます（watcher 側から自動で付け替えることはありません）
+
+### セットアップ（ラベル定義の作成）
+
+`size:*` ラベルが repo に存在しないとラベル付与は毎回失敗します（WARN 1 行が出るだけで
+Triage も後続処理も継続しますが、ラベルは付きません）。事前に labels script を実行して
+ください:
+
+```bash
+# 対象 repo で実行（既存ラベルは破壊せず、未作成のものだけ追加される）
+bash .github/scripts/idd-claude-labels.sh
+
+# 別 repo を対象にする場合
+bash .github/scripts/idd-claude-labels.sh --repo owner/name
+```
+
+### 有効化
+
+```bash
+MODEL_ROUTING_ENABLED=true \
+  REPO=owner/name REPO_DIR=$HOME/src/name $HOME/bin/issue-watcher.sh
+```
+
+### 失敗時の挙動（fail-safe / fail-open）
+
+補助機能であるため、**いかなる失敗でも既存パイプラインを止めません**。すべての分岐で
+`model-router:` prefix 付きのログが 1 行残ります（silent fail は作らない）:
+
+| 事象 | 挙動 |
+|---|---|
+| `complexity` が欠落 / `null` / 非文字列 / 許可値外 | ラベルを付与せず WARN のみ。GitHub API 呼び出しゼロ |
+| 既存 `size:*` ラベルあり | 付与せず skip 理由をログ出力 |
+| 既存ラベル一覧の取得 / 解析に失敗 | 付与せず WARN（誤った上書きを避ける安全側） |
+| ラベル付与が失敗（API 不達 / レート制限 / 権限不足 / ラベル未定義） | WARN のみ。当該サイクルの処理は継続 |
+
+旧テンプレートで生成された Triage 結果（`complexity` を持たない）も「値なし」として
+扱われ、エラーにはなりません。次回 Triage で改めて付与されます。
+
+### migration note（後方互換）
+
+- `MODEL_ROUTING_ENABLED` は **新規 opt-in・既定 `false`** です。未設定環境では本機能に
+  起因する GitHub API 呼び出しが **0 回**、ログ出力も **0 行**で、本機能導入前と完全に
+  同一の挙動になります
+- `=true`（リテラル文字列 / 厳密一致）のみが有効です。`True` / `TRUE` / `1` / `on` / typo は
+  すべて安全側（無効）に正規化されます
+- 既存 env var 名 / 既存ラベル名 / cron 登録文字列 / ログ出力先はいずれも変更していません。
+  ラベル追加は additive で、既存ラベルの改名・削除も行いません
+- 本機能導入前に処理済みの既存 Issue への遡及付与（retrofit）は行いません
+
+### ⚠️ merge 後の再配置が必要
+
+`local-watcher/bin/modules/model-router.sh`（新規）/ `local-watcher/bin/watcher-config.sh` /
+`local-watcher/bin/triage-prompt.tmpl` を変更する PR を merge しただけでは、cron / launchd が
+実行する `$HOME/bin/` 配下は古いままです。反映するには以下を実施してください:
+
+```bash
 cd ~/.idd-claude && git pull && ./install.sh --local
 ```
 

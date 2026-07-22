@@ -1,6 +1,6 @@
 # Implementation Plan
 
-- [ ] 1. size ラベル 3 種を labels script 2 系統へ additive parity で追加する (P)
+- [x] 1. size ラベル 3 種を labels script 2 系統へ additive parity で追加する (P)
   - `.github/scripts/idd-claude-labels.sh` の `LABELS=()` 配列末尾に `size:small` / `size:medium` /
     `size:large` の 3 行を追加する（`name|color|description` 形式 / design.md「`size:*` ラベル定義案」表）
   - color は 6 桁小文字 hex（`c2e0c6` / `fef2c0` / `f7c6c7`）、description は `【Issue 用】` prefix +
@@ -19,7 +19,7 @@
   - _Requirements: 6.1, 6.2, 6.3, 6.4, 6.5, 7.1, 7.2_
   - _Boundary: LabelProvisioner_
 
-- [ ] 2. Triage prompt に `complexity` / `complexity_reason` を additive 追加する (P)
+- [x] 2. Triage prompt に `complexity` / `complexity_reason` を additive 追加する (P)
   - `local-watcher/bin/triage-prompt.tmpl` の出力 JSON スキーマ例に、`edit_paths` の**後ろ**へ
     `complexity`（`small` / `medium` / `large` の 1 値）と `complexity_reason`（1〜2 行）を追加する
   - 新規節「`## complexity の出力指示（モデルルーティング Phase 1）`」を末尾に追加し、
@@ -33,7 +33,7 @@
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 2.1, 2.2, 3.5, NFR 3.3, NFR 3.4_
   - _Boundary: TriagePromptTemplate_
 
-- [ ] 3. `modules/model-router.sh` を新設し近接テストを追加する
+- [x] 3. `modules/model-router.sh` を新設し近接テストを追加する
   - `local-watcher/bin/modules/model-router.sh` を新規作成する（ファイル冒頭コメントに用途 / 配置先 /
     依存 / 設計参照 / prefix `mr_` を明記。**関数定義のみ・トップレベル副作用なし**）
   - `mr_log` / `mr_warn` を定義する（`[ts] [$REPO] model-router:` の 3 段 prefix / WARN は `>&2`）
@@ -53,7 +53,7 @@
   - _Requirements: 2.3, 2.4, 3.1, 3.2, 3.3, 3.4, 4.1, 4.2, 4.3, 4.4, 4.7, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6, 8.3, 8.4, NFR 2.1, NFR 2.2, NFR 3.1, NFR 3.2, NFR 4.1, NFR 4.2, NFR 4.3_
   - _Boundary: ModelRouterModule, ModelRouterTest_
 
-- [ ] 4. gate 変数の宣言と module ローダ登録を行う
+- [x] 4. gate 変数の宣言と module ローダ登録を行う
   - `local-watcher/bin/watcher-config.sh` の Phase E gate 群（`PATH_OVERLAP_CHECK` 付近）の直後に
     `MODEL_ROUTING_ENABLED="${MODEL_ROUTING_ENABLED:-false}"` を宣言し、opt-in / 既定無効 /
     `true` 厳密一致・不正値は安全側という意図をコメントで明記する
@@ -68,7 +68,7 @@
   - _Boundary: WatcherConfig, ModuleLoader_
   - _Depends: 3_
 
-- [ ] 5. slot-worker.sh の Triage 消費部に call site を配線する
+- [x] 5. slot-worker.sh の Triage 消費部に call site を配線する
   - `local-watcher/bin/modules/slot-worker.sh` の Phase E edit_paths 永続化ブロック（L498-511）の
     **直後**、`needs-decisions` 分岐（L513）より前に、design.md「Wiring」節の擬似構造どおりの
     gate ブロックを 1 つ挿入する
@@ -84,7 +84,7 @@
   - _Boundary: SlotWorkerTriageConsumer, ModelRouterTest_
   - _Depends: 3, 4_
 
-- [ ] 6. README / CLAUDE.md を同一 PR で更新する (P)
+- [x] 6. README / CLAUDE.md を同一 PR で更新する (P)
   - `README.md`「ディレクトリ構成」ツリーの modules 一覧に `model-router.sh` 行を追加する
   - `README.md`「オプション機能（標準有効 / 常時有効）一覧」の **opt-in（既定 OFF）** 表に
     `MODEL_ROUTING_ENABLED` 行（既定 `false` / `=true` 厳密一致のみ有効 / それ以外は安全側 OFF /
@@ -99,7 +99,7 @@
   - _Requirements: 7.3, 7.4, 7.5, 7.6, 7.7_
   - _Boundary: OperatorDocs_
 
-- [ ] 7. 最終検証（静的解析 / 近接テスト / parity 抽出比較 / 手動スモーク手順）
+- [x] 7. 最終検証（静的解析 / 近接テスト / parity 抽出比較 / 手動スモーク手順）
   - `shellcheck` を変更した全 bash スクリプト（新規 module / slot-worker / watcher-config /
     issue-watcher / labels script）に対して実行し警告ゼロを確認する
   - `bash -n` を新規 module と変更した既存スクリプトに対して実行する
