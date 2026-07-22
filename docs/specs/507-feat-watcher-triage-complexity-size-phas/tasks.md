@@ -84,7 +84,7 @@
   - _Boundary: SlotWorkerTriageConsumer, ModelRouterTest_
   - _Depends: 3, 4_
 
-- [ ] 6. README / CLAUDE.md を同一 PR で更新する (P)
+- [x] 6. README / CLAUDE.md を同一 PR で更新する (P)
   - `README.md`「ディレクトリ構成」ツリーの modules 一覧に `model-router.sh` 行を追加する
   - `README.md`「オプション機能（標準有効 / 常時有効）一覧」の **opt-in（既定 OFF）** 表に
     `MODEL_ROUTING_ENABLED` 行（既定 `false` / `=true` 厳密一致のみ有効 / それ以外は安全側 OFF /
