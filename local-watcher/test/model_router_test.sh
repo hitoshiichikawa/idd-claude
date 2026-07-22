@@ -32,6 +32,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MODEL_ROUTER_SH="$SCRIPT_DIR/../bin/modules/model-router.sh"
 WATCHER_CONFIG_SH="$SCRIPT_DIR/../bin/watcher-config.sh"
 ISSUE_WATCHER_SH="$SCRIPT_DIR/../bin/issue-watcher.sh"
+SLOT_WORKER_SH="$SCRIPT_DIR/../bin/modules/slot-worker.sh"
 
 if [ ! -f "$MODEL_ROUTER_SH" ]; then
   echo "ERROR: cannot find model-router.sh at $MODEL_ROUTER_SH" >&2
@@ -442,6 +443,70 @@ phase_gate_hits=$( { grep -rE '^[[:space:]]*MODEL_ROUTING_[A-Z_]*=' \
   | { grep -vc 'MODEL_ROUTING_ENABLED=' || true; } )
 assert_eq "W4: MODEL_ROUTING_ENABLED 以外の Phase 別 gate を宣言していない（Req 3.6）" \
   "0" "$((phase_gate_hits))"
+
+# ════════════════════════════════════════════════════════════════════
+# Wiring（grep ベース / 実行なし）: slot-worker.sh の call site
+#   Req 2.5 / 3.4 / 4.5 / 4.6 / NFR 1.1 / NFR 2.3
+# ════════════════════════════════════════════════════════════════════
+echo ""
+echo "--- Wiring: slot-worker.sh call site ---"
+
+# 行番号を解決する（0 = 不在）。
+line_of() {
+  local pattern="$1" file="$2"
+  local n
+  n=$( { grep -nE -- "$pattern" "$file" || true; } | head -1 | cut -d: -f1)
+  echo "$((${n:-0}))"
+}
+
+# grep へ渡す ERE リテラル中の `$` は展開させたくないため単一引用符が意図的（SC2016 抑止）。
+# 行頭アンカー付きパターンでコメント行ではなく実行行のみを拾う。
+# shellcheck disable=SC2016
+phase_e_line=$(line_of '^[[:space:]]*if \[ "\$PATH_OVERLAP_CHECK" = "true" \]; then' "$SLOT_WORKER_SH")
+gate_line=$(line_of '^[[:space:]]*if mr_is_enabled; then' "$SLOT_WORKER_SH")
+# shellcheck disable=SC2016
+needs_decisions_line=$(line_of '^[[:space:]]*if \[ "\$STATUS" = "needs-decisions" \]' "$SLOT_WORKER_SH")
+persist_line=$(line_of '^[[:space:]]*mr_persist_size_label ' "$SLOT_WORKER_SH")
+
+# W5: gate ブロックが存在し、Phase E ブロックの後・needs-decisions 分岐の前に置かれている
+assert_rc "W5: slot-worker.sh に mr_is_enabled gate ブロックが存在する" 0 \
+  test "$gate_line" -gt 0
+assert_rc "W5: gate ブロックは Phase E edit_paths ブロックより後にある（design.md 指定位置）" 0 \
+  test "$gate_line" -gt "$phase_e_line"
+assert_rc "W5: gate ブロックは needs-decisions 分岐より前にある（早期 return 前に付与 / Req 4.5）" 0 \
+  test "$gate_line" -lt "$needs_decisions_line"
+
+# W6: gate 外に mr_persist_size_label 呼び出しが無い（呼び出しは gate ブロック内 1 箇所のみ）
+persist_call_count=$( { grep -cE '^[[:space:]]*mr_persist_size_label ' "$SLOT_WORKER_SH" || true; } )
+assert_eq "W6: mr_persist_size_label の呼び出しは 1 箇所のみ（Req 3.4）" "1" "$((persist_call_count))"
+assert_rc "W6: mr_persist_size_label 呼び出しは gate 行より後（gate 内に閉じている / Req 3.4）" 0 \
+  test "$persist_line" -gt "$gate_line"
+assert_rc "W6: mr_persist_size_label 呼び出しは needs-decisions 分岐より前" 0 \
+  test "$persist_line" -lt "$needs_decisions_line"
+
+# W7: `skip-triage` / impl-resume（HAS_EXISTING_SPEC）分岐側に mr_* 呼び出しが無い
+#     （call site の位置で非付与を構造的に保証する / Req 4.5 / 4.6）
+skip_triage_line=$(line_of 'LABEL_SKIP_TRIAGE' "$SLOT_WORKER_SH")
+# shellcheck disable=SC2016
+has_existing_spec_line=$(line_of '^[[:space:]]*if \$HAS_EXISTING_SPEC; then' "$SLOT_WORKER_SH")
+assert_rc "W7: gate ブロックは impl-resume 分岐（HAS_EXISTING_SPEC）より後 = else 枝の内側（Req 4.6）" 0 \
+  test "$gate_line" -gt "$has_existing_spec_line"
+assert_rc "W7: gate ブロックは skip-triage 分岐より後 = else 枝の内側（Req 4.5）" 0 \
+  test "$gate_line" -gt "$skip_triage_line"
+
+# W8: call site が $STATUS / $NEEDS_ARCHITECT / $MODE を読み書きしない（Req 2.5）
+#     gate 行から呼び出し行の直後までを切り出して検査する。
+gate_block=$(sed -n "${gate_line},$((persist_line + 1))p" "$SLOT_WORKER_SH")
+for v in 'STATUS' 'NEEDS_ARCHITECT' 'MODE'; do
+  hits=$( { printf '%s\n' "$gate_block" | grep -c "\$$v" || true; } )
+  assert_eq "W8: call site は \$$v を読み書きしない（mode 判定・needs-decisions 経路不変 / Req 2.5）" \
+    "0" "$((hits))"
+done
+
+# W9: 呼び出し側は rc を分岐に使わず吸収する（`|| true` / Req 5.3 fail-open / NFR 1.1）
+persist_call_line="$(sed -n "${persist_line}p" "$SLOT_WORKER_SH")"
+assert_contains "W9: mr_persist_size_label の戻り値を吸収して後続へ伝播させない（Req 2.4 / 5.3）" \
+  "$persist_call_line" "|| true"
 
 echo ""
 echo "==========================================="
