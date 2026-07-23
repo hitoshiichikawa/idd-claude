@@ -57,23 +57,27 @@ if [ -n "$REPO" ]; then
 fi
 
 # Label definitions: name|color|description
+# Issue #54 Req 2.1 / 2.2 / 2.3: 誤付与防止のため description に「【PR 用】」「【Issue 用】」
+# prefix を入れて適用先を明示する。GitHub のラベル description 上限（100 文字）を超えないよう
+# 末尾の説明文は維持できる範囲で短縮しない（最長: needs-rebase = 80 文字）。
+# ラベルの name / color 自体は本要件で変更しない（既存運用との互換性維持・Req 2.5）。
 LABELS=(
-  "auto-dev|1f77b4|自動開発対象"
-  "needs-decisions|f1c40f|人間の判断が必要"
-  "awaiting-design-review|e67e22|設計 PR レビュー待ち（Architect 発動時）"
-  "claude-claimed|c39bd3|Claude Code が claim 済（Triage 実行中）"
-  "claude-picked-up|9b59b6|Claude Code 実行中"
-  "ready-for-review|2ecc71|PR 作成完了"
-  "claude-failed|e74c3c|自動実行が失敗（復旧時は ready-for-review を先に付与してから外す）"
-  "skip-triage|95a5a6|Triage をスキップ"
-  "needs-rebase|fbca04|approved PR で base が古い／conflict が発生済み（Phase A: Merge Queue Processor が付与）"
-  "needs-iteration|d4c5f9|PR レビューコメントの反復対応待ち（#26 PR Iteration Processor が処理）"
+  "auto-dev|1f77b4|【Issue 用】 自動開発対象"
+  "needs-decisions|f1c40f|【Issue 用】 人間の判断が必要"
+  "awaiting-design-review|e67e22|【Issue 用】 設計 PR レビュー待ち（Architect 発動時）"
+  "claude-claimed|c39bd3|【Issue 用】 Claude Code が claim 済（Triage 実行中）"
+  "claude-picked-up|9b59b6|【Issue 用】 Claude Code 実行中"
+  "ready-for-review|2ecc71|【Issue 用】 PR 作成完了"
+  "claude-failed|e74c3c|【Issue 用】 自動実行が失敗（復旧時は ready-for-review を先に付与してから外す）"
+  "skip-triage|95a5a6|【Issue 用】 Triage をスキップ"
+  "needs-rebase|fbca04|【PR 用】 approved PR で base が古い／conflict が発生済み（Phase A: Merge Queue Processor が付与）"
+  "needs-iteration|d4c5f9|【PR 用】 PR レビューコメントの反復対応待ち（#26 PR Iteration Processor が処理）"
   "needs-quota-wait|c5def5|【Issue 用】 Claude Max quota 超過で reset 待ち（Quota Resume Processor が自動除去）"
   "staged-for-release|b8e0d2|【Issue 用】 develop に merge 済み、main 到達待ち（multi-branch 運用専用）"
   "st-failed|d73a4a|【Issue 用】 ST failure 検知後 revert 済み（Phase B Promote Pipeline が付与）"
   "awaiting-slot|c5def5|【Issue 用】 hot file 競合予防で同サイクル dispatch を見送り中（Phase E Path Overlap Checker が付与・除去）"
   "blocked|b60205|【Issue 用】 依存 Issue 未 merge により auto-dev 進行不能"
-  "hotfix|d93f0b|hotfix 優先処理対象（Dispatcher が非 hotfix より先に投入）"
+  "hotfix|d93f0b|【Issue 用】 hotfix 優先処理対象（Dispatcher が非 hotfix より先に投入）"
   "needs-security-fix|d73a4a|【PR 用】 Security Review strict モード（#281）で severity 閾値以上の検出により付与される。手動剥がしで override 可"
   "needs-merge-gate-attention|f9d0c4|【PR 用】 claude-review が required だが adjudicator も catch-up も発火せず merge gate を満たせない停滞状態（#412）"
   "size:small|c2e0c6|【Issue 用】 Triage 判定の変更規模: 小（単一〜少数ファイルの軽微な変更）"
