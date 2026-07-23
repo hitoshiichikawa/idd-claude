@@ -1580,6 +1580,7 @@ idd-claude は基本フロー（Triage → 実装 → PR 作成）以外の機�
 | **Full-Auto Kill Switch**（full-auto 系 processor の単一 kill switch。**AND セマンティクス**で個別 gate と並列に作用し、`FULL_AUTO_ENABLED=true` かつ個別 gate=true の場合のみ full-auto 系 processor が発火する二重 opt-in。不具合発生時に env 1 つで全 full-auto 挙動を即時 no-op に倒すための運用 knob。**現在の配線対象**は Dependency Auto-Unblock Sweep (#346) + Auto-Merge (#352) + Design Auto-Merge (#354) + PR Reviewer Commit Status (#349) + Failed Recovery (#359) + needs-decisions Auto-Continue (#362) の 6 系統。semantic conflict / blocked cascade は未実装のため将来追加時に同じ kill switch を参照する設計。既存 opt-in 機能（merge-queue / auto-rebase / promote-pipeline / pr-iteration / pr-reviewer / security-review / design-review-release / stage-checkpoint / stage-a-verify / quota-aware / debugger / hooks）は **本フラグ配下に入れず** 個別 gate で独立制御を維持） | `FULL_AUTO_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / `True` / `TRUE` / `1` / `on` / `False` / 空文字 / 前後空白付き / typo）はすべて OFF に正規化（外部副作用ゼロで早期 return + suppression ログ 1 行）。本機能導入前と完全に等価（NFR 1.1） | — | (本表の各 full-auto processor 行を参照) | #348 |
 | **Model Routing Phase 1**（Triage が出力した変更規模 `complexity` を `size:small` / `size:medium` / `size:large` ラベルとして Issue に永続化する。Triage を再実行しないサイクル（impl-resume / PR Iteration / Failed Recovery）でも判定結果を sticky に参照でき、人間が事前にラベルを貼れば Triage 判定を override できる。既存 `size:*` ラベルが 1 つでもあれば追加・付け替え・削除のいずれも行わない（先に存在するラベル優先 / 人間 override と過去 Triage 由来を区別しない）。`skip-triage` / impl-resume 経路は Triage ブロックごと迂回されるため付与されない。値の不正は WARN のみで継続（fail-safe）、GitHub 操作の失敗も WARN のみで当該サイクルを中断しない（fail-open）。gate OFF 時は本機能に起因する GitHub API 呼び出し 0 回・ログ 0 行で本機能導入前と完全に等価。**Triage 側の `complexity` / `complexity_reason` 出力は gate に依らず常時行われる**（gate は watcher 側の永続化のみを制御）） | `MODEL_ROUTING_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `on` / `off` / typo）はすべて安全側 OFF に正規化 | **前提**: `bash .github/scripts/idd-claude-labels.sh` で `size:small` / `size:medium` / `size:large` ラベルを作成済みであること（未作成の repo では付与が毎回失敗し WARN が出る / 処理自体は継続） | [Model Routing Phase 1: Triage complexity → size ラベル (#507)](#model-routing-phase-1-triage-complexity--size-ラベル-507) | #507 |
 | **Model Routing Phase 2**（Issue に付いた `size:*` ラベルを読んで、その Issue の **Developer 実行モデル**（`DEV_MODEL`）を slot 内で切り替える。**gate 有効化だけではモデルは変わらない二重 opt-in**（`DEV_MODEL_SMALL` / `DEV_MODEL_MEDIUM` に値を明示して初めて適用される）。解決は **slot 起動時点のラベル集合に基づく 1 回のみ**で、追加の GitHub API 呼び出し・LLM 実行はゼロ。size ラベル不在 / `size:*` 複数付与 / 許可値外はすべて `DEV_MODEL` へ fail-safe。適用先は当該 slot 内の Developer 実行（design セッション / 実装 Stage 群 / per-task ループ）のみで、Triage / Reviewer / PjM / slot 外プロセッサは対象外。gate OFF 時は本機能に起因する外部コマンド呼び出し 0 回・ログ 0 行で導入前と完全に等価） | `MODEL_ROUTING_ENABLED`（Phase 1 と**共通の単一 gate**。Phase 別 gate は設けない） | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `on` / `off` / typo）はすべて安全側 OFF に正規化 | **必須（これが無いと何も変わらない）**: `DEV_MODEL_SMALL` および / または `DEV_MODEL_MEDIUM`（**既定はいずれも空**。モデル ID は埋め込まれていないため運用者が明示指定する。例: `DEV_MODEL_SMALL=claude-sonnet-4-6`）。`size:large` 専用 env は無く `large` は `DEV_MODEL` を使う | [Model Routing Phase 2: size ラベル → Developer モデル (#508)](#model-routing-phase-2-size-ラベル--developer-モデル-508) | #508 |
+| **Tasks Count Gate: 子 Issue 分割案コメント**（[Tasks Count Gate](#tasks-count-gate-147) が escalate（既定 ≥ 11 件）と判定した Issue に対し、`tasks.md` の最上位・未完了タスクから機械生成した **子 Issue 分割案**をコメント 1 件で投稿する。既定は最上位タスク 1 件 = 子 Issue 案 1 件で、`_Depends:_` 由来の依存が **循環** するタスク群のみ 1 案へ統合する（子タスク ID 参照は最上位 ID へ正規化）。各案はタイトル案 / 含む最上位タスク ID / `Split from:` / `Parent:` / 案間依存の `Depends on:` / `gh issue create` の雛形を持つ。**提案のみで子 Issue の自動起票は行わない**（起票・調整は人間）。LLM の追加起動なし（bash の文字列処理のみ）。投稿は専用マーカー`<!-- idd-claude:tasks-count-split-proposal ... -->` で冪等化され、既存 escalation コメントのマーカーとは独立に判定する。生成・投稿の失敗は WARN 1 行のみで escalation コメント投稿と `needs-decisions` 付与は完了する（fail-open）。gate OFF 時は本機能に起因する GitHub API 呼び出し 0 回・ログ 0 行で本機能導入前と完全に等価） | `TC_SPLIT_PROPOSAL_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `false` / `off` / `True` / `TRUE` / `1` / typo）はすべて安全側 OFF に正規化 | **前提**: `TC_ENABLED`（既定 `true`）が opt-out されていないこと（tasks-count gate 自体が走らなければ本機能も起動しない）。閾値は既存の `TC_ESCALATE_LOWER`（既定 `11`）をそのまま使う | [子 Issue 分割案コメント（#509 / opt-in）](#子-issue-分割案コメント509--opt-in) | #509, #147 |
 | **GitHub Actions ワークフロー**（local watcher の代替実行基盤） | `IDD_CLAUDE_USE_ACTIONS`（GitHub Repository Variable。**env var ではない**） | 未設定 = 無効 | Repository Variable に `true` を厳密一致で設定。未設定 / `true` 以外（`on` / `True` / `1` 等）はワークフロー発火を停止 | — | [Step 3-B. GitHub Actions をセットアップ](#step-3-b-github-actions-をセットアップ代替) | #10 |
 
 各機能は**互いに独立**に制御できます。例えば `MERGE_QUEUE_RECHECK_ENABLED=false` だけを
@@ -7020,9 +7021,11 @@ Budget overflow check と同一件数を返します（#216）。両者は別実
 | `TC_WARN_LOWER` | `8` | 既定値推奨 | 警告レンジの下限件数 |
 | `TC_WARN_UPPER` | `10` | 既定値推奨 | 警告レンジの上限件数 |
 | `TC_ESCALATE_LOWER` | `11` | 既定値推奨 | エスカレーション（Developer 抑止）の下限件数 |
+| `TC_SPLIT_PROPOSAL_ENABLED` | `false` | 分割案コメントが欲しい場合のみ `true` | escalate 時に子 Issue 分割案コメントを投稿する（#509 / opt-in。後述） |
 
 閾値 env var が非整数の場合は warning ログを出して既定値（8 / 10 / 11）にフォールバック
-します（fail-safe）。
+します（fail-safe）。`TC_SPLIT_PROPOSAL_ENABLED` はリテラル `true` の厳密一致のみ有効で、
+未設定 / 空文字 / `false` / `off` / `True` / `1` / typo はすべて安全側（無効）へ正規化されます。
 
 ### cron 例
 
@@ -7070,6 +7073,72 @@ opt-out したい場合:
 - Issue #131 由来で既に `needs-decisions` ラベルが付与済みの Issue には重複適用しません
   （Req 4.4）
 
+### 子 Issue 分割案コメント（#509 / opt-in）
+
+`TC_SPLIT_PROPOSAL_ENABLED=true` を明示すると、**escalate 判定（既定 ≥ 11 件）と同時に**
+`tasks.md` の最上位・未完了タスクから機械生成した **子 Issue 分割案**をコメント 1 件で
+投稿します。人間の作業を「ゼロから分割を考える」から「提示された案の承認・調整・起票」へ
+軽減することが目的です。既定は無効（`false`）で、未設定環境では本機能導入前と完全に同一の
+escalate 挙動（escalation コメント本文・`needs-decisions` 付与・ログ行）を保ちます。
+
+> **注**: 本機能は **提案のみ**で、watcher は子 Issue を **自動起票しません**。
+> LLM の追加起動も行わず（bash の文字列処理のみ）、escalate 1 件あたりの GitHub API 呼び出しは
+> 既投稿確認 1 回 + コメント投稿 1 回の **計 2 回以下**です。
+
+#### 分割案の作り方（グルーピング規則）
+
+- 構成単位は `tasks.md` の**最上位・未完了タスク**（計数と同じ正準 regex `^- \[ \]\*? [0-9]+\. `）。
+  子タスク（`1.1` 等）・完了済みタスク（`- [x]` / `- [x]*`）は独立した案になりません
+- 既定は **最上位タスク 1 件 = 子 Issue 案 1 件**
+- `_Depends:_` 由来の依存が **循環する**（相互に到達可能な）タスク群のみ **1 案へ統合**します。
+  一方向の依存連鎖（1 → 2 → 3）は統合せず、案間の `Depends on:` として表現します
+- `_Depends:_` が子タスク ID（`3.1` 等）を参照している場合は対応する最上位 ID（`3`）へ正規化します。
+  子タスク行に書かれた `_Depends:_` は、その親（最上位）タスクの依存として集約します
+- 案の並びは `tasks.md` の出現順で、同一入力に対して常に同一の分割案を生成します（決定論的）
+
+#### コメントに含まれる情報
+
+- 検知件数と適用閾値（`TC_ESCALATE_LOWER`）、生成した子 Issue 案の件数
+- 案ごとに: タイトル案（120 文字以内）/ 含む最上位タスクの numeric ID 一覧 /
+  `Split from: #<元 Issue>` / `Parent: #<元 Issue>` / 案間依存がある場合の `Depends on: 案 <番号>`
+- 起票コマンド（`gh issue create`）の雛形。**人間が内容を確認してから実行**する提示に留めます
+- 末尾の冪等マーカー `<!-- idd-claude:tasks-count-split-proposal issue=<N> count=<C> proposals=<G> -->`
+
+関係種別のキーは [`.claude/rules/issue-dependency.md`](.claude/rules/issue-dependency.md) の
+canonical 記法（`Depends on:` / `Parent:` / `Split from:`）の英語表記のみを使い、alias 表記
+（`前提依存:` / `Blocked by:` / `親 Issue:` / `分割元:`）と逆ブロッキング表記 `Blocks:` は出力しません。
+
+#### 人間が取る次アクション
+
+1. **案を読んで承認 / 調整する** — 粒度が粗い・細かい場合は案をまとめる / 分けるを人手で判断
+2. **子 Issue を起票する** — コメント内の `gh issue create` 雛形を編集して実行（そのまま実行してもよい）
+3. **`Depends on:` の参照先を実 Issue 番号へ置き換える** — 未起票時点では案番号（`案 1` 等）で
+   表現されているため、起票後に `#<番号>` へ差し替えます
+4. **元 Issue の扱いを決める** — 分割後は元 Issue から `needs-decisions` を外して閉じる / 親として
+   残す等の運用判断を行います（本機能はラベル操作を追加しません）
+
+#### 冪等性と縮退挙動
+
+- 同一 Issue のコメント履歴に本機能の専用マーカーが 1 件でもあれば再投稿しません。判定は
+  **既存 escalation コメントのマーカー（`tasks-count-overflow`）とは独立**で、escalation コメントが
+  冪等 skip されても分割案の投稿可否には影響しません
+- コメント履歴の取得に失敗した場合はマーカー不在として扱います（影響は重複コメント 1 件まで）
+- 最上位・未完了タスクを 1 件も抽出できなかった場合は投稿せず、理由をログに残します
+- 本文が 60,000 文字に達する場合は先頭から詰めて残りを省略し、省略した旨を本文に明記します
+- `tasks.md` の内容は未信頼入力として扱い、HTML コメント記法やマーカー相当の文字列、
+  シェルのクォート文字は無害化してから本文へ埋め込みます
+
+#### 有効化
+
+```cron
+*/2 * * * * REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo \
+  TC_SPLIT_PROPOSAL_ENABLED=true \
+  $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+```
+
+`TC_ENABLED=false` で tasks-count gate 自体を opt-out している場合、
+`TC_SPLIT_PROPOSAL_ENABLED` の値にかかわらず分割案は投稿されません。
+
 ### 失敗・異常系
 
 - **tasks.md 不在 / 読み取り不可**: skip + `tc_log reason=tasks-md-missing` を記録
@@ -7102,6 +7171,11 @@ body の主な形式:
 - `issue=#<N> posted escalation-comment count=<C>` — エスカレーション投稿成功
 - `issue=#<N> added label=needs-decisions` — ラベル付与成功
 - `issue=#<N> already-warned skip duplicate comment` — 冪等 skip
+- `issue=#<N> posted split-proposal-comment count=<C> proposals=<G>` — 子 Issue 分割案の投稿成功（#509 / opt-in）
+- `issue=#<N> split-proposal skip reason=already-posted` — 分割案の冪等 skip（#509）
+- `issue=#<N> split-proposal skip reason=no-top-level-tasks` — 分割案の入力タスクが 0 件（#509）
+- `WARN: issue=#<N> split-proposal 生成失敗 reason=<理由>（fail-open で続行）` — 分割案の生成失敗（#509 / stderr）
+- `WARN: issue=#<N> gh issue comment 失敗（split-proposal 投稿、fail-open で続行）` — 分割案の投稿失敗（#509 / stderr）
 
 ### Migration Note（既存ユーザー向け）
 
