@@ -264,6 +264,41 @@ po_resolve_holder_labels() {
   return 0
 }
 
+# ─── #518: Staged-for-release Holder Drop Label Resolver (Req 1.1 / 3.1 / 3.2 / 4.2 / NFR 1.1) ───
+# dispatch × multi-branch のときだけ「holder 集合から drop すべきラベル」
+# （= staged-for-release）を返す純粋関数。それ以外（single-branch / promote / 判定不能）は
+# 空文字を返し、「drop しない」= holder 維持（安全側）を意味する。
+#
+# 背景（#221 との関係）: #221 の `po_resolve_holder_labels` は holder ラベル集合から
+# staged-for-release を抜く「クエリ側減算」のみを行う。しかし staged-for-release と他の
+# holder ラベル（例 `ready-for-review`）を併存する Issue は、併存ラベル経由で OR クエリに
+# マッチし、依然 holder として列挙されてしまう。本関数は `po_collect_inflight_issues` の
+# 列挙結果に対する post-filter の drop 対象ラベルを供給し、併存有無に関わらず staged 済み
+# Issue を holder から確実に外す（#518）。
+#
+# 判定条件は `po_resolve_holder_labels` の multi-branch 判定
+# （context=dispatch かつ BASE_BRANCH != PROMOTION_TARGET_BRANCH）と**完全に一致**させること。
+# ハードコード重複を避けるため `${LABEL_STAGED_FOR_RELEASE:-staged-for-release}` を参照する。
+#
+# Args:
+#   $1 = context（"dispatch" | "promote"）
+# Stdout: dispatch×multi-branch のとき staged-for-release ラベル名、それ以外は空文字
+# Return: 0 always（判定不能でも空文字 = drop しない安全側 / Req 4.2）
+po_resolve_staged_drop_label() {
+  local context="${1:-}"
+
+  # dispatch かつ multi-branch（BASE_BRANCH != PROMOTION_TARGET_BRANCH）のみ drop 対象を返す。
+  # 判定条件は po_resolve_holder_labels の multi-branch 判定と完全一致（真理値表 design.md D3）。
+  if [ "$context" = "dispatch" ] && [ "${BASE_BRANCH:-main}" != "${PROMOTION_TARGET_BRANCH:-main}" ]; then
+    printf '%s' "${LABEL_STAGED_FOR_RELEASE:-staged-for-release}"
+    return 0
+  fi
+
+  # single-branch / promote / 判定不能 → 空文字（drop しない = holder 維持 / fail-safe / Req 4.2）
+  printf '%s' ''
+  return 0
+}
+
 # ─── Phase E: Label OR-clause Builder (#221 Req 1.2 / 4.2 / NFR 1.1) ───
 # holder ラベル CSV を `gh issue list --search` 用の OR clause
 # `label:"X" OR label:"Y" OR ...` へ組み立てる。空要素・前後空白は除去し、
@@ -330,9 +365,18 @@ po_build_label_or_clause() {
 # 除外（Req 4.2）: st-failed, awaiting-slot（集合非依存で固定維持）
 # 候補自身を除外（Req 4.3）、同 repo のみ（Req 4.4: --repo "$REPO" 固定）
 #
+# #518 補足: 第 3 引数 drop_staged_label（空文字 = drop しない）を追加。dispatch×multi-branch
+#   では呼び出し側が `staged-for-release` を渡し、列挙結果から当該ラベルを持つ Issue を
+#   holder 集合から落とす（クエリ側減算では併存ラベル経由で残ってしまう Issue を確実に除外）。
+#   `--json number` を `--json number,labels` に拡張して同一 API 呼び出しでラベルを取得する
+#   ため、in-flight 列挙の API 回数は増えない（NFR 2.3）。第 3 引数省略時は drop なし = 完全な
+#   後方互換（single-branch / 既存 2 引数呼び出しは出力等価 / NFR 1）。
+#
 # Args:
 #   $1 = candidate issue number
 #   $2 = holder labels CSV（省略時 default = 現行 7 ラベル集合 / 後方互換 #221 NFR 1.1）
+#   $3 = drop_staged_label（省略時 "" = drop しない / #518。非空なら当該ラベルを持つ Issue を
+#        holder から除外する）
 # Stdout: JSON object `{"union": [...], "holders": {path: [issue#, ...]}}`
 # Return: 0 = 列挙 OK / 1 = gh API 失敗（caller は fail-open で empty 扱い + warn）
 po_collect_inflight_issues() {
@@ -340,6 +384,8 @@ po_collect_inflight_issues() {
   # #221 task 2: holder ラベル集合を第 2 引数で受ける。default は現行 7 ラベル集合に
   # 固定（引数を渡さない既存呼び出し = single-branch 運用は現行クエリと完全一致 / NFR 1.1）。
   local holder_labels="${2:-claude-claimed,claude-picked-up,awaiting-design-review,ready-for-review,needs-iteration,needs-rebase,staged-for-release}"
+  # #518: dispatch×multi-branch で holder から落とす staged ラベル（空文字 = drop しない）。
+  local drop_staged_label="${3:-}"
 
   # 与えられた CSV を `label:"X" OR label:"Y" OR ...` 形式へ動的に組み立てる。
   # `gh issue list --label A --label B` は AND になるため `--search 'label:A OR ...'`
@@ -354,23 +400,43 @@ po_collect_inflight_issues() {
 
   local search_query
   search_query="is:open is:issue (${label_clause}) -label:\"st-failed\" -label:\"awaiting-slot\""
+  # #518: labels も同時取得（追加 API を発生させない / NFR 2.3）。
   local issues_json
   if ! issues_json=$(gh issue list --repo "$REPO" \
       --search "$search_query" \
-      --json number \
+      --json number,labels \
       --limit 50 2>/dev/null); then
     return 1
   fi
 
   # 候補自身を除外（Req 4.3）、各 Issue について po_load_edit_paths を呼んで
   # union（unique 済 path 配列）と holders map（path → [issue#, ...]）を併走更新する。
+  # #518: 各 Issue はオブジェクト単位（jq -c '.[]'）で反復し、`.number` を抽出する。
   local accum
   accum='{"union": [], "holders": {}}'
-  local n
-  while IFS= read -r n; do
+  local issue_obj n
+  while IFS= read -r issue_obj; do
+    [ -z "$issue_obj" ] && continue
+    n=$(printf '%s' "$issue_obj" | jq -r '.number' 2>/dev/null || echo "")
     [ -z "$n" ] && continue
     if [ "$n" = "$candidate" ]; then
       continue
+    fi
+    # #518 post-filter（Req 1.1 / 1.2）: dispatch×multi-branch で staged-for-release を
+    # 付与された Issue は、他 holder ラベルの併存有無に関わらず holder 集合から除外する。
+    # ラベル判定は jq --arg（厳密一致）で行い、外部入力をフィルタ文字列へ inline 展開しない。
+    # fail-safe（Req 4.1）: drop_staged_label が空、または labels 取得不能で判定不能なら
+    # drop しない（= holder に残す安全側。誤って外して path 衝突を見逃すリスクを避ける）。
+    if [ -n "$drop_staged_label" ]; then
+      local has_staged
+      has_staged=$(printf '%s' "$issue_obj" \
+        | jq -r --arg lbl "$drop_staged_label" \
+            '[.labels[].name] | index($lbl) // empty' 2>/dev/null || echo "")
+      if [ -n "$has_staged" ]; then
+        # NFR 3: 除外を single issue 単位で判別可能にログ出力（drop 経路のみ）。
+        po_log "holder-set excluded staged issue=#${n} label=${drop_staged_label}"
+        continue
+      fi
     fi
     local paths
     paths=$(po_load_edit_paths "$n")
@@ -388,7 +454,7 @@ po_collect_inflight_issues() {
           .holders[$p] = ((.holders[$p] // []) + [$holder] | unique)
         )
     ')
-  done < <(echo "$issues_json" | jq -r '.[].number')
+  done < <(echo "$issues_json" | jq -c '.[]')
 
   echo "$accum"
   return 0
@@ -824,11 +890,17 @@ po_check_dispatch_gate() {
     po_log "holder-set context=dispatch excluded=${LABEL_STAGED_FOR_RELEASE:-staged-for-release} base=${BASE_BRANCH:-main}"
   fi
 
+  # #518: dispatch×multi-branch のときだけ holder 列挙結果から staged-for-release を
+  # 併存ラベルの有無に関わらず落とすための drop ラベルを解決する（single-branch / 判定不能
+  # では空文字 = drop なし）。
+  local drop_staged_label
+  drop_staged_label=$(po_resolve_staged_drop_label "dispatch")
+
   # in-flight union + holders map を取得（Req 4.1〜4.4 / 5.3 / 8.1）。
-  # 解決済み holder 集合を注入する（#221 Req 1.1 / 1.3）。
+  # 解決済み holder 集合と drop ラベルを注入する（#221 Req 1.1 / 1.3 / #518 Req 1.1）。
   # 失敗時は fail-open で claim 続行
   local inflight_obj
-  if ! inflight_obj=$(po_collect_inflight_issues "$candidate" "$holder_labels"); then
+  if ! inflight_obj=$(po_collect_inflight_issues "$candidate" "$holder_labels" "$drop_staged_label"); then
     po_warn "issue=#${candidate} in-flight 列挙に失敗、本サイクルは overlap 判定を skip して claim 続行"
     return 0
   fi
@@ -914,10 +986,15 @@ po__visibility_evaluate_candidate() {
   local holder_labels
   holder_labels=$(po_resolve_holder_labels "dispatch")
 
+  # #518 Req 3: 通常 dispatch 経路と同一の staged-for-release 除外規則を適用するため、
+  # dispatch×multi-branch のときだけ drop ラベルを解決する（両経路で除外結果を一致させる）。
+  local drop_staged_label
+  drop_staged_label=$(po_resolve_staged_drop_label "dispatch")
+
   # in-flight union + holders map を read-only で取得（Req 2.3 / 7.1）。失敗時は
   # 当該候補のみ skip して warn 判定へ返す（fail-open / NFR 3.2）。
   local inflight_obj
-  if ! inflight_obj=$(po_collect_inflight_issues "$candidate" "$holder_labels"); then
+  if ! inflight_obj=$(po_collect_inflight_issues "$candidate" "$holder_labels" "$drop_staged_label"); then
     return 1
   fi
   local inflight_paths inflight_holders
