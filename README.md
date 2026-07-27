@@ -2231,9 +2231,22 @@ holder から除外できます。そこで Path Overlap Checker は holder ラ�
 | promote target=`main` | （不問） | 7 ラベル（full） | 維持（まだ `main` に無い in-flight 集合） |
 | 判定不能（不明 context 等） | （不問） | 7 ラベル（full） | 維持（fail-safe / 安全側） |
 
+> **併存ラベルへの post-filter による確実な除外（#518）**: 上記のラベル集合の減算は
+> `gh issue list --search` の **holder ラベルクエリから `staged-for-release` を抜く**（クエリ側
+> 減算）だけでは不十分です。`staged-for-release` と他の holder ラベル（例 `ready-for-review`）を
+> **併存**する Issue は、併存ラベル経由で OR クエリにマッチし、依然 holder として列挙されて
+> しまうためです。そこで dispatch × multi-branch では、in-flight 列挙結果に対して
+> **`staged-for-release` を付与された Issue を（他 holder ラベルの併存有無に関わらず）holder
+> 集合から落とす post-filter** を適用し、確実に除外します（#518）。この post-filter に必要な
+> ラベル情報は既存の in-flight 列挙 API 呼び出し（`--json number,labels`）から取得するため、
+> **Issue 列挙の API 回数は増えません**。ラベル取得が不能で判定できない Issue は holder に
+> 残す（安全側 / fail-safe）ため、誤って holder から外して path 衝突を見逃すことはありません。
+> この post-filter は通常 dispatch 経路と flock skip 可視化経路（#243）の**両方**に適用され、
+> どちらの経路でも同じ Issue が同じく holder から除外されます。
+
 - **single-branch（`main` only）運用ではゼロ差分**: `staged-for-release` が運用上付与されない
-  ため、`BASE_BRANCH == PROMOTION_TARGET_BRANCH` のとき full 集合を使い、本機能導入前と
-  同一の in-flight 集合 / `awaiting-slot` 判定になります（後方互換）。
+  ため、`BASE_BRANCH == PROMOTION_TARGET_BRANCH` のとき full 集合を使い（post-filter の drop
+  対象も空）、本機能導入前と同一の in-flight 集合 / `awaiting-slot` 判定になります（後方互換）。
 - **gitflow 運用ガイド**: `BASE_BRANCH=develop`（かつ `PROMOTION_TARGET_BRANCH=main`）の
   multi-branch 運用では、完了して `staged-for-release` を付与したまま open に残った Issue が、
   同一 top-level path を編集する新規 Issue を不要に `awaiting-slot` へ落とすことがなくなります。
@@ -2376,11 +2389,16 @@ path-overlap: route=flock-skip visibility skipped (別の可視化パスが進�
 ```
 
 dispatch 文脈で holder 集合から `staged-for-release` を除外した場合（multi-branch 運用）は、
-除外を判別可能な以下のログが出力されます（#221 / NFR 3.1）。single-branch 運用や除外が
+除外を判別可能な以下のログが出力されます（#221 / #518 / NFR 3.1）。single-branch 運用や除外が
 発生しない場合は出力されません（ゼロ差分）:
 
 ```
+# context レベル: 当該 dispatch で holder ラベル集合から staged-for-release を減算した事実（#221）
 path-overlap: holder-set context=dispatch excluded=staged-for-release base=<BASE_BRANCH>
+
+# issue レベル: 併存ラベル経由でクエリにマッチした staged 済み Issue を post-filter で
+#              holder から落とした事実（#518 / NFR 3。除外した Issue 単位で 1 行）
+path-overlap: holder-set excluded staged issue=#<N> label=staged-for-release
 ```
 
 ### dogfood 確認手順
