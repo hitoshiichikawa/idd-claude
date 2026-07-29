@@ -1514,6 +1514,13 @@ GH_API_STATE_RETRY_SLEEP="${GH_API_STATE_RETRY_SLEEP:-2}"
 case "$GH_API_STATE_RETRY_SLEEP" in
   ''|*[!0-9]*) GH_API_STATE_RETRY_SLEEP="2" ;;
 esac
+# Req 6: per-branch PR 存在確認を GraphQL search から REST（core バケット）へ逃がす負荷分散。
+# `=true` 厳密一致のみ ON。
+GH_API_REST_OFFLOAD_ENABLED="${GH_API_REST_OFFLOAD_ENABLED:-false}"
+case "$GH_API_REST_OFFLOAD_ENABLED" in
+  true) : ;;
+  *)    GH_API_REST_OFFLOAD_ENABLED="false" ;;
+esac
 
 # ─── デフォルト有効化フラグの値正規化 (#112 Req 2.10 / #412 で本フラグを追加) ───
 # 下記 10 種の env var はすべて「`=false` を明示した場合のみ無効、それ以外

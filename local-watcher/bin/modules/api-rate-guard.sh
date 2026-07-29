@@ -337,3 +337,73 @@ grl_retry_label_op() {
     attempt=$((attempt + 1))
   done
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Req 6: GraphQL から REST への負荷分散（per-branch PR 存在確認の hot path 逃がし）
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 従来経路（GraphQL search 経由の `gh pr list --head`）で per-branch PR を取得する fallback。
+# 呼び出し側が参照する union フィールド（number/state/headRefName/headRefOid/url）を返す。
+# $3 が非空なら timeout でラップする（元々 timeout 付きだった consumer 用）。
+grl_gh_pr_list_head() {
+  local branch="$1" state="$2" timeout_s="${3:-}"
+  if [ -n "$timeout_s" ]; then
+    timeout "$timeout_s" gh pr list --repo "$REPO" --head "$branch" --state "$state" \
+      --json number,state,headRefName,headRefOid,url --limit 20 2>/dev/null
+  else
+    gh pr list --repo "$REPO" --head "$branch" --state "$state" \
+      --json number,state,headRefName,headRefOid,url --limit 20 2>/dev/null
+  fi
+}
+
+# per-branch PR 存在確認を GraphQL search（`gh pr list --head`）から REST core
+# （`gh api repos/{owner}/{repo}/pulls?head=`）へ逃がすラッパ。offload on 時は REST で取得し
+# `gh pr list --head` 互換 JSON（number / state / headRefName / headRefOid / url）へ正規化して
+# 返す（state は open→OPEN / closed+merged_at→MERGED / closed→CLOSED / Req 6.2 等価判定）。
+# offload off / REST 失敗 / 正規化失敗は `gh pr list --head` へ fallback（Req 6.3, 6.4）。
+# 呼び出し側は number/state/headRefName/headRefOid/url を jq で抽出する既存契約を維持できる。
+# Args: $1=branch / $2=state（open|closed|all。既定 all）/ $3=timeout 秒（任意 / 空なら timeout なし）
+# Stdout: PR 配列 JSON（gh pr list --head 互換）
+grl_rest_prs_for_head() {
+  local branch="$1" state="${2:-all}" timeout_s="${3:-}"
+  # gate off → 従来経路（gh pr list --head）へ委譲（Req 6.4）。
+  if [ "${GH_API_REST_OFFLOAD_ENABLED:-false}" != "true" ]; then
+    grl_gh_pr_list_head "$branch" "$state" "$timeout_s"
+    return $?
+  fi
+  local owner="${REPO%%/*}"
+  local rest_state
+  case "$state" in
+    open)   rest_state="open" ;;
+    closed) rest_state="closed" ;;
+    *)      rest_state="all" ;;
+  esac
+  # REST core 経由取得（未信頼 branch は -f 経由で query param に渡し URL へ inline 展開しない / NFR 5.1）。
+  local rest_json ok=1
+  if [ -n "$timeout_s" ]; then
+    rest_json=$(timeout "$timeout_s" gh api "repos/$REPO/pulls" -f head="$owner:$branch" -f state="$rest_state" 2>/dev/null) && ok=0 || ok=$?
+  else
+    rest_json=$(gh api "repos/$REPO/pulls" -f head="$owner:$branch" -f state="$rest_state" 2>/dev/null) && ok=0 || ok=$?
+  fi
+  if [ "$ok" -ne 0 ]; then
+    grl_warn "REST offload 取得に失敗（gh pr list --head へ fallback / branch=$branch / Req 6.3）"
+    grl_gh_pr_list_head "$branch" "$state" "$timeout_s"
+    return $?
+  fi
+  # REST → gh pr list 互換 JSON へ正規化（Req 6.2 等価判定）。
+  local norm
+  if norm=$(printf '%s' "$rest_json" | jq -c '[.[] | {
+        number: .number,
+        state: (if .state == "open" then "OPEN"
+                elif .merged_at != null then "MERGED"
+                else "CLOSED" end),
+        headRefName: .head.ref,
+        headRefOid: .head.sha,
+        url: .html_url
+      }]' 2>/dev/null); then
+    printf '%s' "$norm"
+    return 0
+  fi
+  grl_warn "REST offload レスポンスの正規化に失敗（gh pr list --head へ fallback / branch=$branch / Req 6.3）"
+  grl_gh_pr_list_head "$branch" "$state" "$timeout_s"
+}
