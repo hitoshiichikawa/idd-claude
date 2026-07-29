@@ -383,8 +383,11 @@ _slot_run_issue() {
     # 除去して auto-dev へ戻し、dispatcher の in-flight 判定が誤らないようにする（次 tick の
     # 再 pickup は人間が足場を修復した後に full 判定で自然に進行する / `_slot_mark_failed` の
     # label 操作を参考にするが `claude-failed` は付けない / fail-open）。
-    gh issue edit "$NUMBER" --repo "$REPO" \
-      --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" >/dev/null 2>&1 || true
+    # #521 Req 5: 再 pickup 復帰系の label 除去（claim 系を外し FAILED は付けない）を
+    # grl_retry_label_op 経由にし rate-limit 起因失敗を有限回リトライ（孤児化防止）。
+    # gate off（既定）は 1 回実行 = 従来挙動（NFR 1.1）。
+    grl_retry_label_op "$NUMBER" --repo "$REPO" \
+      --remove-label "$LABEL_CLAIMED" --remove-label "$LABEL_PICKED" || true
     slot_log "scaffolding-health: HALT により agent stage を起動せず人間判断待ち（claim 系ラベル除去 / Issue #${NUMBER}）"
     return 0
   fi

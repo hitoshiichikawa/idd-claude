@@ -281,3 +281,59 @@ grl_degrade_should_run() {
   fi
   return 0
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Req 5: 状態遷移系ラベル操作の限定リトライ
+# ─────────────────────────────────────────────────────────────────────────────
+
+# resumable-return 系の `gh issue edit`（LABEL_PICKED 除去等）を rate-limit 起因失敗時のみ
+# 有限回リトライするラッパ。gate off は 1 回だけ実行（従来挙動 / gh 出力抑止 / rc をそのまま
+# 返す = byte 等価 / NFR 1.1）。gate on 時、rate-limit 文言を検出したときのみ
+# GH_API_STATE_RETRY_MAX_ATTEMPTS まで GH_API_STATE_RETRY_SLEEP 秒 backoff 再試行する。
+# 非 rate-limit 失敗は再試行せず即返す（不要な二次消費回避 / Req 5.2）。上限到達でも Issue は
+# LABEL_PICKED を残置したまま最終 rc を返し次 tick で再評価される（孤児化しない / Req 5.4）。
+# holder からのラベル誤除去等は発生させない（既存 gh 引数の rc を変えず回数のみ増やす / Req 5.5）。
+# Args: $1=issue 番号 / $@(2..)=gh issue edit の引数（--repo ... --remove-label ... 等）
+# rc: 最終 gh の rc（成功 0）
+grl_retry_label_op() {
+  local issue="$1"
+  shift
+  # gate off → 1 回だけ実行（従来挙動 / gh の stdout/stderr は従来同様抑止 / Req 5 gate off）
+  if [ "${GH_API_STATE_RETRY_ENABLED:-false}" != "true" ]; then
+    gh issue edit "$issue" "$@" >/dev/null 2>&1
+    return $?
+  fi
+  # op 記述（--remove-label / --add-label 値から compact に組み立て、ログの grep 性を高める）
+  local op="" prev="" a
+  for a in "$@"; do
+    case "$prev" in
+      --remove-label) op="${op:+$op,}-${a}" ;;
+      --add-label)    op="${op:+$op,}+${a}" ;;
+    esac
+    prev="$a"
+  done
+  [ -z "$op" ] && op="label-edit"
+  local max="${GH_API_STATE_RETRY_MAX_ATTEMPTS:-3}"
+  local sleep_s="${GH_API_STATE_RETRY_SLEEP:-2}"
+  local attempt=1 rc=0 err=""
+  while :; do
+    err=$(gh issue edit "$issue" "$@" 2>&1)
+    rc=$?
+    if [ "$rc" -eq 0 ]; then
+      return 0
+    fi
+    # rate-limit 起因でなければ即返す（二次消費回避 / Req 5.2）
+    if ! printf '%s' "$err" | grep -qiE 'rate.?limit|RATE_LIMITED|HTTP 429|too many requests'; then
+      return "$rc"
+    fi
+    if [ "$attempt" -ge "$max" ]; then
+      # 上限到達 → 最終 rc を返す（label 残置で次 tick 再評価 / 孤児化しない / Req 5.4）
+      grl_warn "retry issue=#$issue op=$op attempt=$attempt/$max 上限到達（label 残置で次 tick 再評価）"
+      return "$rc"
+    fi
+    # 再試行ログ（Req 5.6: issue 番号・操作種別・試行回数）
+    grl_log "retry issue=#$issue op=$op attempt=$attempt/$max"
+    sleep "$sleep_s" 2>/dev/null || true
+    attempt=$((attempt + 1))
+  done
+}

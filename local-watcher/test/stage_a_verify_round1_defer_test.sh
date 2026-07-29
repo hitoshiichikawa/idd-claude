@@ -51,6 +51,11 @@ fi
 # issue-watcher.sh から該当関数 1 個だけを抽出する（インデント無しの単独 `}` まで）。
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$IMPL_PIPELINE_SH" "stage_a_verify_round1_defer")"
+# Issue #521: stage_a_verify_round1_defer は claude-picked-up 除去を grl_retry_label_op 経由へ
+# 差し替えた。GH_API_STATE_RETRY_ENABLED 未設定（既定 false）では wrapper が gh issue edit を
+# 1 回だけ実行し（従来挙動 / gh 出力抑止は wrapper 内）、下記 gh stub がそのまま観測される。
+# shellcheck disable=SC1090,SC2086
+eval "$(extract_function "$SCRIPT_DIR/../bin/modules/api-rate-guard.sh" "grl_retry_label_op")"
 
 if ! declare -F stage_a_verify_round1_defer >/dev/null; then
   echo "ERROR: stage_a_verify_round1_defer not loaded" >&2

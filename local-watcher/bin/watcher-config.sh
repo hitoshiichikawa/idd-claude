@@ -1497,6 +1497,23 @@ GH_API_DEGRADE_GRAPHQL_THRESHOLD="${GH_API_DEGRADE_GRAPHQL_THRESHOLD:-500}"
 case "$GH_API_DEGRADE_GRAPHQL_THRESHOLD" in
   ''|*[!0-9]*) GH_API_DEGRADE_GRAPHQL_THRESHOLD="500" ;;
 esac
+# Req 5: 状態遷移系ラベル操作の限定リトライ。`=true` 厳密一致のみ ON。
+GH_API_STATE_RETRY_ENABLED="${GH_API_STATE_RETRY_ENABLED:-false}"
+case "$GH_API_STATE_RETRY_ENABLED" in
+  true) : ;;
+  *)    GH_API_STATE_RETRY_ENABLED="false" ;;
+esac
+# 再試行回数上限（有限 / 安全側既定 3 / 非整数・≤0 は既定へ / NFR 2.3）。
+GH_API_STATE_RETRY_MAX_ATTEMPTS="${GH_API_STATE_RETRY_MAX_ATTEMPTS:-3}"
+case "$GH_API_STATE_RETRY_MAX_ATTEMPTS" in
+  ''|*[!0-9]*) GH_API_STATE_RETRY_MAX_ATTEMPTS="3" ;;
+  *) if [ "$GH_API_STATE_RETRY_MAX_ATTEMPTS" -le 0 ]; then GH_API_STATE_RETRY_MAX_ATTEMPTS="3"; fi ;;
+esac
+# 試行間 backoff 秒（既定 2 / 非整数・<0 は既定へ）。
+GH_API_STATE_RETRY_SLEEP="${GH_API_STATE_RETRY_SLEEP:-2}"
+case "$GH_API_STATE_RETRY_SLEEP" in
+  ''|*[!0-9]*) GH_API_STATE_RETRY_SLEEP="2" ;;
+esac
 
 # ─── デフォルト有効化フラグの値正規化 (#112 Req 2.10 / #412 で本フラグを追加) ───
 # 下記 10 種の env var はすべて「`=false` を明示した場合のみ無効、それ以外
