@@ -39,7 +39,7 @@ commit 時点で未設定環境の挙動は不変（NFR 1.1）。
   - _Boundary: dependency-resolver, path-overlap, stale-pickup-reaper, quota-aware_
   - _Depends: 1_
 
-- [ ] 5. バケット別残量の可視化
+- [x] 5. バケット別残量の可視化
   - `api-rate-guard.sh` に `grl_buckets_refresh`（`gh api rate_limit` → core/graphql/search の remaining/limit をグローバルへ / 非消費経路 / 失敗は warn + 継続）と `grl_buckets_log`（cycle 終端に固定書式 1 行 `gh-rate-limit: core=<r>/<l> graphql=<r>/<l> search=<r>/<l>` を `LOG_DIR` へ）を実装（Req 3.1, 3.2, 3.3, 3.4）
   - `watcher-config.sh` に `GH_API_BUCKET_LOG_ENABLED`（既定 false / `true` のみ ON）を追加
   - `issue-watcher.sh` の cycle 終端（`echo 完了` 直前）へ `grl_buckets_log || true` を、repo 最新化直後へ `grl_buckets_refresh || true`（degrade 用 / 後続 task 6 が参照）を配線
