@@ -224,12 +224,23 @@ else
 fi
 
 # ============================================================
-# Section 10: sr_check_session — kill -0 による pid 生存確認（task 4 / Req 3.1 観点 3 / Req 3.4）
+# Section 10: sr_check_session — kill -0 による pid 生存確認
+#   （task 4 / Req 3.1 観点 3 + #520 Req 1.x / 2.x / 3.x / 4.x）
 #
 # 検証経路:
-#   - lock file 不在 → rc=0 (no session detected)
-#   - lock file 存在 + 自プロセス（`$$`）pid が保持中 → rc=1 (session may be alive)
-#   - lock file 存在 + 大値 pid（99999 等）の死活確認 → rc=0 (no session)
+#   - 10a: lock file 不在 → rc=0 (no session / reason=no-lockfile)
+#   - 10b: lock file 存在 + 自プロセス（`$$`）pid が保持中 → rc=1 (reason=holder-alive)
+#   - 10c: lock file 存在 + 大値 pid（99999 等）の死活確認 → rc=0 (no session)
+#   - 10d: 【#520 反転】観測手段は利用可能だが保持者なし（空 fuser 出力）
+#          → rc=0 (no session / reason=no-holder)。旧実装は safe-side rc=1 に倒していた
+#   - 10e: fuser/lsof 双方不在（binary 実在時は skip）→ rc=1 (safe-side / 維持)
+#   - 10f: 複数 lock file の累積判定（無保持 + 生存保持者）→ rc=1（Req 2.2）
+#   - 10g: PATH 空でツール不在を決定論的に再現 → rc=1 / reason=tool-absent（Req 3.1 / 4.4）
+#   - 10h: sr_is_active が sess_reason=<token> を 1 行ログへ追記（Req 4.2〜4.4 / NFR 3.3）
+#
+# #520 修正核心: flock 方式の lock file はプロセス死亡後もディスクに残るため、「観測手段は
+# 利用可能だが保持者を 1 件も返さない」= 孤児状態を rc=0（セッションなし）と判定する。
+# safe-side fallback は「観測手段（fuser/lsof）自体が不在」のときに限定する。
 #
 # 注意: fuser / lsof の挙動を直接呼ぶと OS 差異が出るため、本 section では
 # fuser / lsof を **bash 関数として stub 化** し、関数経路で pid を返す形に統一する。
@@ -241,6 +252,8 @@ echo "--- Section 10: sr_check_session（task 4 / Req 3.1 観点 3 / Req 3.4） 
 SLOT_LOCK_DIR=$(mktemp -d)
 REPO_SLUG="owner-test-repo"
 assert_rc "Req 3.1 観点 3: lock file 不在で rc=0 (no session detected)" 0 sr_check_session '{}'
+# #520 Req 1.3 / Req 4.x: lock file 不在の判定理由が surface 値で判別できる
+assert_eq "Req 1.3: lock file 不在の判定理由が no-lockfile" "no-lockfile" "$SR_SESSION_REASON"
 
 # ── 10b: lock file 存在 + fuser stub が生存 pid を返す → rc=1 (session may be alive) ──
 touch "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-1.lock"
@@ -251,7 +264,10 @@ fuser() {
   echo "$$"
 }
 # 関数 stub を優先的に使うため command -v fuser は true を返す（builtin 経路）
-assert_rc "Req 3.1 観点 3: 自プロセス pid（生存）で rc=1 (session may be alive)" 1 sr_check_session '{}'
+# Req 6.2: 実プロセス（必ず生存する自プロセス pid）が lock file を保持中の正常系
+assert_rc "Req 2.1 / 6.2: 自プロセス pid（生存）で rc=1 (session may be alive)" 1 sr_check_session '{}'
+# #520 Req 4.2: 生存保持者検出時の判定理由が holder-alive として surface される
+assert_eq "Req 4.2: 生存保持者検出時の判定理由が holder-alive" "holder-alive" "$SR_SESSION_REASON"
 
 # ── 10c: fuser stub が大値 pid（不在）を返す → rc=0 (no session) ──
 # 99999 のような大値 pid は通常存在しない（厳密には環境依存だが Linux 既定 pid_max ≦ 32768 環境で確実に不在）
@@ -273,12 +289,20 @@ else
   assert_rc "Req 3.1 観点 3: 99999 (不在 pid) で rc=0 (no session)" 0 sr_check_session '{}'
 fi
 
-# ── 10d: fuser stub が空文字を返す（pid 取得失敗） → rc=1 (safe-side / Req 3.4) ──
+# ── 10d: fuser stub が空文字を返す（保持者なし） → rc=0 (no session / #520 Req 6.3 反転) ──
+# 【#520 による意図的な期待値反転】観測手段（fuser/lsof）が利用可能でありながら保持者を
+# 1 件も返さない状態は「保持プロセスが既に死んでいる = 孤児」そのものである。flock 方式の
+# lock file はプロセス死亡後もディスクに残るため、旧実装が本ケースを safe-side（rc=1）に
+# 倒していたことで、一度 lock file が残ると reaper が永久に機能しなくなるバグがあった
+# （feedman#223 / #234）。本修正で rc=0 (no session / sess=0) へ反転する（Req 1.1 / Req 6.3）。
+# 旧期待値: `assert_rc "Req 3.4: ... 空 fuser 出力 ... rc=1 (safe-side)" 1 ...`
 # shellcheck disable=SC2317
 fuser() {
   echo ""
 }
-assert_rc "Req 3.4: pid 取得失敗（空 fuser 出力）で rc=1 (safe-side)" 1 sr_check_session '{}'
+assert_rc "Req 1.1（#520 反転）: 空 fuser 出力（保持者なし）で rc=0 (no session)" 0 sr_check_session '{}'
+# #520 Req 4.3: 保持者なしの判定理由が no-holder として surface される
+assert_eq "Req 4.3: 保持者なしの判定理由が no-holder" "no-holder" "$SR_SESSION_REASON"
 
 # ── 10e: fuser / lsof どちらも不在 → rc=1 (safe-side / Req 3.4) ──
 # fuser / lsof を unset し、command -v が両方 fail する状態を作る
@@ -290,8 +314,110 @@ if command -v fuser >/dev/null 2>&1; then
 elif command -v lsof >/dev/null 2>&1; then
   echo "SKIP: 10e を skip（lsof binary が実在し関数 stub 不在 → bin に到達する）"
 else
-  assert_rc "Req 3.4: fuser/lsof 双方不在で rc=1 (safe-side)" 1 sr_check_session '{}'
+  assert_rc "Req 3.1（#520 維持）: fuser/lsof 双方不在で rc=1 (safe-side)" 1 sr_check_session '{}'
 fi
+
+# ── 10f: 複数 lock file の累積判定（1 無保持 + 1 生存保持者）→ rc=1（Req 2.2） ──
+# 1 つ目の lock file は保持者なし（空）、2 つ目は生存 pid を返す stub。空の保持者結果で
+# 早期 return せず走査を継続し、生存保持者を検出して rc=1 になることを検証（#520 累積判定）。
+SLOT_LOCK_DIR=$(mktemp -d)
+REPO_SLUG="owner-test-repo"
+touch "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-1.lock"
+touch "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-2.lock"
+# shellcheck disable=SC2317
+fuser() {
+  case "$1" in
+    *slot-1.lock) echo "" ;;      # 無保持（保持者なし）→ 早期 return せず継続すべき
+    *slot-2.lock) echo "$$" ;;    # 生存保持者（自プロセス pid）
+    *) echo "" ;;
+  esac
+}
+assert_rc "Req 2.2: 無保持 + 生存保持者の複数 lock file で rc=1 (session may be alive)" 1 sr_check_session '{}'
+assert_eq "Req 2.2 / 4.2: 累積判定で生存保持者検出時の理由が holder-alive" "holder-alive" "$SR_SESSION_REASON"
+unset -f fuser 2>/dev/null || true
+rm -rf "$SLOT_LOCK_DIR"
+
+# ── 10g: fuser/lsof 双方不在で rc=1 + reason=tool-absent を決定論的に検証（Req 3.1 / 4.4） ──
+# 環境に fuser/lsof binary が実在してもツール不在を決定論的に再現するため、サブシェルで
+# PATH を空にし関数 stub も unset して command -v を両方 fail させる（10e は binary 実在時
+# skip されるため、本ケースで tool-absent 経路を全環境で必ず観測する）。
+SLOT_LOCK_DIR=$(mktemp -d)
+REPO_SLUG="owner-test-repo"
+touch "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-1.lock"
+unset -f fuser lsof 2>/dev/null || true
+ta_out=$(
+  PATH=""
+  _rc=0
+  sr_check_session '{}' >/dev/null 2>&1 || _rc=$?
+  printf '%s|%s' "$_rc" "${SR_SESSION_REASON:-}"
+)
+ta_rc="${ta_out%%|*}"
+ta_reason="${ta_out#*|}"
+assert_eq "Req 3.1: fuser/lsof 双方不在で rc=1 (safe-side 維持 / 反転しない)" "1" "$ta_rc"
+assert_eq "Req 4.4: ツール不在の判定理由が tool-absent" "tool-absent" "$ta_reason"
+rm -rf "$SLOT_LOCK_DIR"
+
+# ── 10h: sr_is_active が sess_reason を 1 行ログに追記する（Req 4.2〜4.4 / NFR 3.3 後方互換） ──
+# real sr_check_session を用い marker_age / slot_lock を stub して固定。sess の判定理由が
+# sr_is_active のログに sess_reason=<token> として追記され、既存 sess=N フィールドが
+# 維持されることを検証する（各 subshell 内に stub を閉じ込め本物の関数を汚さない）。
+SLOT_LOCK_DIR=$(mktemp -d)
+REPO_SLUG="owner-test-repo"
+touch "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-1.lock"
+
+# (no-holder) fuser 空 → sess=0 reason=no-holder → inactive ログ
+log_noholder=$(
+  # shellcheck disable=SC2317
+  sr_check_marker_age() { return 0; }
+  # shellcheck disable=SC2317
+  sr_check_slot_lock() { return 0; }
+  # shellcheck disable=SC2317
+  fuser() { echo ""; }
+  cap=""
+  # shellcheck disable=SC2317
+  sr_log() { cap="${cap}$*
+"; }
+  sr_is_active '{"issue":77}' >/dev/null 2>&1 || true
+  printf '%s' "$cap"
+)
+assert_contains "Req 4.3: sr_is_active ログに sess_reason=no-holder を追記" "$log_noholder" "sess_reason=no-holder"
+assert_contains "NFR 3.3: no-holder ログで既存 sess=0 フィールドを維持（後方互換）" "$log_noholder" "sess=0"
+
+# (holder-alive) fuser 生存 pid → sess=1 reason=holder-alive → keep ログ
+log_alive=$(
+  # shellcheck disable=SC2317
+  sr_check_marker_age() { return 0; }
+  # shellcheck disable=SC2317
+  sr_check_slot_lock() { return 0; }
+  # shellcheck disable=SC2317
+  fuser() { echo "$$"; }
+  cap=""
+  # shellcheck disable=SC2317
+  sr_log() { cap="${cap}$*
+"; }
+  sr_is_active '{"issue":78}' >/dev/null 2>&1 || true
+  printf '%s' "$cap"
+)
+assert_contains "Req 4.2: sr_is_active ログに sess_reason=holder-alive を追記" "$log_alive" "sess_reason=holder-alive"
+assert_contains "NFR 3.3: holder-alive ログで既存 sess=1 フィールドを維持（後方互換）" "$log_alive" "sess=1"
+
+# (tool-absent) PATH 空でツール不在 → sess=1 reason=tool-absent → keep ログ
+unset -f fuser lsof 2>/dev/null || true
+log_toolabsent=$(
+  PATH=""
+  # shellcheck disable=SC2317
+  sr_check_marker_age() { return 0; }
+  # shellcheck disable=SC2317
+  sr_check_slot_lock() { return 0; }
+  cap=""
+  # shellcheck disable=SC2317
+  sr_log() { cap="${cap}$*
+"; }
+  sr_is_active '{"issue":79}' >/dev/null 2>&1 || true
+  printf '%s' "$cap"
+)
+assert_contains "Req 4.4: sr_is_active ログに sess_reason=tool-absent を追記" "$log_toolabsent" "sess_reason=tool-absent"
+rm -rf "$SLOT_LOCK_DIR"
 
 # 後片付け
 unset -f fuser 2>/dev/null || true
