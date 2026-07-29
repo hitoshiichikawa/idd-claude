@@ -256,7 +256,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）、
 # #325 の token usage 計測（token-usage.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "env-loader.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "auto-merge-disarm.sh" "path-overlap.sh" "model-router.sh" "promote-pipeline.sh" "pr-iteration-comments.sh" "pr-iteration-state.sh" "pr-iteration-oos.sh" "pr-iteration-exec.sh" "pr-iteration.sh" "pr-reviewer-exec.sh" "pr-reviewer-publish.sh" "pr-reviewer.sh" "adjudicator.sh" "pr-design-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery-attempt.sh" "failed-recovery-invoke.sh" "failed-recovery.sh" "stale-pickup-reaper.sh" "needs-decisions-auto.sh" "dep-cycle-detect.sh" "slack-notify.sh" "auto-merge-merged.sh" "design-review-release.sh" "tasks-count-gate.sh" "debugger-gate.sh" "stage-checkpoint.sh" "per-task-loop-diffrange.sh" "per-task-loop-exec.sh" "per-task-loop-prompt.sh" "per-task-loop.sh" "impl-pipeline-prompt.sh" "impl-pipeline-review.sh" "impl-pipeline.sh" "dependency-resolver.sh" "slot-worker-resume.sh" "slot-worker.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "env-loader.sh" "api-rate-guard.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "auto-merge-disarm.sh" "path-overlap.sh" "model-router.sh" "promote-pipeline.sh" "pr-iteration-comments.sh" "pr-iteration-state.sh" "pr-iteration-oos.sh" "pr-iteration-exec.sh" "pr-iteration.sh" "pr-reviewer-exec.sh" "pr-reviewer-publish.sh" "pr-reviewer.sh" "adjudicator.sh" "pr-design-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery-attempt.sh" "failed-recovery-invoke.sh" "failed-recovery.sh" "stale-pickup-reaper.sh" "needs-decisions-auto.sh" "dep-cycle-detect.sh" "slack-notify.sh" "auto-merge-merged.sh" "design-review-release.sh" "tasks-count-gate.sh" "debugger-gate.sh" "stage-checkpoint.sh" "per-task-loop-diffrange.sh" "per-task-loop-exec.sh" "per-task-loop-prompt.sh" "per-task-loop.sh" "impl-pipeline-prompt.sh" "impl-pipeline-review.sh" "impl-pipeline.sh" "dependency-resolver.sh" "slot-worker-resume.sh" "slot-worker.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -402,6 +402,14 @@ unset _dirty_status
 
 git checkout "$BASE_BRANCH"
 git pull --ff-only origin "$BASE_BRANCH"
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# GitHub API Rate Guard: サイクル冒頭のスナップショット取得（#521 / Req 2.1, 2.2）
+# repo 最新化直後・全 processor 実行前に PR/Issue 超集合を各 1 回取得し file 共有する。
+# GH_API_SNAPSHOT_ENABLED=true 厳密一致のときのみ発火し、それ以外（既定）は即 return 0 で
+# 本機能導入前と完全に等価（NFR 1.1）。取得失敗も rc=0（fail-safe）で active=off とし、
+# 参加 processor は従来の個別取得へフォールバックする（Req 2.5, 2.6 / NFR 2.1）。
+grl_snapshot_init || grl_warn "grl_snapshot_init が想定外のエラーで終了しました（各 processor は個別取得へフォールバック）"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # メインループ: Processor / Gate 実行順序（モジュール分割完了マニフェスト / #455 Phase 1・#468 gate）

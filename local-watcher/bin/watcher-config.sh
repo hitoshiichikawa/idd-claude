@@ -1443,6 +1443,43 @@ IMPL_RESUME_PRESERVE_COMMITS="${IMPL_RESUME_PRESERVE_COMMITS:-true}"
 # （Req 2.9, 5.2）。
 IMPL_RESUME_PROGRESS_TRACKING="${IMPL_RESUME_PROGRESS_TRACKING:-true}"
 
+# ─── GitHub API Rate Guard 設定 (#521) ───
+# watcher の 1 サイクル内 GitHub API rate limit（core / graphql / search バケット）消費削減・
+# 枯渇耐性のための 5 機能を制御する env 群。関数本体は modules/api-rate-guard.sh（prefix
+# grl_）、ロガー grl_log / grl_warn / grl_error は core_utils.sh。すべて opt-in（既定 false /
+# `=true` 厳密一致のみ ON）で、未設定・不正値・typo はすべて安全側（無効）へ正規化し、未設定
+# 環境は本機能導入前と完全に等価な no-op を保つ（Req 1.1〜1.3, NFR 1.1）。Claude Max quota
+# （rate_limit_event / quota-aware.sh の領分）とは別物のため env prefix を GH_API_ に分離。
+# 既定 OFF の opt-in 制のため、後段「デフォルト有効化フラグの値正規化」ループには含めない。
+#
+# Req 2: サイクル内スナップショット共有。`=true` 厳密一致のみ ON（Req 1.2, 1.3）。
+GH_API_SNAPSHOT_ENABLED="${GH_API_SNAPSHOT_ENABLED:-false}"
+case "$GH_API_SNAPSHOT_ENABLED" in
+  true) : ;;
+  *)    GH_API_SNAPSHOT_ENABLED="false" ;;
+esac
+# PR 超集合取得の --limit（非整数 / ≤0 は既定 100 へ正規化）。
+GH_API_SNAPSHOT_PR_LIMIT="${GH_API_SNAPSHOT_PR_LIMIT:-100}"
+case "$GH_API_SNAPSHOT_PR_LIMIT" in
+  ''|*[!0-9]*) GH_API_SNAPSHOT_PR_LIMIT="100" ;;
+  *) if [ "$GH_API_SNAPSHOT_PR_LIMIT" -le 0 ]; then GH_API_SNAPSHOT_PR_LIMIT="100"; fi ;;
+esac
+# Issue 超集合取得の --limit（非整数 / ≤0 は既定 100 へ正規化）。
+GH_API_SNAPSHOT_ISSUE_LIMIT="${GH_API_SNAPSHOT_ISSUE_LIMIT:-100}"
+case "$GH_API_SNAPSHOT_ISSUE_LIMIT" in
+  ''|*[!0-9]*) GH_API_SNAPSHOT_ISSUE_LIMIT="100" ;;
+  *) if [ "$GH_API_SNAPSHOT_ISSUE_LIMIT" -le 0 ]; then GH_API_SNAPSHOT_ISSUE_LIMIT="100"; fi ;;
+esac
+# スナップショット JSON ファイル（prs.json / issues.json）の配置先。$HOME/.issue-watcher/
+# 配下（user-owned・単一 writer・flock 保護）で symlink TOCTOU を回避（CLAUDE.md §6）。
+GH_API_SNAPSHOT_DIR="${GH_API_SNAPSHOT_DIR:-$HOME/.issue-watcher/api-snapshot/$REPO_SLUG}"
+# 超集合取得の gh timeout 秒（非整数 / ≤0 は既定 60 へ正規化）。
+GH_API_SNAPSHOT_GH_TIMEOUT="${GH_API_SNAPSHOT_GH_TIMEOUT:-60}"
+case "$GH_API_SNAPSHOT_GH_TIMEOUT" in
+  ''|*[!0-9]*) GH_API_SNAPSHOT_GH_TIMEOUT="60" ;;
+  *) if [ "$GH_API_SNAPSHOT_GH_TIMEOUT" -le 0 ]; then GH_API_SNAPSHOT_GH_TIMEOUT="60"; fi ;;
+esac
+
 # ─── デフォルト有効化フラグの値正規化 (#112 Req 2.10 / #412 で本フラグを追加) ───
 # 下記 10 種の env var はすべて「`=false` を明示した場合のみ無効、それ以外
 # （未設定 / 空文字 / `0` / `False` / `Yes` / typo 等）はすべてデフォルト有効」
