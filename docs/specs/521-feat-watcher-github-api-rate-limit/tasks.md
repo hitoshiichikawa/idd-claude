@@ -56,7 +56,7 @@ commit 時点で未設定環境の挙動は不変（NFR 1.1）。
   - _Requirements: 4.1, 4.2, 4.3, 4.4, 4.5, 4.6_
   - _Depends: 1, 5_
 
-- [ ] 7. 状態遷移系ラベル操作の限定リトライ
+- [x] 7. 状態遷移系ラベル操作の限定リトライ
   - `api-rate-guard.sh` に `grl_retry_label_op <issue番号> <gh issue edit 引数...>` を実装（`GH_API_STATE_RETRY_ENABLED=true` 時のみ、rate-limit 文言検出時に `GH_API_STATE_RETRY_MAX_ATTEMPTS` まで `GH_API_STATE_RETRY_SLEEP` 秒 backoff 再試行。非 rate-limit 失敗は再試行せず即返す。gate off は 1 回実行 = 従来挙動）
   - 試行ごとに `gh-rate-limit: retry issue=#<N> op=<label操作> attempt=<i>/<max>` を出力（Req 5.6）。上限到達でも `claude-picked-up` を残置し次 tick 再評価（孤児化しない / holder ラベル誤除去を発生させない / Req 5.4, 5.5）
   - `watcher-config.sh` に `GH_API_STATE_RETRY_ENABLED`（既定 false）/ `GH_API_STATE_RETRY_MAX_ATTEMPTS`（既定 3 / 有限）/ `GH_API_STATE_RETRY_SLEEP`（既定 2）を追加
