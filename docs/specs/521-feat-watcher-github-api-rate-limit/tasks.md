@@ -73,7 +73,7 @@ commit 時点で未設定環境の挙動は不変（NFR 1.1）。
   - _Requirements: 6.1, 6.2, 6.3, 6.4_
   - _Depends: 1_
 
-- [ ] 9. README 整合
+- [x] 9. README 整合
   - README「オプション機能一覧」へ 5 機能の opt-in 手順・有効化時の挙動・既定安全側方針を追記（Req 7.1）
   - 新規 env 12 個の一覧と既定値の表を追記（Req 7.2 / design env 表と一致）
   - バケット可視化ログ（`gh-rate-limit:` 書式）の読み方と縮退の優先順位（essential vs non-essential 分類）を追記（Req 7.3）。GitHub API rate limit と Claude Max quota の用語分離を明記
