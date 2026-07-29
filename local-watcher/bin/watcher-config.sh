@@ -1443,6 +1443,85 @@ IMPL_RESUME_PRESERVE_COMMITS="${IMPL_RESUME_PRESERVE_COMMITS:-true}"
 # （Req 2.9, 5.2）。
 IMPL_RESUME_PROGRESS_TRACKING="${IMPL_RESUME_PROGRESS_TRACKING:-true}"
 
+# ─── GitHub API Rate Guard 設定 (#521) ───
+# watcher の 1 サイクル内 GitHub API rate limit（core / graphql / search バケット）消費削減・
+# 枯渇耐性のための 5 機能を制御する env 群。関数本体は modules/api-rate-guard.sh（prefix
+# grl_）、ロガー grl_log / grl_warn / grl_error は core_utils.sh。すべて opt-in（既定 false /
+# `=true` 厳密一致のみ ON）で、未設定・不正値・typo はすべて安全側（無効）へ正規化し、未設定
+# 環境は本機能導入前と完全に等価な no-op を保つ（Req 1.1〜1.3, NFR 1.1）。Claude Max quota
+# （rate_limit_event / quota-aware.sh の領分）とは別物のため env prefix を GH_API_ に分離。
+# 既定 OFF の opt-in 制のため、後段「デフォルト有効化フラグの値正規化」ループには含めない。
+#
+# Req 2: サイクル内スナップショット共有。`=true` 厳密一致のみ ON（Req 1.2, 1.3）。
+GH_API_SNAPSHOT_ENABLED="${GH_API_SNAPSHOT_ENABLED:-false}"
+case "$GH_API_SNAPSHOT_ENABLED" in
+  true) : ;;
+  *)    GH_API_SNAPSHOT_ENABLED="false" ;;
+esac
+# PR 超集合取得の --limit（非整数 / ≤0 は既定 100 へ正規化）。
+GH_API_SNAPSHOT_PR_LIMIT="${GH_API_SNAPSHOT_PR_LIMIT:-100}"
+case "$GH_API_SNAPSHOT_PR_LIMIT" in
+  ''|*[!0-9]*) GH_API_SNAPSHOT_PR_LIMIT="100" ;;
+  *) if [ "$GH_API_SNAPSHOT_PR_LIMIT" -le 0 ]; then GH_API_SNAPSHOT_PR_LIMIT="100"; fi ;;
+esac
+# Issue 超集合取得の --limit（非整数 / ≤0 は既定 100 へ正規化）。
+GH_API_SNAPSHOT_ISSUE_LIMIT="${GH_API_SNAPSHOT_ISSUE_LIMIT:-100}"
+case "$GH_API_SNAPSHOT_ISSUE_LIMIT" in
+  ''|*[!0-9]*) GH_API_SNAPSHOT_ISSUE_LIMIT="100" ;;
+  *) if [ "$GH_API_SNAPSHOT_ISSUE_LIMIT" -le 0 ]; then GH_API_SNAPSHOT_ISSUE_LIMIT="100"; fi ;;
+esac
+# スナップショット JSON ファイル（prs.json / issues.json）の配置先。$HOME/.issue-watcher/
+# 配下（user-owned・単一 writer・flock 保護）で symlink TOCTOU を回避（CLAUDE.md §6）。
+GH_API_SNAPSHOT_DIR="${GH_API_SNAPSHOT_DIR:-$HOME/.issue-watcher/api-snapshot/$REPO_SLUG}"
+# 超集合取得の gh timeout 秒（非整数 / ≤0 は既定 60 へ正規化）。
+GH_API_SNAPSHOT_GH_TIMEOUT="${GH_API_SNAPSHOT_GH_TIMEOUT:-60}"
+case "$GH_API_SNAPSHOT_GH_TIMEOUT" in
+  ''|*[!0-9]*) GH_API_SNAPSHOT_GH_TIMEOUT="60" ;;
+  *) if [ "$GH_API_SNAPSHOT_GH_TIMEOUT" -le 0 ]; then GH_API_SNAPSHOT_GH_TIMEOUT="60"; fi ;;
+esac
+# Req 3: バケット別 rate limit の可視化（cycle 終端 1 行ログ）。`=true` 厳密一致のみ ON。
+GH_API_BUCKET_LOG_ENABLED="${GH_API_BUCKET_LOG_ENABLED:-false}"
+case "$GH_API_BUCKET_LOG_ENABLED" in
+  true) : ;;
+  *)    GH_API_BUCKET_LOG_ENABLED="false" ;;
+esac
+# Req 4: 残量閾値割れ時の WARN と非必須プロセッサ縮退。`=true` 厳密一致のみ ON。
+GH_API_DEGRADE_ENABLED="${GH_API_DEGRADE_ENABLED:-false}"
+case "$GH_API_DEGRADE_ENABLED" in
+  true) : ;;
+  *)    GH_API_DEGRADE_ENABLED="false" ;;
+esac
+# graphql バケット残量の縮退閾値（保守的既定 500 / 必須処理を完遂できる余力を残す）。
+# 非整数 / <0 は既定 500 へ正規化（0 は許容 = 実質縮退無効化したい運用向け / Req 4.4）。
+GH_API_DEGRADE_GRAPHQL_THRESHOLD="${GH_API_DEGRADE_GRAPHQL_THRESHOLD:-500}"
+case "$GH_API_DEGRADE_GRAPHQL_THRESHOLD" in
+  ''|*[!0-9]*) GH_API_DEGRADE_GRAPHQL_THRESHOLD="500" ;;
+esac
+# Req 5: 状態遷移系ラベル操作の限定リトライ。`=true` 厳密一致のみ ON。
+GH_API_STATE_RETRY_ENABLED="${GH_API_STATE_RETRY_ENABLED:-false}"
+case "$GH_API_STATE_RETRY_ENABLED" in
+  true) : ;;
+  *)    GH_API_STATE_RETRY_ENABLED="false" ;;
+esac
+# 再試行回数上限（有限 / 安全側既定 3 / 非整数・≤0 は既定へ / NFR 2.3）。
+GH_API_STATE_RETRY_MAX_ATTEMPTS="${GH_API_STATE_RETRY_MAX_ATTEMPTS:-3}"
+case "$GH_API_STATE_RETRY_MAX_ATTEMPTS" in
+  ''|*[!0-9]*) GH_API_STATE_RETRY_MAX_ATTEMPTS="3" ;;
+  *) if [ "$GH_API_STATE_RETRY_MAX_ATTEMPTS" -le 0 ]; then GH_API_STATE_RETRY_MAX_ATTEMPTS="3"; fi ;;
+esac
+# 試行間 backoff 秒（既定 2 / 非整数・<0 は既定へ）。
+GH_API_STATE_RETRY_SLEEP="${GH_API_STATE_RETRY_SLEEP:-2}"
+case "$GH_API_STATE_RETRY_SLEEP" in
+  ''|*[!0-9]*) GH_API_STATE_RETRY_SLEEP="2" ;;
+esac
+# Req 6: per-branch PR 存在確認を GraphQL search から REST（core バケット）へ逃がす負荷分散。
+# `=true` 厳密一致のみ ON。
+GH_API_REST_OFFLOAD_ENABLED="${GH_API_REST_OFFLOAD_ENABLED:-false}"
+case "$GH_API_REST_OFFLOAD_ENABLED" in
+  true) : ;;
+  *)    GH_API_REST_OFFLOAD_ENABLED="false" ;;
+esac
+
 # ─── デフォルト有効化フラグの値正規化 (#112 Req 2.10 / #412 で本フラグを追加) ───
 # 下記 10 種の env var はすべて「`=false` を明示した場合のみ無効、それ以外
 # （未設定 / 空文字 / `0` / `False` / `Yes` / typo 等）はすべてデフォルト有効」

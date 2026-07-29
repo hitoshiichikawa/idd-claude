@@ -257,22 +257,29 @@ process_auto_merge() {
   # GraphQL の autoMergeRequest フィールドを引いて Req 4.5 の冪等判定に使う。
   local repo_owner="${REPO%%/*}"
   local prs_json
-  if ! prs_json=$(timeout "$AUTO_MERGE_GIT_TIMEOUT" gh pr list \
-      --repo "$REPO" \
-      --state open \
-      --search "label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_DECISIONS\" -draft:true" \
-      --json number,headRefName,headRefOid,baseRefName,mergeable,labels,url,isDraft,headRepositoryOwner,autoMergeRequest \
-      --limit 50 2>/dev/null); then
+  # #521 Req 2.3: サイクル内 PR snapshot 経由取得（gate off / 取得失敗時は従来 gh pr list）。
+  if ! prs_json=$(grl_pr_snapshot_or_live "$AUTO_MERGE_GIT_TIMEOUT" \
+      "label:\"$LABEL_READY\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_DECISIONS\" -draft:true" \
+      "number,headRefName,headRefOid,baseRefName,mergeable,labels,url,isDraft,headRepositoryOwner,autoMergeRequest" \
+      50); then
     am_warn "対象 PR 一覧の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
     return 0
   fi
 
   # Req 6.3: head pattern によるクライアント側フィルタ（人間が手書きした PR を除外）+ fork 除外。
+  # #521 Req 2.3: snapshot 参照時に server search の `label:ready-for-review`（包含）/
+  #   `-label:failed` / `-label:needs-decisions`（除外）を client jq で再現。live 経路では冪等。
   prs_json=$(echo "$prs_json" | jq \
     --arg pattern "$AUTO_MERGE_HEAD_PATTERN" \
     --arg owner "$repo_owner" \
+    --arg ready "$LABEL_READY" \
+    --arg failed "$LABEL_FAILED" \
+    --arg needs_decisions "$LABEL_NEEDS_DECISIONS" \
     '[.[]
       | select(.isDraft == false)
+      | select((.labels // [] | map(.name) | index($ready)) != null)
+      | select((.labels // [] | map(.name) | index($failed)) == null)
+      | select((.labels // [] | map(.name) | index($needs_decisions)) == null)
       | select(.headRefName | test($pattern))
       | select((.headRepositoryOwner.login // "") == $owner)
     ]')

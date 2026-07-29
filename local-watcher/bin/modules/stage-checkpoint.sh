@@ -189,8 +189,10 @@ stage_checkpoint_read_review_result() {
 stage_checkpoint_find_impl_pr() {
   local include_closed="${1:-false}"
   local prs
-  prs=$(gh pr list --repo "$REPO" --head "$BRANCH" --state all \
-        --json number,state --limit 5 2>/dev/null) || return 2
+  # #521 Req 6: per-branch PR 存在確認を grl_rest_prs_for_head 経由にし offload on 時は REST へ
+  # 逃がす。off / 失敗時は従来 gh pr list --head へ fallback（number/state 等の互換 JSON を返す
+  # ため下流 jq 抽出は不変 / NFR 1.1）。取得失敗は従来どおり return 2（gh API エラー）。
+  prs=$(grl_rest_prs_for_head "$BRANCH" "all") || return 2
 
   # OPEN / MERGED を優先採用（OPEN > MERGED の順）。CLOSED の件数も観測ログのために抽出する。
   local open_pr merged_pr closed_pr closed_count
@@ -690,9 +692,10 @@ _spec_create_docs_pr() {
   local docs_branch="claude/issue-${NUMBER}-docs-${SLUG}"
 
   # 冪等ガード: 既存の docs 補完 PR があれば作成しない（NFR 2.1 / 2.2）。
+  # #521 Req 6: per-branch PR 存在確認を grl_rest_prs_for_head 経由にし offload on 時は REST へ
+  # 逃がす（off / 失敗時は従来 gh pr list --head へ fallback。number を含む互換 JSON / NFR 1.1）。
   local existing_docs_pr
-  existing_docs_pr=$(gh pr list --repo "$REPO" --head "$docs_branch" --state all \
-                     --json number --limit 1 2>/dev/null \
+  existing_docs_pr=$(grl_rest_prs_for_head "$docs_branch" "all" \
                      | jq -r '.[0].number // empty' 2>/dev/null || true)
   if [ -n "$existing_docs_pr" ]; then
     sc_log "spec-completeness: action=docs-pr result=skip-existing pr=#${existing_docs_pr} branch=${docs_branch} issue=#${NUMBER}" >> "$LOG"

@@ -253,18 +253,44 @@ sr_save_marker() {
 #
 # Stdout: JSON 配列文字列（候補なし / 取得失敗時は `[]`）
 # Returns: 0（常に。fail-continue）
+
+# #521 Req 2.3: Issue snapshot 超集合（全 open ∧ auto-dev）を server search と等価な集合へ
+# client jq で絞り込むヘルパー。include ラベル 1 つ（picked / claimed）を包含し、exclude ラベル
+# 配列（exclude_filter の `-label:...` 群）を除外する。live 経路では server が既に絞るため冪等。
+# Args: $1=対象 JSON 配列 / $2=include ラベル名 / $3=exclude ラベル JSON 配列
+# Stdout: 絞り込み後 JSON 配列（jq 失敗時は入力をそのまま返す fail-safe）
+sr_snapshot_client_filter() {
+  local json="$1" inc="$2" exc="$3"
+  printf '%s' "$json" | jq -c \
+    --arg inc "$inc" \
+    --argjson exc "$exc" \
+    '[.[]
+       | (.labels // [] | map(.name)) as $n
+       | select(($n | index($inc)) != null)
+       | select(($exc | any(. as $e | ($n | index($e)) != null)) | not)
+    ]' 2>/dev/null || printf '%s' "$json"
+}
+
 sr_fetch_candidates() {
   local exclude_filter
   exclude_filter="-label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_AWAITING_DESIGN\" -label:\"$LABEL_NEEDS_QUOTA_WAIT\" -label:\"$LABEL_BLOCKED\" -label:\"$LABEL_STAGED_FOR_RELEASE\" -label:\"hold\""
+  # #521 Req 2.3: snapshot 参照時に exclude_filter を client jq で再現するための除外ラベル
+  # JSON 配列（server search の `-label:...` 群と 1:1 対応）。picked/claimed は auto-dev を
+  # 保持する部分集合のため Issue 超集合（open ∧ auto-dev / updatedAt 含む）に含まれる。
+  local exclude_json
+  exclude_json=$(jq -n -c \
+    --arg a "$LABEL_FAILED" --arg b "$LABEL_NEEDS_DECISIONS" --arg c "$LABEL_AWAITING_DESIGN" \
+    --arg d "$LABEL_NEEDS_QUOTA_WAIT" --arg e "$LABEL_BLOCKED" --arg f "$LABEL_STAGED_FOR_RELEASE" \
+    '[$a,$b,$c,$d,$e,$f,"hold"]' 2>/dev/null || echo '[]')
 
   # クエリ 1: claude-picked-up 候補
+  # #521 Req 2.3: サイクル内 Issue snapshot 経由取得（gate off / 取得失敗時は従来 gh issue list を
+  # byte 等価に実行。--state open --search の形は現行と一致）。
   local picked_json
-  if ! picked_json=$(timeout "$STALE_PICKUP_REAPER_GH_TIMEOUT" gh issue list \
-      --repo "$REPO" \
-      --state open \
-      --search "label:\"$LABEL_PICKED\" $exclude_filter" \
-      --json number,labels,title,url,updatedAt \
-      --limit "$STALE_PICKUP_REAPER_MAX_ISSUES" 2>/dev/null); then
+  if ! picked_json=$(grl_issue_snapshot_or_live "$STALE_PICKUP_REAPER_GH_TIMEOUT" \
+      "label:\"$LABEL_PICKED\" $exclude_filter" \
+      "number,labels,title,url,updatedAt" \
+      "$STALE_PICKUP_REAPER_MAX_ISSUES"); then
     sr_warn "sr_fetch_candidates: gh issue list 失敗（label:$LABEL_PICKED / timeout または API エラー）"
     echo "[]"
     return 0
@@ -277,15 +303,19 @@ sr_fetch_candidates() {
     sr_warn "sr_fetch_candidates: gh issue list が JSON 配列を返さなかった（label:$LABEL_PICKED）"
     picked_json="[]"
   fi
+  # snapshot active 時のみ超集合を label:picked-up 包含 + exclude_filter 除外で絞り込む。
+  # gate off / snapshot 非 active では従来 gh の server search が既に絞った結果をそのまま使う
+  # （client 再絞り込みを掛けず byte 等価 / NFR 1.1）。
+  if grl_snapshot_active; then
+    picked_json=$(sr_snapshot_client_filter "$picked_json" "$LABEL_PICKED" "$exclude_json")
+  fi
 
   # クエリ 2: claude-claimed 候補
   local claimed_json
-  if ! claimed_json=$(timeout "$STALE_PICKUP_REAPER_GH_TIMEOUT" gh issue list \
-      --repo "$REPO" \
-      --state open \
-      --search "label:\"$LABEL_CLAIMED\" $exclude_filter" \
-      --json number,labels,title,url,updatedAt \
-      --limit "$STALE_PICKUP_REAPER_MAX_ISSUES" 2>/dev/null); then
+  if ! claimed_json=$(grl_issue_snapshot_or_live "$STALE_PICKUP_REAPER_GH_TIMEOUT" \
+      "label:\"$LABEL_CLAIMED\" $exclude_filter" \
+      "number,labels,title,url,updatedAt" \
+      "$STALE_PICKUP_REAPER_MAX_ISSUES"); then
     sr_warn "sr_fetch_candidates: gh issue list 失敗（label:$LABEL_CLAIMED / timeout または API エラー）"
     echo "[]"
     return 0
@@ -296,6 +326,9 @@ sr_fetch_candidates() {
   if ! printf '%s' "$claimed_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
     sr_warn "sr_fetch_candidates: gh issue list が JSON 配列を返さなかった（label:$LABEL_CLAIMED）"
     claimed_json="[]"
+  fi
+  if grl_snapshot_active; then
+    claimed_json=$(sr_snapshot_client_filter "$claimed_json" "$LABEL_CLAIMED" "$exclude_json")
   fi
 
   # 2 結果を結合 + dedup + truncate（jq で完結 / NFR 3.1: --argjson 経由）

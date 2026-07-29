@@ -1012,10 +1012,11 @@ publish_claude_review_status() {
   esac
 
   # PR 番号 / head sha を取得（BRANCH 経由）
+  # #521 Req 6: per-branch PR 存在確認を grl_rest_prs_for_head 経由にし、offload on 時は REST
+  # （core バケット）へ逃がす。offload off / REST 失敗時は従来 gh pr list --head へ fallback
+  # （number/state/headRefName/headRefOid/url の互換 JSON を返すため下流 jq 抽出は不変 / NFR 1.1）。
   local pr_json pr_number sha pr_url
-  if ! pr_json=$(timeout "${PR_REVIEWER_GIT_TIMEOUT:-120}" \
-      gh pr list --repo "$REPO" --head "$BRANCH" --state all \
-        --json number,headRefOid,url --limit 1 2>/dev/null); then
+  if ! pr_json=$(grl_rest_prs_for_head "$BRANCH" "all" "${PR_REVIEWER_GIT_TIMEOUT:-120}"); then
     pr_warn "claude-review status publish: gh pr list 失敗 (branch=${BRANCH} issue=#${NUMBER:-?})"
     return 1
   fi

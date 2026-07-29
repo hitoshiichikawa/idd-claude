@@ -57,6 +57,18 @@ eval "$(extract_function "$MODULE_SH" "sr_load_marker")"
 eval "$(extract_function "$MODULE_SH" "sr_save_marker")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$MODULE_SH" "sr_fetch_candidates")"
+# Issue #521: sr_fetch_candidates は Issue 一覧取得を grl_issue_snapshot_or_live 経由へ差し替え、
+# 超集合参照時の client 絞り込みに sr_snapshot_client_filter を呼ぶ。GH_API_SNAPSHOT_ENABLED
+# 未設定（既定 false）では wrapper が従来の gh issue list へ委譲する（snapshot inactive）ため、
+# 後段の gh/timeout stub がそのまま観測される（byte 等価）。両ヘルパーを抽出リストに追随させる。
+# shellcheck disable=SC1090,SC2086
+eval "$(extract_function "$MODULE_SH" "sr_snapshot_client_filter")"
+GRL_MOD_T="$SCRIPT_DIR/../bin/modules/api-rate-guard.sh"
+for _grl_fn in grl_snapshot_dir grl_snapshot_active grl_snapshot_issues grl_issue_snapshot_or_live; do
+  # shellcheck disable=SC1090,SC2086
+  eval "$(extract_function "$GRL_MOD_T" "$_grl_fn")"
+done
+unset _grl_fn
 
 for fn in sr_marker_path sr_load_marker sr_save_marker sr_fetch_candidates; do
   if ! declare -F "$fn" >/dev/null; then

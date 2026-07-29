@@ -61,6 +61,15 @@ for fn in amx_log amx_warn amx_error amx_resolve_gate_enabled amx_should_disarm_
   eval "$(extract_function "$AMX_MOD" "$fn")"
 done
 
+# Issue #521: process_auto_merge_disarm は PR 一覧取得を grl_pr_snapshot_or_live 経由に
+# 差し替えた。GH_API_SNAPSHOT_ENABLED 未設定（既定 false）では wrapper が従来の gh pr list
+# へ委譲するため（snapshot inactive）、下記 stub gh/timeout がそのまま観測される（byte 等価）。
+GRL_MOD="$SCRIPT_DIR/../bin/modules/api-rate-guard.sh"
+for fn in grl_snapshot_dir grl_snapshot_active grl_snapshot_prs grl_pr_snapshot_or_live; do
+  # shellcheck disable=SC1090,SC2086
+  eval "$(extract_function "$GRL_MOD" "$fn")"
+done
+
 # full_auto_enabled は issue-watcher.sh 本体に定義されている（#348）
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$WATCHER_SH" "full_auto_enabled")"

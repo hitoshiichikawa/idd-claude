@@ -227,11 +227,13 @@ process_auto_merge_disarm() {
   #      表現しづらく、autoMergeRequest は server-side filter 不可のため client 側で扱う）。
   local repo_owner="${REPO%%/*}"
   local prs_json
-  if ! prs_json=$(timeout "$AUTO_MERGE_GIT_TIMEOUT" gh pr list \
-      --repo "$REPO" \
-      --state open \
-      --json number,headRefName,labels,autoMergeRequest,url,state,isDraft,headRepositoryOwner \
-      --limit 100 2>/dev/null); then
+  # #521 Req 2.3: サイクル内 PR snapshot 経由取得。本 processor の live 経路は --search なし
+  # （全 open PR）で、PR 超集合（全 open PR）と同一集合のため client jq の追加は不要
+  # （空 search を渡すとラッパは live 時に --search を付けず byte 等価な gh pr list を実行）。
+  if ! prs_json=$(grl_pr_snapshot_or_live "$AUTO_MERGE_GIT_TIMEOUT" \
+      "" \
+      "number,headRefName,labels,autoMergeRequest,url,state,isDraft,headRepositoryOwner" \
+      100); then
     amx_warn "対象 PR 一覧の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
     return 0
   fi

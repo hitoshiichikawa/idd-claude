@@ -77,6 +77,15 @@ eval "$(extract_function "$DR_SH" "dr_unblock_sweep")"
 eval "$(extract_function "$DR_SH" "dr_extract_deps")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$DR_SH" "dr_format_unresolved_comment")"
+# Issue #521: dr_unblock_sweep は Issue 一覧取得を grl_issue_snapshot_or_live 経由へ差し替えた。
+# GH_API_SNAPSHOT_ENABLED 未設定（既定 false）では wrapper が従来の gh issue list へ委譲する
+# （snapshot inactive）ため、下記 gh stub がそのまま観測される（byte 等価）。
+GRL_MOD_T="$SCRIPT_DIR/../bin/modules/api-rate-guard.sh"
+for _grl_fn in grl_snapshot_dir grl_snapshot_active grl_snapshot_issues grl_issue_snapshot_or_live; do
+  # shellcheck disable=SC1090,SC2086
+  eval "$(extract_function "$GRL_MOD_T" "$_grl_fn")"
+done
+unset _grl_fn
 # Issue #348: dr_unblock_sweep 内で full_auto_enabled を呼ぶため、ヘルパー抽出規約
 # （CLAUDE.md 機能追加ガイドライン §7）に従って当該抽出リストへ追随させる。
 # shellcheck disable=SC1090,SC2086

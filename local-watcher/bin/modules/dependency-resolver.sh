@@ -794,8 +794,26 @@ dr_unblock_sweep() {
   # `_dispatcher_run` のメイン候補クエリ（search_filter）と整合する `-label:"..."`
   # 除外を `--search` に追加する。
   # FIFO 順（Issue 番号昇順）を取りやすくするため `sort:created-asc` を採用。
+  # #521 Req 2.3: サイクル内 Issue snapshot 共有。対象集合（open ∧ auto-dev ∧ blocked）は
+  # (open ∧ auto-dev) の部分集合。snapshot active 時のみ超集合を client 絞り込み
+  # （blocked 包含 + failed/needs-decisions 除外）し FIFO 相当（Issue 番号昇順 ≒ created-asc /
+  # Issue 番号は作成順に単調増加）で整列する。それ以外（gate off / 非 active）は従来の
+  # gh issue list（--label auto-dev --label blocked + sort:created-asc）を byte 等価に実行する
+  # （NFR 1.1）。
   local issues_json
-  if ! issues_json=$(gh issue list \
+  if grl_snapshot_active; then
+    if ! issues_json=$(grl_snapshot_issues | jq -c \
+          --arg blocked "$LABEL_BLOCKED" --arg failed "$LABEL_FAILED" --arg nd "$LABEL_NEEDS_DECISIONS" \
+          '[.[]
+             | (.labels // [] | map(.name)) as $n
+             | select(($n | index($blocked)) != null)
+             | select(($n | index($failed)) == null)
+             | select(($n | index($nd)) == null)
+          ] | sort_by(.number)' 2>/dev/null); then
+      dr_warn "dr_unblock_sweep: snapshot 絞り込み失敗 / スイープ skip"
+      return 0
+    fi
+  elif ! issues_json=$(gh issue list \
         --repo "$REPO" \
         --label "$LABEL_TRIGGER" \
         --label "$LABEL_BLOCKED" \

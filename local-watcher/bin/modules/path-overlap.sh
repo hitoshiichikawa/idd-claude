@@ -392,17 +392,40 @@ po_collect_inflight_issues() {
   # 形式を使う（既存 Phase B / Phase D が同形式を採用済）。
   # fail-safe（#221 Req 4.2）: CSV が空 / 不正で有効ラベルが 1 つも得られない場合は
   # full 7 ラベル集合へ fallback する（holder から誤って外さない安全側）。
+  local holder_csv="$holder_labels"
   local label_clause
-  label_clause=$(po_build_label_or_clause "$holder_labels")
+  label_clause=$(po_build_label_or_clause "$holder_csv")
   if [ -z "$label_clause" ]; then
-    label_clause=$(po_build_label_or_clause "claude-claimed,claude-picked-up,awaiting-design-review,ready-for-review,needs-iteration,needs-rebase,staged-for-release")
+    holder_csv="claude-claimed,claude-picked-up,awaiting-design-review,ready-for-review,needs-iteration,needs-rebase,staged-for-release"
+    label_clause=$(po_build_label_or_clause "$holder_csv")
   fi
 
   local search_query
   search_query="is:open is:issue (${label_clause}) -label:\"st-failed\" -label:\"awaiting-slot\""
   # #518: labels も同時取得（追加 API を発生させない / NFR 2.3）。
+  # #521 Req 2.3: サイクル内 Issue snapshot 共有。holder（in-flight ラベル群）は
+  # (open ∧ auto-dev) の部分集合（design Inventory #12）。snapshot active 時のみ超集合を
+  # holder ラベル OR + st-failed/awaiting-slot 除外で client 絞り込みする（holder 集合は
+  # effective CSV を JSON 配列化して jq --argjson で厳密一致判定 / NFR 5.1: フィルタ文字列へ
+  # inline 展開しない）。それ以外（gate off / 非 active）は従来の gh issue list --search を
+  # byte 等価に実行する（NFR 1.1）。取得失敗時は従来どおり return 1（caller が fail-open + warn）。
   local issues_json
-  if ! issues_json=$(gh issue list --repo "$REPO" \
+  if grl_snapshot_active; then
+    local holders_json
+    holders_json=$(printf '%s' "$holder_csv" | jq -R -c \
+      'split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$";"")) | map(select(length>0))' \
+      2>/dev/null || echo '[]')
+    if ! issues_json=$(grl_snapshot_issues | jq -c \
+        --argjson holders "$holders_json" \
+        '[.[]
+           | (.labels // [] | map(.name)) as $n
+           | select($holders | any(. as $h | ($n | index($h)) != null))
+           | select(($n | index("st-failed")) == null)
+           | select(($n | index("awaiting-slot")) == null)
+        ]' 2>/dev/null); then
+      return 1
+    fi
+  elif ! issues_json=$(gh issue list --repo "$REPO" \
       --search "$search_query" \
       --json number,labels \
       --limit 50 2>/dev/null); then

@@ -78,9 +78,12 @@ _assert_base_branch_resolved() {
 # 戻り値: 0 = ラベル除去成功 / 1 = gh 失敗（fail-open。呼び出し側は return 3 を維持し、
 #         ラベル残置の旨を警告ログに残す。手動除去で復旧可能）
 stage_a_verify_round1_defer() {
-  if gh issue edit "$NUMBER" --repo "$REPO" \
+  # #521 Req 5: 再 pickup 復帰系の label 除去（PICKED を外し FAILED は付けない）を
+  # grl_retry_label_op 経由にし、rate-limit 起因失敗を有限回リトライして孤児化を防ぐ。
+  # gate off（既定）は 1 回実行 = 従来挙動（gh 出力抑止は wrapper 内で行う / NFR 1.1）。
+  if grl_retry_label_op "$NUMBER" --repo "$REPO" \
       --remove-label "$LABEL_PICKED" \
-      --remove-label "$LABEL_CLAIMED" >/dev/null 2>&1; then
+      --remove-label "$LABEL_CLAIMED"; then
     echo "[$(date '+%F %T')] stage-a-verify: round=1 差し戻し: claude-picked-up 除去 → bare auto-dev candidate へ復帰（次 tick 再 pickup / issue=#$NUMBER）" >> "$LOG"
     return 0
   fi
@@ -270,9 +273,12 @@ run_impl_pipeline() {
           # 同一 tick 即時再開について (Req 1.1): dispatcher は tick 冒頭に候補スナップショットを
           # 取得するため、tick 途中の本ラベル除去は当該 tick のキューに影響しない（同一 tick 内
           # 即時再 claim は構造的に起きず、再開は後続 tick から）。
-          if gh issue edit "$NUMBER" --repo "$REPO" \
+          # #521 Req 5: 再 pickup 復帰系の label 除去（PICKED を外し FAILED は付けない）を
+          # grl_retry_label_op 経由にし rate-limit 起因失敗を有限回リトライ（孤児化防止）。
+          # gate off（既定）は 1 回実行 = 従来挙動（NFR 1.1）。
+          if grl_retry_label_op "$NUMBER" --repo "$REPO" \
               --remove-label "$LABEL_PICKED" \
-              --remove-label "$LABEL_CLAIMED" >/dev/null 2>&1; then
+              --remove-label "$LABEL_CLAIMED"; then
             pt_log "issue=#${NUMBER} claude-picked-up を除去し bare auto-dev candidate へ復帰 → 後続 tick で impl-resume 再開" | tee -a "$LOG"
           else
             # pt_warn は stderr 出力のため、$LOG への grep 可能な記録は別途 tee で残す（NFR 2.1）

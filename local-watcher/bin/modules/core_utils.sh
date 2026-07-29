@@ -203,6 +203,23 @@ pdr_error() {
   echo "[$(date '+%F %T')] [$REPO] pr-design-reviewer: ERROR: $*" >&2
 }
 
+# api-rate-guard 専用ロガー（識別用 prefix と timestamp 形式を Issue Watcher と揃える）
+# Issue #521: 既存 `qa_log` / `pr_log` と同形式の
+# `[YYYY-MM-DD HH:MM:SS] [$REPO] gh-rate-limit:` prefix を用いる。`grl_warn` / `grl_error`
+# は `>&2` に出力。GitHub API rate limit（core/graphql/search バケット）を扱う本機能は
+# Claude Max quota（quota-aware.sh の `qa_` / rate_limit_event）とは別物のため、ログ prefix
+# を `gh-rate-limit:` に分離して用語混同を避ける（design Overview の用語分離）。関数本体は
+# modules/api-rate-guard.sh 配置。REQUIRED_MODULES には api-rate-guard.sh が登録済み。
+grl_log() {
+  echo "[$(date '+%F %T')] [$REPO] gh-rate-limit: $*"
+}
+grl_warn() {
+  echo "[$(date '+%F %T')] [$REPO] gh-rate-limit: WARN: $*" >&2
+}
+grl_error() {
+  echo "[$(date '+%F %T')] [$REPO] gh-rate-limit: ERROR: $*" >&2
+}
+
 # Reviewer / Pipeline 専用ロガー（既存 mq_log / pi_log と同形式 / #468 で issue-watcher.sh 本体から移設）
 # 他の processor ロガーと異なり `[$REPO]` prefix を持たない点は、移設前の本体定義を byte 等価で
 # 温存したもの（#455 共通規約: ログ文言を 1 文字も変えない）。消費側は impl-pipeline.sh /

@@ -240,12 +240,13 @@ pr_already_processed() {
 pr_fetch_candidate_prs() {
   local repo_owner="${REPO%%/*}"
   local prs_json
-  if ! prs_json=$(timeout "$PR_REVIEWER_GIT_TIMEOUT" gh pr list \
-      --repo "$REPO" \
-      --state open \
-      --search "-draft:true" \
-      --json number,headRefName,headRefOid,baseRefName,isDraft,url,headRepositoryOwner \
-      --limit 50 2>/dev/null); then
+  # #521 Req 2.3: サイクル内 PR snapshot 経由取得（gate off / 取得失敗時は従来 gh pr list）。
+  # server search は `-draft:true` のみで、client jq の `isDraft==false` が完全再現するため
+  # 追加の client jq は不要（超集合参照時も同一集合を返す / gate off の live 経路は byte 等価）。
+  if ! prs_json=$(grl_pr_snapshot_or_live "$PR_REVIEWER_GIT_TIMEOUT" \
+      "-draft:true" \
+      "number,headRefName,headRefOid,baseRefName,isDraft,url,headRepositoryOwner" \
+      50); then
     pr_warn "候補 PR の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
     echo "[]"
     return 0

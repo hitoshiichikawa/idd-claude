@@ -79,12 +79,11 @@ pi_fetch_candidate_prs() {
   local repo_owner="${REPO%%/*}"
   local prs_json
   # AC 1.1 / 1.4 / 1.5 / 8.4: needs-iteration 付き、claude-failed / needs-rebase 無し、非 draft
-  if ! prs_json=$(timeout "$PR_ITERATION_GIT_TIMEOUT" gh pr list \
-      --repo "$REPO" \
-      --state open \
-      --search "label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_REBASE\" -draft:true" \
-      --json number,headRefName,baseRefName,isDraft,url,labels,headRepositoryOwner,body \
-      --limit 50 2>/dev/null); then
+  # #521 Req 2.3: サイクル内 PR snapshot 経由取得（gate off / 取得失敗時は従来 gh pr list）。
+  if ! prs_json=$(grl_pr_snapshot_or_live "$PR_ITERATION_GIT_TIMEOUT" \
+      "label:\"$LABEL_NEEDS_ITERATION\" -label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_REBASE\" -draft:true" \
+      "number,headRefName,baseRefName,isDraft,url,labels,headRepositoryOwner,body" \
+      50); then
     pi_warn "needs-iteration PR の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
     echo "[]"
     return 0
@@ -94,13 +93,22 @@ pi_fetch_candidate_prs() {
   # #35 AC 4.4 / 5.1: design pattern は PR_ITERATION_DESIGN_ENABLED=true のときのみ OR 条件に
   # 含める。#112 以降デフォルトは true。明示的に false を渡した場合のみ impl pattern だけで
   # 絞り込み、設計 PR は candidate 段階で除外される（= 設計 PR 拡張 #35 導入前と同一の挙動）。
+  # #521 Req 2.3: snapshot 参照時に server search の `label:needs-iteration`（包含）/
+  #   `-label:failed` / `-label:needs-rebase`（除外）/ `-draft:true`（isDraft==false）を
+  #   client jq で再現（等価性ルール表）。live 経路では冪等（byte 等価を保つ）。
   echo "$prs_json" | jq \
     --arg impl_pattern "$PR_ITERATION_HEAD_PATTERN" \
     --arg design_pattern "$PR_ITERATION_DESIGN_HEAD_PATTERN" \
     --arg design_enabled "$PR_ITERATION_DESIGN_ENABLED" \
     --arg owner "$repo_owner" \
+    --arg needs_iteration "$LABEL_NEEDS_ITERATION" \
+    --arg failed "$LABEL_FAILED" \
+    --arg needs_rebase "$LABEL_NEEDS_REBASE" \
     '[.[]
       | select(.isDraft == false)
+      | select((.labels // [] | map(.name) | index($needs_iteration)) != null)
+      | select((.labels // [] | map(.name) | index($failed)) == null)
+      | select((.labels // [] | map(.name) | index($needs_rebase)) == null)
       | select((.headRepositoryOwner.login // "") == $owner)
       | select(
           (.headRefName | test($impl_pattern))

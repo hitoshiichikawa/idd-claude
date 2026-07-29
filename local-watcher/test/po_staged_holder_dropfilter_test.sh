@@ -48,6 +48,15 @@ eval "$(extract_function "$PATH_OVERLAP_SH" "po_resolve_staged_drop_label")"
 eval "$(extract_function "$PATH_OVERLAP_SH" "po_collect_inflight_issues")"
 # shellcheck disable=SC1090,SC2086
 eval "$(extract_function "$PATH_OVERLAP_SH" "po_build_label_or_clause")"
+# Issue #521: po_collect_inflight_issues は Issue 一覧取得を grl_issue_snapshot_or_live 経由へ
+# 差し替えた。GH_API_SNAPSHOT_ENABLED 未設定（既定 false）では wrapper が従来の gh issue list へ
+# 委譲する（snapshot inactive）ため、下記 gh stub がそのまま観測される（byte 等価）。
+GRL_MOD_T="$SCRIPT_DIR/../bin/modules/api-rate-guard.sh"
+for _grl_fn in grl_snapshot_dir grl_snapshot_active grl_snapshot_issues grl_issue_snapshot_or_live; do
+  # shellcheck disable=SC1090,SC2086
+  eval "$(extract_function "$GRL_MOD_T" "$_grl_fn")"
+done
+unset _grl_fn
 
 if ! declare -F po_resolve_staged_drop_label >/dev/null; then
   echo "ERROR: po_resolve_staged_drop_label not loaded" >&2

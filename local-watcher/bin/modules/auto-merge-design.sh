@@ -272,12 +272,11 @@ process_auto_merge_design() {
   # ラベル必須条件は付与しない（Issue #354 設計判断）。
   local repo_owner="${REPO%%/*}"
   local prs_json
-  if ! prs_json=$(timeout "$AUTO_MERGE_DESIGN_GIT_TIMEOUT" gh pr list \
-      --repo "$REPO" \
-      --state open \
-      --search "-label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_NEEDS_ITERATION\" -draft:true" \
-      --json number,headRefName,headRefOid,baseRefName,mergeable,labels,url,isDraft,headRepositoryOwner,autoMergeRequest \
-      --limit 50 2>/dev/null); then
+  # #521 Req 2.3: サイクル内 PR snapshot 経由取得（gate off / 取得失敗時は従来 gh pr list）。
+  if ! prs_json=$(grl_pr_snapshot_or_live "$AUTO_MERGE_DESIGN_GIT_TIMEOUT" \
+      "-label:\"$LABEL_FAILED\" -label:\"$LABEL_NEEDS_DECISIONS\" -label:\"$LABEL_NEEDS_ITERATION\" -draft:true" \
+      "number,headRefName,headRefOid,baseRefName,mergeable,labels,url,isDraft,headRepositoryOwner,autoMergeRequest" \
+      50); then
     amd_warn "対象 PR 一覧の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
     return 0
   fi
@@ -285,11 +284,20 @@ process_auto_merge_design() {
   # Req 2.6 / 6.7 / 8.3: head pattern によるクライアント側フィルタ（impl PR / 人間が
   # 手書きした PR を除外）+ fork 除外。impl PR は `^claude/issue-.*-design` パターン
   # 不一致により自然分離される（二重防御）。
+  # #521 Req 2.3: snapshot 参照時に server search の `-label:failed` /
+  #   `-label:needs-decisions` / `-label:needs-iteration`（除外）を client jq で再現。
+  #   live 経路では冪等。
   prs_json=$(echo "$prs_json" | jq \
     --arg pattern "$AUTO_MERGE_DESIGN_HEAD_PATTERN" \
     --arg owner "$repo_owner" \
+    --arg failed "$LABEL_FAILED" \
+    --arg needs_decisions "$LABEL_NEEDS_DECISIONS" \
+    --arg needs_iteration "$LABEL_NEEDS_ITERATION" \
     '[.[]
       | select(.isDraft == false)
+      | select((.labels // [] | map(.name) | index($failed)) == null)
+      | select((.labels // [] | map(.name) | index($needs_decisions)) == null)
+      | select((.labels // [] | map(.name) | index($needs_iteration)) == null)
       | select(.headRefName | test($pattern))
       | select((.headRepositoryOwner.login // "") == $owner)
     ]')

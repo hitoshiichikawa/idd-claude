@@ -256,7 +256,7 @@ IDD_MODULE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)/mo
 # 3 プロセッサ（promote-pipeline / pr-iteration / stage-a-verify）を並べ、末尾に
 # #238 の scaffolding-health.sh と #239 の per-run evidence サマリ（run-summary.sh）、
 # #325 の token usage 計測（token-usage.sh）を置く。
-REQUIRED_MODULES=( "core_utils.sh" "env-loader.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "auto-merge-disarm.sh" "path-overlap.sh" "model-router.sh" "promote-pipeline.sh" "pr-iteration-comments.sh" "pr-iteration-state.sh" "pr-iteration-oos.sh" "pr-iteration-exec.sh" "pr-iteration.sh" "pr-reviewer-exec.sh" "pr-reviewer-publish.sh" "pr-reviewer.sh" "adjudicator.sh" "pr-design-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery-attempt.sh" "failed-recovery-invoke.sh" "failed-recovery.sh" "stale-pickup-reaper.sh" "needs-decisions-auto.sh" "dep-cycle-detect.sh" "slack-notify.sh" "auto-merge-merged.sh" "design-review-release.sh" "tasks-count-gate.sh" "debugger-gate.sh" "stage-checkpoint.sh" "per-task-loop-diffrange.sh" "per-task-loop-exec.sh" "per-task-loop-prompt.sh" "per-task-loop.sh" "impl-pipeline-prompt.sh" "impl-pipeline-review.sh" "impl-pipeline.sh" "dependency-resolver.sh" "slot-worker-resume.sh" "slot-worker.sh" )
+REQUIRED_MODULES=( "core_utils.sh" "env-loader.sh" "api-rate-guard.sh" "quota-aware.sh" "merge-queue.sh" "auto-rebase.sh" "auto-merge.sh" "auto-merge-design.sh" "auto-merge-disarm.sh" "path-overlap.sh" "model-router.sh" "promote-pipeline.sh" "pr-iteration-comments.sh" "pr-iteration-state.sh" "pr-iteration-oos.sh" "pr-iteration-exec.sh" "pr-iteration.sh" "pr-reviewer-exec.sh" "pr-reviewer-publish.sh" "pr-reviewer.sh" "adjudicator.sh" "pr-design-reviewer.sh" "stage-a-verify.sh" "scaffolding-health.sh" "run-summary.sh" "token-usage.sh" "security-review.sh" "guard-hook.sh" "context-map.sh" "failed-recovery-attempt.sh" "failed-recovery-invoke.sh" "failed-recovery.sh" "stale-pickup-reaper.sh" "needs-decisions-auto.sh" "dep-cycle-detect.sh" "slack-notify.sh" "auto-merge-merged.sh" "design-review-release.sh" "tasks-count-gate.sh" "debugger-gate.sh" "stage-checkpoint.sh" "per-task-loop-diffrange.sh" "per-task-loop-exec.sh" "per-task-loop-prompt.sh" "per-task-loop.sh" "impl-pipeline-prompt.sh" "impl-pipeline-review.sh" "impl-pipeline.sh" "dependency-resolver.sh" "slot-worker-resume.sh" "slot-worker.sh" )
 for _idd_mod in "${REQUIRED_MODULES[@]}"; do
   _idd_mod_path="$IDD_MODULE_DIR/$_idd_mod"
   if [ ! -f "$_idd_mod_path" ]; then
@@ -404,6 +404,20 @@ git checkout "$BASE_BRANCH"
 git pull --ff-only origin "$BASE_BRANCH"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# GitHub API Rate Guard: サイクル冒頭のスナップショット取得（#521 / Req 2.1, 2.2）
+# repo 最新化直後・全 processor 実行前に PR/Issue 超集合を各 1 回取得し file 共有する。
+# GH_API_SNAPSHOT_ENABLED=true 厳密一致のときのみ発火し、それ以外（既定）は即 return 0 で
+# 本機能導入前と完全に等価（NFR 1.1）。取得失敗も rc=0（fail-safe）で active=off とし、
+# 参加 processor は従来の個別取得へフォールバックする（Req 2.5, 2.6 / NFR 2.1）。
+grl_snapshot_init || grl_warn "grl_snapshot_init が想定外のエラーで終了しました（各 processor は個別取得へフォールバック）"
+
+# GitHub API Rate Guard: サイクル冒頭のバケット残量取得（#521 / Req 3 可視化 / Req 4 縮退）。
+# BUCKET_LOG / DEGRADE のいずれも無効なら新規 API 呼び出しゼロで即 return（NFR 1.1）。取得失敗も
+# rc=0（fail-safe）で当サイクルのバケット参照を無効化し、後続 processor を阻害しない（Req 3.4）。
+# ここで取得した graphql 残量を後続の grl_degrade_should_run（task 6）が参照する。
+grl_buckets_refresh || true
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # メインループ: Processor / Gate 実行順序（モジュール分割完了マニフェスト / #455 Phase 1・#468 gate）
 #
 # 旧 issue-watcher.sh にインライン定義されていた processor / gate / pipeline ヘルパー群は
@@ -490,7 +504,9 @@ process_promote_pipeline \
 # PR Reviewer Processor (#261) を PR Iteration の直前に実行。レビュー結果で付与した
 # needs-iteration ラベルを同一 flock 内で直後の process_pr_iteration が引き継げる
 # （PR_REVIEWER_ENABLED!=true なら即 return 0 で本機能導入前と等価、NFR 1.1）。
-process_pr_reviewer || pr_warn "process_pr_reviewer が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+# #521 Req 4.2: non-essential（レビュー系）。graphql 残量閾値割れ時は縮退で skip（essential は
+# gate せず常時実行 / Req 4.3）。gate off / 残量未取得は常に実行（NFR 1.1, 2.2）。
+grl_degrade_should_run "pr-reviewer" && { process_pr_reviewer || pr_warn "process_pr_reviewer が想定外のエラーで終了しました（後続 Issue 処理は継続）"; }
 
 # Issue #374 claude-review Catch-up Processor を PR Reviewer の直後に実行。
 # per-task ループ運用で `publish_claude_review_status` が PR 作成より前の時間軸で発火して
@@ -498,7 +514,7 @@ process_pr_reviewer || pr_warn "process_pr_reviewer が想定外のエラーで�
 # AND 二重 opt-in（PR_REVIEWER_STATUS_CHECK_ENABLED=true AND FULL_AUTO_ENABLED=true）が
 # 成立した場合のみ動作。OFF（既定）なら即 return 0 で本機能導入前と等価（NFR 1.1）。
 # `PR_REVIEWER_ENABLED` の値には依存しない（claude-review 単独有効化を維持）。
-process_claude_review_status_catchup || pr_warn "process_claude_review_status_catchup が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+grl_degrade_should_run "claude-review-catchup" && { process_claude_review_status_catchup || pr_warn "process_claude_review_status_catchup が想定外のエラーで終了しました（後続 Issue 処理は継続）"; }
 
 # Issue #412 Merge Gate Visibility Processor を catch-up の直後に実行。
 # `claude-review` を required status に採用した repo で、adjudicator も Reviewer catch-up も
@@ -506,7 +522,7 @@ process_claude_review_status_catchup || pr_warn "process_claude_review_status_ca
 # 観測ログ）。`claude-review` が required でない repo では即 return 0（gh api 1 回のみ /
 # NFR 1.1 ほぼ no-op）。adjudicator や catch-up が後発で publish に成功した場合は次サイクル
 # 冒頭で当該 PR がケース 1 / ケース 2 として解消され、label が冪等に除去される（Req 4.3）。
-process_claude_review_merge_gate_visibility || pr_warn "process_claude_review_merge_gate_visibility が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+grl_degrade_should_run "claude-review-merge-gate-visibility" && { process_claude_review_merge_gate_visibility || pr_warn "process_claude_review_merge_gate_visibility が想定外のエラーで終了しました（後続 Issue 処理は継続）"; }
 
 # Issue #407: Design PR Reviewer Processor。設計 PR (`claude/issue-<N>-design-<slug>`) 専用の
 # 独立 Claude レビュアを起動し、claude-review status と needs-iteration ラベルを確定する。
@@ -517,24 +533,24 @@ process_claude_review_merge_gate_visibility || pr_warn "process_claude_review_me
 # 本 design 経路に入ることで、設計 PR が万一 impl 経路から claude-review を書かれても
 # 本 processor が後発で確定する（design.md「claude-review publisher contention」節）。
 # impl 経路（pr-reviewer.sh / adjudicator.sh / catch-up）は不変（Req 7.2, 7.3）。
-process_pr_design_reviewer || pdr_warn "process_pr_design_reviewer が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+grl_degrade_should_run "pr-design-reviewer" && { process_pr_design_reviewer || pdr_warn "process_pr_design_reviewer が想定外のエラーで終了しました（後続 Issue 処理は継続）"; }
 
 # Security Review Processor (#279) を PR Reviewer の直後・PR Iteration の直前に実行。
 # advisory 固定動作（ラベル操作なし）のため PR Reviewer の needs-iteration 付与とは
 # 競合しない。PR タイムライン上で「外部 AI レビュー → セキュリティレビュー → iteration
 # 反復」の時系列が運用者に提示される（SECURITY_REVIEW_ENABLED!=true なら即 return 0 で
 # 本機能導入前と等価、NFR 1.1）。
-process_security_review || sec_warn "process_security_review が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+grl_degrade_should_run "security-review" && { process_security_review || sec_warn "process_security_review が想定外のエラーで終了しました（後続 Issue 処理は継続）"; }
 
 # Phase A 直後に PR Iteration Processor を実行（AC 8.1 / 8.2: 同一 flock 内で直列実行）
-process_pr_iteration || pi_warn "process_pr_iteration が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+grl_degrade_should_run "pr-iteration" && { process_pr_iteration || pi_warn "process_pr_iteration が想定外のエラーで終了しました（後続 Issue 処理は継続）"; }
 
 # Failed Recovery Processor (#359) を PR Iteration の直後・Design Review Release の直前に実行。
 # `claude-failed` Issue + auto-merge 待ち PR の CI error を fresh Claude session で
 # 自動修正する。FAILED_RECOVERY_ENABLED=true AND FULL_AUTO_ENABLED=true の二重 opt-in
 # が成立する場合のみ起動し、それ以外（既定）は即 return 0 で本機能導入前と等価（NFR 1.1, 1.3）。
 # 通算 4 回上限（FAILED_RECOVERY_MAX_ATTEMPTS）と no-progress ガードで quota 燃焼を防ぐ。
-process_failed_recovery || fr_warn "process_failed_recovery が想定外のエラーで終了しました（後続 Issue 処理は継続）"
+grl_degrade_should_run "failed-recovery" && { process_failed_recovery || fr_warn "process_failed_recovery が想定外のエラーで終了しました（後続 Issue 処理は継続）"; }
 
 # Stale Pickup Reaper (#379) を Failed Recovery の直後・Design Review Release の直前に実行。
 # claude-picked-up / claude-claimed ラベルが残り continuance しないセッション喪失 Issue を
@@ -882,6 +898,11 @@ if [ "$DISPATCHER_RC" -ne 0 ]; then
   # サイクル中断（既存の ERROR 終了規約 = exit 1 と整合）
   exit "$DISPATCHER_RC"
 fi
+
+# GitHub API Rate Guard: サイクル終端のバケット残量ログ（#521 / Req 3.1, 3.3）。
+# GH_API_BUCKET_LOG_ENABLED=true のときのみ `gh-rate-limit: core=.. graphql=.. search=..` を
+# 1 行出力する。gate off は no-op で本機能導入前と等価（NFR 1.1）。取得失敗は warn + 継続。
+grl_buckets_log || true
 
 echo "[$(date '+%F %T')] 完了"
 exit 0
