@@ -47,7 +47,7 @@ commit 時点で未設定環境の挙動は不変（NFR 1.1）。
   - _Requirements: 3.1, 3.2, 3.3, 3.4_
   - _Depends: 1_
 
-- [ ] 6. 残量閾値割れ時の WARN と縮退
+- [x] 6. 残量閾値割れ時の WARN と縮退
   - `api-rate-guard.sh` に `grl_degrade_should_run <processor名>` を実装（`GH_API_DEGRADE_ENABLED=true` かつ graphql 残量 < `GH_API_DEGRADE_GRAPHQL_THRESHOLD` で WARN + 非必須は rc=1 skip・essential 名は常に rc=0。gate off は常に rc=0 = 従来挙動 / Req 4.6）
   - skip 時に `gh-rate-limit: skip processor=<name> reason=degrade bucket=graphql remaining=<r> threshold=<t>` を出力（Req 4.5 / WARN に bucket・残量・閾値含む）
   - `watcher-config.sh` に `GH_API_DEGRADE_ENABLED`（既定 false）と `GH_API_DEGRADE_GRAPHQL_THRESHOLD`（既定 500 / 保守的 / 非整数・<0 を既定へ）を追加（Req 4.4）
