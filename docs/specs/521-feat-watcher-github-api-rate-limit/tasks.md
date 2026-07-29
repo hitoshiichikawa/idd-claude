@@ -23,7 +23,7 @@ commit 時点で未設定環境の挙動は不変（NFR 1.1）。
   - _Boundary: merge-queue, auto-rebase, auto-merge, auto-merge-design, auto-merge-disarm_
   - _Depends: 1_
 
-- [ ] 3. PR snapshot 差し替え: review 系 (P)
+- [x] 3. PR snapshot 差し替え: review 系 (P)
   - Inventory #7〜#10 の 4 module（`pr-iteration.sh` / `pr-reviewer.sh` / `pr-design-reviewer.sh` / `security-review.sh`）の `gh pr list` を `grl_pr_snapshot_or_live` 経由へ差し替え、client jq を現行 `--search` 全条件（`-draft:true` = `isDraft==false` 等）で再現（Req 2.3）
   - gate off の live 経路は byte 等価に保つ
   - 各 module の fixture テストに snapshot 参照時の等価集合ケースを追加（`-draft:true` 相当の client 絞り込み / live API なし）
