@@ -49,7 +49,9 @@ grl_snapshot_pr_fields() {
   echo "number,title,headRefName,headRefOid,baseRefName,isDraft,mergeable,mergeStateStatus,reviewDecision,labels,url,headRepositoryOwner,autoMergeRequest"
 }
 grl_snapshot_issue_fields() {
-  echo "number,title,body,url,labels,author"
+  # design Issue union（number,title,body,url,labels,author）に加え、stale-pickup-reaper
+  # （Inventory #13 参加）が必須とする updatedAt を含めて真の超集合にする（#521 確認事項参照）。
+  echo "number,title,body,url,labels,author,updatedAt"
 }
 
 # snapshot ディレクトリの絶対パス（config 既定は $HOME/.issue-watcher/api-snapshot/$REPO_SLUG）。
@@ -171,25 +173,23 @@ grl_pr_snapshot_or_live() {
 
 # 参加 processor 用ラッパ（Issue）。active なら超集合を返し caller が client jq で絞る。
 # 非 active なら live 引数で従来 gh issue list を実行。
-# $1=timeout $2=search $3=jsonfields $4=limit → stdout Issue JSON
+# $1=timeout（空なら timeout ラッパを付けない = 元々 timeout 無しの consumer 用）
+# $2=search（空なら --search を付けない）$3=jsonfields $4=limit → stdout Issue JSON
+# 元々 timeout / --search を付けていなかった consumer（quota-aware / path-overlap /
+# dependency-resolver）に対しても gate off の live 経路を等価に保つため、空値時は当該
+# フラグ / timeout ラッパを省略する。
 grl_issue_snapshot_or_live() {
   local timeout_s="$1" search="$2" fields="$3" limit="$4"
   if grl_snapshot_active; then
     grl_snapshot_issues
     return 0
   fi
-  if [ -n "$search" ]; then
-    timeout "$timeout_s" gh issue list \
-      --repo "$REPO" \
-      --state open \
-      --search "$search" \
-      --json "$fields" \
-      --limit "$limit" 2>/dev/null
+  local -a cmd=(gh issue list --repo "$REPO" --state open)
+  [ -n "$search" ] && cmd+=(--search "$search")
+  cmd+=(--json "$fields" --limit "$limit")
+  if [ -n "$timeout_s" ]; then
+    timeout "$timeout_s" "${cmd[@]}" 2>/dev/null
   else
-    timeout "$timeout_s" gh issue list \
-      --repo "$REPO" \
-      --state open \
-      --json "$fields" \
-      --limit "$limit" 2>/dev/null
+    "${cmd[@]}" 2>/dev/null
   fi
 }

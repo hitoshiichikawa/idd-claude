@@ -678,8 +678,21 @@ process_quota_resume() {
   fi
   qa_log "Resume Processor 開始 (grace=${QUOTA_RESUME_GRACE_SEC}s)"
 
+  # #521 Req 2.3: サイクル内 Issue snapshot 共有。対象集合（open ∧ needs-quota-wait）は
+  # (open ∧ auto-dev) の部分集合（needs-quota-wait 中も auto-dev を保持）のため Issue 超集合に
+  # 含まれる。snapshot active 時のみ超集合を needs-quota-wait で client 絞り込みし、それ以外
+  # （gate off / 非 active）は従来の gh issue list（--label needs-quota-wait）を byte 等価に実行
+  # する（NFR 1.1）。
   local issues_json
-  if ! issues_json=$(gh issue list --repo "$REPO" \
+  if grl_snapshot_active; then
+    if ! issues_json=$(grl_snapshot_issues | jq -c \
+          --arg needs_quota "$LABEL_NEEDS_QUOTA_WAIT" \
+          '[.[] | select((.labels // [] | map(.name) | index($needs_quota)) != null)]' \
+          2>/dev/null); then
+      qa_warn "needs-quota-wait Issue の snapshot 絞り込みに失敗（後続 Processor 継続）"
+      return 0
+    fi
+  elif ! issues_json=$(gh issue list --repo "$REPO" \
         --label "$LABEL_NEEDS_QUOTA_WAIT" --state open \
         --json number --limit 50 2>/dev/null); then
     qa_warn "needs-quota-wait Issue 取得に失敗（後続 Processor 継続）"
