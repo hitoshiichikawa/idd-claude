@@ -4,7 +4,7 @@
 可視化 → 縮退 → リトライ → REST 逃がし → README → 全体検証」。全 gate 既定 off のため、各タスク
 commit 時点で未設定環境の挙動は不変（NFR 1.1）。
 
-- [ ] 1. snapshot 基盤 module・config・cycle 配線
+- [x] 1. snapshot 基盤 module・config・cycle 配線
   - `local-watcher/bin/modules/api-rate-guard.sh` を新規作成（prefix `grl_` / 関数定義のみ・トップレベル副作用なし / ファイル冒頭ヘッダに用途・prefix・依存を明記）
   - `grl_snapshot_init` / `grl_snapshot_active` / `grl_snapshot_prs` / `grl_snapshot_issues` / `grl_pr_snapshot_or_live` / `grl_issue_snapshot_or_live` を実装（超集合フィールド union は design 参照。`mktemp`→`mv` の atomic 書込・`GRL_SNAPSHOT_STATUS` グローバルで active 管理）
   - 取得失敗時は `grl_warn` 出力 + active=off で fallback（Req 2.5, 2.6 / NFR 2.1）。gate off / 未設定 / 不正値は no-op（Req 1.1, 1.2, 1.3）
