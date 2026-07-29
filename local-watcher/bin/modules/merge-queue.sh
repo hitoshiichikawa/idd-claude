@@ -202,12 +202,12 @@ process_merge_queue() {
   # GitHub search 構文で server side フィルタ（API call 削減・NFR 1.2）
   local repo_owner="${REPO%%/*}"
   local prs_json
-  if ! prs_json=$(timeout "$MERGE_QUEUE_GIT_TIMEOUT" gh pr list \
-      --repo "$REPO" \
-      --state open \
-      --search "review:approved -label:\"$LABEL_NEEDS_REBASE\" -label:\"$LABEL_FAILED\" -draft:true" \
-      --json number,headRefName,baseRefName,mergeable,mergeStateStatus,labels,url,isDraft,reviewDecision,headRepositoryOwner \
-      --limit 50 2>/dev/null); then
+  # #521 Req 2.3: サイクル内 PR snapshot 経由取得（gate on 時は超集合 file を共有参照、
+  # gate off / 取得失敗時は従来の gh pr list を byte 等価に実行）。
+  if ! prs_json=$(grl_pr_snapshot_or_live "$MERGE_QUEUE_GIT_TIMEOUT" \
+      "review:approved -label:\"$LABEL_NEEDS_REBASE\" -label:\"$LABEL_FAILED\" -draft:true" \
+      "number,headRefName,baseRefName,mergeable,mergeStateStatus,labels,url,isDraft,reviewDecision,headRepositoryOwner" \
+      50); then
     mq_warn "approved PR の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
     return 0
   fi
@@ -216,12 +216,19 @@ process_merge_queue() {
   #   - isDraft / reviewDecision の再確認（server filter の保険）
   #   - head ref prefix (MERGE_QUEUE_HEAD_PATTERN): 人間の手書き PR を巻き込まない
   #   - head repo owner == base repo owner: fork PR を除外
+  # #521 Req 2.3: snapshot（全 open PR 超集合）参照時に server search の
+  #   `-label:needs-rebase` / `-label:failed` を client jq で再現（等価性ルール表）。
+  #   live 経路では server が既に除外済みのため冪等（byte 等価を保つ）。
   prs_json=$(echo "$prs_json" | jq \
     --arg pattern "$MERGE_QUEUE_HEAD_PATTERN" \
     --arg owner "$repo_owner" \
+    --arg needs_rebase "$LABEL_NEEDS_REBASE" \
+    --arg failed "$LABEL_FAILED" \
     '[.[]
       | select(.isDraft == false)
       | select(.reviewDecision == "APPROVED")
+      | select((.labels // [] | map(.name) | index($needs_rebase)) == null)
+      | select((.labels // [] | map(.name) | index($failed)) == null)
       | select(.headRefName | test($pattern))
       | select((.headRepositoryOwner.login // "") == $owner)
     ]')
@@ -349,12 +356,11 @@ process_merge_queue_recheck() {
   # AC 4.3 / 4.4: server-side フィルタで API call を最小化、Phase A と同一 timeout を適用。
   local repo_owner="${REPO%%/*}"
   local prs_json
-  if ! prs_json=$(timeout "$MERGE_QUEUE_GIT_TIMEOUT" gh pr list \
-      --repo "$REPO" \
-      --state open \
-      --search "review:approved label:\"$LABEL_NEEDS_REBASE\" -label:\"$LABEL_FAILED\" -draft:true" \
-      --json number,headRefName,baseRefName,mergeable,labels,url,isDraft,reviewDecision,headRepositoryOwner \
-      --limit 100 2>/dev/null); then
+  # #521 Req 2.3: サイクル内 PR snapshot 経由取得（gate off / 取得失敗時は従来 gh pr list）。
+  if ! prs_json=$(grl_pr_snapshot_or_live "$MERGE_QUEUE_GIT_TIMEOUT" \
+      "review:approved label:\"$LABEL_NEEDS_REBASE\" -label:\"$LABEL_FAILED\" -draft:true" \
+      "number,headRefName,baseRefName,mergeable,labels,url,isDraft,reviewDecision,headRepositoryOwner" \
+      100); then
     # AC 4.5: タイムアウト / エラー時は WARN を出して以降スキップ（後続処理は継続）
     mqr_warn "対象 PR 一覧の取得に失敗しました（gh pr list タイムアウトまたはエラー）"
     return 0
@@ -364,12 +370,18 @@ process_merge_queue_recheck() {
   #   - isDraft / reviewDecision の再確認
   #   - head ref prefix (MERGE_QUEUE_HEAD_PATTERN): 人間の手書き PR を巻き込まない
   #   - head repo owner == base repo owner: fork PR を除外
+  # #521 Req 2.3: snapshot 参照時に server search の `label:needs-rebase`（包含）/
+  #   `-label:failed`（除外）を client jq で再現（等価性ルール表）。live 経路では冪等。
   prs_json=$(echo "$prs_json" | jq \
     --arg pattern "$MERGE_QUEUE_HEAD_PATTERN" \
     --arg owner "$repo_owner" \
+    --arg needs_rebase "$LABEL_NEEDS_REBASE" \
+    --arg failed "$LABEL_FAILED" \
     '[.[]
       | select(.isDraft == false)
       | select(.reviewDecision == "APPROVED")
+      | select((.labels // [] | map(.name) | index($needs_rebase)) != null)
+      | select((.labels // [] | map(.name) | index($failed)) == null)
       | select(.headRefName | test($pattern))
       | select((.headRepositoryOwner.login // "") == $owner)
     ]')
