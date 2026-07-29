@@ -65,7 +65,7 @@ commit 時点で未設定環境の挙動は不変（NFR 1.1）。
   - _Requirements: 5.1, 5.2, 5.3, 5.4, 5.5, 5.6_
   - _Depends: 1_
 
-- [ ] 8. GraphQL から REST への負荷分散
+- [x] 8. GraphQL から REST への負荷分散
   - `api-rate-guard.sh` に `grl_rest_prs_for_head <branch> <state>` を実装（`GH_API_REST_OFFLOAD_ENABLED=true` 時に `gh api "repos/$REPO/pulls" -f head="$owner:$branch" -f state="$state"` で REST core 経由取得し、`gh pr list --head` 互換 JSON へ正規化: `state` は open→OPEN / closed+merged_at→MERGED / closed→CLOSED、`headRefName`=head.ref、`url`=html_url。失敗・gate off は `gh pr list --head` へ fallback / Req 6.1, 6.2, 6.3, 6.4）
   - `watcher-config.sh` に `GH_API_REST_OFFLOAD_ENABLED`（既定 false）を追加
   - per-branch PR 存在確認（`slot-worker-resume.sh:318,1017` / `stage-checkpoint.sh:192,694`）を `grl_rest_prs_for_head` 経由へ差し替え（呼び出し側が参照する number/state/headRefName/url フィールドの互換を保つ）
