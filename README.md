@@ -4971,12 +4971,18 @@ Failed Recovery が Issue 単位の通算 attempt budget を持つのに対し�
    `flock -n -x` を試行し、いずれの slot も保持されていない（保持されている slot が 1 つでも
    あれば「アクティブの可能性あり」へ倒す）
 3. **watcher セッション不在**: slot ロックを保持していた pid を `fuser` / `lsof` で取得し、
-   `kill -0 <pid>` で現存確認。pid 取得不能 / OS 差で観測手段が無い場合は「セッション存在の
-   可能性あり」へ倒す（保守的 fallback）
+   `kill -0 <pid>` で現存確認。観測手段（`fuser` / `lsof`）が **利用可能で保持者を検出しない**
+   場合は「セッションなし」と判定します（flock 方式の lock file は保持プロセスが死んでも
+   ディスクに残るため、この状態はまさに回収対象の孤児です / #520）。**safe-side fallback は
+   観測手段（`fuser` / `lsof`）自体が不在のときに限定** し、その場合のみ「セッション存在の
+   可能性あり」へ倒します
 
-**判定根拠取得失敗時は「アクティブの可能性あり」へ倒す** 保守的 fallback を全関数で徹底し、
-誤検出による進行中作業の喪失を構造的に防ぎます（Req 3.4）。判定根拠（age / lock / session）は
-`stale-pickup:` prefix の 1 行ログで watcher ログへ記録されます（Req 3.5 / NFR 4.1, 4.2）。
+**観測手段が不在のときのみ「アクティブの可能性あり」へ倒す** safe-side fallback を徹底し、
+誤検出による進行中作業の喪失を構造的に防ぎます（#379 Req 3.4 の適用範囲を #520 で限定）。
+判定根拠（age / lock / session）は `stale-pickup:` prefix の 1 行ログで watcher ログへ記録され、
+セッション判定理由（`holder-alive` / `no-holder` / `tool-absent` / `no-lockfile`）は既存の
+`sess=N` フィールドを保ったまま `sess_reason=<token>` として同ログに追記されます
+（Req 3.5 / NFR 4.1, 4.2 / #520 Req 4.2〜4.4）。
 
 ### 復旧アクション
 

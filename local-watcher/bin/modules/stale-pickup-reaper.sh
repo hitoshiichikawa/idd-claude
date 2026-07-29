@@ -341,6 +341,14 @@ sr_fetch_candidates() {
 #                           1=inactive (revert へ進む)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+# sr_check_session が surface するセッション判定理由トークンを保持するグローバル
+# （#520 / Req 4.2〜4.4）。値: no-lockfile / tool-absent / holder-alive / no-holder。
+# sr_check_session の各呼び出しで再代入され、sr_is_active が既存 `sess=N` の直後に
+# `sess_reason=<token>` を別フィールドとして 1 行ログへ追記する（既存 age/lock/sess の
+# フィールド名・形式は不変 / NFR 3.3）。orchestrator 起動ごとに bash プロセスごと
+# 再初期化されるため明示 unset は不要。set -u 安全のため自己代入で初期化する。
+SR_SESSION_REASON="${SR_SESSION_REASON:-}"
+
 # marker.first_seen_at から現在までの経過分数を閾値判定する純粋関数（Req 3.1 観点 1 /
 # Req 4.2 / Req 4.4 / NFR 4.1）。
 #
@@ -428,22 +436,40 @@ sr_check_slot_lock() {
 }
 
 # Lock file 保持 pid の生存確認で「watcher / claude セッション存在」を判定する
-# （Req 3.1 観点 3 / Req 3.4）。
+# （#379 Req 3.1 観点 3 / #520 で safe-side fallback の適用範囲を限定）。
 #
 # Args: $1 = marker_json (将来拡張用 / 現状未使用)
 # Returns:
-#   0 = no session detected (lock file 不在 / 全 pid が非生存)
-#   1 = session may be alive (1 件でも pid 生存 / fuser & lsof 不在で判定不能含む safe-side)
+#   0 = no session detected
+#         (lock file 不在 / 保持者問い合わせが空 / 取得 pid が全て非生存 / Req 1.1〜1.3)
+#   1 = session may be alive
+#         (1 件でも pid 生存 / fuser & lsof 双方不在で観測手段なしの safe-side / Req 2.x, 3.x)
 #
-# 副作用なし（pid 取得・生存確認のみ）。Linux は `fuser`、macOS は `lsof -t` で
-# lock file 保持 pid を取得し、`kill -0 <pid>` で生存確認する。fuser / lsof どちらも
-# 不在の環境では Req 3.4 の safe-side として rc=1 を返す。
+# 副作用: 判定理由トークンを $SR_SESSION_REASON に surface する（#520 / Req 4.2〜4.4）。
+# それ以外の外部副作用なし（pid 取得・生存確認のみ / read-only）。Linux は `fuser`、
+# macOS は `lsof -t` で lock file 保持 pid を取得し `kill -0 <pid>` で生存確認する（NFR 2）。
+#
+# #520 の修正核心: flock 方式の lock file は保持プロセスが死んでもディスクに残るため、
+# 「観測手段は利用可能だが保持者を 1 件も返さない」状態は『保持者が既に死んでいる = 孤児』
+# そのものである。旧実装はこれを safe-side（rc=1）に倒していたため、一度 lock file が残ると
+# reaper が当該 repo で永久に機能しなくなっていた（feedman#223 / #234）。本修正では当該状態を
+# 「セッションなし」寄り（早期 return せず走査継続）に扱い、safe-side fallback は「観測手段
+# （fuser/lsof）自体が不在」のときに限定する（Req 3.1 / Req 3.2 / #379 Req 3.4 の適用範囲修正）。
+#
+# 判定理由トークン（$SR_SESSION_REASON）:
+#   - no-lockfile  : lock file が 1 つも存在しない（rc=0 / Req 1.3）
+#   - tool-absent  : fuser/lsof 双方不在で観測手段なし（rc=1 / safe-side / Req 3.1）
+#   - holder-alive : 生存する保持 pid を検出（rc=1 / Req 2.1, 2.2）
+#   - no-holder    : 観測手段はあるが生存保持者を 1 件も検出せず（rc=0 / Req 1.1, 1.2）
 sr_check_session() {
   # 将来拡張用に引数を受け取るが本実装では未参照（SC2034 を `:` 参照で意図的に抑止）
   local _marker_json="${1:-}"
   : "$_marker_json"
 
-  # lock file が一切無いケースは「保持 pid 自体が存在しない」= no session
+  # 判定理由の既定値。lock file 不在ケースの理由でもある（Req 1.3 / Req 4.x）。
+  SR_SESSION_REASON="no-lockfile"
+
+  # lock file が一切無いケースは「保持 pid 自体が存在しない」= no session（Req 1.3）
   local lockfile
   local any_lockfile=0
   for lockfile in "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-"*.lock; do
@@ -452,20 +478,26 @@ sr_check_session() {
     break
   done
   if [ "$any_lockfile" = "0" ]; then
+    SR_SESSION_REASON="no-lockfile"
     return 0
   fi
 
-  # pid 取得手段の選定: Linux fuser → macOS lsof の順に試行。両方不在は safe-side。
+  # pid 取得手段の選定: Linux fuser → macOS lsof の順に試行。両方不在のときのみ safe-side。
   local pid_tool=""
   if command -v fuser >/dev/null 2>&1; then
     pid_tool="fuser"
   elif command -v lsof >/dev/null 2>&1; then
     pid_tool="lsof"
   else
-    return 1  # fuser / lsof 双方不在 → safe-side（Req 3.4）
+    # 観測手段（fuser/lsof）自体が不在 → safe-side（Req 3.1 / Req 3.2）。
+    # 「手段はあるが保持者が検出されない（下の no-holder）」とは明確に区別する（#520）。
+    SR_SESSION_REASON="tool-absent"
+    return 1
   fi
 
-  # 各 lock file から pid を取得し生存確認
+  # 各 lock file から pid を取得し生存確認する。全 lock file を走査し、生存保持者を
+  # 1 件でも検出すれば「セッションあり」（Req 2.1 / Req 2.2）。空の保持者問い合わせ結果は
+  # 「保持者なし = 孤児寄り」として早期 return せず次の lock file 検査へ進む（#520 修正核心）。
   local pids pid
   for lockfile in "$SLOT_LOCK_DIR/${REPO_SLUG}-slot-"*.lock; do
     [ -f "$lockfile" ] || continue
@@ -482,11 +514,11 @@ sr_check_session() {
     esac
 
     if [ -z "$pids" ]; then
-      # この lock file からは pid を取得できなかった → safe-side で「保持の可能性あり」
-      # （他 lock file で生存 pid を見つけても結論変わらないので即 return しない / 累積判定）
-      # ただし lock file が存在する以上、pid 取得自体ができないのは Req 3.4 の対象として
-      # safe-side 寄りに倒す。次の lock file 検査を続けるが、ここで return 1 しても良い。
-      return 1
+      # 観測手段は利用可能だが当該 lock file の保持者が 0 件 = 保持プロセスが既に死んでいる
+      # （flock 方式の lock file はプロセス死亡後もディスクに残る）。これはまさに検出したい
+      # 「孤児」状態そのものなので safe-side に倒さず、次の lock file 検査へ進む（#520 /
+      # Req 1.1）。他 lock file に生存保持者があれば下で holder-alive を返す（累積判定）。
+      continue
     fi
 
     for pid in $pids; do
@@ -495,12 +527,16 @@ sr_check_session() {
         ''|*[!0-9]*) continue ;;
       esac
       if kill -0 "$pid" 2>/dev/null; then
-        return 1  # 1 件でも生存 pid あり = session may be alive
+        # 1 件でも生存 pid あり = session may be alive（Req 2.1 / Req 2.2）
+        SR_SESSION_REASON="holder-alive"
+        return 1
       fi
     done
   done
 
-  # すべての pid が非生存（または lock file 自体が 0 件）→ no session detected
+  # 全 lock file を走査し終え、生存保持者が 1 件も無い（保持者なし or 取得 pid が全て非生存）
+  # → no session detected（Req 1.1 / Req 1.2）
+  SR_SESSION_REASON="no-holder"
   return 0
 }
 
@@ -514,14 +550,16 @@ sr_check_session() {
 # AND 判定: age == 0 AND lock == 0 AND sess == 0 のときのみ「非アクティブ確定」（return 1）。
 # それ以外（いずれか 1 観点でも「アクティブの可能性あり」を示す）は keep（return 0）。
 #
-# 判定根拠は `sr_log` で 1 行記録（Req 3.5 / NFR 4.1 / NFR 4.2）:
-#   非アクティブ確定時: `issue=#N inactive (age>threshold, no slot lock, no session) age=$age lock=$lock sess=$sess`
-#   keep 時:            `issue=#N keep age=$age lock=$lock sess=$sess`
+# 判定根拠は `sr_log` で 1 行記録（Req 3.5 / NFR 4.1 / NFR 4.2 / #520 Req 4.2〜4.4）:
+#   非アクティブ確定時: `issue=#N inactive (age>threshold, no slot lock, no session) age=$age lock=$lock sess=$sess sess_reason=$sess_reason`
+#   keep 時:            `issue=#N keep age=$age lock=$lock sess=$sess sess_reason=$sess_reason`
+# 既存 `age` / `lock` / `sess=N` のフィールド名・形式は不変で、判定理由 `sess_reason` を
+# 末尾に別フィールドとして追記する（NFR 3.3 / 既存 sess=N パーサを壊さない）。
 #
 # Args: $1 = marker_json (string)
 sr_is_active() {
   local marker_json="$1"
-  local age lock sess
+  local age lock sess sess_reason
   local issue_id
 
   # issue 番号を marker JSON から抽出（ログ識別用 / 未含有時は `?` で fallback）
@@ -531,14 +569,18 @@ sr_is_active() {
   sr_check_marker_age "$marker_json" || age=$?
   lock=0
   sr_check_slot_lock "$marker_json" || lock=$?
+  # sess の判定理由は sr_check_session が $SR_SESSION_REASON に surface する（#520）。
+  # 呼び出し前に空へ倒し、未設定（stub 等）でも `unknown` に安全に fallback させる。
+  SR_SESSION_REASON=""
   sess=0
   sr_check_session "$marker_json" || sess=$?
+  sess_reason="${SR_SESSION_REASON:-unknown}"
 
   if [ "$age" = "0" ] && [ "$lock" = "0" ] && [ "$sess" = "0" ]; then
-    sr_log "issue=#$issue_id inactive (age>threshold, no slot lock, no session) age=$age lock=$lock sess=$sess"
+    sr_log "issue=#$issue_id inactive (age>threshold, no slot lock, no session) age=$age lock=$lock sess=$sess sess_reason=$sess_reason"
     return 1  # inactive 確定 → revert へ
   fi
-  sr_log "issue=#$issue_id keep age=$age lock=$lock sess=$sess"
+  sr_log "issue=#$issue_id keep age=$age lock=$lock sess=$sess sess_reason=$sess_reason"
   return 0    # active or unknown → keep
 }
 
