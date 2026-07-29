@@ -1568,6 +1568,7 @@ idd-claude は基本フロー（Triage → 実装 → PR 作成）以外の機�
 | **Security Review Processor**（Claude Code 公式 `/security-review` skill を `claude` CLI headless 経由で open PR の diff に適用し、検出結果を PR コメント投稿 + `security-notes.md` 成果物として残す。既定は **advisory 固定**でマージブロックを行わない / strict モードは `SECURITY_REVIEW_MODE=strict` で別途有効化（#281）） | `SECURITY_REVIEW_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `1` / typo）はすべて OFF | **前提**: `claude` CLI が watcher 実行環境に**インストール・認証済み**であること（既存必須ツール）。推奨: `SECURITY_REVIEW_MODEL`（既定 `claude-opus-4-8`）、`SECURITY_REVIEW_MAX_PRS`（既定 `5`）、`SECURITY_REVIEW_HEAD_PATTERN`（既定 `^claude/issue-`）、`SECURITY_REVIEW_EXEC_TIMEOUT`（既定 `600`） | [Security Review Processor (#279)](#security-review-processor-279) | #279, #281 |
 | **Failed Recovery Processor**（`claude-failed` ラベル付き Issue + auto-merge 待ち PR の CI error を fresh Claude session で自動解析・修正する Processor。Issue 単位の **通算 4 回** attempt budget と同原因再発 + 無進捗の **no-progress ガード**で quota 燃焼と多重ループを必ず終端させる。**Reviewer 内部 2/2 試行・pr-iteration 3R との独立カウンタ**（D-19b）。state は `$HOME/.issue-watcher/failed-recovery/<repo-slug>/<issue>.json` に atomic write。**`FAILED_RECOVERY_ENABLED=true` AND `FULL_AUTO_ENABLED=true`** の AND 二重 opt-in 配下。gate OFF 時は gh API 呼び出しゼロで本機能導入前と完全に等価（既存 `claude-failed` 手動運用と等価）。終端時は `claude-failed` ラベル据え置きで手動レビューへエスカレーション） | `FAILED_RECOVERY_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `on` / `yes` / typo）はすべて OFF に正規化。さらに `FULL_AUTO_ENABLED=true` との AND 評価で双方 ON のときのみ起動 | **前提**: `FULL_AUTO_ENABLED=true`（#348 kill switch との AND 評価）。**前提**: `claude` CLI が watcher 実行環境に**インストール・認証済み**であること。推奨: `FAILED_RECOVERY_MAX_ATTEMPTS`（既定 `4` / 通算 attempt 上限）、`FAILED_RECOVERY_MAX_TURNS`（既定 `20` / claude session turn 上限）、`FAILED_RECOVERY_DEV_MODEL`（既定 `claude-opus-4-8`）、`FAILED_RECOVERY_MAX_PRS`（既定 `3` / 1 サイクル走査件数）、`FAILED_RECOVERY_GIT_TIMEOUT`（既定 `60` 秒）、`FAILED_RECOVERY_STATE_DIR`（既定 `$HOME/.issue-watcher/failed-recovery/<repo-slug>` / 通常変更不要） | [Failed Recovery Processor (#359)](#failed-recovery-processor-359) | #359 |
 | **Stale Pickup Reaper**（watcher セッションがクラッシュ / OOM / マシン再起動などで異常終了した結果、`claude-picked-up` / `claude-claimed` ラベルが Issue に残り続けて dispatcher が「処理中」とみなして候補から永久除外する停止状態を自動回復させる Processor。3 観点 AND 判定（marker 経過時間が閾値超 + 該当 slot ロック非保持 + watcher セッション不在）で **非アクティブ確定** のときのみ pickup ラベルを除去し `auto-dev` 状態へ戻す。impl branch は触らず温存し、次サイクルで dispatcher が impl-resume として再 pickup する。state は `$HOME/.issue-watcher/stale-pickup/<repo-slug>/<issue>.json` に atomic write。**`STALE_PICKUP_REAPER_ENABLED=true` 単独 opt-in**（`FULL_AUTO_ENABLED` 配下に **入らない** / 二重 opt-in 不要 / ラベル除去のみで claude 起動・コード変更・push を行わないため）。`claude-failed` ラベル付き Issue は対象外（Failed Recovery Processor #359 の領分） / `needs-decisions` / `awaiting-design-review` / `needs-quota-wait` / `blocked` / `hold` / `staged-for-release` 等の人間判断待ち・正当な待機状態ラベル付き Issue は対象外。gate OFF 時は gh API 呼び出しゼロで本機能導入前と完全に等価） | `STALE_PICKUP_REAPER_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `on` / `yes` / typo）はすべて OFF に正規化 | 推奨: `STALE_PICKUP_REAPER_THRESHOLD_MINUTES`（既定 `45` / pickup ラベル滞留閾値・分単位 / 非整数 / `<=0` は既定 45 にフォールバック）、`STALE_PICKUP_REAPER_MAX_ISSUES`（既定 `20` / 1 サイクル走査件数上限）、`STALE_PICKUP_REAPER_GH_TIMEOUT`（既定 `60` / gh 呼び出しごとの timeout 秒）、`STALE_PICKUP_REAPER_STATE_DIR`（既定 `$HOME/.issue-watcher/stale-pickup/<repo-slug>` / 通常変更不要） | [Stale Pickup Reaper (#379)](#stale-pickup-reaper-379) | #379 |
+| **GitHub API Rate Guard**（1 サイクル内の **GitHub API rate limit**（core / graphql / search バケット）消費削減・枯渇耐性の 5 機能: (1) 一覧取得のサイクル内スナップショット共有、(2) バケット別残量の可視化、(3) 残量閾値割れ時の WARN と非必須プロセッサ縮退、(4) 状態遷移系ラベル操作の rate-limit 限定リトライ、(5) per-branch PR 存在確認の REST（core バケット）逃がし。**すべて機能別に独立 opt-in / 既定 OFF**。gate 全 OFF（既定）では新規 API 呼び出しゼロで本機能導入前と byte 等価。取得・残量取得・REST の失敗はすべて従来経路へ fail-safe フォールバック。**Claude Max quota**（`rate_limit_event` / [Quota-Aware Watcher #66](#quota-aware-watcher-66)）とは別物のため log prefix を `gh-rate-limit:`、env prefix を `GH_API_` に分離） | `GH_API_SNAPSHOT_ENABLED` / `GH_API_BUCKET_LOG_ENABLED` / `GH_API_DEGRADE_ENABLED` / `GH_API_STATE_RETRY_ENABLED` / `GH_API_REST_OFFLOAD_ENABLED`（機能別 5 gate） | `false` | 各 gate `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `1` / typo）はすべて OFF に正規化（安全側 no-op）。数値 env（limit / threshold / attempts / sleep / timeout）は非整数 / ≤0（threshold は <0）を既定へ正規化 | 推奨: 下記詳細セクションの env 一覧・縮退優先順を参照 | [GitHub API Rate Guard (#521)](#github-api-rate-guard-521) | #521 |
 | **needs-decisions Auto-Continue**（Triage / PM が出力した `decisions[].classification` タグに基づき、`needs-decisions` 状態の Issue のうち `safe` 分類（PM 第一推奨あり + 機密 / コンプラ / 不可逆 / 外部影響のいずれにも該当しない）のみを **PM の第一推奨**で自動続行させる Processor。判定順序は **kill switch → mode → classification → recommendation** の 4 段で、auto-continue 時は `claude-claimed` のみ除去（`needs-decisions` ラベル不付与）+ Issue コメント 1 件（採用 recommendation + mode + classification + 監査用 fingerprint）投稿で次サイクル再 pickup に戻す。**`human-only` 分類はモードによらず絶対停止**（NFR 4.2 hard safety boundary）/ 分類欠落 / 混在 / jq 失敗 / Triage JSON 不在もすべて `human-only` 扱いで halt。**`NEEDS_DECISIONS_MODE != all-human` AND `FULL_AUTO_ENABLED=true`** の AND 二重 opt-in 配下。gate OFF 時 / 既定 `all-human` 時は gh API 呼び出しゼロで本機能導入前と完全に等価。既存 `needs-decisions` 付与経路（Partial Status Gate #148 / Spec Completeness #219 / Tasks Count #131 等）の挙動は touch しない（新規 pickup 経路を作らない / NFR 1.3）。pilot 運用先 = altpocket-server） | `NEEDS_DECISIONS_MODE` | `all-human` | `all-human` / `classified` / `all-auto` の 3 値厳密一致のみ有効。それ以外（未設定 / 空文字 / `Classified` / `auto` / 大文字小文字違い / 前後空白付き / typo）はすべて安全側 `all-human` に正規化（=`needs-decisions` 自動続行は発火しない）。さらに `FULL_AUTO_ENABLED=true` との AND 評価で双方 ON のときのみ起動 | **前提**: `FULL_AUTO_ENABLED=true`（[#348 kill switch](#full-auto-kill-switch) との AND 評価）。**前提**: Triage / PM agent が `decisions[].classification` を出力していること（`triage-prompt.tmpl` / `.claude/agents/product-manager.md` で文書化済）。`classified` = `safe` のみ自動続行（推奨）/ `all-auto` = 全 `safe` を自動続行（危険 / 明示 opt-in） | [needs-decisions Auto-Continue (#362)](#needs-decisions-auto-continue-362) | #362, #348 |
 | **Security Review strict モード**（#279 advisory 経路を温存したまま、severity 閾値以上の検出時に `needs-security-fix` + `needs-iteration` をペア付与して PR Iteration Processor #26 の自動反復動線に乗せる） | `SECURITY_REVIEW_MODE` | `advisory` | `=strict` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `Strict` / `STRICT` / 前後空白付き / typo）は WARN 1 行 + `advisory` fallback。`SECURITY_REVIEW_STRICT` は deprecated alias で WARN のみ（mode 解決には影響しない） | **前提**: `SECURITY_REVIEW_ENABLED=true`（本機能の起動 gate）。**前提**: `bash .github/scripts/idd-claude-labels.sh --force` で `needs-security-fix` ラベルを作成済みであること。推奨: `SECURITY_REVIEW_BLOCK_LABEL`（既定 `needs-security-fix`、付与ラベル名 override） | [strict モード（#281）](#strict-モード281) | #281 |
 | **Security Review strict severity 閾値**（strict モードでマージ阻害ラベルを付与する severity 下限。critical > high > medium > low > info の ordinal） | `SECURITY_REVIEW_BLOCK_SEVERITY` | `high` | 許容値は lowercase 厳密一致の `critical` / `high` / `medium` / `low` / `info` の 5 値。それ以外（大文字混在 / typo / 前後空白付き）は WARN 1 行 + `high` fallback | **前提**: `SECURITY_REVIEW_MODE=strict`（advisory 経路では参照されない） | [strict モード（#281）](#strict-モード281) | #281 |
@@ -5082,6 +5083,104 @@ git pull origin main
 ```
 
 を再実行してください（`$HOME/bin/modules/stale-pickup-reaper.sh` も同時に再配置されます）。
+
+---
+
+## GitHub API Rate Guard (#521)
+
+watcher は 1 回の cron tick（サイクル）で複数のプロセッサ（Merge Queue / PR Iteration /
+PR Reviewer / Design Review Release / Dispatcher 等）を順に実行し、各プロセッサが独立に
+PR 一覧 / Issue 一覧を GitHub API から取得します。同一サイクル内で同じ一覧取得が重複すると
+**GitHub API rate limit**（GraphQL は 5,000 point/h をアカウント内の全ツールで共有）を急速に
+消費し、枯渇時にはプロセッサが失敗して特に resumable return 時の状態遷移系ラベル操作
+（`claude-picked-up` 除去等）が失敗すると Issue が孤児化します。
+
+本機能は (1) 一覧取得のサイクル内スナップショット共有、(2) バケット別残量の可視化、
+(3) 残量閾値割れ時の WARN と縮退、(4) 状態遷移系ラベル操作の限定リトライ、(5) hot path の
+一部の REST（core バケット）への負荷分散、の 5 点を **すべて機能別に独立 opt-in / 既定 OFF** で
+導入します。**gate を 1 つも有効化しない限り、新規 API 呼び出しはゼロで、一覧取得挙動・
+プロセッサ実行順・ラベル遷移・ログ出力は本機能導入前と完全に等価**です（既定安全側 / NFR 1.1）。
+不正値・typo は安全側（無効 / 既定値）へ正規化されます。
+
+> **用語分離（重要）**: 本機能が対象とするのは **GitHub API rate limit**（core / graphql /
+> search バケット）であり、Claude Max サブスクリプションの 5 時間 quota
+> （`rate_limit_event`。[Quota-Aware Watcher (#66)](#quota-aware-watcher-66) が対象）とは
+> **別物**です。混同を避けるため、本機能のログ prefix は `gh-rate-limit:`、env prefix は
+> `GH_API_`、module prefix は `grl_` に統一しています。
+
+### opt-in 手順
+
+有効化したい機能の gate env を cron / launchd エントリ（または per-repo env ファイル
+`$HOME/.issue-watcher/<REPO_SLUG>.env`）で `=true` に設定します。各機能は独立に有効化できます:
+
+```bash
+# 例: スナップショット共有 + バケット可視化 + 縮退を有効化
+REPO=owner/repo REPO_DIR=$HOME/work/repo \
+  GH_API_SNAPSHOT_ENABLED=true \
+  GH_API_BUCKET_LOG_ENABLED=true \
+  GH_API_DEGRADE_ENABLED=true \
+  $HOME/bin/issue-watcher.sh
+```
+
+`local-watcher/bin/modules/api-rate-guard.sh` は `install.sh` 再実行で
+`$HOME/bin/modules/` へ配置されます（consumer repo への配布は不要 = local-watcher 専用）。
+
+### 導入する env var 一覧と既定値
+
+| env | 既定 | 正規化 | 対応機能 |
+|---|---|---|---|
+| `GH_API_SNAPSHOT_ENABLED` | `false` | `=true` 厳密一致のみ ON、他は OFF | (1) スナップショット共有 |
+| `GH_API_SNAPSHOT_PR_LIMIT` | `100` | 非整数 / ≤0 → 100 | (1) PR 超集合取得の `--limit` |
+| `GH_API_SNAPSHOT_ISSUE_LIMIT` | `100` | 非整数 / ≤0 → 100 | (1) Issue 超集合取得の `--limit` |
+| `GH_API_SNAPSHOT_DIR` | `$HOME/.issue-watcher/api-snapshot/<REPO_SLUG>` | — | (1) スナップショット JSON 配置先 |
+| `GH_API_SNAPSHOT_GH_TIMEOUT` | `60` | 非整数 / ≤0 → 60 | (1) 超集合取得の gh timeout 秒 |
+| `GH_API_BUCKET_LOG_ENABLED` | `false` | `=true` のみ ON | (2) バケット可視化 |
+| `GH_API_DEGRADE_ENABLED` | `false` | `=true` のみ ON | (3) 縮退 |
+| `GH_API_DEGRADE_GRAPHQL_THRESHOLD` | `500` | 非整数 / <0 → 500（保守的既定） | (3) graphql 残量の縮退閾値 |
+| `GH_API_STATE_RETRY_ENABLED` | `false` | `=true` のみ ON | (4) 限定リトライ |
+| `GH_API_STATE_RETRY_MAX_ATTEMPTS` | `3` | 非整数 / ≤0 → 3（有限） | (4) 再試行回数上限 |
+| `GH_API_STATE_RETRY_SLEEP` | `2` | 非整数 / <0 → 2 | (4) 試行間 backoff 秒 |
+| `GH_API_REST_OFFLOAD_ENABLED` | `false` | `=true` のみ ON | (5) REST 逃がし |
+
+### バケット可視化ログの読み方
+
+`GH_API_BUCKET_LOG_ENABLED=true` のとき、各サイクル終端に以下の固定書式 1 行が `LOG_DIR`
+配下へ出力されます（`/rate_limit` 参照は rate limit を消費しません）:
+
+```text
+[2026-07-29 12:00:00] [owner/repo] gh-rate-limit: core=4990/5000 graphql=4800/5000 search=28/30
+```
+
+- 書式は `gh-rate-limit: core=<残量>/<上限> graphql=<残量>/<上限> search=<残量>/<上限>`。
+  `grep 'gh-rate-limit:'` で事後検索できます。
+- **graphql バケット**（5,000/h をアカウント内の全ツールで共有）が枯渇の主動機のため、
+  縮退判定の主対象です。残量が急減していれば枯渇の予兆です。
+- 取得に失敗した場合は `gh-rate-limit: WARN: ...` を出力してサイクルは継続します。
+
+### 縮退の優先順位（essential vs non-essential）
+
+`GH_API_DEGRADE_ENABLED=true` のとき、graphql 残量が `GH_API_DEGRADE_GRAPHQL_THRESHOLD`
+（既定 500）を下回ると、**非必須（non-essential）プロセッサを当該サイクルで skip** し、
+`gh-rate-limit: WARN: skip processor=<name> reason=degrade bucket=graphql remaining=<r> threshold=<t>`
+を出力します。**必須（essential）プロセッサは残量にかかわらず skip されません**（dispatch と
+状態遷移の完遂性を守る / NFR 2.2）:
+
+| 分類 | プロセッサ | 縮退時 |
+|---|---|---|
+| **essential**（常に実行） | quota-resume / merge-queue(-recheck) / auto-rebase / auto-merge(-design/-disarm/-merged) / promote-pipeline / stale-pickup-reaper / design-review-release / Dispatcher | 実行 |
+| non-essential（縮退時 skip） | pr-reviewer / claude-review-catchup / claude-review-merge-gate-visibility / pr-design-reviewer / security-review / pr-iteration / failed-recovery | skip |
+
+非必須プロセッサ（レビュー系・可視化系・claude 起動を伴う反復/回復）は次サイクルで再試行
+されるため、縮退で skip しても安全です。
+
+### fail-safe / 後方互換
+
+- スナップショット取得・バケット残量取得・REST 逃がしのいずれの失敗も、従来の個別取得 /
+  従来 GraphQL 経路へフォールバックしサイクルを継続します（warn ログを 1 行残す）。
+- 状態遷移系ラベル操作のリトライは有限回（`GH_API_STATE_RETRY_MAX_ATTEMPTS`）で打ち切り、
+  上限到達でも `claude-picked-up` を残置したまま次 tick で再評価されます（孤児化しない）。
+- 既存 env var 名 / ラベル名 / exit code / cron 登録文字列 / ログ出力先は本機能で変更しません。
+  新規ラベルも導入しません。
 
 ---
 
