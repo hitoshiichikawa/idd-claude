@@ -14,7 +14,7 @@ commit 時点で未設定環境の挙動は不変（NFR 1.1）。
   - `local-watcher/test/api_rate_guard_snapshot_test.sh` を追加（`extract_function` + fixture。超集合取得・accessor・active 判定・取得失敗時 fallback・gate off no-op を live API なしで検証 / NFR 6.2）
   - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.5, 2.6_
 
-- [ ] 2. PR snapshot 差し替え: merge / auto-merge 系 (P)
+- [x] 2. PR snapshot 差し替え: merge / auto-merge 系 (P)
   - Inventory #1〜#6 の 5 module（`merge-queue.sh`（recheck 含む）/ `auto-rebase.sh` / `auto-merge.sh` / `auto-merge-design.sh` / `auto-merge-disarm.sh`）の `gh pr list` を `grl_pr_snapshot_or_live` 経由へ差し替え
   - snapshot 参照時、各 module の client jq を現行 `--search` 全条件で再現（design「等価性ルール」表。例: merge-queue へ `-label:needs-rebase` / `-label:failed` の `index==null` select 追加、auto-rebase の `label:needs-rebase` 包含）— gate off の live 経路は byte 等価に保つ（Req 2.3）
   - 鮮度クリティカル（Dispatcher 候補 / check_existing_impl_pr）は差し替えず個別取得を維持（Req 2.4）
