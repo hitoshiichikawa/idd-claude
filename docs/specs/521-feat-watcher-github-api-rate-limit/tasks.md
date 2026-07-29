@@ -80,7 +80,7 @@ commit 時点で未設定環境の挙動は不変（NFR 1.1）。
   - _Requirements: 7.1, 7.2, 7.3_
   - _Depends: 1, 5, 6, 7, 8_
 
-- [ ] 10. 全体整合の検証（統合・no-op 回帰）
+- [x] 10. 全体整合の検証（統合・no-op 回帰）
   - gate 全 off（既定）で main loop の一覧取得回数・プロセッサ実行順・ログ出力が導入前と一致することを統合テストで確認（Req 1.1 no-op / NFR 1.1）
   - `shellcheck local-watcher/bin/issue-watcher.sh local-watcher/bin/watcher-config.sh local-watcher/bin/modules/*.sh` 新規警告 0・`bash -n` OK を確認（NFR 6.1）
   - dry-run（対象なし・全 gate off）で `処理対象の Issue なし` 正常終了、`GH_API_BUCKET_LOG_ENABLED=true` で終端 1 行ログ出力を smoke 確認
