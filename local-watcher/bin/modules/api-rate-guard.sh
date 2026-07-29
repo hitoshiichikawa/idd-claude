@@ -193,3 +193,60 @@ grl_issue_snapshot_or_live() {
     "${cmd[@]}" 2>/dev/null
   fi
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Req 3 / 4: バケット別 rate limit の可視化・縮退用残量取得
+# ─────────────────────────────────────────────────────────────────────────────
+
+# `gh api rate_limit`（プライマリ rate limit を消費しない参照経路 / Req 3.2）で core /
+# graphql / search バケットの remaining・limit をモジュールグローバルへ取り込む。
+# BUCKET_LOG / DEGRADE のいずれも無効なら新規 API 呼び出しゼロで即 return（NFR 1.1）。
+# 取得 / パース失敗は warn + GRL_BUCKET_STATUS=unavailable で継続（Req 3.4 / NFR 2.1）。
+# rc: 常に 0（fail-safe）。
+grl_buckets_refresh() {
+  if [ "${GH_API_BUCKET_LOG_ENABLED:-false}" != "true" ] \
+    && [ "${GH_API_DEGRADE_ENABLED:-false}" != "true" ]; then
+    GRL_BUCKET_STATUS="disabled"
+    return 0
+  fi
+  local json
+  if ! json=$(gh api rate_limit 2>/dev/null); then
+    grl_warn "rate_limit の取得に失敗（バケット可視化 / 縮退は当サイクル無効化して継続 / Req 3.4, NFR 2.1）"
+    GRL_BUCKET_STATUS="unavailable"
+    return 0
+  fi
+  local parsed
+  parsed=$(printf '%s' "$json" | jq -r '
+    [ (.resources.core.remaining // "?"), (.resources.core.limit // "?"),
+      (.resources.graphql.remaining // "?"), (.resources.graphql.limit // "?"),
+      (.resources.search.remaining // "?"), (.resources.search.limit // "?") ]
+    | @tsv' 2>/dev/null)
+  if [ -z "$parsed" ]; then
+    grl_warn "rate_limit のパースに失敗（バケット可視化 / 縮退は当サイクル無効化して継続 / Req 3.4）"
+    GRL_BUCKET_STATUS="unavailable"
+    return 0
+  fi
+  IFS=$'\t' read -r GRL_BUCKET_CORE_REMAINING GRL_BUCKET_CORE_LIMIT \
+    GRL_BUCKET_GRAPHQL_REMAINING GRL_BUCKET_GRAPHQL_LIMIT \
+    GRL_BUCKET_SEARCH_REMAINING GRL_BUCKET_SEARCH_LIMIT <<< "$parsed"
+  GRL_BUCKET_STATUS="ok"
+  return 0
+}
+
+# cycle 終端に core / graphql / search の残量・上限を 1 行の固定書式でログ出力する（Req 3.1,
+# 3.3）。grep 可能な固定書式: `gh-rate-limit: core=<r>/<l> graphql=<r>/<l> search=<r>/<l>`。
+# gate off は no-op、残量取得失敗は warn + 継続（Req 3.4）。
+# rc: 常に 0。
+grl_buckets_log() {
+  if [ "${GH_API_BUCKET_LOG_ENABLED:-false}" != "true" ]; then
+    return 0
+  fi
+  # cycle 終端の残量を反映するため再取得する（rate_limit は非消費 / Req 3.2）。
+  grl_buckets_refresh
+  if [ "${GRL_BUCKET_STATUS:-}" != "ok" ]; then
+    grl_warn "バケット残量を取得できず可視化ログを出力できません（Req 3.4）"
+    return 0
+  fi
+  grl_log "core=${GRL_BUCKET_CORE_REMAINING}/${GRL_BUCKET_CORE_LIMIT} graphql=${GRL_BUCKET_GRAPHQL_REMAINING}/${GRL_BUCKET_GRAPHQL_LIMIT} search=${GRL_BUCKET_SEARCH_REMAINING}/${GRL_BUCKET_SEARCH_LIMIT}"
+  return 0
+}

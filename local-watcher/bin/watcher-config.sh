@@ -1479,6 +1479,12 @@ case "$GH_API_SNAPSHOT_GH_TIMEOUT" in
   ''|*[!0-9]*) GH_API_SNAPSHOT_GH_TIMEOUT="60" ;;
   *) if [ "$GH_API_SNAPSHOT_GH_TIMEOUT" -le 0 ]; then GH_API_SNAPSHOT_GH_TIMEOUT="60"; fi ;;
 esac
+# Req 3: バケット別 rate limit の可視化（cycle 終端 1 行ログ）。`=true` 厳密一致のみ ON。
+GH_API_BUCKET_LOG_ENABLED="${GH_API_BUCKET_LOG_ENABLED:-false}"
+case "$GH_API_BUCKET_LOG_ENABLED" in
+  true) : ;;
+  *)    GH_API_BUCKET_LOG_ENABLED="false" ;;
+esac
 
 # ─── デフォルト有効化フラグの値正規化 (#112 Req 2.10 / #412 で本フラグを追加) ───
 # 下記 10 種の env var はすべて「`=false` を明示した場合のみ無効、それ以外

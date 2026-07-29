@@ -411,6 +411,12 @@ git pull --ff-only origin "$BASE_BRANCH"
 # 参加 processor は従来の個別取得へフォールバックする（Req 2.5, 2.6 / NFR 2.1）。
 grl_snapshot_init || grl_warn "grl_snapshot_init が想定外のエラーで終了しました（各 processor は個別取得へフォールバック）"
 
+# GitHub API Rate Guard: サイクル冒頭のバケット残量取得（#521 / Req 3 可視化 / Req 4 縮退）。
+# BUCKET_LOG / DEGRADE のいずれも無効なら新規 API 呼び出しゼロで即 return（NFR 1.1）。取得失敗も
+# rc=0（fail-safe）で当サイクルのバケット参照を無効化し、後続 processor を阻害しない（Req 3.4）。
+# ここで取得した graphql 残量を後続の grl_degrade_should_run（task 6）が参照する。
+grl_buckets_refresh || true
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # メインループ: Processor / Gate 実行順序（モジュール分割完了マニフェスト / #455 Phase 1・#468 gate）
 #
@@ -890,6 +896,11 @@ if [ "$DISPATCHER_RC" -ne 0 ]; then
   # サイクル中断（既存の ERROR 終了規約 = exit 1 と整合）
   exit "$DISPATCHER_RC"
 fi
+
+# GitHub API Rate Guard: サイクル終端のバケット残量ログ（#521 / Req 3.1, 3.3）。
+# GH_API_BUCKET_LOG_ENABLED=true のときのみ `gh-rate-limit: core=.. graphql=.. search=..` を
+# 1 行出力する。gate off は no-op で本機能導入前と等価（NFR 1.1）。取得失敗は warn + 継続。
+grl_buckets_log || true
 
 echo "[$(date '+%F %T')] 完了"
 exit 0
