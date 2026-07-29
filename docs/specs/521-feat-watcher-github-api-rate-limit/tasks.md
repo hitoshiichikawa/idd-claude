@@ -31,7 +31,7 @@ commit 時点で未設定環境の挙動は不変（NFR 1.1）。
   - _Boundary: pr-iteration, pr-reviewer, pr-design-reviewer, security-review_
   - _Depends: 1_
 
-- [ ] 4. Issue snapshot 参加 processor の差し替え (P)
+- [x] 4. Issue snapshot 参加 processor の差し替え (P)
   - Inventory #11〜#14 の 4 module（`dependency-resolver.sh` / `path-overlap.sh` / `stale-pickup-reaper.sh` / `quota-aware.sh`）の `gh issue list` を `grl_issue_snapshot_or_live` 経由へ差し替え、client jq を現行 `--search` で再現（Req 2.3）
   - 参加条件「対象集合 ⊆ (open ∧ auto-dev)」を各 module のコメントに明記。gate off 時は live 経路で byte 等価
   - 各 module の fixture テストに snapshot 参照時の等価集合ケースを追加（reaper の `label:claude-picked-up` 絞り込み等 / live API なし）
