@@ -1485,6 +1485,18 @@ case "$GH_API_BUCKET_LOG_ENABLED" in
   true) : ;;
   *)    GH_API_BUCKET_LOG_ENABLED="false" ;;
 esac
+# Req 4: 残量閾値割れ時の WARN と非必須プロセッサ縮退。`=true` 厳密一致のみ ON。
+GH_API_DEGRADE_ENABLED="${GH_API_DEGRADE_ENABLED:-false}"
+case "$GH_API_DEGRADE_ENABLED" in
+  true) : ;;
+  *)    GH_API_DEGRADE_ENABLED="false" ;;
+esac
+# graphql バケット残量の縮退閾値（保守的既定 500 / 必須処理を完遂できる余力を残す）。
+# 非整数 / <0 は既定 500 へ正規化（0 は許容 = 実質縮退無効化したい運用向け / Req 4.4）。
+GH_API_DEGRADE_GRAPHQL_THRESHOLD="${GH_API_DEGRADE_GRAPHQL_THRESHOLD:-500}"
+case "$GH_API_DEGRADE_GRAPHQL_THRESHOLD" in
+  ''|*[!0-9]*) GH_API_DEGRADE_GRAPHQL_THRESHOLD="500" ;;
+esac
 
 # ─── デフォルト有効化フラグの値正規化 (#112 Req 2.10 / #412 で本フラグを追加) ───
 # 下記 10 種の env var はすべて「`=false` を明示した場合のみ無効、それ以外

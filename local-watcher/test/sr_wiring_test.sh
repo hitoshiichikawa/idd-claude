@@ -326,7 +326,11 @@ else
 fi
 
 # call site 配線確認: process_failed_recovery 行の後ろに process_stale_pickup_reaper 行がある
-fr_line=$(grep -n '^process_failed_recovery ||' "$WATCHER_SH" | head -1 | cut -d: -f1)
+# Issue #521: failed-recovery は non-essential のため縮退 gate でラップされ、call site は
+# `grl_degrade_should_run "failed-recovery" && { process_failed_recovery || fr_warn ...; }`
+# となった。行頭アンカーを外して wrapped 形の call site も検出する（順序契約の意図は不変）。
+# stale-pickup-reaper は essential のため従来どおり行頭 `process_stale_pickup_reaper ||`。
+fr_line=$(grep -n 'process_failed_recovery ||' "$WATCHER_SH" | head -1 | cut -d: -f1)
 spr_line=$(grep -n '^process_stale_pickup_reaper ||' "$WATCHER_SH" | head -1 | cut -d: -f1)
 if [ -n "$fr_line" ] && [ -n "$spr_line" ] && [ "$spr_line" -gt "$fr_line" ]; then
   echo "PASS: Req 1.1 / NFR 1.2: process_stale_pickup_reaper の call site が process_failed_recovery の後（fr=$fr_line, spr=$spr_line）"

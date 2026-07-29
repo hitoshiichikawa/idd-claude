@@ -250,3 +250,34 @@ grl_buckets_log() {
   grl_log "core=${GRL_BUCKET_CORE_REMAINING}/${GRL_BUCKET_CORE_LIMIT} graphql=${GRL_BUCKET_GRAPHQL_REMAINING}/${GRL_BUCKET_GRAPHQL_LIMIT} search=${GRL_BUCKET_SEARCH_REMAINING}/${GRL_BUCKET_SEARCH_LIMIT}"
   return 0
 }
+
+# 非必須プロセッサ call site の縮退 gate。graphql バケット残量が閾値を下回ったら skip
+# （rc=1）+ WARN（bucket・残量・閾値を含む / Req 4.1, 4.2, 4.5 / NFR 4.2）。
+# gate off / 残量未取得 / 残量が非整数のときは常に実行（rc=0 / 安全側 / Req 4.6 / NFR 2.2）。
+# essential プロセッサは呼び出し側で本 gate を通さないため常に実行される（Req 4.3）。
+# Args: $1 = プロセッサ名（skip ログに記録）
+# rc: 0=実行してよい / 1=当サイクルは skip
+grl_degrade_should_run() {
+  local name="$1"
+  # gate off は常に実行（従来挙動 / Req 4.6）
+  if [ "${GH_API_DEGRADE_ENABLED:-false}" != "true" ]; then
+    return 0
+  fi
+  # 残量が取得できていない（bucket 取得失敗等）→ 安全側で実行（必須処理を守る / NFR 2.2）
+  if [ "${GRL_BUCKET_STATUS:-}" != "ok" ]; then
+    return 0
+  fi
+  local remaining="${GRL_BUCKET_GRAPHQL_REMAINING:-}"
+  local threshold="${GH_API_DEGRADE_GRAPHQL_THRESHOLD:-500}"
+  # 残量が非整数（"?" 等）→ 判定不能なので安全側で実行
+  case "$remaining" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  if [ "$remaining" -lt "$threshold" ]; then
+    # 閾値割れ → WARN + skip。skip ログに processor 名・bucket・残量・閾値を含める
+    # （Req 4.1 WARN / Req 4.5 skip 根拠 / NFR 4.2）。
+    grl_warn "skip processor=$name reason=degrade bucket=graphql remaining=$remaining threshold=$threshold"
+    return 1
+  fi
+  return 0
+}

@@ -109,6 +109,45 @@ rm -f "$warn_file"
 logfail_out="$(grl_buckets_log 2>&1 || true)"
 assert_contains "取得失敗: buckets_log は warn で継続" "$logfail_out" "gh-rate-limit: WARN"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. grl_degrade_should_run（Req 4）: 閾値割れで非必須 skip / essential は呼び出し側で
+#    gate しないため本関数は processor 名を問わず同一判定（skip 判定は残量のみに依存）。
+# ─────────────────────────────────────────────────────────────────────────────
+# gate off → 常に rc=0（従来挙動 / Req 4.6）
+GH_API_DEGRADE_ENABLED="false"
+GRL_BUCKET_STATUS="ok"
+GRL_BUCKET_GRAPHQL_REMAINING="10"
+GH_API_DEGRADE_GRAPHQL_THRESHOLD="500"
+assert_rc "degrade gate off: 残量僅少でも rc=0（skip しない）" 0 grl_degrade_should_run "pr-reviewer"
+
+# gate on + 残量 >= 閾値 → rc=0（実行）
+GH_API_DEGRADE_ENABLED="true"
+GRL_BUCKET_GRAPHQL_REMAINING="600"
+assert_rc "degrade on + 残量>=閾値: rc=0（実行）" 0 grl_degrade_should_run "pr-reviewer"
+
+# gate on + 残量 < 閾値 → rc=1（skip）+ WARN に bucket/残量/閾値
+GH_API_DEGRADE_ENABLED="true"
+GRL_BUCKET_GRAPHQL_REMAINING="100"
+GH_API_DEGRADE_GRAPHQL_THRESHOLD="500"
+assert_rc "degrade on + 残量<閾値: rc=1（skip）" 1 grl_degrade_should_run "pr-reviewer"
+skip_out="$(grl_degrade_should_run "pr-reviewer" 2>&1 1>/dev/null || true)"
+assert_contains "skip ログに processor 名" "$skip_out" "skip processor=pr-reviewer"
+assert_contains "skip ログに reason=degrade" "$skip_out" "reason=degrade"
+assert_contains "skip ログに bucket=graphql" "$skip_out" "bucket=graphql"
+assert_contains "skip ログに remaining/threshold" "$skip_out" "remaining=100 threshold=500"
+
+# gate on + 残量未取得（status != ok）→ 安全側 rc=0（必須処理を守る / NFR 2.2）
+GH_API_DEGRADE_ENABLED="true"
+GRL_BUCKET_STATUS="unavailable"
+GRL_BUCKET_GRAPHQL_REMAINING="0"
+assert_rc "degrade on + 残量未取得: 安全側 rc=0（実行）" 0 grl_degrade_should_run "pr-reviewer"
+
+# gate on + 残量非整数（"?"）→ 安全側 rc=0
+GH_API_DEGRADE_ENABLED="true"
+GRL_BUCKET_STATUS="ok"
+GRL_BUCKET_GRAPHQL_REMAINING="?"
+assert_rc "degrade on + 残量非整数: 安全側 rc=0（実行）" 0 grl_degrade_should_run "pr-reviewer"
+
 # ── サマリ ──
 echo "----------------------------------------"
 echo "PASS: $PASS_COUNT / FAIL: $FAIL_COUNT"
