@@ -47,7 +47,7 @@ commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 
   - _Requirements: 1.4, 2.1, 3.2, 3.3, 3.4, 4.1_
   - _Depends: 2_
 
-- [ ] 4. 生成 .html を版管理から除外（既定方針 = .gitignore） (P)
+- [x] 4. 生成 .html を版管理から除外（既定方針 = .gitignore） (P)
   - ルート `.gitignore` に `docs/specs/**/*.html` を追加し、生成 .html を版管理対象外にする（Req 7.2）。
     生成は claude セッションの commit / PR 作成後・`git add` なしで走るため当該 PR に混入しないが、後続 `git add -A` の巻き込みも本除外で防ぐ
   - commit 版管理（Req 7.1: `.gitattributes` の `linguist-generated`）は **不採用**（design 確認事項 2 参照）。リモート閲覧要求が確定した場合の代替として design に記録済み
