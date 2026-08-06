@@ -4,7 +4,7 @@
 版管理 → ドキュメント → 全体検証」。opt-in gate `SPEC_HTML_ENABLED` は既定 OFF のため、各タスク
 commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 1.1）。
 
-- [ ] 1. watcher-config.sh に SPEC_HTML_* gate と正規化を追加
+- [x] 1. watcher-config.sh に SPEC_HTML_* gate と正規化を追加
   - `local-watcher/bin/watcher-config.sh` の opt-in gate 群近傍（`AUTO_REBASE_MODE` 等の `case` 正規化前例に倣う）へ
     `SPEC_HTML_ENABLED`（既定 `false` / `true` 厳密一致のみ ON・他は `case` で `false` に正規化）を追加（Req 1.1, 1.3）
   - 併せて `SPEC_HTML_RENDER_BIN`（既定 `pandoc`）/ `SPEC_HTML_RENDER_CMD`（既定 `pandoc -f gfm -t html5 -s -o {OUT} {IN}`）/
