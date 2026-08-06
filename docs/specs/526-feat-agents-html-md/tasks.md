@@ -55,7 +55,7 @@ commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 
   - _Requirements: 7.2_
   - _Boundary: .gitignore_
 
-- [ ] 5. README / CLAUDE.md のドキュメント整合 (P)
+- [x] 5. README / CLAUDE.md のドキュメント整合 (P)
   - `README.md`「オプション機能一覧」相当節に、`SPEC_HTML_ENABLED`（既定 false・opt-in）と補助 env（`SPEC_HTML_RENDER_BIN` /
     `SPEC_HTML_RENDER_CMD` / `SPEC_HTML_TIMEOUT` / `SPEC_HTML_TARGETS`）の一覧・既定値・有効化手順を追記（NFR 7.1）
   - 閲覧経路（ローカル checkout での worktree 参照方法）と consumer `.gitignore` への 1 行追加、依存 CLI（pandoc）の setup 要件を明記（Req 6.3 / NFR 2.2）
