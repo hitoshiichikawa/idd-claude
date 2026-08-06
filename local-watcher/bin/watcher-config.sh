@@ -1376,6 +1376,50 @@ DEBUGGER_ENABLED="${DEBUGGER_ENABLED:-false}"
 DEBUGGER_MODEL="${DEBUGGER_MODEL:-claude-opus-4-8}"
 DEBUGGER_MAX_TURNS="${DEBUGGER_MAX_TURNS:-40}"
 
+# ─── Spec HTML 並行生成 設定 (#526) ───
+# 新規 opt-in 機能。明示的に `=true` を指定したときだけ、design / impl 完了直後の
+# fail-open hook（slot-worker.sh `_slot_run_issue`）が spec 配下の人間レビュー用 .md
+# 成果物に対応する .html を並行生成する（Req 1.1, 1.2）。`.md` は正準（source of
+# truth）として不変で、機械ゲート / エージェント連携は .html に一切依存しない
+# （Req 3.x）。`=true` 以外（未設定 / 空 / `false` / `0` / `True` / `1` / typo 等）は
+# すべて `false` に正規化し、本機能導入前と完全に同一の観測可能挙動を維持する
+# （Req 1.1, 1.3 / NFR 1.1）。本フラグは新規追加 = opt-in 制 + 既定 false が要件のため、
+# ファイル末尾の「デフォルト有効化フラグの値正規化」ループには **含めない**
+# （#112 の 8 種反転対象とは別扱い / `AUTO_REBASE_MODE` と同扱い）。
+# 詳細は docs/specs/526-feat-agents-html-md/design.md を参照。
+#
+# - SPEC_HTML_ENABLED:     本機能の opt-in gate。`true` 厳密一致のみ有効（既定 `false`）。
+# - SPEC_HTML_RENDER_BIN:  可用性判定（command -v）対象の md→html CLI（既定 `pandoc`）。
+# - SPEC_HTML_RENDER_CMD:  変換コマンドテンプレ。`{IN}` / `{OUT}` を対象 .md / .html
+#                          の絶対パスへ置換して実行する（既定は pandoc gfm→html5）。
+# - SPEC_HTML_TIMEOUT:     1 ファイル変換の timeout 秒。非整数 / ≤0 は既定 60 に正規化。
+# - SPEC_HTML_TARGETS:     並行生成対象の basename allowlist（space 区切り）。
+SPEC_HTML_ENABLED="${SPEC_HTML_ENABLED:-false}"
+# 値正規化: `true` のみ通し、それ以外（未設定 / 空 / `false` / `0` / `True` /
+# `1` / typo 等）はすべて `false` に固定する（Req 1.1, 1.3 / NFR 1.1）。
+case "$SPEC_HTML_ENABLED" in
+  true) : ;;
+  *)    SPEC_HTML_ENABLED="false" ;;
+esac
+SPEC_HTML_RENDER_BIN="${SPEC_HTML_RENDER_BIN:-pandoc}"
+# 既定コマンドは `{OUT}` / `{IN}` の `}` を含むため、`${VAR:-default}` の default に
+# 直書きすると bash が最初の `}` を展開終端と誤認して壊れる。brace を含まない中間変数
+# に既定を置いてから `:-` の default として参照する（未設定 / 空文字とも既定を採用）。
+_spec_html_render_cmd_default='pandoc -f gfm -t html5 -s -o {OUT} {IN}'
+SPEC_HTML_RENDER_CMD="${SPEC_HTML_RENDER_CMD:-$_spec_html_render_cmd_default}"
+unset _spec_html_render_cmd_default
+SPEC_HTML_TIMEOUT="${SPEC_HTML_TIMEOUT:-60}"
+# 非整数 / ≤0 は既定 60 に正規化（timeout に渡す前の安全側フォールバック / Req 1.3）。
+case "$SPEC_HTML_TIMEOUT" in
+  ''|*[!0-9]*) SPEC_HTML_TIMEOUT=60 ;;
+  *)
+    if [ "$SPEC_HTML_TIMEOUT" -le 0 ]; then
+      SPEC_HTML_TIMEOUT=60
+    fi
+    ;;
+esac
+SPEC_HTML_TARGETS="${SPEC_HTML_TARGETS:-requirements.md design.md tasks.md impl-notes.md review-notes.md}"
+
 # ─── PreToolUse Guard Hook 設定 (#294 / base 初版) ───
 # Claude Code の PreToolUse フック機構を利用し、watcher が起動する全 claude CLI 実行に
 # 対して `--settings <絶対パス>` を opt-in で注入する。hook 本体（idd-guard.sh）と
