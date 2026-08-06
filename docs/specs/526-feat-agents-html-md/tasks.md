@@ -16,7 +16,7 @@ commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 
     ON/OFF 判定、`SPEC_HTML_TIMEOUT` の非整数・負値 → 既定 60。source 後の値検証。安全側 fallback の AC のため同 task 内必須）
   - _Requirements: 1.1, 1.3_
 
-- [ ] 2. spec-html.sh module を実装し REQUIRED_MODULES へ登録
+- [x] 2. spec-html.sh module を実装し REQUIRED_MODULES へ登録
   - `local-watcher/bin/modules/spec-html.sh` を新規作成（prefix `shx_` / 関数定義のみ・トップレベル副作用なし /
     ファイル冒頭に用途・配置先・依存・prefix・family 非該当を明記。`tasks-count-gate.sh` のヘッダ様式を踏襲）
   - 公開関数を実装（design「Service Interface」準拠）: `shx_log`/`shx_warn`/`shx_error`（prefix `spec-html:` / grep 可能 3 段）、
