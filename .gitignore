@@ -2,3 +2,8 @@
 
 # antigravity CLI のセッション固有ファイル（symlink）はコミットしない
 .antigravitycli/
+
+# Spec HTML 並行生成（#526）の派生物。.md が正準で .html は SPEC_HTML_ENABLED=true 時に
+# ローカル生成する generated ファイルのため版管理対象外（Req 7.2）。後続 `git add -A` の
+# 巻き込みも防ぐ。consumer 側 .gitignore への反映は README の opt-in setup で案内する。
+docs/specs/**/*.html
