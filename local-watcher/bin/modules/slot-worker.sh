@@ -859,6 +859,10 @@ EOF
         # design 分岐 rc=0 case にのみ配置し、impl / impl-resume / Stage Checkpoint
         # Resume 経路には差し込まないことで Req 3.1 / 3.2 を構造的に保証する。
         tc_run_post_architect_check || true
+        # Issue #526: Spec HTML 並行生成 — design 成果物（requirements/design/tasks.md）
+        # 確定直後に対応 .html を並行生成。SPEC_HTML_ENABLED=false（既定）では module
+        # 早期 return で副作用ゼロ、`|| true` と module return 0 固定で本流に非干渉。
+        shx_run_for_spec_dir || true
         rm -f "$_qa_reset_file_design"
         return 0
         ;;
@@ -890,6 +894,11 @@ EOF
       0)
         echo "✅ #$NUMBER: $MODE 完了（Reviewer ゲート通過 / PR 作成済み）" | tee -a "$LOG"
         slot_log "$MODE 完了（PR 作成済み）"
+        # Issue #526: Spec HTML 並行生成 — impl 成果物（impl-notes.md / review-notes.md
+        # を含む spec .md）確定直後に対応 .html を並行生成。生成は PR 作成 **後** に走り
+        # `git add` しないため当該 PR に混入しない。既定 OFF では module 早期 return で
+        # 副作用ゼロ、`|| true` と return 0 固定で本流（exit code / ラベル遷移）に非干渉。
+        shx_run_for_spec_dir || true
         return 0
         ;;
       3)
