@@ -4,7 +4,7 @@
 版管理 → ドキュメント → 全体検証」。opt-in gate `SPEC_HTML_ENABLED` は既定 OFF のため、各タスク
 commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 1.1）。
 
-- [ ] 1. watcher-config.sh に SPEC_HTML_* gate と正規化を追加
+- [x] 1. watcher-config.sh に SPEC_HTML_* gate と正規化を追加
   - `local-watcher/bin/watcher-config.sh` の opt-in gate 群近傍（`AUTO_REBASE_MODE` 等の `case` 正規化前例に倣う）へ
     `SPEC_HTML_ENABLED`（既定 `false` / `true` 厳密一致のみ ON・他は `case` で `false` に正規化）を追加（Req 1.1, 1.3）
   - 併せて `SPEC_HTML_RENDER_BIN`（既定 `pandoc`）/ `SPEC_HTML_RENDER_CMD`（既定 `pandoc -f gfm -t html5 -s -o {OUT} {IN}`）/
@@ -16,7 +16,7 @@ commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 
     ON/OFF 判定、`SPEC_HTML_TIMEOUT` の非整数・負値 → 既定 60。source 後の値検証。安全側 fallback の AC のため同 task 内必須）
   - _Requirements: 1.1, 1.3_
 
-- [ ] 2. spec-html.sh module を実装し REQUIRED_MODULES へ登録
+- [x] 2. spec-html.sh module を実装し REQUIRED_MODULES へ登録
   - `local-watcher/bin/modules/spec-html.sh` を新規作成（prefix `shx_` / 関数定義のみ・トップレベル副作用なし /
     ファイル冒頭に用途・配置先・依存・prefix・family 非該当を明記。`tasks-count-gate.sh` のヘッダ様式を踏襲）
   - 公開関数を実装（design「Service Interface」準拠）: `shx_log`/`shx_warn`/`shx_error`（prefix `spec-html:` / grep 可能 3 段）、
@@ -36,7 +36,7 @@ commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 
   - _Requirements: 1.2, 2.2, 2.3, 2.4, 2.5, 3.1, 4.2, 5.1, 5.2, 5.3, 6.1_
   - _Depends: 1_
 
-- [ ] 3. slot-worker.sh の design / impl 完了直後に生成 hook を配線
+- [x] 3. slot-worker.sh の design / impl 完了直後に生成 hook を配線
   - `local-watcher/bin/modules/slot-worker.sh` `_slot_run_issue` の design 分岐 rc=0 case、
     `tc_run_post_architect_check || true` の **直後**に `shx_run_for_spec_dir || true` を 1 行追加（design 段 / Req 2.1, 4.1）
   - 同関数 impl 分岐 `_impl_rc` case 0（`✅ ... 完了`）に `shx_run_for_spec_dir || true` を 1 行追加（impl 段 / impl-notes・review-notes を含む / Req 2.1, 4.1）
@@ -47,7 +47,7 @@ commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 
   - _Requirements: 1.4, 2.1, 3.2, 3.3, 3.4, 4.1_
   - _Depends: 2_
 
-- [ ] 4. 生成 .html を版管理から除外（既定方針 = .gitignore） (P)
+- [x] 4. 生成 .html を版管理から除外（既定方針 = .gitignore） (P)
   - ルート `.gitignore` に `docs/specs/**/*.html` を追加し、生成 .html を版管理対象外にする（Req 7.2）。
     生成は claude セッションの commit / PR 作成後・`git add` なしで走るため当該 PR に混入しないが、後続 `git add -A` の巻き込みも本除外で防ぐ
   - commit 版管理（Req 7.1: `.gitattributes` の `linguist-generated`）は **不採用**（design 確認事項 2 参照）。リモート閲覧要求が確定した場合の代替として design に記録済み
@@ -55,7 +55,7 @@ commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 
   - _Requirements: 7.2_
   - _Boundary: .gitignore_
 
-- [ ] 5. README / CLAUDE.md のドキュメント整合 (P)
+- [x] 5. README / CLAUDE.md のドキュメント整合 (P)
   - `README.md`「オプション機能一覧」相当節に、`SPEC_HTML_ENABLED`（既定 false・opt-in）と補助 env（`SPEC_HTML_RENDER_BIN` /
     `SPEC_HTML_RENDER_CMD` / `SPEC_HTML_TIMEOUT` / `SPEC_HTML_TARGETS`）の一覧・既定値・有効化手順を追記（NFR 7.1）
   - 閲覧経路（ローカル checkout での worktree 参照方法）と consumer `.gitignore` への 1 行追加、依存 CLI（pandoc）の setup 要件を明記（Req 6.3 / NFR 2.2）
@@ -67,7 +67,7 @@ commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 
   - _Boundary: README.md, CLAUDE.md_
   - _Depends: 2_
 
-- [ ] 6. 全体整合の検証（no-op 回帰・静的解析・smoke）
+- [x] 6. 全体整合の検証（no-op 回帰・静的解析・smoke）
   - gate 既定 OFF で main loop の処理順序・生成成果物・ログ出力先が導入前と一致すること（call site `|| true` 経路が no-op）を統合的に確認（Req 1.1 / NFR 1.1）
   - `shellcheck local-watcher/bin/issue-watcher.sh local-watcher/bin/watcher-config.sh local-watcher/bin/modules/*.sh` 新規警告ゼロ・
     `bash -n local-watcher/bin/issue-watcher.sh` OK を確認（NFR 6.1）
