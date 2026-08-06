@@ -36,7 +36,7 @@ commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 
   - _Requirements: 1.2, 2.2, 2.3, 2.4, 2.5, 3.1, 4.2, 5.1, 5.2, 5.3, 6.1_
   - _Depends: 1_
 
-- [ ] 3. slot-worker.sh の design / impl 完了直後に生成 hook を配線
+- [x] 3. slot-worker.sh の design / impl 完了直後に生成 hook を配線
   - `local-watcher/bin/modules/slot-worker.sh` `_slot_run_issue` の design 分岐 rc=0 case、
     `tc_run_post_architect_check || true` の **直後**に `shx_run_for_spec_dir || true` を 1 行追加（design 段 / Req 2.1, 4.1）
   - 同関数 impl 分岐 `_impl_rc` case 0（`✅ ... 完了`）に `shx_run_for_spec_dir || true` を 1 行追加（impl 段 / impl-notes・review-notes を含む / Req 2.1, 4.1）
