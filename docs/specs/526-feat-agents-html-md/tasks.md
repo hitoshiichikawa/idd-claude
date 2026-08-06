@@ -67,7 +67,7 @@ commit 時点で未設定環境の観測可能挙動は導入前と不変（NFR 
   - _Boundary: README.md, CLAUDE.md_
   - _Depends: 2_
 
-- [ ] 6. 全体整合の検証（no-op 回帰・静的解析・smoke）
+- [x] 6. 全体整合の検証（no-op 回帰・静的解析・smoke）
   - gate 既定 OFF で main loop の処理順序・生成成果物・ログ出力先が導入前と一致すること（call site `|| true` 経路が no-op）を統合的に確認（Req 1.1 / NFR 1.1）
   - `shellcheck local-watcher/bin/issue-watcher.sh local-watcher/bin/watcher-config.sh local-watcher/bin/modules/*.sh` 新規警告ゼロ・
     `bash -n local-watcher/bin/issue-watcher.sh` OK を確認（NFR 6.1）
