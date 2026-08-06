@@ -50,11 +50,20 @@ fi
 # normalized <var> [ENV=VAL ...]
 #   指定 env のもとで SPEC_HTML_* ブロックを eval し、<var> の正規化後の値を stdout に返す。
 #   env 未指定の変数は親環境から継承しない（テスト冒頭で unset 済み）ため「未設定」検証になる。
+#   REPO は正規化 log の prefix で参照されるため固定値を与える（date もその場で解決される）。
 normalized() {
   local var="$1"
   shift
-  env "$@" bash -c "set -uo pipefail; $SPEC_HTML_BLOCK
-printf '%s' \"\${$var}\""
+  env REPO="owner/test" "$@" bash -c "set -uo pipefail; $SPEC_HTML_BLOCK
+printf '%s' \"\${$var}\"" 2>/dev/null
+}
+
+# stderr_of [ENV=VAL ...]
+#   SPEC_HTML_* ブロック eval 時の stderr（正規化 log）を stdout に返す（Req 1.3 検証用）。
+#   stdout は /dev/null に落とし、group の 2>&1 で stderr のみを caller の stdout へ渡す。
+stderr_of() {
+  { env REPO="owner/test" "$@" bash -c "set -uo pipefail; $SPEC_HTML_BLOCK
+:" >/dev/null; } 2>&1
 }
 
 # 親環境に残留していると「未設定」ケースが誤判定になるため明示的に除去する。
@@ -69,6 +78,13 @@ assert_eq "ENABLED: 1 → false (OFF)"          "false" "$(normalized SPEC_HTML_
 assert_eq "ENABLED: false → false (OFF)"      "false" "$(normalized SPEC_HTML_ENABLED SPEC_HTML_ENABLED=false)"
 assert_eq "ENABLED: typo(yes) → false (OFF)"  "false" "$(normalized SPEC_HTML_ENABLED SPEC_HTML_ENABLED=yes)"
 assert_eq "ENABLED: TRUE → false (OFF)"       "false" "$(normalized SPEC_HTML_ENABLED SPEC_HTML_ENABLED=TRUE)"
+
+echo "=== SPEC_HTML_ENABLED 不正値の 1 行ログ / 既定 OFF は無ログ（Req 1.3 / NFR 1.1）==="
+assert_contains "不正値 yes → 正規化 log あり" "$(stderr_of SPEC_HTML_ENABLED=yes)" "spec-html: WARN: SPEC_HTML_ENABLED='yes'"
+assert_contains "不正値 True → 正規化 log あり" "$(stderr_of SPEC_HTML_ENABLED=True)" "は不正値のため安全側で無効化"
+assert_eq "未設定 → 無ログ（NFR 1.1）" "" "$(stderr_of)"
+assert_eq "明示 false → 無ログ（NFR 1.1）" "" "$(stderr_of SPEC_HTML_ENABLED=false)"
+assert_eq "true → 無ログ" "" "$(stderr_of SPEC_HTML_ENABLED=true)"
 
 echo "=== SPEC_HTML_TIMEOUT 正規化（非整数 / ≤0 は既定 60 / Req 1.3）==="
 assert_eq "TIMEOUT: 未設定 → 60"       "60" "$(normalized SPEC_HTML_TIMEOUT)"

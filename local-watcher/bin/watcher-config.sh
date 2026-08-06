@@ -1395,11 +1395,17 @@ DEBUGGER_MAX_TURNS="${DEBUGGER_MAX_TURNS:-40}"
 # - SPEC_HTML_TIMEOUT:     1 ファイル変換の timeout 秒。非整数 / ≤0 は既定 60 に正規化。
 # - SPEC_HTML_TARGETS:     並行生成対象の basename allowlist（space 区切り）。
 SPEC_HTML_ENABLED="${SPEC_HTML_ENABLED:-false}"
-# 値正規化: `true` のみ通し、それ以外（未設定 / 空 / `false` / `0` / `True` /
-# `1` / typo 等）はすべて `false` に固定する（Req 1.1, 1.3 / NFR 1.1）。
+# 値正規化: `true` のみ ON。未設定 / 明示 `false` は既定 OFF として **ログ副作用ゼロ**
+# で通す（NFR 1.1）。それ以外（`0` / `True` / `1` / typo 等）は **不正値**として安全側
+# `false` に正規化し、スキップ理由を 1 行ログに記録する（Req 1.3）。default（未設定 →
+# `false`）と明示 `false` は本 log 分岐に来ないため、既定 OFF 環境ではログ出力先に
+# 一切の副作用を与えない（NFR 1.1）。
 case "$SPEC_HTML_ENABLED" in
-  true) : ;;
-  *)    SPEC_HTML_ENABLED="false" ;;
+  true|false) : ;;
+  *)
+    echo "[$(date '+%F %T')] [$REPO] spec-html: WARN: SPEC_HTML_ENABLED='$SPEC_HTML_ENABLED' は不正値のため安全側で無効化（false）します（Req 1.3）" >&2
+    SPEC_HTML_ENABLED="false"
+    ;;
 esac
 SPEC_HTML_RENDER_BIN="${SPEC_HTML_RENDER_BIN:-pandoc}"
 # 既定コマンドは `{OUT}` / `{IN}` の `}` を含むため、`${VAR:-default}` の default に
