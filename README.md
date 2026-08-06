@@ -111,6 +111,7 @@ idd-claude/
     │   │   ├── auto-merge-merged.sh      #   auto-merge 完了検知＋通知（#388）
     │   │   ├── design-review-release.sh  #   Design Review Release プロセッサ（#40 / #456）
     │   │   ├── tasks-count-gate.sh       #   Tasks Count Gate（#147 / #457）
+    │   │   ├── spec-html.sh              #   Spec HTML 並行生成（opt-in / #526）
     │   │   ├── debugger-gate.sh          #   Debugger Gate ヘルパー（#22 / #458）
     │   │   ├── stage-checkpoint.sh       #   Stage Checkpoint（#68 / #459）
     │   │   ├── per-task-loop.sh                    #   Per-task TDD Loop orchestrator（#21 / #461-462 / #500 で family 分割）
@@ -1560,6 +1561,7 @@ idd-claude は基本フロー（Triage → 実装 → PR 作成）以外の機�
 | **Triage Bare Mode**（Triage の claude 起動に `--bare` を付与し、CLAUDE.md / `.claude/rules` / hooks / skills / MCP の自動ロードを排除。Triage の固定 context トークンを 6〜8 割削減） | `TRIAGE_BARE` | `false` | `=true` 厳密一致のみ有効。それ以外はすべて OFF | **併用不可**: `IDD_CLAUDE_HOOKS_ENABLED`（guard hook）opt-in 時は hook 注入と衝突しうるため `--bare` を自動で見送り WARN をログに残す（guard 優先） | — | #332 |
 | **Phase 2: Per-task TDD Implementation Loop**（tasks.md の task 1 件ごとに fresh Implementer + fresh Reviewer を起動し、`### Task <id>` learnings を後続 task に前方伝播。**標準機能として** 各 task 起動直前に `context-map.md` を決定論的に生成して後段 prompt へ inline embed し広域 grep / glob を抑止する → [Context Map for per-task agents (#313)](#context-map-for-per-task-agents-313)） | `PER_TASK_LOOP_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / `True` / `1` / typo）はすべて `false` 等価 | 推奨: `PER_TASK_MAX_TASKS`（暴走防止 knob。既定 `0` = 無制限。正の整数で task 件数上限を設定すると上限超過時に `claude-failed` で停止） | [Per-task TDD Implementation Loop (#21)](#per-task-tdd-implementation-loop-21) | #21, #313 |
 | **Phase 3: Debugger Subagent**（Reviewer Round 2 reject 直前 / Developer BLOCKED 宣言時に fresh Debugger を web search 権限付きで起動し、Fix Plan markdown を後続 Developer 再起動 prompt に注入） | `DEBUGGER_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / `True` / `1` / typo）はすべて `false` 等価 | 任意: `DEBUGGER_MODEL`（既定 `claude-opus-4-8`）、`DEBUGGER_MAX_TURNS`（既定 `40`） | [Debugger Subagent (Phase 3, #22)](#debugger-subagent-phase-3-22) | #22 |
+| **Spec HTML 並行生成**（design / impl 完了直後に人間レビュー用 .md 成果物（requirements / design / tasks / impl-notes / review-notes.md）へ対応する .html を並行生成し、生タグではなくレンダリング済みで確認できるようにする。**.md が正準**で機械ゲート / エージェント連携は .html に一切依存しない。生成失敗・CLI 不在は fail-open で本流を止めず、既定 OFF では 1 行も挙動を変えない） | `SPEC_HTML_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `False` / `0` / `True` / `1` / typo）はすべて `false` に正規化（不正値時のみ 1 行 WARN / Req 1.3）。既定 OFF はログ副作用ゼロ | **前提**: `SPEC_HTML_RENDER_BIN`（既定 `pandoc`）が watcher 実行環境にインストール済みであること（未インストール時は skip + WARN で本流継続）。任意: `SPEC_HTML_RENDER_CMD`（既定 `pandoc -f gfm -t html5 -s -o {OUT} {IN}` / `{IN}`・`{OUT}` を対象 .md・.html の絶対パスへ置換）、`SPEC_HTML_TIMEOUT`（既定 `60` 秒 / 非整数・≤0 は 60 に正規化）、`SPEC_HTML_TARGETS`（既定 5 basename の space 区切り allowlist） | [Spec HTML 並行生成 (#526)](#spec-html-並行生成-526) | #526 |
 | **PR Reviewer Processor**（外部 AI レビューツール `codex` / `antigravity`（バイナリ `agy`）に open PR を自動レビューさせ、結果を PR コメント投稿 + 修正要求の `VERDICT` 検出時に `needs-iteration` 付与で PR Iteration Processor #26 へ接続） | `PR_REVIEWER_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `1` / typo）はすべて OFF | **必須**: `PR_REVIEWER_TOOL`（`codex` / `antigravity`。または alias `PR_REVIEWER_CODEX_ENABLED` / `PR_REVIEWER_ANTIGRAVITY_ENABLED` のいずれか一方。両方有効化は排他エラー）。**前提**: 当該ツールが watcher 実行環境に**インストール・認証済み**であること（セットアップ自動化はスコープ外）。推奨: `PR_REVIEWER_MAX_PRS`（既定 `5`）、`PR_REVIEWER_HEAD_PATTERN`（既定 `^claude/`）、`PR_REVIEWER_EXEC_TIMEOUT`（既定 `600`） | [PR Reviewer Processor (#261)](#pr-reviewer-processor-261) | #261 |
 | **PR Reviewer Commit Status Publishing**（codex / antigravity の `VERDICT` と Claude Reviewer の `RESULT` を **GitHub Commit Status API** (`POST /repos/{owner}/{repo}/statuses/{sha}`) 経由で `codex-review` / `claude-review` の安定 context 名で publish し、branch protection の required status checks を required にすれば auto-merge ゲートに組み込める。**`PR_REVIEWER_STATUS_CHECK_ENABLED=true` AND `FULL_AUTO_ENABLED=true`** の AND 二重 opt-in 配下。gate OFF 時は publish 呼び出しゼロで本機能導入前と完全に等価。publish 失敗は WARN log を残しパイプライン継続（silent fail 禁止）。同一 `(sha, context)` への再 POST は GitHub の latest-wins 仕様で最新値に上書きされ、古い head sha への明示削除は行わない） | `PR_REVIEWER_STATUS_CHECK_ENABLED` | `false` | `=true` 厳密一致のみ有効。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `on` / typo）はすべて OFF に正規化。さらに `FULL_AUTO_ENABLED=true` との AND 評価で双方 ON のときのみ publish | **前提**: `FULL_AUTO_ENABLED=true`（#348 kill switch との AND 評価）。**運用設定**: GitHub の repo 設定 → Branches → Branch protection rules で `codex-review` / `claude-review` を **Required status checks** に追加（公開後 1 回 publish されれば候補に出現する）。`PR_REVIEWER_ENABLED=true` で codex 経路、Claude Reviewer ステージ完了で claude 経路がそれぞれ発火 | [PR Reviewer Commit Status Publishing (#349)](#pr-reviewer-commit-status-publishing-349) | #349 |
 | **PR Reviewer Adjudicator**（PR Reviewer Processor #261 が投稿した codex 指摘を Claude adjudicator が **legitimate（実害）** と **excessive（過剰）** に裁定し、(1) `needs-iteration` ラベルの付与・解消を legitimate 件数のみで駆動、(2) merge ゲートを `codex-review`（advisory）から `claude-review`（必須相当）へシフトする。impl PR のみスコープ（設計 PR の `claude-review` 永久 BLOCKED 事象は本機能では解消されないため、consumer 側 branch protection で設計 PR の required 解除 / 人間 admin merge が引き続き必要 / 設計 PR は `DESIGN_REVIEWER_ENABLED` #407 が別経路で publish）。`FALLBACK_ON_FAIL=passthrough` 既定で adjudicator 失敗時は既存 catch-up（独立 Reviewer の verdict）が `claude-review` を引き継ぐ SPOF 緩和構造。**#412 で既定反転**: opt-in / 既定 OFF → **opt-out / 既定 ON**） | `PR_REVIEWER_ADJUDICATOR_ENABLED` | `true`（**#412 で既定反転**） | `=false` 厳密一致のみ無効化（opt-out）。それ以外（未設定 / 空文字 / `True` / `TRUE` / `1` / `0` / `on` / typo）はすべて ON に正規化（安全側） | **前提**: `PR_REVIEWER_ENABLED=true`（adjudicator hook は #261 の `pr_run_review_for_pr` 末尾に挟まれるため、#261 OFF では発火しない）。推奨: `PR_REVIEWER_ADJUDICATOR_MODEL`（既定 `claude-sonnet-4-6`）、`PR_REVIEWER_ADJUDICATOR_EXEC_TIMEOUT`（既定 `300` 秒）、`PR_REVIEWER_ADJUDICATOR_PROMPT`（空なら内蔵 default）、`PR_REVIEWER_ADJUDICATOR_FALLBACK_ON_FAIL`（既定 `passthrough` / `legitimate` の 2 値、それ以外は `passthrough` に正規化）、`PR_REVIEWER_ADJUDICATOR_MAX_FINDINGS`（既定 `50`） | [PR Reviewer Adjudicator (#404 / #412)](#pr-reviewer-adjudicator-404) | #404, #412 |
@@ -7663,6 +7665,81 @@ Loop / Debugger Subagent と同様、watcher 関連ファイルを変更する P
 ```bash
 cd ~/.idd-claude && git pull && ./install.sh --local
 ```
+
+---
+
+## Spec HTML 並行生成 (#526)
+
+`docs/specs/<番号>-<slug>/` 配下の人間レビュー用 markdown 成果物（`requirements.md` /
+`design.md` / `tasks.md` / `impl-notes.md` / `review-notes.md`）を、生タグではなく
+**レンダリング済み HTML でも確認できる**ようにする opt-in 機能です。design / impl 完了直後の
+fail-open hook（`slot-worker.sh` `_slot_run_issue`）が、有効化時のみ各 .md に対応する .html を
+**並行生成**します。
+
+**.md が正準（source of truth）**であり、watcher の機械ゲート（tasks.md checkbox 判定 /
+Tasks Count Gate / stage-a-verify センチネル / Reviewer `RESULT:` 行 / per-task checkbox）と
+エージェント連携（PM / Architect / Developer / Reviewer）は **.html に一切依存しません**。
+.html は派生物であり、生成失敗・CLI 不在・破損があっても本流（ラベル遷移 / PR 作成 / ゲート
+判定 / exit code）は影響を受けません（fail-open / 常に return 0）。
+
+> **注**: 本機能は **opt-in（既定 OFF）**。`SPEC_HTML_ENABLED` 未指定 / `=true` 以外では
+> .html を 1 つも生成せず、本機能導入前と観測可能挙動（処理順序 / 生成成果物 / ログ出力先 /
+> exit code）が完全に等価です（Req 1.1, 1.4 / NFR 1.1）。
+
+### opt-in 手順
+
+cron / launchd の `REPO=... REPO_DIR=...` に `SPEC_HTML_ENABLED=true` を 1 つ追加し、
+変換 CLI（既定 `pandoc`）を watcher 実行環境にインストールします:
+
+```bash
+# 依存 CLI（既定 pandoc）をインストール（例）
+#   Debian/Ubuntu: sudo apt-get install pandoc
+#   macOS (Homebrew): brew install pandoc
+# cron 例
+*/2 * * * * REPO=owner/a REPO_DIR=$HOME/work/a SPEC_HTML_ENABLED=true $HOME/bin/issue-watcher.sh
+```
+
+`pandoc` が未インストールでも watcher は停止しません（`shx_render_available` が skip + WARN を
+記録して本流を継続 / Req 5 / NFR 2）。
+
+### env 一覧
+
+| env var | 既定 | 役割 |
+|---|---|---|
+| `SPEC_HTML_ENABLED` | `false` | 本機能の opt-in gate。`true` 厳密一致のみ有効。不正値は 1 行 WARN + `false` 正規化（Req 1.3） |
+| `SPEC_HTML_RENDER_BIN` | `pandoc` | 可用性判定（`command -v`）対象の md→html CLI |
+| `SPEC_HTML_RENDER_CMD` | `pandoc -f gfm -t html5 -s -o {OUT} {IN}` | 変換コマンドテンプレ。`{IN}` / `{OUT}` を対象 .md / .html の絶対パスへ置換して実行 |
+| `SPEC_HTML_TIMEOUT` | `60` | 1 ファイル変換の timeout 秒。非整数 / ≤0 は `60` に正規化 |
+| `SPEC_HTML_TARGETS` | `requirements.md design.md tasks.md impl-notes.md review-notes.md` | 並行生成対象の basename allowlist（space 区切り）。実在するもののみ生成 |
+
+### 閲覧経路
+
+既定の閲覧経路は **ローカル checkout（worktree）での参照**です。生成された .html は対応 .md と
+同一ディレクトリ（`docs/specs/<番号>-<slug>/`）に配置されるため、`design.html` 等をブラウザや
+エディタのプレビューで開いてレビューします。GitHub PR 上では任意 .html はレンダリングされない
+前提のため、PR 本文の HTML 化は行いません（Out of Scope）。
+
+### 版管理と consumer 側 `.gitignore`
+
+生成 .html は **版管理対象外**です（Req 7.2）。本リポジトリの root `.gitignore` に
+`docs/specs/**/*.html` を追加済みで、生成は commit / PR 作成後・`git add` なしで走るため PR に
+混入しません。**consumer repo で本機能を有効化する場合**は、install 管理外のため各 repo の
+`.gitignore` に以下 1 行を手動追加してください（install.sh による自動追記は行いません）:
+
+```gitignore
+docs/specs/**/*.html
+```
+
+### 外部アップロードは本 spec 未実装（予約名）
+
+生成 .html を外部静的ホスティング（GitHub Pages 等）へアップロードする経路は本機能では
+**実装しません**（Req 6.1, 6.2 / Out of Scope）。採用する場合は本機能とは独立した別 opt-in gate
+（予約名 `SPEC_HTML_UPLOAD_ENABLED`）配下でのみ有効化する設計とし、既定では外部送信しません。
+本 spec では当該 env は定義・実装していません（未使用 env を作らない）。
+
+> **反映方法**: 本機能は `local-watcher/bin/modules/spec-html.sh` / `watcher-config.sh` /
+> `issue-watcher.sh` を変更するため、watcher ファイルを変更する他機能と同様、merge しただけでは
+> `$HOME/bin/` は古いままです。`cd ~/.idd-claude && git pull && ./install.sh --local` で反映します。
 
 ---
 
