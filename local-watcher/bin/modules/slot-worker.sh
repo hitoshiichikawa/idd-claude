@@ -6,12 +6,13 @@
 #   （本ファイル）と 1 つの sub-file が family を構成する（dispatcher_ / pclp_ / slot_ /
 #   _resume_* / _slot_* 等が混在する非 prefix 統一系のため、単一の共有 prefix は持たない）。
 #   分割マニフェスト（どの関数がどのファイルにあるか）:
-#     - slot-worker.sh          … 本ファイル: Slot Runner 本体 + ロガー + slot 失敗処理（計 13）
+#     - slot-worker.sh          … 本ファイル: Slot Runner 本体 + ロガー + slot 失敗処理（計 14）
 #         dispatcher_log / dispatcher_warn / dispatcher_error : Dispatcher 共通ロガー
 #         pclp_log / pclp_warn / pclp_error                   : pre-claim filter 共通ロガー
 #         _parallel_validate_slots                            : PARALLEL_SLOTS 設定値検証
 #         slot_log / slot_warn / slot_error                   : Slot Worker 共通ロガー
 #         _slot_mark_failed                                   : slot 失敗時の claude-failed 遷移
+#         _slot_reclaim_stale_claim                           : 異常終了時の claude-claimed 残留回収（#530）
 #         _slot_apply_dev_model_routing                       : size ラベル → DEV_MODEL 適用（#508）
 #         _slot_run_issue                                     : Slot Runner 本体（モード別ディスパッチ / #467）
 #     - slot-worker-resume.sh   … resume / slug 判定 / pre-claim / status publish（計 13）
@@ -178,6 +179,77 @@ $(build_recovery_hint "unknown")"
   gh issue comment "$NUMBER" --repo "$REPO" --body "$body" >/dev/null 2>&1 || true
 }
 
+# ─── 異常終了時の claim ラベル残留回収 (Issue #530 / EXIT trap 連結) ───
+#
+# `_slot_run_issue` が `_slot_mark_failed` に到達する **前** に異常終了する
+# （`set -u` クラッシュ / 想定外の非ゼロ終了）と `claude-claimed` が Issue に残留し、
+# dispatcher が「処理中」とみなして永久に再 pickup しなくなる停止状態に陥る（手動で
+# ラベルを外すまで復旧しない）。本関数を `_slot_run_issue` の EXIT trap に連結して、
+# slot 終了時に **実ラベル（ground-truth）に `claude-claimed` が残っている場合のみ**
+# それを除去して `auto-dev` へ戻し、後続の watcher サイクルで再 pickup 可能にする
+# （Req 2.1 / NFR 3.1）。
+#
+# ground-truth 基準を採る理由（claim 保持中フラグ方式ではなく）: design モードの
+# claim → `awaiting-design-review` 遷移は claude / PjM セッション内部で起こり
+# slot-worker からは観測しづらい。実ラベルを見れば正常完了（impl → `claude-picked-up`
+# 付け替え済 / design → `awaiting-design-review` 付け替え済 / `_slot_mark_failed` →
+# `claude-failed` 付与済 / needs-decisions・blocked・quota-wait・scaffolding-halt の各
+# 早期 return は claim 除去済）では `claude-claimed` が既に **不在** のため回収は自然に
+# no-op となり、Req 2.2 / 2.3 / 2.5 を構造的に満たす。
+#
+# 回収対象は `claude-claimed` に **限定** し `claude-picked-up` は触らない（Req 2.4 /
+# Req 2.6）。`claude-picked-up` は実行中の正常状態であり、その stale 判定は liveness
+# 3 観点（marker 経過 / slot lock / セッション存在）を持つ Stale Pickup Reaper (#379)
+# の責務。in-slot trap で無条件 revert すると実行中の正常な Issue を誤回収するため、
+# ここでは意図的に picked-up を対象外とする（両機構の非干渉 / Req 2.6）。
+#
+# 契約:
+#   - fail-open: gh 失敗で slot の exit code を変えない（呼び出し側も `|| true`）
+#   - 冪等: 既に不在の label 除去は gh 側で no-op（Req 2.5 / NFR 1.1）
+#   - `NUMBER` / `REPO` が空、または `NUMBER` が非数値のときは gh を叩かない防御
+#   - 回収を **実行したときのみ** 1 行ログ（NFR 2.1 / silent fail 禁止）。正常完了時は
+#     `claude-claimed` 不在で早期 return するためログを出さず既存ログ列を汚さない
+#
+# 引数: なし（`_slot_run_issue` のサブシェルグローバル NUMBER / REPO を参照）
+# 戻り値: 常に 0（fail-open）
+_slot_reclaim_stale_claim() {
+  # NUMBER は _slot_run_issue 冒頭（trap 設置前）で確定済のため trap 発火時は常に定義済
+  # だが、想定外の未設定・空・非数値でも gh を叩かない（未信頼 ID の使用直前検証 /
+  # CLAUDE.md §5）。REPO は Config 由来で常に設定済だが同様に防御する。
+  local n="${NUMBER:-}" _repo="${REPO:-}"
+  [ -n "$n" ] || return 0
+  [ -n "$_repo" ] || return 0
+  case "$n" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+
+  # ground-truth: 実ラベルに claude-claimed が残っているか確認する。取得失敗は fail-open
+  # （回収せず return 0）。EXIT trap は正常完了でも発火するため、取得失敗のたびに WARN を
+  # 出すとノイズになる。回収漏れは次 tick で Stale Pickup Reaper（opt-in 時）や再取得に委ねる。
+  local labels_json
+  labels_json=$(gh issue view "$n" --repo "$_repo" --json labels 2>/dev/null) || return 0
+  local has_claimed
+  has_claimed=$(printf '%s' "$labels_json" | jq -r --arg c "$LABEL_CLAIMED" '
+    if (.labels // null) | type == "array"
+    then any(.labels[]; .name == $c)
+    else false
+    end
+  ' 2>/dev/null) || has_claimed="false"
+  [ "$has_claimed" = "true" ] || return 0
+
+  # claude-claimed 残留 = _slot_mark_failed 到達前の異常終了。claim を除去し auto-dev を
+  # 確保する 1 リクエスト PATCH（_slot_mark_failed の combined PATCH と同型 / 原子的）。
+  # 処理中も auto-dev は除去されない設計だが、万一欠落していても --add-label で確実に戻す
+  # （gh は付与済みラベルの再付与を no-op として扱う / 冪等）。`--` でオプション解釈を
+  # 打ち切り、未信頼 ID によるフラグ注入を防ぐ（CLAUDE.md §5）。
+  gh issue edit "$n" --repo "$_repo" -- \
+    --remove-label "$LABEL_CLAIMED" \
+    --add-label "$LABEL_TRIGGER" >/dev/null 2>&1 || true
+
+  slot_log "claim 残留回収: claude-claimed 除去 + auto-dev 確保（異常終了検出 / 次 tick で再 pickup 可能 / Issue #530）"
+  return 0
+}
+
 # ─── Model Routing Phase 2: size ラベル → Developer モデル適用 (Issue #508) ───
 #
 # 当該 slot が起動時点で取得済みの Issue ラベル集合から size 値を読み取り、Model Router
@@ -288,6 +360,20 @@ _slot_run_issue() {
   TS=$(date +%Y%m%d-%H%M%S)
   LOG="$LOG_DIR/issue-${NUMBER}-${TS}.log"
 
+  # ── set -u 防御: mode 判定変数の全経路初期化（Issue #530 / Req 1） ──
+  # design 再入 / resume / stage-checkpoint により後段の無条件初期化ブロック（現状の
+  # `NEEDS_ARCHITECT="false"` / `ARCHITECT_REASON=""` / `MODE=""`）を通過しない経路で
+  # 実行されると、これらが未割り当てのまま mode 判定（後段 `[ "$NEEDS_ARCHITECT" = ...`
+  # / `case "$MODE"` 等）で参照され、`set -u` 下でサブシェルが即死し Issue が再処理
+  # 不能な停止状態に陥る。メタデータ抽出直後（EXIT trap 設置より前）に `:=` で確実に
+  # 定義済みにして全経路で未割り当て参照を防ぐ（defense-in-depth）。fresh 経路では
+  # 後段の無条件初期化が同じ既定値へ上書きするためセマンティクスは不変（後方互換な
+  # no-op のバグ修正 / opt-in gate なし / Req 1.5）。読み取り箇所側のガード
+  # （`${VAR:-}`）と併せた belt-and-suspenders とする。
+  : "${NEEDS_ARCHITECT:=false}"
+  : "${ARCHITECT_REASON:=}"
+  : "${MODE:=}"
+
   # slot 運用ログ（worktree 初期化・hook 結果など）。Issue ログとは別系統で残す（Req 6.2）。
   local SLOT_LOG="$LOG_DIR/slot-${IDD_SLOT_NUMBER}-${NUMBER}-${TS}.log"
   # 以降の slot_log 行は stdout (cron mailer) と SLOT_LOG の両方に書き出す
@@ -323,7 +409,11 @@ _slot_run_issue() {
   rs_set_issue "$NUMBER"
   # #325: token usage の Issue 単位サマリも同じ EXIT trap に連結する（rs_emit の発火を
   # 妨げないよう各々 || true で fail-open。出力順は run-summary → token-usage）。
-  trap 'rs_emit || true; tu_emit_issue_summary || true' EXIT
+  # #530: 最後に claim 残留回収を連結する。_slot_mark_failed 到達前の異常終了で
+  # claude-claimed が残った場合のみ（ground-truth 判定）除去して auto-dev へ戻す。既存
+  # emit を妨げないよう末尾に置き、fail-open（|| true）で exit code を変えない。正常
+  # 完了時は claude-claimed 不在で no-op（Req 2.2 / 2.3）。
+  trap 'rs_emit || true; tu_emit_issue_summary || true; _slot_reclaim_stale_claim || true' EXIT
 
   # ── Worktree 初期化（per-slot 永続 worktree）──
   local WT
@@ -683,10 +773,10 @@ _slot_run_issue() {
       return 0
     fi
 
-    if [ "$NEEDS_ARCHITECT" = "true" ]; then
+    if [ "${NEEDS_ARCHITECT:-}" = "true" ]; then
       MODE="design"
       rs_set_mode design
-      echo "🎨 #$NUMBER: Architect 必要 → design モード（理由: $ARCHITECT_REASON）" | tee -a "$LOG"
+      echo "🎨 #$NUMBER: Architect 必要 → design モード（理由: ${ARCHITECT_REASON:-}）" | tee -a "$LOG"
     else
       MODE="impl"
       rs_set_mode impl
@@ -778,7 +868,7 @@ _slot_run_issue() {
    - Issue 本文と既存コメント（\`gh issue view ${NUMBER} --comments\`）を必ず読む
    - 人間がコメントで回答済みの決定事項は requirements に反映する
 2. architect サブエージェントで設計書とタスク分割を保存
-   - Triage 判定理由: ${ARCHITECT_REASON}
+   - Triage 判定理由: ${ARCHITECT_REASON:-}
    - \`${SPEC_DIR_REL}/design.md\`（モジュール構成・データモデル・公開 IF・処理フロー・リスク）
    - \`${SPEC_DIR_REL}/tasks.md\`（Developer 向けタスク分割、各タスクが独立コミット可能な粒度）
 3. project-manager サブエージェントを **design-review モード** で起動
@@ -834,7 +924,7 @@ ${STEPS}
 EOF
 )
 
-    echo "--- Development 実行（$MODE）---" >> "$LOG"
+    echo "--- Development 実行（${MODE:-}）---" >> "$LOG"
     # Issue #66: Quota-Aware Watcher 経由で claude を起動
     local _qa_reset_file_design _qa_rc_design=0 _qa_ts_design
     _qa_ts_design=$(date +%Y%m%d-%H%M%S)
