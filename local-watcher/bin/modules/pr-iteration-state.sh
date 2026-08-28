@@ -175,11 +175,39 @@ ${marker}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_processing_comment_posted: 指定 PR・指定 round の着手表明コメントが既に投稿済みか判定
+#   （Issue #529 Req 2: 着手前段の checkout 失敗で同一 round が毎サイクル再試行される際の
+#   コメントスパムを抑止するための dedupe 判定）
+#   入力: $1=pr_number, $2=round
+#   戻り値: 0=投稿済み（再投稿を抑止すべき） / 1=未投稿（投稿すべき） /
+#           2=判定不能（gh 取得失敗。呼び出し元は fail-open で投稿側に倒す / AC 2.3）
+#
+#   設計判断:
+#     - 着手表明コメントは本文末尾に sentinel marker
+#       `<!-- idd-claude:pr-iteration-processing round=N -->` を含む（pi_post_processing_comment
+#       が付与）。この marker の完全一致で「同一 PR・同一 round のコメント既投稿」を判定する。
+#     - round は呼び出し元で算術計算された数値（next_round）であり、grep -F -- でリテラル
+#       部分一致する（未信頼値をパターン / オプションとして解釈させない / NFR 2.1）。
+#     - 副作用なし（読み取り専用）。gh 取得失敗は rc=2 で通知し、呼び出し元で fail-open。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_processing_comment_posted() {
+  local pr_number="$1"
+  local round="$2"
+  local marker="idd-claude:pr-iteration-processing round=${round}"
+  local comments
+  if ! comments=$(timeout "$PR_ITERATION_GIT_TIMEOUT" \
+      gh api "/repos/${REPO}/issues/${pr_number}/comments" --jq '.[].body' 2>/dev/null); then
+    return 2
+  fi
+  printf '%s' "$comments" | grep -Fq -- "$marker"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_post_processing_comment: round 着手表明コメントを投稿する（marker 書き込みなし）
 #   入力: $1=pr_number, $2=new_round, $3=max_rounds (表示用、`0`=無制限表記)
 #   戻り値: 0 固定（コメント投稿失敗は WARN のみ。ラベル誤遷移リスクが無いため
 #           round 全体を失敗扱いにはしない / NFR 1.1 既存挙動踏襲）
-#   Issue #122 Req 1.6 / 2.4
+#   Issue #122 Req 1.6 / 2.4 / Issue #529 Req 2
 #
 #   設計判断:
 #     - 既存 pi_post_processing_marker は「marker 書き込み + コメント投稿」の合成だったが、
@@ -187,11 +215,23 @@ ${marker}"
 #       marker 書き込みは round 終了時に成功 path でのみ行うよう分離した。
 #     - コメントは round 開始時の人間向け視認用なので、claude 実行前に投稿する
 #       （既存挙動 NFR 1.1 と等価）。
+#     - Issue #529 Req 2: 投稿前に同一 PR・同一 round の着手表明コメント既投稿を dedupe 判定し、
+#       既投稿なら再投稿しない（AC 2.1）。新 round では marker が未存在のため 1 回だけ投稿する
+#       （AC 2.2）。dedupe 判定に失敗した場合は投稿側へ fail-open（既存挙動を維持 / AC 2.3）。
 # ─────────────────────────────────────────────────────────────────────────────
 pi_post_processing_comment() {
   local pr_number="$1"
   local new_round="$2"
   local max_rounds="${3:-$PR_ITERATION_MAX_ROUNDS}"
+
+  # Issue #529 Req 2: 同一 round の着手表明コメントが既に投稿済みなら再投稿しない（AC 2.1）。
+  # rc=0（既投稿）のときのみ抑止。rc=1（未投稿）/ rc=2（判定不能）は投稿へ進む（AC 2.2 / 2.3 fail-open）。
+  local _pi_dedup_rc=0
+  pi_processing_comment_posted "$pr_number" "$new_round" || _pi_dedup_rc=$?
+  if [ "$_pi_dedup_rc" -eq 0 ]; then
+    pi_log "PR #${pr_number}: round=${new_round} 着手表明コメントは投稿済みのため再投稿を抑止 (#529 dedupe)"
+    return 0
+  fi
 
   local max_display
   if [ "$max_rounds" = "0" ]; then
