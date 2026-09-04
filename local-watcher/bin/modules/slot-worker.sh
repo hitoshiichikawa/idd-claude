@@ -330,6 +330,110 @@ _slot_apply_dev_model_routing() {
   return 0
 }
 
+# ─── Issue #533: needs-decisions 遷移未達時の claude-claimed 回収フォールバック ───
+#
+# needs-decisions のコメント投稿またはラベル遷移が完了できなかったときに、`claude-claimed`
+# を残留させず当該 Issue を次サイクルの再 pickup 対象へ戻す best-effort フォールバック
+# （Req 3.2 / 3.3）。`auto-dev` は Dispatcher の claim 時にも残置されたままのため、
+# `claude-claimed` を単独除去すれば「claim 系ラベル非在・auto-dev 保持」の状態へ収束し、
+# 次サイクルで Dispatcher が再 pickup できる（Req 3.2）。除去は grl_retry_label_op 経由で
+# rate-limit 起因失敗を有限回リトライする（gate off は 1 回実行 = 従来 API 消費）。除去自体が
+# 失敗しても #530 の EXIT trap 回収（_slot_reclaim_stale_claim）が最終防波堤となるため、
+# ここでは rc を吸収する best-effort とする。委譲事実は warn ログで明示する（Req 3.3 / NFR 2）。
+#
+# 参照グローバル: NUMBER / REPO / LABEL_CLAIMED（呼び出し元 _slot_run_issue のスコープ）
+# 引数: $1 = 未達となった操作の識別子（warn ログ用 / comment-failed / label-transition-failed）
+# rc: 常に 0
+_slot_reclaim_claimed_for_next_cycle() {
+  local reason="$1"
+  slot_warn "needs-decisions 遷移が未達のため claude-claimed を除去し次サイクル再 pickup へ委譲します（Issue #${NUMBER} / reason=${reason}）"
+  if ! grl_retry_label_op "$NUMBER" --repo "$REPO" --remove-label "$LABEL_CLAIMED"; then
+    slot_warn "needs-decisions: claude-claimed 除去のフォールバックにも失敗（Issue #${NUMBER} / #530 の EXIT trap 回収に委ねます）"
+  fi
+  return 0
+}
+
+# ─── Issue #533: needs-decisions のコメント投稿 / ラベル遷移の成否検証と宙吊り防止 ───
+#
+# Triage が needs-decisions を判定したときの「決定事項コメント投稿 + `claude-claimed` →
+# `needs-decisions` ラベル遷移」を、各 GitHub API 呼び出しの成否を検証しながら実行する。
+# 従来は両操作を `>/dev/null 2>&1 || true` で握り潰していたため、レート制限時間帯には
+# コメント 0 件・ラベル未遷移・`claude-claimed` 残留のまま「決定事項を起票しました」という
+# 成功ログが出力され、質問が人間に届かず次サイクルの再 pickup も起きない「宙吊り」状態に
+# なっていた（#533）。
+#
+# 不変条件（Req 3 / 最重要）: needs-decisions 遷移が完了できなかった場合でも `claude-claimed`
+# を残留させない。質問が人間へ届く（両操作成功）か、次サイクルで再 pickup される
+# （`claude-claimed` 単独除去で auto-dev 保持・claim 系ラベル非在へ戻す）かのいずれかを
+# 常に保証する。成功ログ（起票 / 取り消し済）は実際に成功したときだけ出力する（Req 1.1 / 1.2 /
+# 2.1 / 2.2 / 3.1）。
+#
+# sequencing（Req 6 / 誤誘導防止）: コメントを先に投稿し、成功したときだけラベル遷移を行う。
+# コメント失敗時に `needs-decisions` を付けると「質問が見えないのに要回答ラベルだけ付く」
+# 誤誘導になるため、`claude-claimed` のみ除去して次サイクルへ委ねる（次サイクルの再 Triage で
+# コメント再投稿 + 遷移が再試行される。コメント重複は許容 = requirements Open Question の PM 推奨）。
+#
+# ラベル遷移は grl_retry_label_op 経由（api-rate-guard.sh / #521）。gate
+# GH_API_STATE_RETRY_ENABLED=false（既定）では 1 回だけ実行 = 従来 API 消費（Req 5.3）。
+# gate on かつ rate-limit 起因失敗のみ有限回リトライ（Req 4.1）、非 rate-limit 失敗は即返却
+# （Req 4.3）、上限到達でも claude-claimed 残留を防ぐ（Req 4.2）。成功ログの正確性・claim
+# 非残留は gate の有効／無効に依らず常に成立する（Req 5.1 / 5.2）。
+#
+# 参照グローバル: NUMBER / REPO / LOG / DECISION_COUNT / TRIAGE_FILE / LABEL_CLAIMED /
+#   LABEL_NEEDS_DECISIONS（呼び出し元 _slot_run_issue のスコープ）
+# rc: 常に 0（needs-decisions 処理は当該サイクルの正常な終端であり失敗扱いにしない）
+_slot_publish_needs_decisions() {
+  local COMMENT
+  COMMENT=$(jq -r '
+    "## 🤔 実装着手前に確認が必要な事項\n\n" +
+    "Issue 内容を Claude Code の Product Manager で精査した結果、" +
+    "以下の判断は人間に委ねる必要があると判定しました。\n\n" +
+    "> " + .rationale + "\n\n" +
+    "---\n\n" +
+    (.decisions | to_entries | map(
+      "### " + ((.key + 1) | tostring) + ". " + .value.topic + "\n\n" +
+      "**質問**: " + .value.question + "\n\n" +
+      "**選択肢**:\n" +
+      (.value.options | map("- " + .) | join("\n")) + "\n\n" +
+      "**影響**: " + .value.impact + "\n\n" +
+      "**推奨**: " + .value.recommendation + "\n"
+    ) | join("\n---\n\n")) +
+    "\n\n---\n\n" +
+    "## 回答方法\n\n" +
+    "1. 各項目についてこの Issue にコメントで回答してください。\n" +
+    "2. すべての項目に結論が出たら、この Issue から **`needs-decisions` ラベルを外してください**。\n" +
+    "3. ラベルが外れた時点で Claude Code が自動で再 Triage し、追加論点が無ければ開発に着手します。\n" +
+    "4. Triage をスキップして強制着手したい場合は `skip-triage` ラベルを付与してください。"
+  ' "$TRIAGE_FILE")
+
+  # (1) 決定事項コメントの投稿（Req 1）。rc を検証し、成功時のみラベル遷移へ進む。
+  # 失敗時は成功ログを出さず warn で明示し（Req 1.2 / 1.3）、質問が見えない状態で
+  # needs-decisions を付けないため、claude-claimed のみ除去して次サイクルへ委ねる（Req 3.2）。
+  if ! gh issue comment "$NUMBER" --repo "$REPO" --body "$COMMENT" >/dev/null 2>&1; then
+    slot_warn "needs-decisions: 決定事項コメントの投稿に失敗しました（Issue #${NUMBER} / operation=comment）"
+    _slot_reclaim_claimed_for_next_cycle "comment-failed"
+    return 0
+  fi
+
+  # (2) claude-claimed → needs-decisions ラベル遷移（Req 2）。grl_retry_label_op で rc 検証。
+  # Phase C / Issue #52: claim を取り消し（claude-claimed 除去）+ needs-decisions 付与。
+  # 失敗時は「取り消し済」ログを出さず warn で明示し（Req 2.2 / 2.3 / 4.2）、コメントは投稿
+  # 済のため質問自体は届いているが、claude-claimed 残留で次サイクル再 pickup が起きないため、
+  # claude-claimed を単独除去して次サイクルへ委ねる（次サイクル再 Triage で遷移を再試行 / Req 3.2）。
+  if ! grl_retry_label_op "$NUMBER" --repo "$REPO" \
+      --remove-label "$LABEL_CLAIMED" --add-label "$LABEL_NEEDS_DECISIONS"; then
+    slot_warn "needs-decisions: claude-claimed→needs-decisions のラベル遷移に失敗しました（Issue #${NUMBER} / operation=label-transition）"
+    _slot_reclaim_claimed_for_next_cycle "label-transition-failed"
+    return 0
+  fi
+
+  # (3) 両操作成功（Req 1.1 / 2.1 / 6.3）: コメント投稿済・ラベル遷移済の一貫状態に収束。
+  # 本経路のログ行・ラベル遷移・戻り値は本機能導入前と同一（NFR 1.2）。
+  echo "🟡 #$NUMBER: $DECISION_COUNT 件の決定事項を起票しました" | tee -a "$LOG"
+  slot_log "Triage 結果: needs-decisions（claude-claimed 取り消し済）"
+  return 0
+}
+
 # ─── Slot Runner 本体: _slot_run_issue (Issue #16 / #467 で本体から移動) ───
 
 # 1 Issue を 1 slot worktree で処理する Worker 本体。
@@ -736,40 +840,10 @@ _slot_run_issue() {
         slot_log "Triage 結果: needs-decisions → auto-continue（#362, claude-claimed 除去済・次サイクル再 pickup 待機）"
         return 0
       fi
-      local COMMENT
-      COMMENT=$(jq -r '
-        "## 🤔 実装着手前に確認が必要な事項\n\n" +
-        "Issue 内容を Claude Code の Product Manager で精査した結果、" +
-        "以下の判断は人間に委ねる必要があると判定しました。\n\n" +
-        "> " + .rationale + "\n\n" +
-        "---\n\n" +
-        (.decisions | to_entries | map(
-          "### " + ((.key + 1) | tostring) + ". " + .value.topic + "\n\n" +
-          "**質問**: " + .value.question + "\n\n" +
-          "**選択肢**:\n" +
-          (.value.options | map("- " + .) | join("\n")) + "\n\n" +
-          "**影響**: " + .value.impact + "\n\n" +
-          "**推奨**: " + .value.recommendation + "\n"
-        ) | join("\n---\n\n")) +
-        "\n\n---\n\n" +
-        "## 回答方法\n\n" +
-        "1. 各項目についてこの Issue にコメントで回答してください。\n" +
-        "2. すべての項目に結論が出たら、この Issue から **`needs-decisions` ラベルを外してください**。\n" +
-        "3. ラベルが外れた時点で Claude Code が自動で再 Triage し、追加論点が無ければ開発に着手します。\n" +
-        "4. Triage をスキップして強制着手したい場合は `skip-triage` ラベルを付与してください。"
-      ' "$TRIAGE_FILE")
-
-      gh issue comment "$NUMBER" --repo "$REPO" --body "$COMMENT" >/dev/null 2>&1 || true
-      # Phase C / Issue #52: claim を取り消す（claude-claimed 除去）+ needs-decisions 付与。
-      # 次サイクルで人間が needs-decisions を外したら再ピックアップされる必要があるため、
-      # claim 系ラベルを残してはいけない。本機能導入前は claude-picked-up は未付与
-      # だったが、Phase C 以降は Dispatcher が claim ラベル（Issue #52 で claude-claimed
-      # に分離）を事前に付与しているためここで取り消す。
-      gh issue edit "$NUMBER" --repo "$REPO" \
-        --remove-label "$LABEL_CLAIMED" \
-        --add-label "$LABEL_NEEDS_DECISIONS" >/dev/null 2>&1 || true
-      echo "🟡 #$NUMBER: $DECISION_COUNT 件の決定事項を起票しました" | tee -a "$LOG"
-      slot_log "Triage 結果: needs-decisions（claude-claimed 取り消し済）"
+      # Issue #533: 決定事項コメント投稿とラベル遷移の成否を検証し、失敗時に claude-claimed を
+      # 残留させない（宙吊り防止）。COMMENT 組み立て・gh comment・claude-claimed→needs-decisions
+      # 遷移・成功ログはすべて _slot_publish_needs_decisions に集約した（testable 化 / CLAUDE.md §1）。
+      _slot_publish_needs_decisions
       return 0
     fi
 
