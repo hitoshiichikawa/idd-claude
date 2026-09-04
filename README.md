@@ -4591,6 +4591,30 @@ round 上限を `0` で無制限にしても、Claude が空コミットや「�
 「no-progress 連続 N round」「現在の連続カウンタ値」「上限値」が明示されるため、
 round 数超過と区別できます。
 
+#### 着手前段の堅牢化（#529 / holding worktree detach・コメント dedupe・着手前段 no-progress）
+
+slot worker が実装完了後も slot worktree（`~/.issue-watcher/worktrees/<owner>-<repo>/slot-N`）へ
+PR の head branch を checkout したまま残していると、Processor が `git checkout -B <head_ref>`
+を実行しても git の仕様（`fatal: '<branch>' is already used by worktree at ...`）で checkout が
+拒否されます。この失敗が続くと、着手表明コメントが毎サイクル再投稿されてスパム化し、round も
+no-progress 連続カウンタも進まないため escalate にも到達せず無限リトライになります（design PR は
+round 無制限のため被害が特に大）。#529 で以下を追加しました（新しい env var / gate / ラベルは
+導入せず、常時有効。誰も head branch を保持していない正常系は従来と完全に同一の no-op）:
+
+- **holding worktree の自動 detach**: `git checkout -B` の直前に、head branch を保持している
+  他 worktree（slot worker の残留分）を `git -C <wt> checkout --detach` で解放してから checkout
+  します。対象 head branch を保持する worktree のみが対象で、他 branch を保持する worktree や
+  現在の worktree（REPO_DIR 自身）には影響しません。detach 失敗（dirty 等）でも round を止めず
+  既存 checkout フローへ進みます（fail-safe）。
+- **着手表明コメントの dedupe**: 同一 PR・同一 round の「処理を開始しました」コメントが既に
+  投稿済みなら再投稿しません（新しい round では従来どおり 1 回だけ投稿）。判定に失敗しても
+  round を失敗扱いにせず投稿側へ fail-open します。
+- **着手前段失敗の no-progress 計上**: head branch の fetch / detach / checkout / prompt 構築など
+  「Claude 起動前（着手前段）」で失敗した round を no-progress 連続カウンタに加算し、
+  `PR_ITERATION_NO_PROGRESS_LIMIT`（既定 3）到達で `claude-failed` へ escalate します。Claude が
+  起動して失敗した round の既存挙動（marker 据え置き）は変更しません。design（round 無制限）でも
+  no-progress 上限で打ち切ります。
+
 #### hidden marker の後方互換性（#122）
 
 `no-progress-streak` キーは #122 で追加されました。**既存 marker（streak キー無し）が

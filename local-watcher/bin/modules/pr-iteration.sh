@@ -10,15 +10,16 @@
 #                                   round driver / 成功時ラベル確定
 #         process_pr_iteration（エントリ）/ pi_run_iteration（1 PR 分の round driver）/
 #         pi_pr_has_label / pi_fetch_candidate_prs / pi_resolve_max_rounds /
-#         pi_classify_pr_kind / pi_select_template / pi_finalize_labels /
-#         pi_finalize_labels_design
+#         pi_classify_pr_kind / pi_select_template / pi_detach_holding_worktrees /
+#         pi_finalize_labels / pi_finalize_labels_design
 #     - pr-iteration-comments.sh … 一般コメント収集 + filter chain
 #         pi_collect_general_comments / pi_general_filter_self / _resolved / _excessive /
 #         _oos / _event_style / pi_general_truncate
 #     - pr-iteration-state.sh    … PR body hidden marker の read/write + round outcome / streak
 #         pi_read_round_counter / pi_read_no_progress_streak / pi_read_last_run /
-#         pi_write_marker / pi_post_processing_comment / pi_post_processing_marker /
-#         pi_classify_round_outcome / pi_round_commit_pushed / pi_next_no_progress_streak
+#         pi_write_marker / pi_post_processing_comment / pi_processing_comment_posted /
+#         pi_post_processing_marker / pi_classify_round_outcome / pi_round_commit_pushed /
+#         pi_next_no_progress_streak
 #     - pr-iteration-oos.sh      … out-of-scope 還流 / 検出 / 内容ベース no-progress（#437）
 #         pi_route_out_of_scope_escalate / pi_detect_developer_oos_marker /
 #         pi_oos_fingerprint / pi_read_oos_no_progress_streak / pi_read_oos_fingerprint /
@@ -277,6 +278,72 @@ pi_select_template() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# pi_detach_holding_worktrees: head branch を保持している「他の」worktree を detach する
+#   （Issue #529 Req 1）
+#   入力: $1 = head_ref（未信頼。git のオプションとして解釈させない）
+#   戻り値: 0 固定（fail-safe: worktree 列挙・detach 失敗でも round を止めない / AC 1.5）
+#
+#   背景:
+#     slot worker が実装完了後も slot worktree（~/.issue-watcher/worktrees/<owner>-<repo>/slot-N）
+#     へ PR の head branch を checkout したまま残していると、Processor が REPO_DIR で
+#     `git checkout -B "$head_ref"` を実行しても git の仕様
+#     （`fatal: '<branch>' is already used by worktree at ...`）で checkout が拒否される。
+#     本関数を checkout の直前に呼び、head branch を保持する他 worktree を detach して解放する。
+#
+#   設計判断:
+#     - `git worktree list --porcelain` を awk でパースし、`branch refs/heads/<head_ref>` を
+#       保持する worktree の path を列挙する。値は substr で切り出し、path 中のスペースを保つ。
+#     - 未信頼な head_ref は awk `-v target=` で渡し、awk プログラムに inline 展開しない
+#       （NFR 2.1）。branch 値の完全一致で判定するため部分一致誤検出も起きない（AC 1.4）。
+#     - head_ref は git のオプションとしては一切渡さない（列挙は awk 内比較、detach は
+#       引数なしの `checkout --detach`）。`-` 始まりの head_ref でも git フラグ注入されない
+#       （NFR 2.2）。
+#     - 現在の worktree（REPO_DIR）自身が head_ref を保持する通常ケースは呼び出し元の
+#       `checkout -B` が扱えるため detach 対象から除外する（NFR 1.2 no-op / 不要な churn 回避）。
+#       git はブランチの checkout 先を 1 worktree に制約するため、他 worktree が保持している
+#       状況では REPO_DIR は保持していない（= 除外は正常系のみに効く）。
+#     - すべての git 操作に既存 PR_ITERATION_GIT_TIMEOUT（既定 60 秒）を適用し、無応答で
+#       1 watcher サイクルをブロックしない（NFR 3.1）。
+#     - detach 失敗（dirty 等）は WARN のみで round を止めず、既存 checkout フローへ進む
+#       （AC 1.5）。誰も head branch を保持していなければ何も detach しない（NFR 1.2）。
+# ─────────────────────────────────────────────────────────────────────────────
+pi_detach_holding_worktrees() {
+  local head_ref="${1-}"
+  [ -n "$head_ref" ] || return 0
+
+  # 現在の worktree（REPO_DIR）top-level を git 正準形で取得（worktree list の path と揃える）。
+  local current_top
+  current_top=$(timeout "$PR_ITERATION_GIT_TIMEOUT" git rev-parse --show-toplevel 2>/dev/null || echo "")
+
+  # refs/heads/<head_ref> を保持する worktree path を列挙（列挙失敗は空 / fail-safe）。
+  local holding
+  holding=$(timeout "$PR_ITERATION_GIT_TIMEOUT" git worktree list --porcelain 2>/dev/null \
+    | awk -v target="refs/heads/${head_ref}" '
+        /^worktree / { path = substr($0, 10) }
+        /^branch /   { if (substr($0, 8) == target) print path }
+      ' 2>/dev/null || true)
+
+  [ -n "$holding" ] || return 0
+
+  local wt
+  while IFS= read -r wt; do
+    [ -n "$wt" ] || continue
+    # 現在の worktree はスキップ（checkout -B が正常処理する / NFR 1.2）
+    if [ -n "$current_top" ] && [ "$wt" = "$current_top" ]; then
+      continue
+    fi
+    # 他 worktree を detach（引数なし checkout --detach で現 HEAD のまま branch を解放）。
+    # 失敗しても round を止めない（AC 1.5 fail-safe）。
+    if timeout "$PR_ITERATION_GIT_TIMEOUT" git -C "$wt" checkout --detach >/dev/null 2>&1; then
+      pi_log "PR iteration: head branch '${head_ref}' を保持する worktree '${wt}' を detach しました (#529)"
+    else
+      pi_warn "PR iteration: worktree '${wt}' の detach に失敗（checkout フローは継続 / fail-safe #529）"
+    fi
+  done <<< "$holding"
+  return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # pi_run_iteration: 1 PR 分の iteration を実行（fresh context Claude 起動）
 #   入力: $1=pr_json
 #   戻り値: 0=success(commit+push or reply-only), 1=failure, 2=escalated(round上限到達),
@@ -386,15 +453,21 @@ pi_run_iteration() {
   #   - $pi_sha_file : 1 行目=before_sha, 2 行目=after_sha
   # Issue #437 Req 4.2 / 4.3: subshell <-> 親 で Developer 構造化マーカーの検出種別を渡すための
   #   tmpfile（1 行: "design" | "spec-stale" | ""）。gate OFF では書かない（空のまま）。
-  local pi_soft_fail_file pi_recover_file pi_sha_file pi_oos_marker_file
+  # Issue #529 Req 3: 「着手前段（fetch / detach / checkout / before_sha 記録 / prompt build）
+  #   失敗」と「claude が起動したが失敗」を区別するための tmpfile。claude 起動の直前に
+  #   `reached-claude` を書き込む。subshell が非 0 終了したとき、本 file が空なら claude は
+  #   一度も起動しておらず round が実質消費されていない = 着手前段失敗として no-progress に計上する。
+  local pi_soft_fail_file pi_recover_file pi_sha_file pi_oos_marker_file pi_preclaim_file
   pi_soft_fail_file=$(mktemp -t "pi-softfail-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
   pi_recover_file=$(mktemp -t "pi-recover-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
   pi_sha_file=$(mktemp -t "pi-sha-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
   pi_oos_marker_file=$(mktemp -t "pi-oosmark-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
+  pi_preclaim_file=$(mktemp -t "pi-preclaim-${pr_number}-XXXXXX" 2>/dev/null || mktemp)
   : > "$pi_soft_fail_file"
   : > "$pi_recover_file"
   : > "$pi_sha_file"
   : > "$pi_oos_marker_file"
+  : > "$pi_preclaim_file"
 
   # サブシェル + trap で必ず base branch に戻す（AC 8.3）
   local rc=0
@@ -408,6 +481,11 @@ pi_run_iteration() {
       pi_warn "PR #${pr_number}: git fetch origin ${head_ref} に失敗"
       exit 1
     fi
+    # Issue #529 Req 1: checkout の直前に head branch を保持している他 worktree（slot worker の
+    # 残留分など）を detach して解放する。誰も保持していなければ no-op（NFR 1.2）。detach 失敗でも
+    # 既存 checkout フローへ進む（AC 1.5 fail-safe）。この checkout コードパスは kind 非依存で
+    # impl / design 両方が通るため 1 箇所の修正で両 kind をカバーする（AC 1.3）。
+    pi_detach_holding_worktrees "$head_ref" || true
     if ! timeout "$PR_ITERATION_GIT_TIMEOUT" git checkout -B "$head_ref" "origin/${head_ref}" >/dev/null 2>&1; then
       pi_warn "PR #${pr_number}: head branch '${head_ref}' の checkout に失敗"
       exit 1
@@ -438,6 +516,12 @@ pi_run_iteration() {
     #            （Req 5.1）。
     # set -e / pipefail 配下で `tee` や `jq` の非 0 exit を握り潰さないよう、
     # PIPESTATUS を即座にコピーしてから claude 本体の exit code を取り出す。
+    #
+    # Issue #529 Req 3: ここまで（fetch / detach / checkout / before_sha 記録 / prompt build）
+    # 到達 = 着手前段は成功。以降の失敗（claude 非 0 / branch guard）は既存挙動（marker 据え置き）で
+    # 扱う。本 file が空のまま subshell が非 0 終了した場合のみ、親側で着手前段失敗として
+    # no-progress 計上 + 上限 escalate へ流す。
+    printf 'reached-claude' > "$pi_preclaim_file"
     local claude_rc=0
     set +e
     claude \
@@ -594,7 +678,12 @@ pi_run_iteration() {
   if [ -s "$pi_oos_marker_file" ]; then
     dev_oos_marker=$(cat "$pi_oos_marker_file")
   fi
-  rm -f "$pi_soft_fail_file" "$pi_recover_file" "$pi_sha_file" "$pi_oos_marker_file"
+  # Issue #529 Req 3: claude 起動到達フラグ（空 = 着手前段で失敗し claude 未起動）。
+  local pi_preclaim_reached="false"
+  if [ -s "$pi_preclaim_file" ]; then
+    pi_preclaim_reached="true"
+  fi
+  rm -f "$pi_soft_fail_file" "$pi_recover_file" "$pi_sha_file" "$pi_oos_marker_file" "$pi_preclaim_file"
 
   # Issue #122 Req 5: 失敗扱い（quota soft-fail / claude crash / post-round-commit fail）の
   # round では marker を据え置く（round counter / no-progress streak いずれも増減させない）。
@@ -775,7 +864,36 @@ pi_run_iteration() {
     pi_warn "PR #${pr_number}: kind=${kind} ラベル遷移失敗、needs-iteration を残置"
     return 1
   else
-    # AC 6.3 (#26) / #35 AC 3.3: 失敗 → needs-iteration を残し WARN
+    # Issue #529 Req 3: 「着手前段（fetch / detach / checkout / prompt build）失敗」と
+    # 「claude が起動したが失敗」を区別する。前者は claude が一度も起動しておらず round が
+    # 実質消費されていないため、no-progress として streak に計上し上限で escalate する
+    # （毎サイクル同一 round のリトライが無限に続くのを打ち切る / AC 3.1〜3.5）。
+    # 後者は既存挙動（marker 据え置き / needs-iteration 残置）を保つ（claude CLI 失敗の
+    # 既存契約 / Issue #122 Req 5.3）。design（round 無制限）でも no-progress 上限で escalate
+    # する（max_rounds に依らず PR_ITERATION_NO_PROGRESS_LIMIT で打ち切る / AC 3.5）。
+    if [ "$pi_preclaim_reached" != "true" ]; then
+      # 着手前段失敗: streak を +1（commit 無し）して marker へ永続化する。round は据え置く
+      # （= 同一 round の着手表明コメント dedupe（Req 2）を有効に保つため next_round を進めない）。
+      local pre_streak
+      pre_streak=$(pi_next_no_progress_streak "false" "$prev_streak")
+      # marker 書き込み失敗は WARN のみ（streak 永続化に失敗しても round を無限化させない）。
+      if ! pi_write_marker "$pr_number" "$round" "$pre_streak" "$_pi_oos_marker_streak" "$_pi_oos_marker_fingerprint"; then
+        pi_warn "PR #${pr_number}: kind=${kind} round=${next_round} 着手前段失敗の marker 書き込みに失敗（streak 加算を永続化できず）"
+      fi
+      local pre_outcome
+      pre_outcome=$(pi_classify_round_outcome "false" "$pre_streak" "$PR_ITERATION_NO_PROGRESS_LIMIT")
+      if [ "$pre_outcome" = "escalate" ]; then
+        # AC 3.3 / 3.4 / 3.5: no-progress 上限到達 → needs-iteration 除去 + claude-failed 付与。
+        # ログに PR 番号 / kind / round / streak / limit を含める（AC 3.4）。
+        pi_log "PR #${pr_number}: kind=${kind} round=${next_round} no-progress-streak=${pre_streak} limit=${PR_ITERATION_NO_PROGRESS_LIMIT} reason=preclaim-no-progress escalate"
+        pi_escalate_to_failed "$pr_number" "$next_round" "$max_rounds" "no-progress" "$pre_streak" || true
+        return 2
+      fi
+      # AC 3.1 / 3.2: 上限未満 → needs-iteration 据え置きで次サイクル再試行を許可。
+      pi_log "PR #${pr_number}: kind=${kind} round=${next_round} action=preclaim-no-progress (needs-iteration を残置, streak=${pre_streak}/${PR_ITERATION_NO_PROGRESS_LIMIT})"
+      return 1
+    fi
+    # AC 6.3 (#26) / #35 AC 3.3: claude 起動後の失敗 → needs-iteration を残し WARN
     # Issue #122 Req 5.3: claude CLI が非 0 終了した round では marker 据え置き
     # （上記 case で recover_status が none: / post-round-commit:ok のときのみここに来るが、
     # rc != 0 の場合は claude が失敗しているので marker は触らない）
