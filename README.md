@@ -5171,7 +5171,7 @@ REPO=owner/repo REPO_DIR=$HOME/work/repo \
 ### バケット可視化ログの読み方
 
 `GH_API_BUCKET_LOG_ENABLED=true` のとき、各サイクル終端に以下の固定書式 1 行が `LOG_DIR`
-配下へ出力されます（`/rate_limit` 参照は rate limit を消費しません）:
+配下へ出力されます:
 
 ```text
 [2026-07-29 12:00:00] [owner/repo] gh-rate-limit: core=4990/5000 graphql=4800/5000 search=28/30
@@ -5181,15 +5181,33 @@ REPO=owner/repo REPO_DIR=$HOME/work/repo \
   `grep 'gh-rate-limit:'` で事後検索できます。
 - **graphql バケット**（5,000/h をアカウント内の全ツールで共有）が枯渇の主動機のため、
   縮退判定の主対象です。残量が急減していれば枯渇の予兆です。
-- 取得に失敗した場合は `gh-rate-limit: WARN: ...` を出力してサイクルは継続します。
+- **取得経路（#536）**: `graphql` 欄は GraphQL の `rateLimit` クエリ（実 GraphQL 消費を反映する
+  経路）から取得します。`core` / `search` 欄は従来どおり REST `gh api rate_limit`（rate limit を
+  消費しない参照経路）から取得します。OAuth token 認証では REST `.resources.graphql` が常に
+  `5000/5000` の名目値を返し実消費を反映しないため、graphql に限り取得経路を GraphQL クエリへ
+  是正しました。
+- **API 消費（#536 / #521 Req 3.2 緩和の migration note）**: graphql 残量取得は 1 サイクルあたり
+  少量（目安 1〜2pt）の GraphQL 消費を許容します（縮退判定用と可視化用で最大 2 回発火しうる）。
+  core / search は従来どおり非消費経路を維持します。
+- 取得に失敗した場合は `gh-rate-limit: WARN: ...` を出力してサイクルは継続します。失敗種別に
+  応じて分岐します（#536 判断 2）:
+  - **graphql 取得が rate limit 起因で失敗**した場合は graphql 残量を **0 とみなし**、
+    `GH_API_DEGRADE_ENABLED=true` なら非必須プロセッサを skip します（枯渇時に縮退が効かなく
+    なる事態を防ぐ）。skip WARN には判定根拠（取得失敗理由・`bucket=graphql`・閾値）を含めます。
+  - **graphql 取得が rate limit 以外**（タイムアウト・ネットワーク障害・パース失敗等）で失敗した
+    場合、および core / search の REST 取得が失敗した場合は、従来どおり安全側で全プロセッサを
+    実行します。
 
 ### 縮退の優先順位（essential vs non-essential）
 
-`GH_API_DEGRADE_ENABLED=true` のとき、graphql 残量が `GH_API_DEGRADE_GRAPHQL_THRESHOLD`
-（既定 500）を下回ると、**非必須（non-essential）プロセッサを当該サイクルで skip** し、
+`GH_API_DEGRADE_ENABLED=true` のとき、graphql 実残量（GraphQL `rateLimit` クエリ由来 / #536）が
+`GH_API_DEGRADE_GRAPHQL_THRESHOLD`（既定 500）を下回ると、**非必須（non-essential）プロセッサを
+当該サイクルで skip** し、
 `gh-rate-limit: WARN: skip processor=<name> reason=degrade bucket=graphql remaining=<r> threshold=<t>`
-を出力します。**必須（essential）プロセッサは残量にかかわらず skip されません**（dispatch と
-状態遷移の完遂性を守る / NFR 2.2）:
+を出力します。graphql 残量取得が rate limit 起因で失敗した場合も残量 0 とみなして同様に skip し、
+`reason=degrade-graphql-fetch-rate-limited` を含む WARN を出力します（#536 判断 2）。**必須
+（essential）プロセッサは残量にかかわらず skip されません**（dispatch と状態遷移の完遂性を守る /
+NFR 2.2）:
 
 | 分類 | プロセッサ | 縮退時 |
 |---|---|---|
@@ -5201,8 +5219,10 @@ REPO=owner/repo REPO_DIR=$HOME/work/repo \
 
 ### fail-safe / 後方互換
 
-- スナップショット取得・バケット残量取得・REST 逃がしのいずれの失敗も、従来の個別取得 /
-  従来 GraphQL 経路へフォールバックしサイクルを継続します（warn ログを 1 行残す）。
+- スナップショット取得・REST 逃がし・core/search のバケット残量取得の失敗は、従来の個別取得 /
+  従来 GraphQL 経路へフォールバックしサイクルを継続します（warn ログを 1 行残す）。graphql 残量
+  取得の失敗のみ、rate limit 起因なら残量 0 とみなして縮退（縮退有効時）、それ以外なら安全側で
+  全プロセッサ実行へフォールバックします（#536 判断 2）。いずれの失敗もサイクルは中断しません。
 - 状態遷移系ラベル操作のリトライは有限回（`GH_API_STATE_RETRY_MAX_ATTEMPTS`）で打ち切り、
   上限到達でも `claude-picked-up` を残置したまま次 tick で再評価されます（孤児化しない）。
 - 既存 env var 名 / ラベル名 / exit code / cron 登録文字列 / ログ出力先は本機能で変更しません。
