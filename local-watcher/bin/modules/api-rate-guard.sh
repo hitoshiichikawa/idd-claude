@@ -27,8 +27,10 @@
 #   - ロガー grl_log / grl_warn / grl_error は core_utils.sh に定義（本体より前に source）。
 #   - グローバル変数（$REPO / $REPO_SLUG / $LABEL_TRIGGER / $GH_API_*）は
 #     watcher-config.sh が本体 source 前に定義・正規化済み。
-#   - モジュールグローバル: GRL_SNAPSHOT_STATUS（active/inactive）/ GRL_BUCKET_* を
-#     grl_snapshot_init / grl_buckets_refresh が代入する（単一 writer = flock 済み main）。
+#   - モジュールグローバル: GRL_SNAPSHOT_STATUS（active/inactive）/ GRL_BUCKET_*（core/search
+#     の REST 由来値・全体 status）/ GRL_BUCKET_GRAPHQL_STATUS（graphql 取得の
+#     ok/rate_limited/unavailable/disabled）を grl_snapshot_init / grl_buckets_refresh /
+#     grl_graphql_bucket_refresh が代入する（単一 writer = flock 済み main）。
 #   - 外部 CLI: gh / jq / date / mktemp / mv / cat / timeout。
 #   - すべての新挙動は対応 gate（GH_API_*_ENABLED）が `true` 厳密一致のときのみ発火し、
 #     それ以外（未設定 / 不正値 / 取得失敗）は従来の個別取得・従来 mutation・従来 GraphQL へ
@@ -198,38 +200,98 @@ grl_issue_snapshot_or_live() {
 # Req 3 / 4: バケット別 rate limit の可視化・縮退用残量取得
 # ─────────────────────────────────────────────────────────────────────────────
 
-# `gh api rate_limit`（プライマリ rate limit を消費しない参照経路 / Req 3.2）で core /
-# graphql / search バケットの remaining・limit をモジュールグローバルへ取り込む。
-# BUCKET_LOG / DEGRADE のいずれも無効なら新規 API 呼び出しゼロで即 return（NFR 1.1）。
-# 取得 / パース失敗は warn + GRL_BUCKET_STATUS=unavailable で継続（Req 3.4 / NFR 2.1）。
-# rc: 常に 0（fail-safe）。
+# core / search は REST `gh api rate_limit`（プライマリ rate limit を消費しない参照経路 /
+# Req 1.2, 3.2）から、graphql は GraphQL `rateLimit` クエリ（実 GraphQL 消費を反映する経路 /
+# 判断 1 仮案 A / Req 1.1, 1.3, 1.4 / #536）から remaining・limit をモジュールグローバルへ
+# 取り込む。REST の `.resources.graphql`（OAuth token では常に 5000/5000 の名目値）は
+# graphql 残量に用いない。BUCKET_LOG / DEGRADE のいずれも無効なら新規 API 呼び出しゼロで
+# 即 return（GraphQL クエリも REST も呼ばない / Req 5.1 / NFR 1.1）。
+# core/search REST 取得・パース失敗は warn + GRL_BUCKET_STATUS=unavailable で継続し、graphql
+# 取得失敗は grl_graphql_bucket_refresh が GRL_BUCKET_GRAPHQL_STATUS へ種別を反映する
+# （Req 3.4 / 4.1 / 4.3 / NFR 2.1）。rc: 常に 0（fail-safe / Req 4.5）。
 grl_buckets_refresh() {
   if [ "${GH_API_BUCKET_LOG_ENABLED:-false}" != "true" ] \
     && [ "${GH_API_DEGRADE_ENABLED:-false}" != "true" ]; then
     GRL_BUCKET_STATUS="disabled"
+    GRL_BUCKET_GRAPHQL_STATUS="disabled"
     return 0
   fi
+  # core / search: REST `gh api rate_limit`（非消費経路 / Req 1.2, 3.2）。
+  # REST の `.resources.graphql` は名目値のため graphql 残量には用いず、下の
+  # grl_graphql_bucket_refresh が GraphQL クエリで実残量を取得する（Req 1.1, 1.4）。
   local json
   if ! json=$(gh api rate_limit 2>/dev/null); then
-    grl_warn "rate_limit の取得に失敗（バケット可視化 / 縮退は当サイクル無効化して継続 / Req 3.4, NFR 2.1）"
+    grl_warn "rate_limit（core/search）の取得に失敗（当サイクルの core/search 可視化を無効化して継続 / Req 3.4, NFR 2.1）"
     GRL_BUCKET_STATUS="unavailable"
+  else
+    local parsed
+    parsed=$(printf '%s' "$json" | jq -r '
+      [ (.resources.core.remaining // "?"), (.resources.core.limit // "?"),
+        (.resources.search.remaining // "?"), (.resources.search.limit // "?") ]
+      | @tsv' 2>/dev/null)
+    if [ -z "$parsed" ]; then
+      grl_warn "rate_limit（core/search）のパースに失敗（当サイクルの core/search 可視化を無効化して継続 / Req 3.4）"
+      GRL_BUCKET_STATUS="unavailable"
+    else
+      IFS=$'\t' read -r GRL_BUCKET_CORE_REMAINING GRL_BUCKET_CORE_LIMIT \
+        GRL_BUCKET_SEARCH_REMAINING GRL_BUCKET_SEARCH_LIMIT <<< "$parsed"
+      GRL_BUCKET_STATUS="ok"
+    fi
+  fi
+  # graphql: GraphQL rateLimit クエリで実残量を取得（実 GraphQL 消費を反映 / Req 1.1, 1.3）。
+  grl_graphql_bucket_refresh
+  return 0
+}
+
+# GraphQL `rateLimit` クエリ（`gh api graphql -f query='{ rateLimit { limit used remaining
+# resetAt } }'`）で graphql バケットの実残量・上限を取得しモジュールグローバルへ取り込む
+# （判断 1 仮案 A / Req 1.1, 1.3, 1.4 / #536）。REST `.resources.graphql`（OAuth token では
+# 常に 5000/5000 の名目値）は用いない。クエリ文字列は固定リテラルで未信頼入力を inline
+# しない（NFR 5.1）。取得は 1 サイクルあたり少量（目安 1pt。#521 Req 3.2 を graphql に限り
+# 緩和 / NFR 1.1）を消費する。取得失敗は種別を判定して状態へ反映する:
+#   - rate limit 起因（RATE_LIMITED / HTTP 429/403 / rate limit 文言）
+#       → GRL_BUCKET_GRAPHQL_STATUS=rate_limited / REMAINING=0
+#         （縮退判定で残量 0 とみなす / Req 4.1, 4.2）
+#   - それ以外（timeout / network / パース失敗）
+#       → GRL_BUCKET_GRAPHQL_STATUS=unavailable
+#         （従来どおり安全側で全プロセッサ実行 / Req 4.3, 4.4）
+# 失敗検出は gh の非ゼロ rc、または rc=0 でも body に errors[] を含む GraphQL エラーの双方を
+# 見る。rate limit 起因かは既存 grl_retry_label_op と同一パターンを stdout+stderr へ適用する。
+# rc: 常に 0（fail-safe / Req 4.5）。
+grl_graphql_bucket_refresh() {
+  local out rc=0
+  # stdout+stderr を結合して捕捉する（成功時 stderr は空でクリーンな JSON / 失敗時は
+  # rate limit 文言の検出に stderr が必要 / GraphQL 応答の非ゼロ rc を || で捕捉して set -e 回避）。
+  out=$(gh api graphql -f query='{ rateLimit { limit used remaining resetAt } }' 2>&1) || rc=$?
+  # 失敗検出: gh の非ゼロ rc、または rc=0 でも body に errors[] を含む GraphQL エラー。
+  local has_gql_error=1
+  printf '%s' "$out" | jq -e '.errors and (.errors | length > 0)' >/dev/null 2>&1 && has_gql_error=0
+  if [ "$rc" -ne 0 ] || [ "$has_gql_error" -eq 0 ]; then
+    # 未信頼文言は grep へ stdin 経由で渡す（引数注入なし / NFR 5.1）。
+    if printf '%s' "$out" | grep -qiE 'rate.?limit|RATE_LIMITED|HTTP 429|HTTP 403|too many requests'; then
+      GRL_BUCKET_GRAPHQL_REMAINING="0"
+      GRL_BUCKET_GRAPHQL_LIMIT="?"
+      GRL_BUCKET_GRAPHQL_STATUS="rate_limited"
+      grl_warn "graphql 残量取得に失敗（rate limit 起因 / 残量 0 とみなして縮退判定 / Req 4.1, 4.2）"
+      return 0
+    fi
+    GRL_BUCKET_GRAPHQL_REMAINING="?"
+    GRL_BUCKET_GRAPHQL_LIMIT="?"
+    GRL_BUCKET_GRAPHQL_STATUS="unavailable"
+    grl_warn "graphql 残量取得に失敗（rate limit 以外 / 安全側で全プロセッサ実行 / Req 4.3, 4.4）"
     return 0
   fi
   local parsed
-  parsed=$(printf '%s' "$json" | jq -r '
-    [ (.resources.core.remaining // "?"), (.resources.core.limit // "?"),
-      (.resources.graphql.remaining // "?"), (.resources.graphql.limit // "?"),
-      (.resources.search.remaining // "?"), (.resources.search.limit // "?") ]
-    | @tsv' 2>/dev/null)
+  parsed=$(printf '%s' "$out" | jq -r '[ (.data.rateLimit.remaining // "?"), (.data.rateLimit.limit // "?") ] | @tsv' 2>/dev/null || true)
   if [ -z "$parsed" ]; then
-    grl_warn "rate_limit のパースに失敗（バケット可視化 / 縮退は当サイクル無効化して継続 / Req 3.4）"
-    GRL_BUCKET_STATUS="unavailable"
+    GRL_BUCKET_GRAPHQL_REMAINING="?"
+    GRL_BUCKET_GRAPHQL_LIMIT="?"
+    GRL_BUCKET_GRAPHQL_STATUS="unavailable"
+    grl_warn "graphql 残量のパースに失敗（rate limit 以外 / 安全側で全プロセッサ実行 / Req 4.3, 4.4）"
     return 0
   fi
-  IFS=$'\t' read -r GRL_BUCKET_CORE_REMAINING GRL_BUCKET_CORE_LIMIT \
-    GRL_BUCKET_GRAPHQL_REMAINING GRL_BUCKET_GRAPHQL_LIMIT \
-    GRL_BUCKET_SEARCH_REMAINING GRL_BUCKET_SEARCH_LIMIT <<< "$parsed"
-  GRL_BUCKET_STATUS="ok"
+  IFS=$'\t' read -r GRL_BUCKET_GRAPHQL_REMAINING GRL_BUCKET_GRAPHQL_LIMIT <<< "$parsed"
+  GRL_BUCKET_GRAPHQL_STATUS="ok"
   return 0
 }
 
@@ -241,7 +303,8 @@ grl_buckets_log() {
   if [ "${GH_API_BUCKET_LOG_ENABLED:-false}" != "true" ]; then
     return 0
   fi
-  # cycle 終端の残量を反映するため再取得する（rate_limit は非消費 / Req 3.2）。
+  # cycle 終端の残量を反映するため再取得する（core/search の REST は非消費 / Req 3.2、
+  # graphql は GraphQL クエリで少量消費 / #521 Req 3.2 の graphql 限定緩和 / NFR 1.1）。
   grl_buckets_refresh
   if [ "${GRL_BUCKET_STATUS:-}" != "ok" ]; then
     grl_warn "バケット残量を取得できず可視化ログを出力できません（Req 3.4）"
@@ -251,31 +314,45 @@ grl_buckets_log() {
   return 0
 }
 
-# 非必須プロセッサ call site の縮退 gate。graphql バケット残量が閾値を下回ったら skip
-# （rc=1）+ WARN（bucket・残量・閾値を含む / Req 4.1, 4.2, 4.5 / NFR 4.2）。
-# gate off / 残量未取得 / 残量が非整数のときは常に実行（rc=0 / 安全側 / Req 4.6 / NFR 2.2）。
-# essential プロセッサは呼び出し側で本 gate を通さないため常に実行される（Req 4.3）。
+# 非必須プロセッサ call site の縮退 gate。graphql バケットの実残量が閾値を下回ったら skip
+# （rc=1）+ WARN（bucket・残量・閾値を含む / Req 2.1, 2.2, 4.5 / NFR 4.2）。判定は graphql 取得
+# 結果（GRL_BUCKET_GRAPHQL_STATUS）に基づく:
+#   - rate_limited（rate limit 起因の graphql 取得失敗）→ 残量 0 とみなして skip + WARN
+#     （取得失敗理由・bucket・閾値を含む / Req 4.1, 4.2）
+#   - ok かつ 残量 < 閾値 → skip + WARN（Req 2.1, 2.2）
+#   - ok かつ 残量 >= 閾値 → 実行（Req 2.3）
+# gate off / graphql 残量未取得（unavailable = rate limit 以外の失敗 / パース失敗）/ 残量が
+# 非整数のときは常に実行（rc=0 / 安全側 / Req 2.4 / 4.3 / 4.6 / NFR 2.2）。essential プロセッサは
+# 呼び出し側で本 gate を通さないため常に実行される。
 # Args: $1 = プロセッサ名（skip ログに記録）
 # rc: 0=実行してよい / 1=当サイクルは skip
 grl_degrade_should_run() {
   local name="$1"
-  # gate off は常に実行（従来挙動 / Req 4.6）
+  # gate off は常に実行（従来挙動 / Req 2.4, 4.6）
   if [ "${GH_API_DEGRADE_ENABLED:-false}" != "true" ]; then
     return 0
   fi
-  # 残量が取得できていない（bucket 取得失敗等）→ 安全側で実行（必須処理を守る / NFR 2.2）
-  if [ "${GRL_BUCKET_STATUS:-}" != "ok" ]; then
+  local threshold="${GH_API_DEGRADE_GRAPHQL_THRESHOLD:-500}"
+  local gql_status="${GRL_BUCKET_GRAPHQL_STATUS:-}"
+  # rate limit 起因の graphql 取得失敗 → 残量 0 とみなして skip
+  # （取得失敗理由・bucket・閾値を WARN に記録 / Req 4.1, 4.2）
+  if [ "$gql_status" = "rate_limited" ]; then
+    grl_warn "skip processor=$name reason=degrade-graphql-fetch-rate-limited bucket=graphql remaining=0 threshold=$threshold"
+    return 1
+  fi
+  # graphql 残量が取得できていない（rate limit 以外の失敗 / 未取得）→ 安全側で実行
+  # （必須処理を守る / Req 4.3 / NFR 2.2）
+  if [ "$gql_status" != "ok" ]; then
     return 0
   fi
   local remaining="${GRL_BUCKET_GRAPHQL_REMAINING:-}"
-  local threshold="${GH_API_DEGRADE_GRAPHQL_THRESHOLD:-500}"
   # 残量が非整数（"?" 等）→ 判定不能なので安全側で実行
   case "$remaining" in
     ''|*[!0-9]*) return 0 ;;
   esac
   if [ "$remaining" -lt "$threshold" ]; then
     # 閾値割れ → WARN + skip。skip ログに processor 名・bucket・残量・閾値を含める
-    # （Req 4.1 WARN / Req 4.5 skip 根拠 / NFR 4.2）。
+    # （Req 2.1 skip / Req 2.2 WARN / Req 4.5 skip 根拠 / NFR 4.2）。
     grl_warn "skip processor=$name reason=degrade bucket=graphql remaining=$remaining threshold=$threshold"
     return 1
   fi
