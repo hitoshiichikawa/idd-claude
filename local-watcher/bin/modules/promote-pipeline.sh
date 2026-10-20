@@ -56,9 +56,33 @@ pp_resolve_target_branch() {
 
 # pp_issue_has_label: Issue が指定ラベルを持つか確認するヘルパー。
 # 戻り値: 0 = 持つ / 1 = 持たない or 取得失敗
+#
+# #535: リンク Issue のラベル確認 API を N 非依存の定数に抑えるため、呼び出し元
+# （`pp_collect_merged_issues`）が 1 回の `gh api graphql` でまとめ取得して構築した
+# in-memory マップ `PP_ISSUE_LABELS`（動的スコープで参照）を優先利用する。
+#   - マップが宣言されており当該 Issue のエントリを持つ場合: マップから判定して
+#     `gh issue view` を発火させない（同一 Issue のラベルを 1 サイクル内で重複取得
+#     しない / Req 1.1, 1.2, NFR 2.1）。空ラベルでも key が set なら「持たない」と
+#     確定し、フォールバックしない。
+#   - マップが未宣言（extract_function で単体抽出した既存テスト文脈）または当該 Issue
+#     のエントリが無い（graphql 一括取得の失敗・部分欠落）場合: 従来どおり
+#     `gh issue view --json labels` を 1 回呼んでフォールバック判定する（Req 4.1 の
+#     fail-continue / 既存テスト互換 / シグネチャ・既定挙動を保つ）。
 pp_issue_has_label() {
   local issue_number="$1"
   local label="$2"
+  # #535: in-memory マップ優先。`declare -p` は動的スコープで呼び出し元 local を
+  # 参照でき、未宣言なら非 0 で抜けてフォールバックへ。`${arr[k]+set}` は nounset
+  # 下でも安全な「key set 判定」パラメータ展開。
+  if declare -p PP_ISSUE_LABELS >/dev/null 2>&1 \
+     && [ "${PP_ISSUE_LABELS[$issue_number]+set}" = "set" ]; then
+    # マップ値は改行区切りのラベル名集合。完全一致行があれば当該ラベル保持。
+    # `-x`（行全体一致）+ `-F`（固定文字列）+ `--`（オプション打ち切り）で
+    # `ready-for-review` が `ready-for-review-2` 等に部分一致しないようにする。
+    printf '%s\n' "${PP_ISSUE_LABELS[$issue_number]}" \
+      | grep -qxF -- "$label"
+    return $?
+  fi
   local labels_json
   if ! labels_json=$(timeout "$PROMOTE_GIT_TIMEOUT" \
       gh issue view "$issue_number" --repo "$REPO" --json labels 2>/dev/null); then
@@ -68,6 +92,108 @@ pp_issue_has_label() {
     '.labels // [] | map(.name) | index($l)' >/dev/null 2>&1
 }
 
+# pp_fetch_issue_labels_map: 検証済みリンク Issue 番号群のラベル状態を 1 回の
+# `gh api graphql`（GraphQL alias 一括クエリ）でまとめ取得し、呼び出し元スコープの
+# 連想配列 `PP_ISSUE_LABELS`（Issue 番号 → 改行区切りラベル名集合）へ格納する（#535）。
+#
+# N 非依存の核心: リンク Issue が N 件でも GitHub API 呼び出しは常に 1 回のみ発火する
+# （Req 1.1）。取得対象は「当該サイクルの正確なリンク Issue 集合」に限定されるため、
+# 固定件数上限によるサイレントな取りこぼしを起こさない（Req 1.5）。closed Issue も
+# `issue(number:)` で自然に取得できる。
+#
+# 動的スコープ契約:
+#   呼び出し元は `local -A PP_ISSUE_LABELS` を宣言してから本関数を呼ぶこと。本関数は
+#   `PP_ISSUE_LABELS` を再宣言（local 化）せず、既存の連想配列へ書き込む（bash の
+#   動的スコープにより呼び出し元 local を変更する）。トップレベル副作用は持たない
+#   （module は関数定義のみ / `declare -A` をトップレベルに置かない）。
+#
+# 入力（stdin）: リンク Issue 番号を 1 行 1 件（`^[0-9]+$` 済み前提だが本関数でも再検証）
+# 副作用:
+#   - PP_ISSUE_LABELS[<番号>] を設定（存在する Issue は空ラベルでも key を set にし、
+#     フォールバック `gh issue view` を抑止する）。GraphQL の null alias（存在しない
+#     番号）は空ラベルとして無害に扱う。
+# 戻り値:
+#   0 = リンク Issue 0 件（no-op）または一括取得成功でマップ構築
+#   1 = 一括取得失敗（WARN 出力 / マップは未構築のまま。呼び出し側は各 Issue で
+#       フォールバック取得へ退避 / Req 4.1 fail-continue）
+#
+# 未信頼入力の取り扱い:
+#   - alias に埋め込む Issue 番号は埋め込み直前に `^[0-9]+$` を満たすもののみ使う
+#     （GraphQL `number:` は Int なので整数のみで注入面は塞げるが検証を省かない / NFR 3.2）。
+#   - owner / name は `$REPO` 由来（信頼値）だが `-f owner=... -f name=...` の GraphQL
+#     変数渡しで query 文字列へ inline 展開しない。
+#
+# Requirements: 1.1, 1.2, 1.5, 4.1, 4.3, NFR 2.1, NFR 3.2
+pp_fetch_issue_labels_map() {
+  local n
+  local -a issue_numbers=()
+  # stdin を先に全消費して検証済み番号を配列化（後段の graphql 用 process
+  # substitution は別 FD なので stdin と競合しない）。
+  while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    # NFR 3.2 / Req 4.3: GraphQL alias 埋め込み直前の数値 ID 再検証。
+    [[ "$n" =~ ^[0-9]+$ ]] || continue
+    issue_numbers+=("$n")
+  done
+  # リンク Issue 0 件なら API を一切呼ばない（Req 4.4 と整合 / 無駄打ち防止）。
+  [ "${#issue_numbers[@]}" -gt 0 ] || return 0
+
+  local owner="${REPO%%/*}"
+  local name="${REPO#*/}"
+
+  # alias 付き GraphQL クエリを組み立てる。alias に埋め込む番号は検証済み整数のみ。
+  # `$owner` / `$name` は GraphQL 変数であり bash 変数ではないため単一引用符で literal
+  # 保持する（bash 展開は意図的に抑止 / gh api graphql が -f owner / -f name で解決）。
+  # shellcheck disable=SC2016
+  local query='query($owner:String!,$name:String!){ repository(owner:$owner,name:$name){'
+  local idx=0
+  for n in "${issue_numbers[@]}"; do
+    query+=" i${idx}: issue(number:${n}){ number labels(first:100){ nodes{ name } } }"
+    idx=$((idx + 1))
+  done
+  query+=' } }'
+
+  # 1 回の gh api graphql でまとめ取得（N 非依存 / Req 1.1）。owner / name は
+  # GraphQL 変数渡し、query は検証済み整数のみ inline。
+  local result_json
+  if ! result_json=$(timeout "$PROMOTE_GIT_TIMEOUT" \
+      gh api graphql \
+        -f owner="$owner" -f name="$name" \
+        -f query="$query" 2>/dev/null); then
+    # Req 4.1: 取得失敗（timeout / non-zero / レート制限）→ WARN + fail-continue。
+    # マップは未構築のまま（呼び出し側で各 Issue のフォールバック取得へ退避）。
+    pp_warn "リンク Issue のラベル一括取得に失敗（gh api graphql タイムアウトまたはエラー）"
+    return 1
+  fi
+
+  # 結果 `.data.repository` の各 alias を「番号<TAB>ラベル(US 区切り)」で列挙し、
+  # 動的スコープの PP_ISSUE_LABELS へ格納する。null alias（存在しない番号）は
+  # select で除外され、未 set のまま = 呼び出し側で空扱い/フォールバックとなる。
+  # US(0x1f) はラベル名に出現しない制御文字なので区切りとして安全（@tsv は US を
+  # エスケープしない）。while 本体は process substitution で現シェルに残すため、
+  # 連想配列への書き込みが失われない（pipe だとサブシェルで消える）。
+  local num labels_joined
+  local us
+  us=$(printf '\037')
+  while IFS=$'\t' read -r num labels_joined; do
+    [ -n "$num" ] || continue
+    [[ "$num" =~ ^[0-9]+$ ]] || continue
+    if [ -n "$labels_joined" ]; then
+      PP_ISSUE_LABELS["$num"]="${labels_joined//${us}/$'\n'}"
+    else
+      # 存在するが無ラベルの Issue: 空値でも key を set にし、フォールバックを抑止。
+      PP_ISSUE_LABELS["$num"]=""
+    fi
+  done < <(printf '%s' "$result_json" | jq -r '
+    (.data.repository // {})
+    | to_entries[]
+    | select(.value != null)
+    | [ (.value.number | tostring),
+        ([.value.labels.nodes[].name] | join("")) ]
+    | @tsv' 2>/dev/null)
+  return 0
+}
+
 # pp_remove_ready_for_review_if_present: Issue から `ready-for-review` ラベルを
 # 除去する（#413）。`staged-for-release` 自動付与対象として確定した Issue 集合に
 # 対して `pp_collect_merged_issues` 内のループから呼ばれる。
@@ -75,8 +201,10 @@ pp_issue_has_label() {
 # 設計判断:
 #   - 既に `ready-for-review` が付与されていない（人間が手動付与しなかった / 既に
 #     除去済み）Issue では `gh issue edit` を再送しない（NFR 2.1 / Req 1.3）。
-#     ラベル状態は `pp_issue_has_label` で事前確認する（`gh issue view --json labels`
-#     を 1 回呼ぶ）。
+#     ラベル状態は `pp_issue_has_label` で事前確認する。#535 以降、呼び出し元
+#     `pp_collect_merged_issues` が構築した in-memory マップ `PP_ISSUE_LABELS` が
+#     あればそこから判定し `gh issue view` を発火させない（マップ未構築時のみ
+#     従来どおり `gh issue view --json labels` を 1 回呼ぶ）。
 #   - 数値 ID `^[0-9]+$` の再検証を行う（NFR 3.2 / 防御層）。jq capture 側で既に
 #     担保されているが、`gh issue edit` 引数や URL に展開する直前の最終ゲート。
 #   - 除去失敗（タイムアウト / non-zero exit / レート制限）時は WARN ログを 1 行
@@ -171,9 +299,19 @@ pp_extract_linked_issues() {
 # 空になる。head ブランチ名 `^claude/issue-([0-9]+)-impl-` からの導出経路を併用して
 # base ブランチが default かどうかに依存しない収集を行う（pp_extract_linked_issues 参照）。
 #
+# #535: リンク Issue のラベル確認 API を N（リンク Issue 数）非依存の定数に抑える。
+# 従来は per-Issue に ready-for-review 有無 + staged-for-release 有無で `gh issue view
+# --json labels` を 2 回（= 2×N 回/サイクル）発火していた。本関数冒頭で
+# `pp_fetch_issue_labels_map` が 1 回の `gh api graphql` で全リンク Issue のラベルを
+# まとめ取得し in-memory マップを構築、per-Issue の 2 判定は同一マップを参照する
+# （確認系 API はサイクルあたり定数 1 回 / Req 1.1, 1.2, NFR 2.1）。毎サイクル実ラベル
+# 状態から再導出するため自己修復（人間の手動ラベル操作が翌サイクルで戻る）を維持する
+# （Req 1.3, 1.4, 3.5）。一括取得失敗時は per-Issue `gh issue view` へフォールバック
+# （Req 4.1）。
+#
 # stdout: 現時点で `staged-for-release` を持つ全 open Issue の番号を 1 行 1 件で出力
 #         （次のステップで ST 判定する対象集合になる）
-# Requirements: 2.1, NFR 2.4, NFR 5.2, #389 Req 1.1-1.5
+# Requirements: 2.1, NFR 2.4, NFR 5.2, #389 Req 1.1-1.5, #535 Req 1-5
 pp_collect_merged_issues() {
   local repo_owner="${REPO%%/*}"
   local recent_merged_prs_json
@@ -203,7 +341,15 @@ pp_collect_merged_issues() {
   #    Path Overlap Checker の holder 集合に誤って残り続ける現象を防ぐ。
   local added=0
   local skipped=0
+  # #535: リンク Issue 全件のラベル状態を 1 回の gh api graphql でまとめ取得し、
+  # 動的スコープで参照される in-memory マップに格納する。以降 per-Issue ループから
+  # 呼ばれる pp_remove_ready_for_review_if_present / pp_issue_has_label は本マップを
+  # 優先参照し、ラベル確認 API を N に比例させない（Req 1.1, 1.2, NFR 2.1）。
+  # 取得失敗時はマップ未構築のまま個別 gh issue view へフォールバック（Req 4.1）。
+  # module トップレベルに declare -A を置かず、per-cycle の local として宣言する。
+  local -A PP_ISSUE_LABELS=()
   if [ -n "$linked_issues" ]; then
+    pp_fetch_issue_labels_map <<< "$linked_issues" || true
     while IFS= read -r issue_number; do
       [ -n "$issue_number" ] || continue
       # #389 Req 1.5 / NFR 4.2: 数値 ID を使用直前に再検証する。jq の capture で

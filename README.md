@@ -1472,6 +1472,16 @@ Phase B 有効化前から手動で `staged-for-release` を付与していた I
 は発生しますが ST 判定は行われず、ラベル除去・revert・promote のいずれも起きません
 （`skip-warn` 状態として WARN log のみ）。
 
+**ラベル確認 API の N 非依存化（#535）**: リンク Issue の `staged-for-release` / `ready-for-review`
+有無確認は、リンク Issue 数 N に比例せずサイクルあたり **1 回の `gh api graphql` 一括取得**
+に集約されます（従来は Issue ごとに `gh issue view` を 2 回 = 2×N 回/サイクル発火していました）。
+毎サイクル実ラベル状態から再導出するため、人間が手動で `staged-for-release` を外した／
+`ready-for-review` を付け直した Issue は翌サイクルで自己修復されます（ラベル遷移結果・ログ書式は
+本変更前と等価。GraphQL 一括取得が失敗した場合は従来どおり per-Issue の `gh issue view` へ
+フォールバックして継続します）。この最適化は GitHub GraphQL rate limit の恒常消費を抑えるための
+もので、`PROMOTE_PIPELINE_ENABLED=true` 時のみ効果があります（未設定時は従来どおり API 呼び出し
+ゼロ）。
+
 Quota-Aware Watcher (#66) が有効化されている場合（#112 以降デフォルト `true`。
 `QUOTA_AWARE_ENABLED=false` で無効化可）、いずれの Stage（Triage / Stage A / Stage A' /
 Reviewer round=1/2 / Stage C / design）でも、claude CLI が `rate_limit_event
