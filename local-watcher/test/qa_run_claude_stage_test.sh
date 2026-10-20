@@ -175,6 +175,67 @@ run_case "normal-success with claude rc=2 (NFR 1.2 既存 rc 透過)" \
 run_case "v2-rate-limit-malformed-line (Req 5.4)" \
   99 "1778821200" "v2-rate-limit-malformed-line.jsonl" 0
 
+# ─── P0-3: STAGE_WALL_TIMEOUT（Stage wall-clock timeout）───
+# qa_run_claude_stage は STAGE_WALL_TIMEOUT > 0 のとき "$@" を
+# `timeout --kill-after=60 <秒>` で包み、rc=124 を "stage timeout" として qa_log に明示する。
+# 既定 0 / 不正値では "$@" をそのまま実行し導入前と同一（後方互換）。timeout は外部コマンドの
+# ため fake_claude（シェル関数）ではなく実コマンド（sleep / bash -c）で検証する。
+echo "--- STAGE_WALL_TIMEOUT cases (P0-3) ---"
+
+# wall=1 + 5 秒かかるコマンド → rc=124 + "stage timeout" ログ（opt-in 経路）
+export QUOTA_AWARE_ENABLED="true"
+export STAGE_WALL_TIMEOUT="1"
+reset_file=$(mktemp -p "$TMPDIR_TEST" "reset.XXXXXX")
+rc=0
+out=$(qa_run_claude_stage "TestStage" "$reset_file" -- sleep 5 2>&1) || rc=$?
+rm -f "$reset_file" "${reset_file}.detect"
+assert_eq "wall=1 opt-in: rc=124" "124" "$rc"
+assert_contains "wall=1 opt-in: qa_log has stage timeout line" "$out" "stage timeout label=TestStage wall=1s"
+
+# 同条件の opt-out（素通し）経路でも timeout が効く
+export QUOTA_AWARE_ENABLED="false"
+reset_file=$(mktemp -p "$TMPDIR_TEST" "reset.XXXXXX")
+rc=0
+out=$(qa_run_claude_stage "TestStage" "$reset_file" -- sleep 5 2>&1) || rc=$?
+rm -f "$reset_file" "${reset_file}.detect"
+assert_eq "wall=1 opt-out: rc=124" "124" "$rc"
+assert_contains "wall=1 opt-out: qa_log has stage timeout line" "$out" "stage timeout label=TestStage wall=1s"
+
+# wall=0（既定）→ timeout なし: 即終了する非ゼロ rc をそのまま透過し timeout ログなし
+export QUOTA_AWARE_ENABLED="true"
+export STAGE_WALL_TIMEOUT="0"
+reset_file=$(mktemp -p "$TMPDIR_TEST" "reset.XXXXXX")
+rc=0
+out=$(qa_run_claude_stage "TestStage" "$reset_file" -- bash -c 'exit 3' 2>&1) || rc=$?
+rm -f "$reset_file" "${reset_file}.detect"
+assert_eq "wall=0: rc passthrough (3)" "3" "$rc"
+case "$out" in
+  *"stage timeout"*) echo "FAIL: wall=0: no stage timeout line"; FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+  *) echo "PASS: wall=0: no stage timeout line"; PASS_COUNT=$((PASS_COUNT + 1)) ;;
+esac
+
+# 不正値（非整数）→ 0 扱い（安全側 = timeout なし）。十分短いコマンドで rc 透過のみ確認
+export STAGE_WALL_TIMEOUT="abc"
+reset_file=$(mktemp -p "$TMPDIR_TEST" "reset.XXXXXX")
+rc=0
+out=$(qa_run_claude_stage "TestStage" "$reset_file" -- bash -c 'exit 0' 2>&1) || rc=$?
+rm -f "$reset_file" "${reset_file}.detect"
+assert_eq "wall=abc: treated as disabled, rc=0" "0" "$rc"
+case "$out" in
+  *"stage timeout"*) echo "FAIL: wall=abc: no stage timeout line"; FAIL_COUNT=$((FAIL_COUNT + 1)) ;;
+  *) echo "PASS: wall=abc: no stage timeout line"; PASS_COUNT=$((PASS_COUNT + 1)) ;;
+esac
+
+# wall=5 で 1 秒で終わる正常コマンド → rc=0（timeout が邪魔をしない）+ fixture 出力は $LOG に残る
+export STAGE_WALL_TIMEOUT="5"
+reset_file=$(mktemp -p "$TMPDIR_TEST" "reset.XXXXXX")
+rc=0
+qa_run_claude_stage "TestStage" "$reset_file" -- cat "$FIXTURE_DIR/normal-success.jsonl" >/dev/null 2>&1 || rc=$?
+rm -f "$reset_file" "${reset_file}.detect"
+assert_eq "wall=5 with fast success: rc=0" "0" "$rc"
+unset STAGE_WALL_TIMEOUT
+export QUOTA_AWARE_ENABLED="true"
+
 # ─── Issue #416: 平文セッション上限経路の統合テスト ───
 # epoch は実行時刻依存のため固定値 assert ではなく以下を検証する:
 #   - rc=99（既存 JSON 経路と同じ deferral 経路に合流 / Req 1.2）

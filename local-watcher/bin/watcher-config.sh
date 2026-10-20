@@ -1452,6 +1452,29 @@ IDD_CLAUDE_HOOKS_DIR="${IDD_CLAUDE_HOOKS_DIR:-$HOME/.idd-claude/hooks}"
 IDD_CLAUDE_HOOKS_MIN_VERSION="${IDD_CLAUDE_HOOKS_MIN_VERSION:-2.1.167}"
 IDD_HOOK_LOG="${IDD_HOOK_LOG:-}"
 
+# ─── 無人運用の停止防止: 本体 git / gh timeout と Dispatcher シグナル猶予 (P0-2 / P0-3) ───
+# cron tick 冒頭の `git fetch` / `git pull --ff-only` と Dispatcher の `gh issue list` /
+# `gh issue edit`（claim）に wall-clock timeout を付ける。ネットワーク / credential helper /
+# GitHub API の hang で tick が無期限停止すると、flock fd 200 を握ったまま以降の全 tick が
+# 「他のインスタンスが実行中」で exit 0 し続け、cron / launchd からは正常に見える。
+# 値は秒（非負整数）。`0` で timeout なし（GNU timeout の仕様）= 導入前と同一挙動。
+# 非整数 / 空文字 / 負値は既定へ正規化する。
+WATCHER_GIT_TIMEOUT="${WATCHER_GIT_TIMEOUT:-300}"
+case "$WATCHER_GIT_TIMEOUT" in
+  ''|*[!0-9]*) WATCHER_GIT_TIMEOUT="300" ;;
+esac
+# gh の timeout は既存 MERGE_QUEUE_GIT_TIMEOUT と同既定（60 秒）を連鎖参照する。
+WATCHER_GH_TIMEOUT="${WATCHER_GH_TIMEOUT:-${MERGE_QUEUE_GIT_TIMEOUT:-60}}"
+case "$WATCHER_GH_TIMEOUT" in
+  ''|*[!0-9]*) WATCHER_GH_TIMEOUT="60" ;;
+esac
+# Dispatcher が SIGINT / SIGTERM を受けて worker の process group へ TERM を送った後、
+# KILL を broadcast するまでの猶予秒数（P0-2）。`0` で猶予なし（即 KILL）。
+DISPATCHER_KILL_GRACE_SEC="${DISPATCHER_KILL_GRACE_SEC:-10}"
+case "$DISPATCHER_KILL_GRACE_SEC" in
+  ''|*[!0-9]*) DISPATCHER_KILL_GRACE_SEC="10" ;;
+esac
+
 # ─── Quota-Aware Watcher 設定 (#66) ───
 # Claude Max の 5 時間ローリング quota を claude CLI の `rate_limit_event` JSON で
 # 検知し、quota 起因の停止と他失敗を `needs-quota-wait` ラベルで分離する。
@@ -1462,6 +1485,15 @@ QUOTA_AWARE_ENABLED="${QUOTA_AWARE_ENABLED:-true}"
 # reset 予定時刻 + 本秒数を経過するまで `needs-quota-wait` を除去しない（NFR 3.3:
 # 同 cron tick 内で付与/除去を往復させない構造的抑止）。
 QUOTA_RESUME_GRACE_SEC="${QUOTA_RESUME_GRACE_SEC:-60}"
+# Stage 実行（qa_run_claude_stage が包む claude --print 呼び出し）の wall-clock 上限秒
+# （P0-3）。正の整数のとき `timeout --kill-after=60 <秒>` で claude を包み、超過時は
+# rc=124（kill-after 後の KILL なら 137）を "stage timeout" として qa_log に明示する。
+# 既定 `0` = 無効（導入前と完全に同一挙動 / 後方互換）。非整数 / 空文字 / 負値は 0 へ正規化。
+# QUOTA_AWARE_ENABLED の真偽に関わらず（opt-out の素通し経路でも）適用される。
+STAGE_WALL_TIMEOUT="${STAGE_WALL_TIMEOUT:-0}"
+case "$STAGE_WALL_TIMEOUT" in
+  ''|*[!0-9]*) STAGE_WALL_TIMEOUT="0" ;;
+esac
 
 # ─── Phase C: Issue 並列化 (worktree slot + dispatcher, #16) ───
 # 入口（auto-dev Issue 処理）の並列度を制御する env var 群。

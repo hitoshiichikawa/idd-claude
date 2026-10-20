@@ -5541,7 +5541,7 @@ Dispatcher (1 プロセス)
   ├─ gh issue list（既存フィルタ）で対象 Issue 候補を取得（hotfix 優先 + 番号昇順にソート / #200）
   ├─ 各 Issue について空き slot を flock で探索
   ├─ claude-picked-up ラベルを付与（claim atomicity）
-  ├─ Slot Worker をバックグラウンド fork
+  ├─ Slot Worker をバックグラウンド fork（独自 process group / fd 200 は閉じる）
   └─ サイクル末尾で wait（全 Worker 完了まで）
 
 Slot Worker N (PARALLEL_SLOTS 個まで並走)
@@ -5557,7 +5557,9 @@ Slot Worker N (PARALLEL_SLOTS 個まで並走)
 - **物理隔離**: 各 slot は専用の `git worktree` を持つため、同時実行中の slot 同士が同じ
   作業ツリーを書き換える物理競合は構造的に発生しない
 - **per-slot lock**: 各 slot は専用 lock ファイル（`$HOME/.issue-watcher/<slug>-slot-N.lock`）
-  を持ち、ある slot の処理が他 slot の処理開始をブロックしない
+  を持ち、ある slot の処理が他 slot の処理開始をブロックしない。lock fd は Dispatcher が
+  取得したものを fork した Slot Worker が継承し、**Worker（とその claude / gh / git 子孫）が
+  生きている間は保持され続ける**（下記「無人運用での停止防止」参照）
 
 ### 候補の処理順: FIFO + hotfix 優先（#200）
 
@@ -5583,6 +5585,40 @@ Dispatcher が 1 サイクルで候補 Issue を slot へ投入する順序は�
 > `hotfix` 優先を使うには、`idd-claude-labels.sh` を再実行して `hotfix` ラベルを作成して
 > ください（既存ラベルは保護されます）。
 
+### 無人運用での停止防止（Dispatcher の堅牢化）
+
+cron / launchd 配下で誰も見ていない状態でも watcher が「exit 0 のまま永久停止」しないよう、
+Dispatcher と Slot Worker の fork / 終了処理を次のように堅牢化しています（`docs/proposals`
+の無人運用改善 P0-1〜P0-3。いずれも欠陥修正のため opt-in gate はなく、既定で有効）:
+
+- **per-slot lock を Worker が実際に継承する（P0-1）**: 以前は空き slot 探索をコマンド置換
+  `$(...)` で呼んでいたため、`_slot_acquire` が開いた lock fd と `flock` が置換サブシェルの
+  終了と同時に消え、Worker 実行中に lock を握るプロセスが存在しませんでした（stale-pickup-reaper
+  の「lock 保持者あり」判定が常に偽になるなど）。Dispatcher は slot 番号を変数で受け取る形に
+  変更され、fork した Worker が lock fd（210+N）を継承して処理終了まで保持します。
+- **多重起動防止の fd 200 を Worker に継承させない（P0-2）**: `LOCK_FILE` の `flock`（fd 200）は
+  Worker サブシェル冒頭で閉じます。閉じないと claude / gh / git の孫プロセスへ継承され、watcher
+  本体が終了した後も生き残った孫が flock を握り続け、以降の全 tick が「他のインスタンスが
+  実行中のためスキップ」で exit 0 し続けます（cron からは正常に見える）。
+- **Worker を process group 化し、孫まで終了させる（P0-2）**: Worker は bash の job control
+  （`set -m`）下で fork され、自身を leader とする process group（pgid == pid）を持ちます
+  （`setsid` はシェル関数を包めないため使いません。macOS でも外部コマンド不要）。
+  `SIGINT` / `SIGTERM` 受信時、Dispatcher はサブシェル単体ではなく **group 全体 + `pgrep -P` で
+  辿った全子孫**（GNU `timeout` 配下で別 group に移った claude も含む）へ `TERM` を送り、
+  `DISPATCHER_KILL_GRACE_SEC` 秒以内に終了しなければ `KILL` を broadcast します。
+- **本体の git / gh 呼び出しに wall-clock timeout（P0-3）**: tick 冒頭の `git fetch` /
+  `git pull --ff-only` は `WATCHER_GIT_TIMEOUT`、Dispatcher の `gh issue list` /
+  `gh issue edit`（claim）は `WATCHER_GH_TIMEOUT` で包みます。超過時（rc=124）は従来の失敗時と
+  同じく当該サイクルを `exit 1` で中断し、原因を ERROR ログに明示します（次 tick で再試行）。
+  Stage（claude 実行）側の timeout は [Quota-Aware Watcher](#quota-aware-watcher-66) の
+  `STAGE_WALL_TIMEOUT` を参照してください。
+
+> **migration note（後方互換）**: env var 名 / ラベル名 / exit code の意味 / ログ出力先は
+> 変わりません。新規 env はいずれも既定値つきで、`WATCHER_GIT_TIMEOUT=0` /
+> `WATCHER_GH_TIMEOUT=0` を渡すと timeout なし（導入前と同一）に戻せます。唯一の既定挙動変更は
+> 「git / gh が無期限に hang していた状況で、既定 300 秒 / 60 秒後にサイクルが失敗終了する」
+> ことです。
+
 ### 環境変数
 
 | 変数 | デフォルト | 推奨 | 用途 |
@@ -5591,6 +5627,9 @@ Dispatcher が 1 サイクルで候補 Issue を slot へ投入する順序は�
 | `SLOT_INIT_HOOK` | （未設定） | 言語ランタイム / 依存ツールの準備が必要な repo のみ | 各 slot worktree 初期化（reset 直後・Claude 起動前）に 1 度だけ実行する **絶対パス指定の実行ファイル**。詳細は下記「SLOT_INIT_HOOK」節を参照 |
 | `WORKTREE_BASE_DIR` | `$HOME/.issue-watcher/worktrees` | 通常は変更不要 | per-slot worktree の配置先ベースディレクトリ。テスト時のみ override する想定 |
 | `SLOT_LOCK_DIR` | `$HOME/.issue-watcher` | 通常は変更不要 | per-slot lock ファイルの配置先 |
+| `WATCHER_GIT_TIMEOUT` | `300` | 通常は変更不要 | tick 冒頭の `git fetch origin --prune` / `git pull --ff-only` の wall-clock timeout（秒）。`0` で timeout なし。非整数 / 負値は既定へ正規化（P0-3） |
+| `WATCHER_GH_TIMEOUT` | `60`（`MERGE_QUEUE_GIT_TIMEOUT` を連鎖参照） | 通常は変更不要 | Dispatcher の `gh issue list` / `gh issue edit`（claim）の wall-clock timeout（秒）。`0` で timeout なし。非整数 / 負値は既定へ正規化（P0-3） |
+| `DISPATCHER_KILL_GRACE_SEC` | `10` | 通常は変更不要 | `SIGINT` / `SIGTERM` 受信時、Worker の process group へ `TERM` を送ってから `KILL` を broadcast するまでの猶予（秒）。`0` で即 `KILL`（P0-2） |
 
 `PARALLEL_SLOTS` の値が正の整数として解釈できない（`0` / 負数 / 非数値 / 空文字 / 先頭ゼロ等）
 場合、watcher は ERROR ログを出力してそのサイクルを中断します（`exit 1`）。
@@ -5897,6 +5936,7 @@ quota 超過時に claude CLI は `rate_limit_event (status=exceeded)` を含む
 |---|---|---|
 | `QUOTA_AWARE_ENABLED` | `true`（#112） | Quota-Aware Watcher の有効化 / 無効化（**デフォルト有効**）。`=false` を明示すると完全 skip し本機能導入前と等価に動作 |
 | `QUOTA_RESUME_GRACE_SEC` | `60` | reset 予定時刻 + 本秒数を経過するまで `needs-quota-wait` を除去しない grace 期間（同 cron tick 内の付与/除去往復を構造的に抑止 / NFR 3.3） |
+| `STAGE_WALL_TIMEOUT` | `0`（無効） | Stage 実行（`qa_run_claude_stage` が包む各 `claude --print` 呼び出し）の wall-clock 上限（秒）。正の整数のとき `timeout --kill-after=60 <秒>` で claude を包み、超過時は rc=124（kill-after 後の `KILL` なら 137）を `quota-aware: stage timeout label=<Stage> wall=<秒>s ...` としてログに明示したうえで、既存の非ゼロ exit 経路（`claude-failed` 等）へそのまま透過する。`QUOTA_AWARE_ENABLED=false` の素通し経路にも適用。非整数 / 負値は `0` へ正規化（P0-3 / 無人運用で claude が無応答のまま tick を占有し続ける事故の防止） |
 
 cron 例（明示 opt-out したい場合）:
 
@@ -5910,6 +5950,25 @@ grace を変えたい場合は `QUOTA_RESUME_GRACE_SEC=120` 等を追記。多 r
 Anthropic アカウント token を共有する場合は、reset 直後に複数 repo の Issue が
 同時 resume されて再 quota exceeded になる可能性があるため、grace を repo ごとに
 ずらすことを推奨。
+
+#### Stage wall-clock timeout（`STAGE_WALL_TIMEOUT` / P0-3）
+
+無人運用では、claude CLI がネットワーク断や API 側の異常で **出力も終了もしないまま**
+tick を占有し続けると、当該 slot は永久に busy になり、`LOCK_FILE` の flock も解放されません。
+`STAGE_WALL_TIMEOUT=<秒>`（例: `7200`）を渡すと、Quota-Aware の Stage wrapper が各 claude
+呼び出しを GNU `timeout --kill-after=60` で包み、超過時は次の 1 行をログに出してから
+従来どおり非ゼロ exit として扱います（quota 検出とは独立。既定 `0` = 導入前と同一挙動）:
+
+```text
+[YYYY-MM-DD HH:MM:SS] [owner/repo] quota-aware: stage timeout label=<Stage> wall=7200s kill_after=60s rc=124（STAGE_WALL_TIMEOUT 超過で強制終了）
+```
+
+`timeout` は claude を独自 process group で起動し超過時に group 全体へシグナルを送るため、
+claude が spawn したツール子プロセスも併せて終了します。cron 例:
+
+```bash
+*/2 * * * * REPO=owner/your-repo REPO_DIR=$HOME/work/your-repo STAGE_WALL_TIMEOUT=7200 $HOME/bin/issue-watcher.sh >> $HOME/.issue-watcher/cron.log 2>&1
+```
 
 ### reset 時刻の永続化方式
 

@@ -108,7 +108,11 @@ _parallel_validate_slots() {
 #
 # 設計上の重要点:
 #   - サブシェルで動くため、内部の `cd` / 環境変数変更は親に伝播しない（Req 3.5 を構造的に保証）
-#   - 入口で _slot_acquire 済を前提（Dispatcher が取得済の lock fd を継承）
+#   - 入口で _slot_acquire 済を前提（Dispatcher が取得済の lock fd 210+N を継承。P0-1 で
+#     Dispatcher 側の置換なし呼び出しに修正し、継承が実際に成立するようになった）
+#   - 多重起動防止の fd 200 は fork 直後に Dispatcher 側（_dispatcher_spawn_worker）で閉じて
+#     あり、本 Worker と claude / gh / git 孫プロセスには継承されない（P0-2）
+#   - 本 Worker は自身を leader とする process group（pgid == pid）で動く（P0-2）
 #   - claim（claude-picked-up ラベル付与）は Dispatcher 側で完了済（Req 2.2）
 #   - 処理シーケンス:
 #       1. slot 専用ログファイル open
