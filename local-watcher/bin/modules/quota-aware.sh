@@ -255,6 +255,14 @@ qa_detect_rate_limit() {
 # 副作用:
 #   - $LOG（呼び出し側で設定済み）に stream 出力を追記
 #   - $reset_file は空（quota 検出なし）または epoch 1 行
+#
+# P0-3 Stage wall-clock timeout:
+#   STAGE_WALL_TIMEOUT（watcher-config.sh で非負整数へ正規化済み。未定義環境では 0）が
+#   正のとき、claude 呼び出しを `timeout --kill-after=60 <秒>` で包む。超過時の rc=124
+#   （kill-after 後の KILL は 137）は "stage timeout" として qa_log に明示し、rc はそのまま
+#   呼び出し元へ透過する（既存の非ゼロ exit 経路 = claude-failed 等へ委譲）。既定 0 では
+#   コマンド配列が "$@" と同一で導入前と完全に同一挙動。opt-out（QUOTA_AWARE_ENABLED!=true）
+#   の素通し経路にも同様に適用する（timeout は quota 検出ではなく hang 対策のため）。
 qa_run_claude_stage() {
   local stage_label="$1"
   local reset_file="$2"
@@ -262,6 +270,17 @@ qa_run_claude_stage() {
   # 引数 separator '--' を skip
   if [ "${1:-}" = "--" ]; then
     shift
+  fi
+
+  # P0-3: wall-clock timeout wrapper の組み立て（0 = 無効で "$@" をそのまま実行）
+  local _qa_wall="${STAGE_WALL_TIMEOUT:-0}"
+  case "$_qa_wall" in
+    ''|*[!0-9]*) _qa_wall=0 ;;
+  esac
+  local _qa_kill_after=60
+  local -a _qa_cmd=("$@")
+  if [ "$_qa_wall" -gt 0 ]; then
+    _qa_cmd=(timeout --kill-after="$_qa_kill_after" "$_qa_wall" "$@")
   fi
 
   # Issue #325: stage 実行前の $LOG 行数を offset として記録し、実行後に本 stage が
@@ -277,9 +296,12 @@ qa_run_claude_stage() {
   if [ "$QUOTA_AWARE_ENABLED" != "true" ]; then
     local _tu_rc=0
     set +e
-    "$@"
+    "${_qa_cmd[@]}"
     _tu_rc=$?
     set -e
+    if [ "$_qa_wall" -gt 0 ] && { [ "$_tu_rc" -eq 124 ] || [ "$_tu_rc" -eq 137 ]; }; then
+      qa_log "stage timeout label=$stage_label wall=${_qa_wall}s kill_after=${_qa_kill_after}s rc=${_tu_rc}（STAGE_WALL_TIMEOUT 超過で強制終了）"
+    fi
     # Issue #325: stage 単位の token usage を 1 行追記（fail-open / claude rc は透過）
     if declare -F tu_report_stage_usage >/dev/null 2>&1; then
       tu_report_stage_usage "$stage_label" "$_tu_offset" || true
@@ -302,10 +324,14 @@ qa_run_claude_stage() {
   # PIPESTATUS[0] = claude 本体 exit code を確実に取り出す。
   local claude_rc=0
   set +e
-  "$@" 2>&1 | tee -a "$LOG" | qa_detect_rate_limit > "$detect_file"
+  "${_qa_cmd[@]}" 2>&1 | tee -a "$LOG" | qa_detect_rate_limit > "$detect_file"
   local _qa_pipestatus=("${PIPESTATUS[@]}")
   set -e
   claude_rc="${_qa_pipestatus[0]:-0}"
+  # P0-3: timeout 超過を明示ログ（rc は下流の既存判定へそのまま透過）
+  if [ "$_qa_wall" -gt 0 ] && { [ "$claude_rc" -eq 124 ] || [ "$claude_rc" -eq 137 ]; }; then
+    qa_log "stage timeout label=$stage_label wall=${_qa_wall}s kill_after=${_qa_kill_after}s rc=${claude_rc}（STAGE_WALL_TIMEOUT 超過で強制終了）"
+  fi
 
   # Issue #325: stage 単位の token usage を $LOG へ 1 行追記（fail-open / 観測のみ）。
   # quota 検出（exit 99）経路でも実行済み分の usage を記録するため detect 解釈より先に呼ぶ。

@@ -375,7 +375,15 @@ flock -n 200 || {
 # リポジトリを最新化
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 cd "$REPO_DIR"
-git fetch origin --prune
+# P0-3: git fetch / pull に wall-clock timeout を付ける。ネットワーク障害・credential helper
+# の hang で cron tick が無期限停止し、flock fd 200 を握ったまま以降の全 tick が
+# 「他のインスタンスが実行中」で exit 0 し続ける事故を防ぐ。`WATCHER_GIT_TIMEOUT=0` で
+# 従来どおり timeout なし（watcher-config.sh で正規化済み / GNU timeout は 0 で無効化）。
+timeout "$WATCHER_GIT_TIMEOUT" git fetch origin --prune || {
+  _git_rc=$?
+  echo "[$(date '+%F %T')] watcher: [$REPO] git fetch origin --prune が失敗しました（rc=${_git_rc} / timeout=${WATCHER_GIT_TIMEOUT}s / rc=124 は timeout）" >&2
+  exit 1
+}
 
 # Issue #119 Req 3.1〜3.5: cycle 冒頭で working tree が dirty なまま
 # `git checkout $BASE_BRANCH` に進むと「local changes would be overwritten」
@@ -401,7 +409,11 @@ fi
 unset _dirty_status
 
 git checkout "$BASE_BRANCH"
-git pull --ff-only origin "$BASE_BRANCH"
+timeout "$WATCHER_GIT_TIMEOUT" git pull --ff-only origin "$BASE_BRANCH" || {
+  _git_rc=$?
+  echo "[$(date '+%F %T')] watcher: [$REPO] git pull --ff-only origin $BASE_BRANCH が失敗しました（rc=${_git_rc} / timeout=${WATCHER_GIT_TIMEOUT}s / rc=124 は timeout）" >&2
+  exit 1
+}
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # GitHub API Rate Guard: サイクル冒頭のスナップショット取得（#521 / Req 2.1, 2.2）
@@ -581,6 +593,12 @@ process_design_review_release || drr_warn "process_design_review_release が想�
 # 子プロセスか」を後で再特定できる。
 declare -A _DISPATCHER_SLOT_PIDS
 
+# _dispatcher_find_free_slot が取得した slot 番号の受け渡し用グローバル（P0-1）。
+# stdout ではなく変数で返すのは、`slot=$(_dispatcher_find_free_slot)` のコマンド置換だと
+# _slot_acquire が開いた lock fd (210+N) と flock が置換サブシェルの終了と同時に消え、
+# fork 後の Slot Worker が lock を継承できない（= per-slot lock が実質無効）ため。
+_DISPATCHER_PICKED_SLOT=""
+
 # ── Issue #170 Req 3: Dispatcher のシグナル捕捉（SIGINT / SIGTERM）──
 # cron/launchd からの中断や手動 Ctrl-C 時、fork 済み slot worker（サブシェル）が
 # 孤立して `.broken-*` worktree が蓄積するのを防ぐための最小実装。
@@ -605,11 +623,30 @@ _dispatcher_on_signal() {
   dispatcher_warn "シグナル ${sig} を受信。fork 済み slot worker を終了し worktree prune を実行します"
 
   # Req 3.1: fork 済みの slot worker 子プロセスへ終了シグナルを送る。
+  # P0-2: worker は _dispatcher_spawn_worker が job control 下で fork しているため
+  # 自身を leader とする process group（pgid == pid）を持つ。サブシェル単体ではなく
+  # group 全体（+ pgrep で辿れる子孫）へ送り、claude / gh / git 孫プロセスまで終了させる。
+  # 孫が生き残ると継承した fd を握ったまま残り、次 tick 以降の多重起動防止や per-slot
+  # lock を永久に塞ぐ。
   local n pid
   for n in "${!_DISPATCHER_SLOT_PIDS[@]}"; do
     pid="${_DISPATCHER_SLOT_PIDS[$n]}"
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      kill -TERM "$pid" 2>/dev/null || true
+      _dispatcher_signal_worker_tree "$pid" TERM
+    fi
+  done
+  # TERM 後 DISPATCHER_KILL_GRACE_SEC 秒以内に終了しなければ KILL を broadcast する
+  # （claude が TERM を無視 / 遅延する場合の取りこぼし防止）。
+  local _waited=0
+  while [ "$_waited" -lt "$DISPATCHER_KILL_GRACE_SEC" ] && _dispatcher_any_worker_alive; do
+    sleep 1
+    _waited=$((_waited + 1))
+  done
+  for n in "${!_DISPATCHER_SLOT_PIDS[@]}"; do
+    pid="${_DISPATCHER_SLOT_PIDS[$n]}"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      dispatcher_warn "slot-${n} (pid=$pid) が ${DISPATCHER_KILL_GRACE_SEC}s 以内に終了しないため KILL を送信"
+      _dispatcher_signal_worker_tree "$pid" KILL
     fi
   done
   # 子プロセスの終了を回収（孤立防止）。reap 失敗は致命化させない。
@@ -628,6 +665,87 @@ _dispatcher_on_signal() {
 }
 trap '_dispatcher_on_signal INT' INT
 trap '_dispatcher_on_signal TERM' TERM
+
+# _DISPATCHER_SLOT_PIDS に登録された worker が 1 つでも生存していれば 0 を返す。
+_dispatcher_any_worker_alive() {
+  local n pid
+  for n in "${!_DISPATCHER_SLOT_PIDS[@]}"; do
+    pid="${_DISPATCHER_SLOT_PIDS[$n]}"
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+# worker の process group と pgrep で辿れる全子孫へシグナルを送る（P0-2 / best-effort）。
+# 引数: $1 = worker pid（_dispatcher_spawn_worker が fork したため pgid == pid）
+#       $2 = シグナル名（TERM / KILL）
+# - まず `kill -- -<pid>` で process group 全体へ broadcast（worker サブシェル・tee・
+#   claude / gh / git 孫を含む）。group が無ければ pid 単体へフォールバック。
+# - GNU `timeout`（STAGE_WALL_TIMEOUT / MERGE_QUEUE_GIT_TIMEOUT 等）は自身を別 process
+#   group へ移すため group broadcast では届かない。pgrep -P で子孫を再帰的に辿り、各々の
+#   group と pid にも送る。pgrep 不在環境では group broadcast のみ（従来より悪化しない）。
+# - 子孫の列挙は **group broadcast より前** に行う。leader（worker サブシェル）を先に
+#   終了させると残った孫が init に reparent され、`pgrep -P <worker>` で辿れなくなる。
+_dispatcher_signal_worker_tree() {
+  local pid="$1"
+  local sig="$2"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 0
+  local -a descendants=()
+  if command -v pgrep >/dev/null 2>&1; then
+    mapfile -t descendants < <(_dispatcher_list_descendants "$pid")
+  fi
+  kill -s "$sig" -- "-${pid}" 2>/dev/null || kill -s "$sig" "$pid" 2>/dev/null || true
+  local d
+  for d in ${descendants[@]+"${descendants[@]}"}; do
+    kill -s "$sig" -- "-${d}" 2>/dev/null || true
+    kill -s "$sig" "$d" 2>/dev/null || true
+  done
+}
+
+# $1 の子孫プロセス pid を再帰的に（深さ優先）stdout へ 1 行ずつ出力する
+# （_dispatcher_signal_worker_tree の下請け / pgrep 必須）。
+_dispatcher_list_descendants() {
+  local parent="$1"
+  local -a kids=()
+  mapfile -t kids < <(pgrep -P "$parent" 2>/dev/null || true)
+  local child
+  for child in ${kids[@]+"${kids[@]}"}; do
+    [[ "$child" =~ ^[0-9]+$ ]] || continue
+    echo "$child"
+    _dispatcher_list_descendants "$child"
+  done
+}
+
+# Slot Worker をバックグラウンド fork し、pid を _DISPATCHER_SLOT_PIDS に登録する。
+# 引数: $1 = slot 番号（_slot_acquire 済 / lock fd 210+N が本シェルで open 中）
+#       $2 = issue JSON（1 行）
+#
+# P0-1: サブシェルは親の fd を継承するため、_slot_acquire が本シェルで開いた lock fd を
+#   worker が引き続き保持する（親側は fork 後に _slot_release で閉じる）。
+# P0-2: `set -m`（job control）下で fork すると worker サブシェルが自身を leader とする
+#   新規 process group（pgid == pid）になり、_dispatcher_on_signal が `kill -- -<pid>` で
+#   claude / gh / git 孫プロセスまで一括終了できる。`setsid` はシェル関数（_slot_run_issue）
+#   を包めない（別プロセスへの再 exec が必要）ため bash 組み込みの job control を使う
+#   （macOS でも外部コマンド不要）。fork 直後に `set +m` へ戻すため、以降の wait /
+#   wait -n / trap の挙動は従来どおり。job control 下では async コマンドの stdin が
+#   自動で /dev/null にならないため明示して従来挙動（非 job control 時の既定）に揃える。
+# P0-2: 多重起動防止の fd 200（LOCK_FILE の flock）を worker 冒頭で閉じる。閉じないと
+#   claude / gh / git の孫プロセスへ継承され、watcher 本体終了後に生き残った孫が flock を
+#   握り続け、以降の全 tick が「他のインスタンスが実行中のためスキップ」で exit 0 し続ける。
+_dispatcher_spawn_worker() {
+  local slot="$1"
+  local issue="$2"
+  set -m
+  (
+    exec 200>&-
+    _slot_run_issue "$slot" "$issue"
+  ) </dev/null &
+  local pid=$!
+  set +m
+  _DISPATCHER_SLOT_PIDS[$slot]=$pid
+}
 
 # 完了した子プロセスを slot_pid map から prune する。
 # `kill -0 <pid>` が失敗（プロセス不在）なら slot は空いたとみなす。
@@ -649,8 +767,11 @@ _dispatcher_reap_finished_slots() {
 }
 
 # 空き slot を探す（reap → 1..PARALLEL_SLOTS で _slot_acquire）。
-# 戻り値: 0 = 取得成功（slot 番号を stdout に echo） / 1 = 全 slot busy
+# 戻り値: 0 = 取得成功（slot 番号を _DISPATCHER_PICKED_SLOT に格納） / 1 = 全 slot busy
+# 注意（P0-1）: 本関数は必ず **コマンド置換なし** で呼ぶこと。`$(...)` 内で呼ぶと
+# _slot_acquire が開いた lock fd (210+N) がサブシェル終了で閉じ、flock が解放される。
 _dispatcher_find_free_slot() {
+  _DISPATCHER_PICKED_SLOT=""
   _dispatcher_reap_finished_slots
   local n
   for ((n=1; n<=PARALLEL_SLOTS; n++)); do
@@ -659,7 +780,7 @@ _dispatcher_find_free_slot() {
       continue
     fi
     if _slot_acquire "$n"; then
-      echo "$n"
+      _DISPATCHER_PICKED_SLOT="$n"
       return 0
     fi
   done
@@ -712,22 +833,31 @@ _dispatcher_run() {
 
   local hotfix_issues all_issues
   # (1) hotfix ティア: created-asc で取得（最も古い hotfix を limit 切り出しで失わない）
-  hotfix_issues=$(gh issue list \
+  # P0-3: gh issue list に timeout を付ける（GitHub API / ネットワーク hang で tick が
+  # 無期限停止するのを防ぐ）。失敗 / timeout は従来（set -e による exit 1）と同じく
+  # サイクル中断だが、原因が分かるよう ERROR ログを明示する。
+  hotfix_issues=$(timeout "$WATCHER_GH_TIMEOUT" gh issue list \
     --repo "$REPO" \
     --label "$LABEL_TRIGGER" \
     --label "$LABEL_HOTFIX" \
     --state open \
     --search "$search_filter sort:created-asc" \
     --json number,title,body,url,labels \
-    --limit "$DISPATCH_LIMIT")
+    --limit "$DISPATCH_LIMIT") || {
+    dispatcher_error "gh issue list（hotfix ティア）が失敗しました（rc=$? / timeout=${WATCHER_GH_TIMEOUT}s / rc=124 は timeout）"
+    return 1
+  }
   # (2) 全候補（hotfix / 非 hotfix 混在）: created-asc で取得（最も古い Issue を失わない）
-  all_issues=$(gh issue list \
+  all_issues=$(timeout "$WATCHER_GH_TIMEOUT" gh issue list \
     --repo "$REPO" \
     --label "$LABEL_TRIGGER" \
     --state open \
     --search "$search_filter sort:created-asc" \
     --json number,title,body,url,labels \
-    --limit "$DISPATCH_LIMIT")
+    --limit "$DISPATCH_LIMIT") || {
+    dispatcher_error "gh issue list（全候補）が失敗しました（rc=$? / timeout=${WATCHER_GH_TIMEOUT}s / rc=124 は timeout）"
+    return 1
+  }
 
   # 両クエリ結果を結合し、hotfix ティア優先 + 各ティア内 Issue 番号昇順で安定ソート、
   # number で dedup して先頭 $DISPATCH_LIMIT 件に切り詰める。
@@ -815,9 +945,11 @@ _dispatcher_run() {
     fi
 
     # ── 空き slot 探索（busy なら 1 件完了するまで待機）──
+    # P0-1: コマンド置換 `slot=$(...)` は使わない（lock fd が置換サブシェルと共に消える）。
     local slot=""
     while true; do
-      if slot=$(_dispatcher_find_free_slot); then
+      if _dispatcher_find_free_slot; then
+        slot="$_DISPATCHER_PICKED_SLOT"
         break
       fi
       # 全 slot busy → 1 件完了を待つ（bash 4.3+ の `wait -n`）
@@ -855,7 +987,7 @@ _dispatcher_run() {
     # Issue #52: claim/Triage 段階のラベルを claude-claimed に分離（claude-picked-up は
     # Triage 通過後に Slot Runner が付け替える）。これにより Issue activity 上で
     # claim 済 / Triage 中 / 実装中 が 1 ラベル単位で識別可能になる。
-    if ! gh issue edit "$issue_number" --repo "$REPO" --add-label "$LABEL_CLAIMED" >/dev/null 2>&1; then
+    if ! timeout "$WATCHER_GH_TIMEOUT" gh issue edit "$issue_number" --repo "$REPO" --add-label "$LABEL_CLAIMED" >/dev/null 2>&1; then
       # Req 2.3: ラベル付与失敗 → WARN + slot lock 解放 + 次 Issue へ
       dispatcher_warn "Issue #${issue_number}: claude-claimed ラベル付与に失敗、slot-${slot} を解放して次 Issue へ"
       _slot_release "$slot"
@@ -867,10 +999,10 @@ _dispatcher_run() {
 
     # ── Slot Runner をバックグラウンド起動 ──
     # サブシェル `( ... ) &` で fork。サブシェルは親の fd を継承するため
-    # _slot_acquire で取得した lock fd は subshell が引き続き保持する。
-    ( _slot_run_issue "$slot" "$issue" ) &
-    local pid=$!
-    _DISPATCHER_SLOT_PIDS[$slot]=$pid
+    # _slot_acquire で取得した lock fd (210+N) は subshell が引き続き保持する
+    # （P0-1: _dispatcher_find_free_slot を置換なしで呼んでいるため本シェルで open 中）。
+    # 独自 process group 化 / fd 200 close は _dispatcher_spawn_worker 側（P0-2）。
+    _dispatcher_spawn_worker "$slot" "$issue"
 
     # 親 Dispatcher 側の fd を解放する。これにより、Dispatcher が同 slot を再
     # acquire しようとしたとき、subshell が lock を保持している間は flock -n が

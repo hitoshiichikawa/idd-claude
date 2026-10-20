@@ -694,6 +694,9 @@ _slot_lock_path() {
 # 引数: $1 = slot 番号
 # 戻り値: 0 = acquired / 1 = 既に他プロセスがロック中、または fd open 失敗
 # 副作用: 成功時 fd (210+N) が open 状態（呼び出し側スコープで保持される）
+# 注意（P0-1）: コマンド置換 `$(...)` やパイプの中で呼ぶと、fd と flock は置換サブシェルの
+#   終了と同時に消える。Dispatcher は本関数（経由の _dispatcher_find_free_slot）を置換なしで
+#   呼び、fork した Slot Worker サブシェルに fd を継承させることで lock を保持する。
 #
 # Req 4.2, 4.3, 4.4
 _slot_acquire() {
